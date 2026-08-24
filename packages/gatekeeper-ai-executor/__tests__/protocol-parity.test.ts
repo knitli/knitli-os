@@ -7,6 +7,8 @@ import {
   MAX_ACTIVE_EXECUTOR_PROFILES,
   MAX_EXECUTOR_PROFILE_LABEL_BYTES,
   MAX_EXECUTOR_PROFILE_MODEL_BYTES,
+  MAX_EXECUTOR_PROFILE_PROVIDER_CONFIG_BYTES,
+  MAX_STORED_EXECUTOR_PROFILES,
 } from "@gadgets/workshop-shared/api";
 import { describe, expect, it } from "vitest";
 import type { ActiveExecutorProfile, InferenceRuntime } from "../src/protocol.js";
@@ -155,8 +157,10 @@ describe("AI executor v1 protocol parity", () => {
   it("pins the independent Gatekeeper runtime and Workshop admin shapes", () => {
     expect(AI_EXECUTOR_PROTOCOL_VERSION).toBe(1);
     expect(MAX_ACTIVE_EXECUTOR_PROFILES).toBe(100);
+    expect(MAX_STORED_EXECUTOR_PROFILES).toBe(100);
     expect(MAX_EXECUTOR_PROFILE_LABEL_BYTES).toBe(100);
     expect(MAX_EXECUTOR_PROFILE_MODEL_BYTES).toBe(256);
+    expect(MAX_EXECUTOR_PROFILE_PROVIDER_CONFIG_BYTES).toBe(256);
     expect(Object.keys(runtimeFixture).toSorted()).toEqual([
       "invoke",
       "listActiveProfiles",

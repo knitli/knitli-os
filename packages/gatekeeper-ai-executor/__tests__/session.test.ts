@@ -516,6 +516,92 @@ describe("AI executor deferred session", () => {
     });
   });
 
+  it.each([
+    ["a null record", "ai-run:record:2", null],
+    [
+      "a mismatched duplicate identity",
+      "ai-run:record:2",
+      { runId: 1, status: "pending" },
+    ],
+    [
+      "an invalid completed result",
+      "ai-run:record:2",
+      { runId: 2, status: "completed", result: { text: "unsafe", finishReason: "bogus" } },
+    ],
+    [
+      "a noncanonical failed error",
+      "ai-run:record:2",
+      {
+        runId: 2,
+        status: "failed",
+        error: {
+          code: "provider_unavailable",
+          retryable: true,
+          message: "raw provider secret",
+        },
+      },
+    ],
+  ])("validates the complete snapshot before repairing %s", (_label, invalidKey, invalidValue) => {
+    const kv = new FakeKv();
+    kv.put("ai-run:record:1", { runId: 1, status: "running" });
+    kv.put("ai-run:request:1", {
+      messages: [{ role: "user", content: "private prompt must remain" }],
+    });
+    kv.put(invalidKey, invalidValue);
+    const before = structuredClone([...kv.values]);
+    const construct = () => new AiExecutorRunStore(kv);
+
+    let thrown: unknown;
+    try {
+      construct();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect.soft(thrown).toBeInstanceOf(Error);
+    expect.soft(thrown).toMatchObject({
+      message: expect.stringMatching(/invalid persisted AI inference run/i),
+    });
+    expect([...kv.values]).toEqual(before);
+  });
+
+  it.each([
+    ["a missing request", undefined],
+    [
+      "a provider escape hatch",
+      { messages: [{ role: "user", content: "private prompt" }], url: "https://attacker.invalid" },
+    ],
+    [
+      "an oversized message",
+      { messages: [{ role: "user", content: "x".repeat(64 * 1024 + 1) }] },
+    ],
+  ])("validates %s before applying the constructor plan", (_label, invalidRequest) => {
+    const kv = new FakeKv();
+    kv.put("ai-run:record:1", { runId: 1, status: "running" });
+    kv.put("ai-run:request:1", {
+      messages: [{ role: "user", content: "private running prompt must remain" }],
+    });
+    kv.put("ai-run:record:2", { runId: 2, status: "pending" });
+    if (invalidRequest !== undefined) {
+      kv.put("ai-run:request:2", invalidRequest);
+    }
+    const before = structuredClone([...kv.values]);
+    const construct = () => new AiExecutorRunStore(kv);
+
+    let thrown: unknown;
+    try {
+      construct();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect.soft(thrown).toBeInstanceOf(Error);
+    expect.soft(thrown).toMatchObject({
+      message: expect.stringMatching(/invalid persisted AI inference request/i),
+    });
+    expect([...kv.values]).toEqual(before);
+  });
+
   it("evicts old terminal records and orphaned staged payloads while retaining the newest 100", async () => {
     const { controller, kv, session, store } = harness();
     for (let index = 0; index < 105; index++) {

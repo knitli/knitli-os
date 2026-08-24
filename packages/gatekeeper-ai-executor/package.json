@@ -5,9 +5,11 @@
   "type": "module",
   "main": "./src/ai-executor.ts",
   "scripts": {
-    "build": "tsc --noEmit",
+    "build": "capnweb-validate build --out .wrangler/validate && tsc --noEmit",
     "clean": "rm -rf .wrangler dist",
-    "test": "vitest run --config vite.config.ts",
+    "test": "capnweb-validate build --out .wrangler/validate && vitest run --config vite.config.ts && vitest run --config vitest.worker.config.ts",
+    "test:node": "vitest run --config vite.config.ts",
+    "test:workerd": "vitest run --config vitest.worker.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -16,7 +18,9 @@
     "capnweb-validate": "catalog:"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "catalog:",
     "@cloudflare/workers-types": "^5.20260808.1",
+    "miniflare": "5.20260801.0-alpha",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "catalog:",

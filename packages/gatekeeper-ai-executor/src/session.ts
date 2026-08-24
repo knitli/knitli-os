@@ -28,6 +28,9 @@ export type { AiRequest } from "./types.js";
 const NEXT_RUN_ID_KEY = "ai-run:next-id";
 const RUN_PREFIX = "ai-run:record:";
 const REQUEST_PREFIX = "ai-run:request:";
+const MAX_OUTSTANDING_RUNS = 50;
+const MAX_RETAINED_TERMINAL_RUNS = 100;
+const MAX_TRACKED_RUNS = MAX_OUTSTANDING_RUNS + MAX_RETAINED_TERMINAL_RUNS + 1;
 
 const ACTION_DESCRIPTION: ActionDescription = {
   title: "Run AI inference",
@@ -42,7 +45,7 @@ export interface RunKv {
   get<T>(key: string): T | undefined;
   put<T>(key: string, value: T): void;
   delete(key: string): void;
-  list<T>(options: { prefix: string }): Iterable<[string, T]>;
+  list<T>(options: { prefix: string; limit?: number; reverse?: boolean }): Iterable<[string, T]>;
 }
 
 type RunRecord = AiRunResult;
@@ -53,11 +56,20 @@ export class AiExecutorRunStore {
   constructor(kv: RunKv) {
     this.#kv = kv;
     this.#recoverInterruptedRuns();
+    this.#pruneTerminalRuns();
   }
 
   stage(value: unknown): AiRunPending {
     const request = parseAiRequest(value);
+    if (this.#outstandingRunCount() >= MAX_OUTSTANDING_RUNS) {
+      throw new Error(
+        `${MAX_OUTSTANDING_RUNS} AI inference runs are already awaiting approval or running.`,
+      );
+    }
     const runId = this.#kv.get<number>(NEXT_RUN_ID_KEY) ?? 1;
+    if (!Number.isSafeInteger(runId) || runId < 1 || runId >= Number.MAX_SAFE_INTEGER) {
+      throw new Error("AI inference run id space is exhausted.");
+    }
     this.#kv.put(NEXT_RUN_ID_KEY, runId + 1);
     this.#kv.put(this.#requestKey(runId), request);
     try {
@@ -69,11 +81,13 @@ export class AiExecutorRunStore {
     return { runId, status: "pending" };
   }
 
-  discardPending(runId: number): void {
-    const record = this.get(runId);
-    if (record?.status !== "pending") return;
+  markSubmissionOutcomeUnknown(runId: number): void {
+    const record = this.#require(runId);
+    if (record.status === "pending" || record.status === "running") {
+      this.fail(runId, outcomeUnknownError());
+      return;
+    }
     this.#kv.delete(this.#requestKey(runId));
-    this.#kv.delete(this.#runKey(runId));
   }
 
   get(runId: number): RunRecord | undefined {
@@ -111,11 +125,13 @@ export class AiExecutorRunStore {
       status: "completed",
       result: completion,
     });
+    this.#pruneTerminalRuns();
   }
 
   fail(runId: number, error: AiRunError): void {
     this.#kv.delete(this.#requestKey(runId));
     this.#kv.put<RunRecord>(this.#runKey(runId), { runId, status: "failed", error });
+    this.#pruneTerminalRuns();
   }
 
   reject(runId: number): void {
@@ -126,6 +142,7 @@ export class AiExecutorRunStore {
     }
     this.#kv.delete(this.#requestKey(runId));
     this.#kv.put<RunRecord>(this.#runKey(runId), { runId, status: "rejected" });
+    this.#pruneTerminalRuns();
   }
 
   #require(runId: number): RunRecord {
@@ -134,15 +151,37 @@ export class AiExecutorRunStore {
     return record;
   }
 
-  #recoverInterruptedRuns(): void {
-    for (const [key, record] of this.#kv.list<RunRecord>({ prefix: RUN_PREFIX })) {
-      if (record.status !== "running") continue;
+  #records(): Array<[string, RunRecord]> {
+    return [...this.#kv.list<RunRecord>({ prefix: RUN_PREFIX, limit: MAX_TRACKED_RUNS })];
+  }
+
+  #outstandingRunCount(): number {
+    return this.#records().filter(([, record]) =>
+      record.status === "pending" || record.status === "running").length;
+  }
+
+  #pruneTerminalRuns(): void {
+    const terminalRuns = this.#records()
+      .filter(([, record]) => record.status !== "pending" && record.status !== "running")
+      .toSorted((left, right) => right[1].runId - left[1].runId);
+    for (const [key, record] of terminalRuns.slice(MAX_RETAINED_TERMINAL_RUNS)) {
       this.#kv.delete(this.#requestKey(record.runId));
-      this.#kv.put<RunRecord>(key, {
-        runId: record.runId,
-        status: "failed",
-        error: outcomeUnknownError(),
-      });
+      this.#kv.delete(key);
+    }
+  }
+
+  #recoverInterruptedRuns(): void {
+    for (const [key, record] of this.#records()) {
+      if (record.status === "running") {
+        this.#kv.delete(this.#requestKey(record.runId));
+        this.#kv.put<RunRecord>(key, {
+          runId: record.runId,
+          status: "failed",
+          error: outcomeUnknownError(),
+        });
+      } else if (record.status !== "pending") {
+        this.#kv.delete(this.#requestKey(record.runId));
+      }
     }
   }
 
@@ -171,8 +210,8 @@ export class AiExecutorActionController {
     return this.#store.stage(request);
   }
 
-  discardPending(runId: number): void {
-    this.#store.discardPending(runId);
+  markSubmissionOutcomeUnknown(runId: number): void {
+    this.#store.markSubmissionOutcomeUnknown(runId);
   }
 
   get(runId: number): AiRunResult | undefined {
@@ -197,19 +236,29 @@ export class AiExecutorActionController {
     const request = this.#store.claim(runId);
     this.#inFlight.add(runId);
     try {
-      if (await this.#runtime.protocolVersion !== AI_EXECUTOR_PROTOCOL_VERSION) {
-        throw Object.assign(new Error("AI executor protocol mismatch"), {
-          error: { code: "profile_unavailable", retryable: true },
-        });
+      let result: unknown;
+      try {
+        if (await this.#runtime.protocolVersion !== AI_EXECUTOR_PROTOCOL_VERSION) {
+          throw Object.assign(new Error("AI executor protocol mismatch"), {
+            error: { code: "profile_unavailable", retryable: true },
+          });
+        }
+        result = await this.#runtime.invoke(this.#profileId, request);
+      } catch (error) {
+        const sanitized = sanitizeInvocationError(error);
+        this.#store.fail(runId, sanitized);
+        // Do not attach the raw runtime error as a cause: it may contain a provider body or secret.
+        // oxlint-disable-next-line preserve-caught-error
+        throw new Error(sanitized.message);
       }
-      const result = await this.#runtime.invoke(this.#profileId, request);
-      this.#store.complete(runId, result);
-    } catch (error) {
-      const sanitized = sanitizeInvocationError(error);
-      this.#store.fail(runId, sanitized);
-      // Do not attach the raw runtime error as a cause: it may contain a provider body or secret.
-      // oxlint-disable-next-line preserve-caught-error
-      throw new Error(sanitized.message);
+
+      try {
+        this.#store.complete(runId, result);
+      } catch {
+        const uncertain = outcomeUnknownError();
+        this.#store.fail(runId, uncertain);
+        throw new Error(uncertain.message);
+      }
     } finally {
       this.#inFlight.delete(runId);
     }
@@ -244,9 +293,9 @@ export class AiExecutorSession extends RpcTarget {
     const staged = this.#controller.stage(request);
     try {
       await this.#queue.submitAction(staged.runId, ACTION_DESCRIPTION);
-    } catch (error) {
-      this.#controller.discardPending(staged.runId);
-      throw error;
+    } catch {
+      this.#controller.markSubmissionOutcomeUnknown(staged.runId);
+      throw new Error(outcomeUnknownError().message);
     }
     return staged;
   }

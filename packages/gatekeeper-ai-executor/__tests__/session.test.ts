@@ -1,3 +1,4 @@
+import { RpcStub, RpcTarget } from "capnweb";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -12,6 +13,11 @@ import {
 
 class FakeKv implements RunKv {
   readonly values = new Map<string, unknown>();
+  #putFailure: ((key: string, value: unknown) => boolean) | undefined;
+
+  failNextPutWhere(predicate: (key: string, value: unknown) => boolean): void {
+    this.#putFailure = predicate;
+  }
 
   get<T>(key: string): T | undefined {
     const value = this.values.get(key);
@@ -19,6 +25,10 @@ class FakeKv implements RunKv {
   }
 
   put<T>(key: string, value: T): void {
+    if (this.#putFailure?.(key, value)) {
+      this.#putFailure = undefined;
+      throw new Error("injected durable storage put failure");
+    }
     this.values.set(key, structuredClone(value));
   }
 
@@ -26,10 +36,14 @@ class FakeKv implements RunKv {
     this.values.delete(key);
   }
 
-  list<T>(options: { prefix: string }): Map<string, T> {
+  list<T>(options: { prefix: string; limit?: number; reverse?: boolean }): Map<string, T> {
+    const entries = [...this.values]
+      .filter(([key]) => key.startsWith(options.prefix))
+      .toSorted(([left], [right]) => left.localeCompare(right));
+    if (options.reverse) entries.reverse();
     return new Map(
-      [...this.values]
-        .filter(([key]) => key.startsWith(options.prefix))
+      entries
+        .slice(0, options.limit)
         .map(([key, value]) => [key, structuredClone(value) as T]),
     );
   }
@@ -39,6 +53,12 @@ const REQUEST: AiRequest = {
   messages: [{ role: "user", content: "private prompt" }],
   maxOutputTokens: 64,
 };
+
+const OUTCOME_UNKNOWN = {
+  code: "outcome_unknown",
+  retryable: false,
+  message: "The inference was interrupted after it started, so its outcome is unknown.",
+} as const;
 
 function runtimeFake(invoke?: InferenceRuntime["invoke"]): InferenceRuntime {
   return {
@@ -71,6 +91,22 @@ function harness(options: {
 }
 
 describe("AI executor deferred session", () => {
+  it("disposes its approval-queue stub", async () => {
+    class DisposableQueue extends RpcTarget {
+      async authorizeObservation(): Promise<void> {}
+      async submitAction(): Promise<void> {}
+    }
+    const queue = new RpcStub(new DisposableQueue());
+    const { controller } = harness();
+    const session = new AiExecutorSession(controller, queue as never);
+    const staged = controller.stage(REQUEST);
+    await controller.applyAction(staged.runId);
+
+    session[Symbol.dispose]();
+
+    await expect(session.getResult(staged.runId)).rejects.toThrow();
+  });
+
   it("stages a bounded request, submits safe ai.infer metadata, and does no inference", async () => {
     let runtimeCalls = 0;
     const actions: Array<{ id: number; description: Record<string, unknown> }> = [];
@@ -105,17 +141,32 @@ describe("AI executor deferred session", () => {
     expect(JSON.stringify(store.get(1))).not.toContain("private prompt");
   });
 
-  it("removes staged state when action submission fails", async () => {
+  it("closes an ambiguously acknowledged action without leaving its prompt replayable", async () => {
+    let acceptedRunId: number | undefined;
+    let runtimeCalls = 0;
     const queue = queueFake({
-      submitAction: async () => {
-        throw new Error("approval queue unavailable");
+      submitAction: async (runId: number) => {
+        acceptedRunId = runId;
+        throw new Error("acknowledgement lost after acceptance");
       },
     });
-    const { session, store } = harness({ queue });
+    const runtime = runtimeFake(async () => {
+      runtimeCalls++;
+      return { text: "must not run", finishReason: "stop" };
+    });
+    const { controller, session, store } = harness({ queue, runtime });
 
-    await expect(session.submit(REQUEST)).rejects.toThrow("approval queue unavailable");
-    expect(store.get(1)).toBeUndefined();
+    await expect(session.submit(REQUEST)).rejects.toThrow("outcome is unknown");
+    expect(acceptedRunId).toBe(1);
     expect(store.getStagedRequest(1)).toBeUndefined();
+    expect(store.get(1)).toEqual({ runId: 1, status: "failed", error: OUTCOME_UNKNOWN });
+    await expect(controller.applyAction(acceptedRunId!)).rejects.toThrow("outcome is unknown");
+    await expect(session.getResult(1)).resolves.toEqual({
+      runId: 1,
+      status: "failed",
+      error: OUTCOME_UNKNOWN,
+    });
+    expect(runtimeCalls).toBe(0);
   });
 
   it("claims before inference and applies a run at most once", async () => {
@@ -323,26 +374,128 @@ describe("AI executor deferred session", () => {
     });
   });
 
-  it("sanitizes a malformed runtime completion instead of retaining it", async () => {
-    const runtime = runtimeFake(async () => ({
-      text: "completion containing private material",
-      finishReason: "stop",
-      rawProviderBody: "token=secret",
-    } as never));
+  it("closes malformed post-dispatch completion as outcome_unknown without replay", async () => {
+    let runtimeCalls = 0;
+    const runtime = runtimeFake(async () => {
+      runtimeCalls++;
+      return {
+        text: "completion containing private material",
+        finishReason: "stop",
+        rawProviderBody: "token=secret",
+      } as never;
+    });
     const { controller, session, store } = harness({ runtime });
     const { runId } = await session.submit(REQUEST);
 
-    await expect(controller.applyAction(runId)).rejects.toThrow("provider is unavailable");
+    await expect(controller.applyAction(runId)).rejects.toThrow("outcome is unknown");
     expect(store.get(runId)).toEqual({
       runId,
       status: "failed",
-      error: {
-        code: "provider_unavailable",
-        retryable: true,
-        message: "The inference provider is unavailable.",
+      error: OUTCOME_UNKNOWN,
+    });
+    await expect(controller.applyAction(runId)).rejects.toThrow("outcome is unknown");
+    expect(runtimeCalls).toBe(1);
+    expect(JSON.stringify(store.get(runId))).not.toMatch(/private material|secret|rawProviderBody/);
+  });
+
+  it("closes oversized post-dispatch completion as outcome_unknown without replay", async () => {
+    let runtimeCalls = 0;
+    const runtime = runtimeFake(async () => {
+      runtimeCalls++;
+      return { text: "x".repeat(1024 * 1024 + 1), finishReason: "stop" };
+    });
+    const { controller, session, store } = harness({ runtime });
+    const { runId } = await session.submit(REQUEST);
+
+    await expect(controller.applyAction(runId)).rejects.toThrow("outcome is unknown");
+
+    expect(store.get(runId)).toEqual({ runId, status: "failed", error: OUTCOME_UNKNOWN });
+    await expect(controller.applyAction(runId)).rejects.toThrow("outcome is unknown");
+    expect(runtimeCalls).toBe(1);
+  });
+
+  it("closes a post-dispatch completion write failure without replay", async () => {
+    let runtimeCalls = 0;
+    const kv = new FakeKv();
+    const runtime = runtimeFake(async () => {
+      runtimeCalls++;
+      kv.failNextPutWhere((_key, value) =>
+        typeof value === "object" && value !== null &&
+        (value as { status?: unknown }).status === "completed");
+      return { text: "private completion", finishReason: "stop" };
+    });
+    const { controller, session, store } = harness({ kv, runtime });
+    const { runId } = await session.submit(REQUEST);
+
+    await expect(controller.applyAction(runId)).rejects.toThrow("outcome is unknown");
+
+    expect(store.get(runId)).toEqual({ runId, status: "failed", error: OUTCOME_UNKNOWN });
+    await expect(controller.applyAction(runId)).rejects.toThrow("outcome is unknown");
+    expect(runtimeCalls).toBe(1);
+    expect(JSON.stringify([...kv.values])).not.toContain("private completion");
+  });
+
+  it("rejects a 51st pending/running run before submitting it to the approval queue", async () => {
+    let submitted = 0;
+    const queue = queueFake({
+      submitAction: async () => {
+        submitted++;
       },
     });
-    expect(JSON.stringify(store.get(runId))).not.toMatch(/private material|secret|rawProviderBody/);
+    const { session, store } = harness({ queue });
+    for (let index = 0; index < 50; index++) {
+      await session.submit({
+        messages: [{ role: "user", content: `private prompt ${index}` }],
+      });
+    }
+    store.claim(1);
+
+    await expect(session.submit(REQUEST)).rejects.toThrow(/50.*awaiting approval/i);
+
+    expect(submitted).toBe(50);
+  });
+
+  it("evicts old terminal records and orphaned staged payloads while retaining the newest 100", async () => {
+    const { controller, kv, session, store } = harness();
+    for (let index = 0; index < 105; index++) {
+      const { runId } = await session.submit({
+        messages: [{ role: "user", content: `private prompt ${index}` }],
+      });
+      await controller.applyAction(runId);
+      if (runId === 1) {
+        kv.put("ai-run:request:1", {
+          messages: [{ role: "user", content: "orphaned private prompt" }],
+        });
+      }
+    }
+
+    expect(store.get(1)).toBeUndefined();
+    expect(store.get(5)).toBeUndefined();
+    expect(store.getStagedRequest(1)).toBeUndefined();
+    expect(store.get(6)).toMatchObject({ runId: 6, status: "completed" });
+    expect(store.get(105)).toEqual({
+      runId: 105,
+      status: "completed",
+      result: { text: "answer", finishReason: "stop" },
+    });
+    expect(JSON.stringify([...kv.values])).not.toMatch(/orphaned private prompt/);
+  });
+
+  it("fails closed before staging when the run-id space is exhausted", async () => {
+    let submitted = 0;
+    const kv = new FakeKv();
+    kv.put("ai-run:next-id", Number.MAX_SAFE_INTEGER);
+    const queue = queueFake({
+      submitAction: async () => {
+        submitted++;
+      },
+    });
+    const { session } = harness({ kv, queue });
+
+    await expect(session.submit(REQUEST)).rejects.toThrow(/run id space is exhausted/i);
+
+    expect(submitted).toBe(0);
+    expect([...kv.values.keys()].filter(key => key.startsWith("ai-run:request:"))).toEqual([]);
   });
 
   it("rejects provider escape hatches before staging or queueing", async () => {

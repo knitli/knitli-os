@@ -12,7 +12,7 @@ import type {
   VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
-import PROFILE_CONFIGURATOR_HTML from "./generated/profile-configurator-ui.html.txt";
+import PROFILE_CONFIGURATOR_HTML from "./generated/profile-configurator-ui.txt";
 import type { InferenceRuntime } from "./protocol.js";
 import {
   parseActiveProfiles,

@@ -6,6 +6,7 @@
   "main": "./src/ai-executor.ts",
   "scripts": {
     "clean": "rm -rf .wrangler dist src/generated",
+    "deploy": "vp run --no-cache build:configurator && wrangler deploy",
     "test:node": "vitest run --config vite.config.ts",
     "test:workerd": "vitest run --config vitest.worker.config.ts",
     "typecheck": "tsc --noEmit"

@@ -918,6 +918,125 @@ export type AdminFormat = {
   bundled: boolean;
 };
 
+/** Provider identifiers supported by the version-1 AI executor profile catalog. */
+export type AiExecutorProvider = "aws-bedrock" | "azure-openai" | "openrouter";
+
+/** Limits shared by every version-1 AI executor profile input. */
+export interface AiExecutorProfileLimits {
+  /** Administrator-facing profile label. */
+  label: string;
+
+  /** Maximum serialized request size accepted by the profile. */
+  maxInputBytes: number;
+
+  /** Maximum completion token count accepted by the profile. */
+  maxOutputTokens: number;
+
+  /** Provider-call timeout in milliseconds. */
+  timeoutMs: number;
+
+  /** Maximum provider calls admitted per minute. */
+  requestsPerMinute: number;
+}
+
+/** Closed version-1 profile input forwarded to the private inference catalog. */
+export type AiExecutorProfileInput = AiExecutorProfileLimits &
+  (
+    | {
+        /** Cloudflare AI Gateway's Bedrock compatibility route. */
+        provider: "aws-bedrock";
+        /** Provider model identifier. */
+        model: string;
+      }
+    | {
+        /** Azure OpenAI through Cloudflare AI Gateway. */
+        provider: "azure-openai";
+        /** Azure OpenAI resource name, not a caller-supplied host or URL. */
+        resource: string;
+        /** Azure model deployment name. */
+        deployment: string;
+        /** Azure OpenAI API version. */
+        apiVersion: string;
+        /** Provider model identifier displayed to administrators. */
+        model: string;
+        /** Optional name of an AI Gateway BYOK credential. */
+        byokAlias?: string;
+      }
+    | {
+        /** OpenRouter through Cloudflare AI Gateway. */
+        provider: "openrouter";
+        /** Provider model identifier. */
+        model: string;
+        /** Optional name of an AI Gateway BYOK credential. */
+        byokAlias?: string;
+      }
+  );
+
+/** Lifecycle states returned by the version-1 AI executor profile catalog. */
+export type AiExecutorProfileLifecycle = "draft" | "verified" | "active" | "disabled";
+
+/** Sanitized outcomes retained for an administrator verification attempt. */
+export type AiExecutorVerificationStatus =
+  | "succeeded"
+  | "provider_rejected"
+  | "provider_unavailable"
+  | "timeout";
+
+/** Sanitized result of verifying one AI executor profile revision. */
+export interface AiExecutorVerificationResult {
+  /** Stable verification outcome. */
+  status: AiExecutorVerificationStatus;
+  /** Verification duration in milliseconds. */
+  durationMs: number;
+  /** Optional Cloudflare AI Gateway log identifier. */
+  gatewayLogId?: string;
+  /** Optional bounded, sanitized diagnostic supplied by the inference service. */
+  message?: string;
+}
+
+/** Administrator-visible version-1 AI executor profile. */
+export type AiExecutorProfile = AiExecutorProfileInput & {
+  /** Server-generated opaque profile identifier. */
+  id: string;
+  /** Current profile lifecycle. */
+  lifecycle: AiExecutorProfileLifecycle;
+  /** Optimistic-concurrency revision. */
+  revision: number;
+  /** ISO timestamp for the last successful verification, when present. */
+  verifiedAt?: string;
+  /** Sanitized result of the latest retained verification attempt. */
+  verification?: AiExecutorVerificationResult;
+};
+
+/** Stable error codes from the optional AI executor administrator bridge. */
+export const AI_EXECUTOR_ADMIN_ERROR_CODES = {
+  featureUnavailable: "AI_EXECUTOR_ADMIN_FEATURE_UNAVAILABLE",
+  protocolMismatch: "AI_EXECUTOR_ADMIN_PROTOCOL_MISMATCH",
+  revisionConflict: "AI_EXECUTOR_PROFILE_REVISION_CONFLICT",
+  serviceUnavailable: "AI_EXECUTOR_ADMIN_SERVICE_UNAVAILABLE",
+} as const;
+
+/** An expected AI executor administrator bridge failure code. */
+export type AiExecutorAdminErrorCode =
+  typeof AI_EXECUTOR_ADMIN_ERROR_CODES[keyof typeof AI_EXECUTOR_ADMIN_ERROR_CODES];
+
+const aiExecutorAdminErrors = codedErrorFamily<AiExecutorAdminErrorCode>({
+  [AI_EXECUTOR_ADMIN_ERROR_CODES.featureUnavailable]:
+    "AI executor administration is not enabled on this deployment.",
+  [AI_EXECUTOR_ADMIN_ERROR_CODES.protocolMismatch]:
+    "The AI executor service uses an incompatible protocol version.",
+  [AI_EXECUTOR_ADMIN_ERROR_CODES.revisionConflict]:
+    "The AI executor profile changed. Reload it and try again.",
+  [AI_EXECUTOR_ADMIN_ERROR_CODES.serviceUnavailable]:
+    "The AI executor service is temporarily unavailable.",
+});
+
+/** Creates a sanitized AI executor administrator bridge error with a stable code. */
+export const createAiExecutorAdminError = aiExecutorAdminErrors.create;
+
+/** Reads a stable AI executor administrator bridge code from an expected error. */
+export const getAiExecutorAdminErrorCode = aiExecutorAdminErrors.getCode;
+
 /**
  * Capability for managing deployment-wide admin settings, obtained via
  * AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
@@ -926,6 +1045,28 @@ export type AdminFormat = {
  * driven). Each setter throws on invalid input.
  */
 export interface AdminApi {
+  /** List every administrator-curated AI executor profile. */
+  listAiExecutorProfiles(): Promise<AiExecutorProfile[]>;
+
+  /** Create a server-identified AI executor profile. */
+  createAiExecutorProfile(input: AiExecutorProfileInput): Promise<AiExecutorProfile>;
+
+  /** Replace one AI executor profile only at the expected revision. */
+  updateAiExecutorProfile(
+    id: string,
+    input: AiExecutorProfileInput,
+    revision: number,
+  ): Promise<AiExecutorProfile>;
+
+  /** Verify one AI executor profile only at the expected revision. */
+  verifyAiExecutorProfile(id: string, revision: number): Promise<AiExecutorProfile>;
+
+  /** Activate one verified AI executor profile only at the expected revision. */
+  activateAiExecutorProfile(id: string, revision: number): Promise<AiExecutorProfile>;
+
+  /** Disable one AI executor profile only at the expected revision. */
+  disableAiExecutorProfile(id: string, revision: number): Promise<AiExecutorProfile>;
+
   /** Read all admin-managed settings for the admin UI in one call. */
   getSettings(): Promise<AdminSettingsView>;
 

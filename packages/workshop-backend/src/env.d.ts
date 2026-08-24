@@ -45,6 +45,13 @@ declare global {
       >;
       FRONTEND_ERROR_RATE_LIMITER?: RateLimit;
 
+      // Optional private administrator capability for the wrapper-owned AI inference catalog.
+      // It is handed only to the authenticated AdminApi facade; reusable upstream deployments
+      // intentionally omit it.
+      AI_INFERENCE_ADMIN?: Service<
+        import("./admin-settings.js").InferenceAdmin
+      >;
+
       // The Browser Run binding (BROWSER) used to render Gadget exports is intentionally NOT
       // redeclared here: wrangler's generated types make it required, and TypeScript 7 rejects
       // weakening it to optional in a merged augmentation. Self-hosted deployments may omit the

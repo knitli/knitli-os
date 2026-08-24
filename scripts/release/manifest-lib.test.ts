@@ -75,7 +75,9 @@ test("every $-token in binding templates and vars uses known placeholder syntax"
         assert.match(match[0], PLACEHOLDER_RE, `unknown placeholder ${match[0]} in ${where}`);
       }
     } else if (Array.isArray(value)) {
-      value.forEach((v, i) => check(v, `${where}[${i}]`));
+      value.forEach((v, i) => {
+        check(v, `${where}[${i}]`);
+      });
     } else if (value && typeof value === "object") {
       for (const [k, v] of Object.entries(value)) check(v, `${where}.${k}`);
     }
@@ -148,6 +150,16 @@ test("worker entries carry the deploy contract", () => {
   // gatekeeper-email ships in the release but is not installable (needs Email Routing/a zone).
   assert.equal(workers["gatekeeper-email"].installable, false);
   assert.deepEqual(workers["gatekeeper-email"].inputs, []);
+
+  // AI Executor is first-class, but only the outer deployment can inject its private runtime.
+  const executor = workers["gatekeeper-ai-executor"];
+  assert.equal(executor.kind, "gatekeeper");
+  assert.equal(executor.shortName, "ai-executor");
+  assert.equal(executor.installable, false);
+  assert.deepEqual(executor.inputs, []);
+  assert.equal(executor.preinstall, undefined);
+  assert.equal(executor.singleton, undefined);
+  assert.deepEqual(executor.bindings.filter(binding => binding.type === "service"), []);
 
   // gatekeeper-context: closed-beta artifacts binding is cut; its KV is a normal template and
   // no OAuth-app inputs are demanded.

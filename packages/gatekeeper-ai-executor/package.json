@@ -5,14 +5,13 @@
   "type": "module",
   "main": "./src/ai-executor.ts",
   "scripts": {
-    "build": "capnweb-validate build --out .wrangler/validate && tsc --noEmit",
-    "clean": "rm -rf .wrangler dist",
-    "test": "capnweb-validate build --out .wrangler/validate && vitest run --config vite.config.ts && vitest run --config vitest.worker.config.ts",
+    "clean": "rm -rf .wrangler dist src/generated",
     "test:node": "vitest run --config vite.config.ts",
     "test:workerd": "vitest run --config vitest.worker.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@gadgets/configurator-ui": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "capnweb": "catalog:",
     "capnweb-validate": "catalog:"

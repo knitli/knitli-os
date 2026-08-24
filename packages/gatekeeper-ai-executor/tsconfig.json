@@ -11,5 +11,5 @@
     }
   },
   "include": ["src", "__tests__"],
-  "exclude": ["dist", "node_modules"]
+  "exclude": ["dist", "node_modules", "src/configurator/*-ui.tsx"]
 }

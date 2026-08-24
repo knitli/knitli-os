@@ -1,5 +1,10 @@
 import { DurableObject, type RpcStub } from "cloudflare:workers";
-import type { ApprovalQueue } from "@gadgets/workshop-shared/gatekeeper";
+import type {
+  ApprovalQueue,
+  Gatekeeper,
+  GatekeeperUserVerifier,
+  ResourceDescription,
+} from "@gadgets/workshop-shared/gatekeeper";
 import { validateRpc } from "capnweb-validate";
 
 import type { InferenceRuntime } from "./protocol.js";
@@ -10,6 +15,11 @@ import {
 } from "./session.js";
 import type { AiExecutor } from "./types.js";
 import TYPES_CODE from "./types.txt";
+import {
+  canonicalProfileUrl,
+  rejectPrivateObserver,
+  requireActiveProfile,
+} from "./resources.js";
 
 export type AiExecutorGatekeeperProps = {
   profileId: string;
@@ -23,7 +33,7 @@ export type AiExecutorGatekeeperEnv = Cloudflare.Env & {
 export class AiExecutorGatekeeperImpl extends DurableObject<
   AiExecutorGatekeeperEnv,
   AiExecutorGatekeeperProps
-> {
+> implements Gatekeeper<AiExecutor> {
   #controller: AiExecutorActionController;
 
   constructor(
@@ -41,6 +51,29 @@ export class AiExecutorGatekeeperImpl extends DurableObject<
   async getTypeScriptTypes(): Promise<string> {
     return TYPES_CODE;
   }
+
+  async describe(): Promise<ResourceDescription> {
+    const profile = await requireActiveProfile(
+      this.env.AI_INFERENCE_RUNTIME,
+      this.ctx.props.profileId,
+    );
+    return {
+      url: canonicalProfileUrl(profile.id),
+      title: profile.label,
+      snippet: `${profile.provider} · ${profile.model}`,
+      suggestedBindingName: "AI_EXECUTOR",
+      tsType: "AiExecutor",
+    };
+  }
+
+  async addObserver(
+    _id: string,
+    _user: Fetcher<GatekeeperUserVerifier>,
+  ): Promise<void> {
+    rejectPrivateObserver(_user);
+  }
+
+  async removeObserver(_id: string): Promise<void> {}
 
   async getAutoApprovableActions(): Promise<Array<{ tag: string; label: string }>> {
     return [{ tag: "ai.infer", label: "Run AI inference" }];
@@ -67,3 +100,4 @@ export {
   AI_EXECUTOR_PROTOCOL_VERSION,
   type InferenceRuntime,
 } from "./protocol.js";
+export { GatekeeperVendor, AiExecutorAccount, AiExecutorVerifier } from "./vendor.js";

@@ -6,19 +6,60 @@ import {
 } from "cloudflare:workers";
 import type {
   ActionDescription,
+  GatekeeperUser,
   ObservationDescription,
+  ResourceDescription,
+  SupportedResource,
+  VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 
 import {
+  AiExecutorAccount,
   AiExecutorGatekeeperImpl,
   type AiExecutorGatekeeperProps,
+  AiExecutorVerifier,
+  GatekeeperVendor,
 } from "../src/ai-executor.js";
+import type {
+  ActiveExecutorProfile,
+  InferenceRuntime,
+} from "../src/protocol.js";
+import { resolveActiveProfileResource } from "../src/resources.js";
 import type { AiRequest, AiRunResult } from "../src/types.js";
 
 export * from "../src/ai-executor.js";
-export { AiExecutorGatekeeperImpl };
+export {
+  AiExecutorAccount,
+  AiExecutorGatekeeperImpl,
+  AiExecutorVerifier,
+  GatekeeperVendor,
+};
 
+const PROFILE_ID = "0198ddb0-7ac5-7ee9-8e65-62da80270035";
+const DEFAULT_PROFILE: ActiveExecutorProfile = {
+  id: PROFILE_ID,
+  label: "Workerd fake",
+  provider: "openrouter",
+  model: "fake/model",
+  revision: 1,
+};
 let runtimeCalls: Array<{ profileId: string; request: AiRequest }> = [];
+let activeProfiles: ActiveExecutorProfile[] = [DEFAULT_PROFILE];
+let observerVerifierCalls = 0;
+
+export class CountingVerifier extends WorkerEntrypoint {
+  verify(): void {
+    observerVerifierCalls++;
+  }
+
+  async calls(): Promise<number> {
+    return observerVerifierCalls;
+  }
+
+  async reset(): Promise<void> {
+    observerVerifierCalls = 0;
+  }
+}
 
 export class FakeInferenceRuntime extends WorkerEntrypoint {
   get protocolVersion(): 1 {
@@ -26,13 +67,7 @@ export class FakeInferenceRuntime extends WorkerEntrypoint {
   }
 
   async listActiveProfiles() {
-    return [{
-      id: "profile-workerd",
-      label: "Workerd fake",
-      provider: "openrouter" as const,
-      model: "fake/model",
-      revision: 1,
-    }];
+    return activeProfiles;
   }
 
   async invoke(profileId: string, request: AiRequest) {
@@ -42,6 +77,11 @@ export class FakeInferenceRuntime extends WorkerEntrypoint {
 
   async reset(): Promise<void> {
     runtimeCalls = [];
+    activeProfiles = [DEFAULT_PROFILE];
+  }
+
+  async setProfiles(profiles: ActiveExecutorProfile[]): Promise<void> {
+    activeProfiles = profiles;
   }
 
   async calls(): Promise<Array<{ profileId: string; request: AiRequest }>> {
@@ -79,6 +119,7 @@ class TestApprovalQueue extends RpcTarget {
 }
 
 type TestExports = {
+  GatekeeperVendor(options: { props: Record<string, never> }): Fetcher<GatekeeperVendor>;
   AiExecutorGatekeeperImpl(options: { props: AiExecutorGatekeeperProps }):
     DurableObjectClass<AiExecutorGatekeeperImpl>;
 };
@@ -96,7 +137,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     const exports = this.ctx.exports as unknown as TestExports;
     return this.ctx.facets.get<AiExecutorGatekeeperImpl>("executor", () => ({
       class: exports.AiExecutorGatekeeperImpl({
-        props: { profileId: "profile-workerd" },
+        props: { profileId: PROFILE_ID },
       }),
     }));
   }
@@ -115,5 +156,100 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
       observations: [],
       disposed: 0,
     });
+  }
+
+  async vendorDescription(): Promise<VendorDescription> {
+    const exports = this.ctx.exports as unknown as TestExports;
+    return exports.GatekeeperVendor({ props: {} }).describe();
+  }
+
+  async accountResources(): Promise<SupportedResource[]> {
+    const exports = this.ctx.exports as unknown as TestExports;
+    const account = await exports.GatekeeperVendor({ props: {} })
+      .createAccount() as unknown as GatekeeperUser;
+    return account.getSupportedResources();
+  }
+
+  async resolveActiveResourceOutcome(
+    resourceUrl: string,
+  ): Promise<"active" | "AI executor profile is not active."> {
+    const runtime = (
+      this.env as unknown as { AI_INFERENCE_RUNTIME: InferenceRuntime }
+    ).AI_INFERENCE_RUNTIME;
+    try {
+      await resolveActiveProfileResource(runtime, resourceUrl);
+      return "active";
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "AI executor profile is not active."
+      ) {
+        return error.message;
+      }
+      throw error;
+    }
+  }
+
+  async openThroughAccount(resourceUrl: string): Promise<{
+    accountDisplayName?: string;
+    description: ResourceDescription;
+    resource: SupportedResource;
+  }> {
+    const exports = this.ctx.exports as unknown as TestExports;
+    const account = await exports.GatekeeperVendor({ props: {} })
+      .createAccount() as unknown as GatekeeperUser;
+    const accountDescription = await account.describe();
+    const selected = await account.getGatekeeperClassFor(resourceUrl);
+    const gatekeeper = this.ctx.facets.get<AiExecutorGatekeeperImpl>(
+      "executor-account",
+      () => ({
+        class: selected.class as DurableObjectClass<AiExecutorGatekeeperImpl>,
+      }),
+    );
+    this.#queue = new TestApprovalQueue(gatekeeper);
+    return {
+      accountDisplayName: accountDescription.displayName,
+      description: await gatekeeper.describe(),
+      resource: selected.resource,
+    };
+  }
+
+  async openThroughAccountSession(resourceUrl: string): Promise<BoundarySession> {
+    const exports = this.ctx.exports as unknown as TestExports;
+    const account = await exports.GatekeeperVendor({ props: {} })
+      .createAccount() as unknown as GatekeeperUser;
+    const selected = await account.getGatekeeperClassFor(resourceUrl);
+    const gatekeeper = this.ctx.facets.get<AiExecutorGatekeeperImpl>(
+      "executor-account",
+      () => ({
+        class: selected.class as DurableObjectClass<AiExecutorGatekeeperImpl>,
+      }),
+    );
+    this.#queue = new TestApprovalQueue(gatekeeper);
+    return await gatekeeper.startSession(
+      new RpcStub(this.#queue) as never,
+    ) as BoundarySession;
+  }
+
+  async testPrivateObserverPolicy(): Promise<{
+    rejectionMessage: string;
+    verifierCalls: number;
+  }> {
+    const gatekeeper = this.#gatekeeper();
+    const verifier = (this.env as unknown as {
+      VERIFIER_CONTROL: Fetcher<CountingVerifier>;
+    }).VERIFIER_CONTROL;
+    const rejectionMessage = await Promise.resolve(
+      gatekeeper.addObserver("observer", verifier as never),
+    ).then(
+      () => "accepted unexpectedly",
+      (error: unknown) => {
+        if (!(error instanceof Error)) throw error;
+        return error.message;
+      },
+    );
+    await gatekeeper.removeObserver("observer");
+    await gatekeeper.removeObserver("observer");
+    return { rejectionMessage, verifierCalls: await verifier.calls() };
   }
 }

@@ -27,6 +27,10 @@ export default defineConfig({
             name: kCurrentWorker,
             entrypoint: "FakeInferenceRuntime",
           },
+          VERIFIER_CONTROL: {
+            name: kCurrentWorker,
+            entrypoint: "CountingVerifier",
+          },
         },
       },
     }),

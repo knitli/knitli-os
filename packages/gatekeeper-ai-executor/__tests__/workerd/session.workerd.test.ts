@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { reset } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
+import * as aiExecutorWorker from "../../src/ai-executor.js";
 
 import type {
   BoundarySession,
@@ -24,6 +25,34 @@ beforeEach(async () => {
 });
 
 describe("AI executor real Worker RPC boundary", () => {
+  it("has no HTTP capability and returns the same 404 for every request", async () => {
+    const handler = (
+      aiExecutorWorker as unknown as {
+        default?: { fetch(request: Request): Response | Promise<Response> };
+      }
+    ).default;
+    expect(handler, "AI executor Worker must retain ES-module format").toBeDefined();
+    if (!handler) return;
+
+    const requests = [
+      new Request("https://executor.invalid/"),
+      new Request("https://executor.invalid/oauth/callback?code=not-consumed", {
+        method: "POST",
+        body: "ignored",
+      }),
+      new Request("https://executor.invalid/profiles/not-a-profile", {
+        method: "DELETE",
+      }),
+      new Request("https://executor.invalid/anything", { method: "OPTIONS" }),
+    ];
+
+    for (const request of requests) {
+      const response = await handler.fetch(request);
+      expect(response.status).toBe(404);
+      await expect(response.text()).resolves.toBe("Not Found");
+    }
+  });
+
   it("round-trips submit, queue apply, and result authorization", async () => {
     const hooks = testEnv.TEST_HOOKS.getByName("session-boundary");
     const session = await hooks.openSession() as BoundarySession;

@@ -9,6 +9,7 @@ import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
 import AdminFormatsPanel from './components/format/AdminFormatsPanel'
+import AdminAiExecutorsPanel from './components/AdminAiExecutorsPanel'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [
@@ -401,11 +402,14 @@ export default function AdminPage() {
         onValueChange={setActiveTab}
         tabs={[
           { value: 'general', label: 'General' },
-          { value: 'gatekeepers', label: 'Gatekeepers' },
-          { value: 'formats', label: 'Formats' },
+        { value: 'gatekeepers', label: 'Gatekeepers' },
+        { value: 'executors', label: 'Executors' },
+        { value: 'formats', label: 'Formats' },
           { value: 'access', label: 'Access' },
         ]}
       />
+
+      {activeTab === 'executors' && admin && <AdminAiExecutorsPanel admin={admin.api} />}
 
       {/* Standard output formats */}
       {activeTab === 'formats' && admin && (

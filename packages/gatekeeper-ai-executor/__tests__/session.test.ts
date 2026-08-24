@@ -36,9 +36,15 @@ class FakeKv implements RunKv {
     this.values.delete(key);
   }
 
-  list<T>(options: { prefix: string; limit?: number; reverse?: boolean }): Map<string, T> {
+  list<T>(options: {
+    prefix: string;
+    limit?: number;
+    reverse?: boolean;
+    startAfter?: string;
+  }): Map<string, T> {
     const entries = [...this.values]
       .filter(([key]) => key.startsWith(options.prefix))
+      .filter(([key]) => options.startAfter === undefined || key > options.startAfter)
       .toSorted(([left], [right]) => left.localeCompare(right));
     if (options.reverse) entries.reverse();
     return new Map(
@@ -453,6 +459,61 @@ describe("AI executor deferred session", () => {
     await expect(session.submit(REQUEST)).rejects.toThrow(/50.*awaiting approval/i);
 
     expect(submitted).toBe(50);
+  });
+
+  it("classifies outstanding runs hidden after the first 151 lexical records", async () => {
+    const kv = new FakeKv();
+    for (let runId = 1000; runId <= 1201; runId++) {
+      kv.put(`ai-run:record:${runId}`, {
+        runId,
+        status: "completed",
+        result: { text: `terminal ${runId}`, finishReason: "stop" },
+      });
+    }
+    // These keys sort after every terminal key. The old single-page scan pruned only its first
+    // page, then staged new work without ever seeing these 51 outstanding runs.
+    for (let runId = 9000; runId <= 9050; runId++) {
+      kv.put(`ai-run:record:${runId}`, { runId, status: "pending" });
+      kv.put(`ai-run:request:${runId}`, {
+        messages: [{ role: "user", content: `hidden private prompt ${runId}` }],
+      });
+    }
+    kv.put("ai-run:next-id", 10_000);
+    let submitted = 0;
+    const queue = queueFake({
+      submitAction: async () => {
+        submitted++;
+      },
+    });
+    const { session, store } = harness({ kv, queue });
+
+    await expect(session.submit(REQUEST)).rejects.toThrow(/50.*awaiting approval/i);
+
+    expect(submitted).toBe(0);
+    expect(store.get(1000)).toBeUndefined();
+    expect(store.get(1102)).toMatchObject({ runId: 1102, status: "completed" });
+    expect(store.get(1201)).toMatchObject({ runId: 1201, status: "completed" });
+    expect(store.get(9000)).toEqual({ runId: 9000, status: "pending" });
+    expect(store.get(10_000)).toBeUndefined();
+    expect(store.getStagedRequest(10_000)).toBeUndefined();
+  });
+
+  it("fails closed before partially repairing state beyond the finite repair ceiling", () => {
+    const kv = new FakeKv();
+    for (let runId = 1; runId <= 1001; runId++) {
+      kv.put(`ai-run:record:${runId}`, { runId, status: "running" });
+      kv.put(`ai-run:request:${runId}`, {
+        messages: [{ role: "user", content: `private prompt ${runId}` }],
+      });
+    }
+
+    expect(() => new AiExecutorRunStore(kv)).toThrow(/repair ceiling.*1000/i);
+
+    expect(kv.get("ai-run:record:1")).toEqual({ runId: 1, status: "running" });
+    expect(kv.get("ai-run:record:1001")).toEqual({ runId: 1001, status: "running" });
+    expect(kv.get("ai-run:request:1")).toMatchObject({
+      messages: [{ content: "private prompt 1" }],
+    });
   });
 
   it("evicts old terminal records and orphaned staged payloads while retaining the newest 100", async () => {

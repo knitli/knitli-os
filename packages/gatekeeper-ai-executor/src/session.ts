@@ -30,7 +30,10 @@ const RUN_PREFIX = "ai-run:record:";
 const REQUEST_PREFIX = "ai-run:request:";
 const MAX_OUTSTANDING_RUNS = 50;
 const MAX_RETAINED_TERMINAL_RUNS = 100;
-const MAX_TRACKED_RUNS = MAX_OUTSTANDING_RUNS + MAX_RETAINED_TERMINAL_RUNS + 1;
+const RUN_SCAN_BATCH_SIZE = 100;
+// Normal operation retains at most 150 records. This bounded repair headroom handles legacy or
+// interrupted state without allowing one activation to scan an attacker-sized store indefinitely.
+const MAX_REPAIR_RUNS = 1000;
 
 const ACTION_DESCRIPTION: ActionDescription = {
   title: "Run AI inference",
@@ -45,7 +48,12 @@ export interface RunKv {
   get<T>(key: string): T | undefined;
   put<T>(key: string, value: T): void;
   delete(key: string): void;
-  list<T>(options: { prefix: string; limit?: number; reverse?: boolean }): Iterable<[string, T]>;
+  list<T>(options: {
+    prefix: string;
+    limit?: number;
+    reverse?: boolean;
+    startAfter?: string;
+  }): Iterable<[string, T]>;
 }
 
 type RunRecord = AiRunResult;
@@ -152,7 +160,28 @@ export class AiExecutorRunStore {
   }
 
   #records(): Array<[string, RunRecord]> {
-    return [...this.#kv.list<RunRecord>({ prefix: RUN_PREFIX, limit: MAX_TRACKED_RUNS })];
+    const records: Array<[string, RunRecord]> = [];
+    let startAfter: string | undefined;
+    while (true) {
+      const page = [...this.#kv.list<RunRecord>({
+        prefix: RUN_PREFIX,
+        limit: RUN_SCAN_BATCH_SIZE,
+        ...(startAfter === undefined ? {} : { startAfter }),
+      })];
+      if (page.length === 0) return records;
+      records.push(...page);
+      if (records.length > MAX_REPAIR_RUNS) {
+        throw new Error(
+          `AI inference state exceeds the finite repair ceiling of ${MAX_REPAIR_RUNS} runs.`,
+        );
+      }
+      if (page.length < RUN_SCAN_BATCH_SIZE) return records;
+      const lastKey = page.at(-1)![0];
+      if (lastKey === startAfter) {
+        throw new Error("AI inference state pagination did not advance.");
+      }
+      startAfter = lastKey;
+    }
   }
 
   #outstandingRunCount(): number {

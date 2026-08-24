@@ -1,11 +1,16 @@
-import { describe, expect, it } from "vitest";
-import { AI_EXECUTOR_PROTOCOL_VERSION } from "../src/protocol.js";
-import type { ActiveExecutorProfile, InferenceRuntime } from "../src/protocol.js";
 import type {
   AdminApi,
   AiExecutorProfile,
   AiExecutorProfileInput,
 } from "@gadgets/workshop-shared/api";
+import {
+  MAX_ACTIVE_EXECUTOR_PROFILES,
+  MAX_EXECUTOR_PROFILE_LABEL_BYTES,
+  MAX_EXECUTOR_PROFILE_MODEL_BYTES,
+} from "@gadgets/workshop-shared/api";
+import { describe, expect, it } from "vitest";
+import type { ActiveExecutorProfile, InferenceRuntime } from "../src/protocol.js";
+import { AI_EXECUTOR_PROTOCOL_VERSION } from "../src/protocol.js";
 
 type Equal<Left, Right> = (
   <Value>() => Value extends Left ? 1 : 2
@@ -149,6 +154,9 @@ const workshopFixture = {
 describe("AI executor v1 protocol parity", () => {
   it("pins the independent Gatekeeper runtime and Workshop admin shapes", () => {
     expect(AI_EXECUTOR_PROTOCOL_VERSION).toBe(1);
+    expect(MAX_ACTIVE_EXECUTOR_PROFILES).toBe(100);
+    expect(MAX_EXECUTOR_PROFILE_LABEL_BYTES).toBe(100);
+    expect(MAX_EXECUTOR_PROFILE_MODEL_BYTES).toBe(256);
     expect(Object.keys(runtimeFixture).toSorted()).toEqual([
       "invoke",
       "listActiveProfiles",

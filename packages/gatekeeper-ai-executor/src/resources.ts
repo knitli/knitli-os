@@ -1,12 +1,16 @@
+import {
+  MAX_ACTIVE_EXECUTOR_PROFILES,
+  MAX_EXECUTOR_PROFILE_LABEL_BYTES,
+  MAX_EXECUTOR_PROFILE_MODEL_BYTES,
+} from "@gadgets/workshop-shared/api";
 import type { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import {
-  AI_EXECUTOR_PROTOCOL_VERSION,
   type ActiveExecutorProfile,
+  AI_EXECUTOR_PROTOCOL_VERSION,
   type InferenceRuntime,
 } from "./protocol.js";
 
 export const AI_EXECUTOR_RESOURCE_ORIGIN = "https://ai-executor.invalid";
-export const MAX_ACTIVE_PROFILES = 100;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PROVIDERS = new Set(["aws-bedrock", "azure-openai", "openrouter"]);
@@ -46,7 +50,7 @@ export async function parseActiveProfiles(
     throw new Error("Unsupported AI executor protocol version.");
   }
   const value: unknown = await runtime.listActiveProfiles();
-  if (!Array.isArray(value) || value.length > MAX_ACTIVE_PROFILES) {
+  if (!Array.isArray(value) || value.length > MAX_ACTIVE_EXECUTOR_PROFILES) {
     throw invalidProfiles();
   }
 
@@ -59,9 +63,9 @@ export async function parseActiveProfiles(
       throw invalidProfiles();
     }
     const id = safeString(raw.id, 36, true);
-    const label = safeString(raw.label, 100);
+    const label = safeString(raw.label, MAX_EXECUTOR_PROFILE_LABEL_BYTES);
     const provider = safeString(raw.provider, 32);
-    const model = safeString(raw.model, 256);
+    const model = safeString(raw.model, MAX_EXECUTOR_PROFILE_MODEL_BYTES);
     if (
       !UUID_RE.test(id) ||
       !PROVIDERS.has(provider) ||

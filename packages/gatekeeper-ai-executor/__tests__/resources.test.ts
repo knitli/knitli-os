@@ -1,17 +1,16 @@
+import { MAX_ACTIVE_EXECUTOR_PROFILES } from "@gadgets/workshop-shared/api";
 import { describe, expect, it } from "vitest";
-
+import {
+  AI_EXECUTOR_PROTOCOL_VERSION,
+  type InferenceRuntime,
+} from "../src/protocol.js";
 import {
   canonicalProfileUrl,
-  MAX_ACTIVE_PROFILES,
   parseActiveProfiles,
   parseProfileResourceUrl,
   rejectPrivateObserver,
   supportedResourceForProfile,
 } from "../src/resources.js";
-import {
-  AI_EXECUTOR_PROTOCOL_VERSION,
-  type InferenceRuntime,
-} from "../src/protocol.js";
 
 const PROFILE_ID = "0198ddb0-7ac5-7ee9-8e65-62da80270035";
 const PROFILE = {
@@ -62,7 +61,12 @@ describe("AI executor profile resources", () => {
     ).resolves.toEqual([PROFILE]);
     await expect(
       parseActiveProfiles(
-        runtime(Array.from({ length: MAX_ACTIVE_PROFILES + 1 }, () => PROFILE)),
+        runtime(
+          Array.from(
+            { length: MAX_ACTIVE_EXECUTOR_PROFILES + 1 },
+            () => PROFILE,
+          ),
+        ),
       ),
     ).rejects.toThrow("Invalid active AI executor profiles");
     await expect(

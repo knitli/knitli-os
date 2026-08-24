@@ -108,6 +108,51 @@ describe('AI executor form model', () => {
     })
   })
 
+  it('accepts labels and models at their exact UTF-8 byte limits', () => {
+    const result = buildAiExecutorProfileInput({
+      ...createAiExecutorFormDraft('openrouter'),
+      label: 'é'.repeat(50),
+      maxInputBytes: '1024',
+      maxOutputTokens: '256',
+      timeoutMs: '5000',
+      requestsPerMinute: '10',
+      model: 'é'.repeat(128),
+    })
+
+    expect(result).toEqual({
+      ok: true,
+      input: {
+        provider: 'openrouter',
+        label: 'é'.repeat(50),
+        maxInputBytes: 1024,
+        maxOutputTokens: 256,
+        timeoutMs: 5000,
+        requestsPerMinute: 10,
+        model: 'é'.repeat(128),
+      },
+    })
+  })
+
+  it('rejects labels and models over their UTF-8 byte limits', () => {
+    const result = buildAiExecutorProfileInput({
+      ...createAiExecutorFormDraft('openrouter'),
+      label: `${'é'.repeat(50)}a`,
+      maxInputBytes: '1024',
+      maxOutputTokens: '256',
+      timeoutMs: '5000',
+      requestsPerMinute: '10',
+      model: `${'é'.repeat(128)}a`,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      errors: {
+        label: 'Label must be 100 UTF-8 bytes or fewer.',
+        model: 'Model must be 256 UTF-8 bytes or fewer.',
+      },
+    })
+  })
+
   it('switches providers without retaining Azure or BYOK fields', () => {
     const azure = {
       ...createAiExecutorFormDraft('azure-openai'),

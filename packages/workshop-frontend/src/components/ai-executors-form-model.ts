@@ -1,4 +1,11 @@
-import type { AiExecutorProfileInput, AiExecutorProvider } from '@gadgets/workshop-shared/api'
+import {
+  type AiExecutorProfileInput,
+  type AiExecutorProvider,
+  MAX_EXECUTOR_PROFILE_LABEL_BYTES,
+  MAX_EXECUTOR_PROFILE_MODEL_BYTES,
+} from '@gadgets/workshop-shared/api'
+
+const ENCODER = new TextEncoder()
 
 export type AiExecutorFormDraft = {
   provider: AiExecutorProvider
@@ -67,6 +74,10 @@ function requiredText(value: unknown): string | undefined {
   return text === '' ? undefined : text
 }
 
+function exceedsUtf8ByteLimit(value: string, maximumBytes: number): boolean {
+  return ENCODER.encode(value).byteLength > maximumBytes
+}
+
 function draftValue(draft: unknown, field: AiExecutorFormField): unknown {
   return typeof draft === 'object' && draft !== null
     ? (draft as Record<string, unknown>)[field]
@@ -83,12 +94,20 @@ export function buildAiExecutorProfileInput(draft: unknown): AiExecutorFormResul
   const model = requiredText(draftValue(draft, 'model'))
   const providerValue = draftValue(draft, 'provider')
 
-  if (!label) errors.label = 'Enter a label.'
+  if (!label) {
+    errors.label = 'Enter a label.'
+  } else if (exceedsUtf8ByteLimit(label, MAX_EXECUTOR_PROFILE_LABEL_BYTES)) {
+    errors.label = `Label must be ${MAX_EXECUTOR_PROFILE_LABEL_BYTES} UTF-8 bytes or fewer.`
+  }
   if (!maxInputBytes) errors.maxInputBytes = 'Enter a positive whole number.'
   if (!maxOutputTokens) errors.maxOutputTokens = 'Enter a positive whole number.'
   if (!timeoutMs) errors.timeoutMs = 'Enter a positive whole number.'
   if (!requestsPerMinute) errors.requestsPerMinute = 'Enter a positive whole number.'
-  if (!model) errors.model = 'Enter a model.'
+  if (!model) {
+    errors.model = 'Enter a model.'
+  } else if (exceedsUtf8ByteLimit(model, MAX_EXECUTOR_PROFILE_MODEL_BYTES)) {
+    errors.model = `Model must be ${MAX_EXECUTOR_PROFILE_MODEL_BYTES} UTF-8 bytes or fewer.`
+  }
   if (!isProvider(providerValue)) errors.provider = 'Choose a provider.'
 
   const provider = isProvider(providerValue) ? providerValue : undefined

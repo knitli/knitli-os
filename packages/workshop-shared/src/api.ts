@@ -921,6 +921,15 @@ export type AdminFormat = {
 /** Provider identifiers supported by the version-1 AI executor profile catalog. */
 export type AiExecutorProvider = "aws-bedrock" | "azure-openai" | "openrouter";
 
+/** Maximum active executor profiles returned by version-1 runtime catalog. */
+export const MAX_ACTIVE_EXECUTOR_PROFILES = 100;
+
+/** Maximum UTF-8 byte length of a version-1 executor profile label. */
+export const MAX_EXECUTOR_PROFILE_LABEL_BYTES = 100;
+
+/** Maximum UTF-8 byte length of a version-1 executor profile model identifier. */
+export const MAX_EXECUTOR_PROFILE_MODEL_BYTES = 256;
+
 /** Limits shared by every version-1 AI executor profile input. */
 export interface AiExecutorProfileLimits {
   /** Administrator-facing profile label. */

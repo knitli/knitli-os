@@ -30,10 +30,18 @@ const RUN_PREFIX = "ai-run:record:";
 const REQUEST_PREFIX = "ai-run:request:";
 const MAX_OUTSTANDING_RUNS = 50;
 const MAX_RETAINED_TERMINAL_RUNS = 100;
-const RUN_SCAN_BATCH_SIZE = 100;
+// Keep one storage page well below the 128 MiB isolate ceiling even when every listed value is at
+// its storage/schema maximum. Parsed payloads are discarded before the next page is requested.
+const STORAGE_SCAN_BATCH_SIZE = 8;
 // Normal operation retains at most 150 records. This bounded repair headroom handles legacy or
 // interrupted state without allowing one activation to scan an attacker-sized store indefinitely.
 const MAX_REPAIR_RUNS = 1000;
+const MAX_REPAIR_REQUESTS = 1000;
+// The legitimate maximum is 100 one-MiB completions plus 50 128-KiB pending requests. Allow that
+// state and modest record/key overhead, but bound total deserialization/validation work during one
+// repair activation independently of the entry-count ceilings.
+const MAX_REPAIR_SERIALIZED_BYTES = 112 * 1024 * 1024;
+const ENCODER = new TextEncoder();
 
 const ACTION_DESCRIPTION: ActionDescription = {
   title: "Run AI inference",
@@ -56,10 +64,22 @@ export interface RunKv {
   }): Iterable<[string, T]>;
 }
 
-type RunRecord = AiRunResult;
-type RunEntry = readonly [key: string, record: RunRecord];
+type RunRecord = AiRunResult | { runId: number; status: "submitting" };
+type RunMetadata = Readonly<{ runId: number; status: RunRecord["status"] }>;
+type RunEntry = readonly [key: string, record: RunMetadata];
+type RequestEntry = readonly [key: string, runId: number];
+type RequestScan = Readonly<{
+  entries: readonly RequestEntry[];
+  pendingRequestRunIds: ReadonlySet<number>;
+}>;
+type RepairScanBudget = { serializedBytes: number };
+type AllocatorState = Readonly<{
+  initialize: boolean;
+  nextRunId: number;
+}>;
 type ConstructorRepairPlan = Readonly<{
   keysToDelete: readonly string[];
+  nextRunIdToPut?: number;
   recordsToPut: readonly (readonly [key: string, record: RunRecord])[];
 }>;
 
@@ -69,6 +89,14 @@ function invalidPersistedRunState(): Error {
 
 function invalidPersistedRequestState(): Error {
   return new Error("Invalid persisted AI inference request state.");
+}
+
+function invalidPersistedRequestKey(): Error {
+  return new Error("Invalid persisted AI inference request key.");
+}
+
+function invalidRunIdAllocator(): Error {
+  return new Error("Invalid AI inference run id allocator.");
 }
 
 function requirePersistedObject(value: unknown): Record<string, unknown> {
@@ -96,7 +124,7 @@ function parsePersistedRunRecord(
   key: string,
   value: unknown,
   seenRunIds: Set<number>,
-): RunRecord {
+): RunMetadata {
   try {
     const input = requirePersistedObject(value);
     const runId = input.runId;
@@ -107,16 +135,17 @@ function parsePersistedRunRecord(
       throw invalidPersistedRunState();
     }
 
-    let parsed: RunRecord;
+    let status: RunRecord["status"];
     switch (input.status) {
       case "pending":
+      case "submitting":
       case "running":
         requirePersistedKeys(input, ["runId", "status"]);
-        parsed = { runId: runId as number, status: input.status };
+        status = input.status;
         break;
       case "rejected":
         requirePersistedKeys(input, ["runId", "status"]);
-        parsed = { runId: runId as number, status: "rejected" };
+        status = "rejected";
         break;
       case "failed": {
         requirePersistedKeys(input, ["runId", "status", "error"]);
@@ -135,33 +164,50 @@ function parsePersistedRunRecord(
         ) {
           throw invalidPersistedRunState();
         }
-        parsed = { runId: runId as number, status: "failed", error: canonicalError };
+        status = "failed";
         break;
       }
       case "completed":
         requirePersistedKeys(input, ["runId", "status", "result"]);
-        parsed = {
-          runId: runId as number,
-          status: "completed",
-          result: parseAiCompletion(input.result),
-        };
+        parseAiCompletion(input.result);
+        status = "completed";
         break;
       default:
         throw invalidPersistedRunState();
     }
     seenRunIds.add(runId as number);
-    return parsed;
+    return Object.freeze({ runId: runId as number, status });
   } catch {
     throw invalidPersistedRunState();
   }
 }
 
+function parsePersistedRequestKey(key: string, seenRunIds: Set<number>): number {
+  const runId = Number(key.slice(REQUEST_PREFIX.length));
+  if (
+    !Number.isSafeInteger(runId) ||
+    runId < 1 ||
+    key !== `${REQUEST_PREFIX}${runId}` ||
+    seenRunIds.has(runId)
+  ) {
+    throw invalidPersistedRequestKey();
+  }
+  seenRunIds.add(runId);
+  return runId;
+}
+
 export class AiExecutorRunStore {
   #kv: RunKv;
+  #nextRunIdFloor: number;
 
   constructor(kv: RunKv) {
     this.#kv = kv;
-    const plan = this.#constructorRepairPlan(this.#records());
+    const repairBudget: RepairScanBudget = { serializedBytes: 0 };
+    const records = this.#records(repairBudget);
+    const requests = this.#requests(records, repairBudget);
+    const allocator = this.#allocator(records, requests.entries);
+    this.#nextRunIdFloor = allocator.nextRunId;
+    const plan = this.#constructorRepairPlan(records, requests, allocator);
     this.#applyConstructorRepairPlan(plan);
   }
 
@@ -172,32 +218,59 @@ export class AiExecutorRunStore {
         `${MAX_OUTSTANDING_RUNS} AI inference runs are already awaiting approval or running.`,
       );
     }
-    const runId = this.#kv.get<number>(NEXT_RUN_ID_KEY) ?? 1;
-    if (!Number.isSafeInteger(runId) || runId < 1 || runId >= Number.MAX_SAFE_INTEGER) {
+    const runId = this.#kv.get<unknown>(NEXT_RUN_ID_KEY);
+    if (!Number.isSafeInteger(runId) || (runId as number) < this.#nextRunIdFloor) {
+      throw invalidRunIdAllocator();
+    }
+    if ((runId as number) >= Number.MAX_SAFE_INTEGER) {
       throw new Error("AI inference run id space is exhausted.");
     }
-    this.#kv.put(NEXT_RUN_ID_KEY, runId + 1);
-    this.#kv.put(this.#requestKey(runId), request);
+    const allocatedRunId = runId as number;
+    const runKey = this.#runKey(allocatedRunId);
+    const requestKey = this.#requestKey(allocatedRunId);
+    if (
+      this.#kv.get<unknown>(runKey) !== undefined ||
+      this.#kv.get<unknown>(requestKey) !== undefined
+    ) {
+      throw new Error("AI inference run id collision.");
+    }
+    this.#kv.put(NEXT_RUN_ID_KEY, allocatedRunId + 1);
+    this.#nextRunIdFloor = allocatedRunId + 1;
+    this.#kv.put(requestKey, request);
     try {
-      this.#kv.put<RunRecord>(this.#runKey(runId), { runId, status: "pending" });
+      this.#kv.put<RunRecord>(runKey, { runId: allocatedRunId, status: "submitting" });
     } catch (error) {
-      this.#kv.delete(this.#requestKey(runId));
+      this.#kv.delete(requestKey);
       throw error;
     }
-    return { runId, status: "pending" };
+    return { runId: allocatedRunId, status: "pending" };
+  }
+
+  markSubmitted(runId: number): void {
+    const record = this.#requireStored(runId);
+    if (record.status === "submitting") {
+      this.#kv.put<RunRecord>(this.#runKey(runId), { runId, status: "pending" });
+    }
   }
 
   markSubmissionOutcomeUnknown(runId: number): void {
-    const record = this.#require(runId);
-    if (record.status === "pending" || record.status === "running") {
+    const record = this.#requireStored(runId);
+    if (
+      record.status === "submitting" ||
+      record.status === "pending" ||
+      record.status === "running"
+    ) {
       this.fail(runId, outcomeUnknownError());
       return;
     }
     this.#kv.delete(this.#requestKey(runId));
   }
 
-  get(runId: number): RunRecord | undefined {
-    return this.#kv.get<RunRecord>(this.#runKey(runId));
+  get(runId: number): AiRunResult | undefined {
+    const record = this.#getStored(runId);
+    return record?.status === "submitting"
+      ? { runId: record.runId, status: "pending" }
+      : record;
   }
 
   getStagedRequest(runId: number): AiRequest | undefined {
@@ -206,8 +279,8 @@ export class AiExecutorRunStore {
   }
 
   claim(runId: number): AiRequest {
-    const record = this.#require(runId);
-    if (record.status !== "pending") {
+    const record = this.#requireStored(runId);
+    if (record.status !== "submitting" && record.status !== "pending") {
       throw new Error(`AI inference run ${runId} is already ${record.status}.`);
     }
     const request = this.getStagedRequest(runId);
@@ -225,6 +298,15 @@ export class AiExecutorRunStore {
   }
 
   complete(runId: number, result: unknown): void {
+    const current = this.#requireStored(runId);
+    if (current.status === "completed") return;
+    if (current.status !== "running") {
+      throw new Error(
+        current.status === "failed"
+          ? current.error.message
+          : `AI inference run ${runId} is already ${current.status}.`,
+      );
+    }
     const completion = parseAiCompletion(result);
     this.#kv.delete(this.#requestKey(runId));
     this.#kv.put<RunRecord>(this.#runKey(runId), {
@@ -235,16 +317,25 @@ export class AiExecutorRunStore {
     this.#pruneTerminalRuns();
   }
 
-  fail(runId: number, error: AiRunError): void {
+  fail(runId: number, error: AiRunError): AiRunError {
+    const current = this.#requireStored(runId);
+    if (current.status === "failed") {
+      this.#kv.delete(this.#requestKey(runId));
+      return current.error;
+    }
+    if (current.status === "completed" || current.status === "rejected") {
+      throw new Error(`AI inference run ${runId} is already ${current.status}.`);
+    }
     this.#kv.delete(this.#requestKey(runId));
     this.#kv.put<RunRecord>(this.#runKey(runId), { runId, status: "failed", error });
     this.#pruneTerminalRuns();
+    return error;
   }
 
   reject(runId: number): void {
-    const record = this.#require(runId);
+    const record = this.#requireStored(runId);
     if (record.status === "rejected") return;
-    if (record.status !== "pending") {
+    if (record.status !== "submitting" && record.status !== "pending") {
       throw new Error(`AI inference run ${runId} is already ${record.status}.`);
     }
     this.#kv.delete(this.#requestKey(runId));
@@ -252,50 +343,159 @@ export class AiExecutorRunStore {
     this.#pruneTerminalRuns();
   }
 
-  #require(runId: number): RunRecord {
-    const record = this.get(runId);
+  #getStored(runId: number): RunRecord | undefined {
+    return this.#kv.get<RunRecord>(this.#runKey(runId));
+  }
+
+  #requireStored(runId: number): RunRecord {
+    const record = this.#getStored(runId);
     if (!record) throw new Error(`No AI inference run with id ${runId}.`);
     return record;
   }
 
-  #records(): RunEntry[] {
-    const snapshot: Array<[string, unknown]> = [];
+  #records(repairBudget: RepairScanBudget = { serializedBytes: 0 }): RunEntry[] {
+    const records: RunEntry[] = [];
+    const seenRunIds = new Set<number>();
+    this.#scan(
+      RUN_PREFIX,
+      MAX_REPAIR_RUNS,
+      "run",
+      repairBudget,
+      (key, value) => {
+        records.push(Object.freeze([
+          key,
+          parsePersistedRunRecord(key, value, seenRunIds),
+        ] as const));
+      },
+    );
+    return records;
+  }
+
+  #requests(
+    records: readonly RunEntry[],
+    repairBudget: RepairScanBudget,
+  ): RequestScan {
+    const recordsByRunId = new Map(records.map(([, record]) => [record.runId, record]));
+    const entries: RequestEntry[] = [];
+    const pendingRequestRunIds = new Set<number>();
+    const seenRunIds = new Set<number>();
+    this.#scan(
+      REQUEST_PREFIX,
+      MAX_REPAIR_REQUESTS,
+      "request",
+      repairBudget,
+      (key, value) => {
+        const runId = parsePersistedRequestKey(key, seenRunIds);
+        if (recordsByRunId.get(runId)?.status === "pending") {
+          try {
+            parseAiRequest(value);
+          } catch {
+            throw invalidPersistedRequestState();
+          }
+          pendingRequestRunIds.add(runId);
+        }
+        entries.push(Object.freeze([key, runId] as const));
+      },
+    );
+    return Object.freeze({
+      entries: Object.freeze(entries),
+      pendingRequestRunIds,
+    });
+  }
+
+  #scan(
+    prefix: string,
+    repairCeiling: number,
+    label: "request" | "run",
+    repairBudget: RepairScanBudget,
+    visit: (key: string, value: unknown) => void,
+  ): void {
+    let scanned = 0;
     let startAfter: string | undefined;
     while (true) {
       const page = [...this.#kv.list<unknown>({
-        prefix: RUN_PREFIX,
-        limit: RUN_SCAN_BATCH_SIZE,
+        prefix,
+        limit: STORAGE_SCAN_BATCH_SIZE,
         ...(startAfter === undefined ? {} : { startAfter }),
       })];
       if (page.length === 0) break;
-      snapshot.push(...page);
-      if (snapshot.length > MAX_REPAIR_RUNS) {
+      scanned += page.length;
+      if (scanned > repairCeiling) {
         throw new Error(
-          `AI inference state exceeds the finite repair ceiling of ${MAX_REPAIR_RUNS} runs.`,
+          `AI inference state exceeds the ${label} repair ceiling of ${repairCeiling} entries.`,
         );
       }
-      if (page.length < RUN_SCAN_BATCH_SIZE) break;
+      for (const [key, value] of page) {
+        this.#consumeRepairBudget(key, value, label, repairBudget);
+        visit(key, value);
+      }
+      if (page.length < STORAGE_SCAN_BATCH_SIZE) break;
       const lastKey = page.at(-1)![0];
       if (lastKey === startAfter) {
-        throw new Error("AI inference state pagination did not advance.");
+        throw new Error(`AI inference ${label} state pagination did not advance.`);
       }
       startAfter = lastKey;
     }
-    const seenRunIds = new Set<number>();
-    return snapshot.map(([key, value]) => [
-      key,
-      parsePersistedRunRecord(key, value, seenRunIds),
-    ] as const);
+  }
+
+  #consumeRepairBudget(
+    key: string,
+    value: unknown,
+    label: "request" | "run",
+    repairBudget: RepairScanBudget,
+  ): void {
+    let serialized: string | undefined;
+    try {
+      serialized = JSON.stringify(value);
+    } catch {
+      throw label === "run" ? invalidPersistedRunState() : invalidPersistedRequestState();
+    }
+    if (serialized === undefined) {
+      throw label === "run" ? invalidPersistedRunState() : invalidPersistedRequestState();
+    }
+    repairBudget.serializedBytes +=
+      ENCODER.encode(key).byteLength + ENCODER.encode(serialized).byteLength;
+    if (repairBudget.serializedBytes > MAX_REPAIR_SERIALIZED_BYTES) {
+      throw new Error(
+        `AI inference aggregate repair state exceeds the finite byte ceiling of ${MAX_REPAIR_SERIALIZED_BYTES} bytes.`,
+      );
+    }
+  }
+
+  #allocator(records: readonly RunEntry[], requests: readonly RequestEntry[]): AllocatorState {
+    const maxRunId = Math.max(
+      0,
+      ...records.map(([, record]) => record.runId),
+      ...requests.map(([, runId]) => runId),
+    );
+    const stored = this.#kv.get<unknown>(NEXT_RUN_ID_KEY);
+    if (stored === undefined) {
+      if (maxRunId !== 0) throw invalidRunIdAllocator();
+      return Object.freeze({ initialize: true, nextRunId: 1 });
+    }
+    if (
+      !Number.isSafeInteger(stored) ||
+      (stored as number) <= maxRunId ||
+      (stored as number) > Number.MAX_SAFE_INTEGER
+    ) {
+      throw invalidRunIdAllocator();
+    }
+    return Object.freeze({ initialize: false, nextRunId: stored as number });
   }
 
   #outstandingRunCount(): number {
     return this.#records().filter(([, record]) =>
-      record.status === "pending" || record.status === "running").length;
+      record.status === "submitting" ||
+      record.status === "pending" ||
+      record.status === "running").length;
   }
 
   #pruneTerminalRuns(): void {
     const terminalRuns = this.#records()
-      .filter(([, record]) => record.status !== "pending" && record.status !== "running")
+      .filter(([, record]) =>
+        record.status !== "submitting" &&
+        record.status !== "pending" &&
+        record.status !== "running")
       .toSorted((left, right) => right[1].runId - left[1].runId);
     for (const [key, record] of terminalRuns.slice(MAX_RETAINED_TERMINAL_RUNS)) {
       this.#kv.delete(this.#requestKey(record.runId));
@@ -303,52 +503,70 @@ export class AiExecutorRunStore {
     }
   }
 
-  #constructorRepairPlan(records: readonly RunEntry[]): ConstructorRepairPlan {
+  #constructorRepairPlan(
+    records: readonly RunEntry[],
+    requests: RequestScan,
+    allocator: AllocatorState,
+  ): ConstructorRepairPlan {
+    const recordsByRunId = new Map(records.map(([, record]) => [record.runId, record]));
+    const keysToDelete = new Set<string>();
+
+    for (const [key, runId] of requests.entries) {
+      const record = recordsByRunId.get(runId);
+      if (record?.status !== "pending") {
+        keysToDelete.add(key);
+      }
+    }
     for (const [, record] of records) {
-      if (record.status !== "pending") continue;
-      try {
-        const request = this.#kv.get<unknown>(this.#requestKey(record.runId));
-        if (request === undefined) throw invalidPersistedRequestState();
-        parseAiRequest(request);
-      } catch {
+      if (
+        record.status === "pending" &&
+        !requests.pendingRequestRunIds.has(record.runId)
+      ) {
         throw invalidPersistedRequestState();
       }
     }
 
     const recovered = records.map(([key, record]) => ({
       key,
-      wasRunning: record.status === "running",
-      record: record.status === "running"
-        ? { runId: record.runId, status: "failed" as const, error: outcomeUnknownError() }
-        : record,
+      wasInterrupted: record.status === "submitting" || record.status === "running",
+      runId: record.runId,
+      status: record.status === "submitting" || record.status === "running"
+        ? "failed" as const
+        : record.status,
     }));
     const terminal = recovered
-      .filter(({ record }) => record.status !== "pending")
-      .toSorted((left, right) => right.record.runId - left.record.runId);
+      .filter(({ status }) => status !== "pending")
+      .toSorted((left, right) => right.runId - left.runId);
     const prunedKeys = new Set(
       terminal.slice(MAX_RETAINED_TERMINAL_RUNS).map(({ key }) => key),
     );
-    const keysToDelete = new Set<string>();
     const recordsToPut: Array<readonly [string, RunRecord]> = [];
 
-    for (const { key, record, wasRunning } of recovered) {
-      if (record.status !== "pending") {
-        keysToDelete.add(this.#requestKey(record.runId));
+    for (const { key, runId, status, wasInterrupted } of recovered) {
+      if (status !== "pending") {
+        keysToDelete.add(this.#requestKey(runId));
       }
       if (prunedKeys.has(key)) {
         keysToDelete.add(key);
-      } else if (wasRunning) {
-        recordsToPut.push(Object.freeze([key, record] as const));
+      } else if (wasInterrupted) {
+        recordsToPut.push(Object.freeze([
+          key,
+          { runId, status: "failed", error: outcomeUnknownError() },
+        ] as const));
       }
     }
 
     return Object.freeze({
       keysToDelete: Object.freeze([...keysToDelete]),
+      ...(allocator.initialize ? { nextRunIdToPut: allocator.nextRunId } : {}),
       recordsToPut: Object.freeze(recordsToPut),
     });
   }
 
   #applyConstructorRepairPlan(plan: ConstructorRepairPlan): void {
+    if (plan.nextRunIdToPut !== undefined) {
+      this.#kv.put(NEXT_RUN_ID_KEY, plan.nextRunIdToPut);
+    }
     for (const key of plan.keysToDelete) {
       this.#kv.delete(key);
     }
@@ -380,6 +598,10 @@ export class AiExecutorActionController {
 
   stage(request: unknown): AiRunPending {
     return this.#store.stage(request);
+  }
+
+  markSubmitted(runId: number): void {
+    this.#store.markSubmitted(runId);
   }
 
   markSubmissionOutcomeUnknown(runId: number): void {
@@ -418,18 +640,18 @@ export class AiExecutorActionController {
         result = await this.#runtime.invoke(this.#profileId, request);
       } catch (error) {
         const sanitized = sanitizeInvocationError(error);
-        this.#store.fail(runId, sanitized);
+        const settled = this.#store.fail(runId, sanitized);
         // Do not attach the raw runtime error as a cause: it may contain a provider body or secret.
         // oxlint-disable-next-line preserve-caught-error
-        throw new Error(sanitized.message);
+        throw new Error(settled.message);
       }
 
       try {
         this.#store.complete(runId, result);
       } catch {
         const uncertain = outcomeUnknownError();
-        this.#store.fail(runId, uncertain);
-        throw new Error(uncertain.message);
+        const settled = this.#store.fail(runId, uncertain);
+        throw new Error(settled.message);
       }
     } finally {
       this.#inFlight.delete(runId);
@@ -465,6 +687,7 @@ export class AiExecutorSession extends RpcTarget {
     const staged = this.#controller.stage(request);
     try {
       await this.#queue.submitAction(staged.runId, ACTION_DESCRIPTION);
+      this.#controller.markSubmitted(staged.runId);
     } catch {
       this.#controller.markSubmissionOutcomeUnknown(staged.runId);
       throw new Error(outcomeUnknownError().message);

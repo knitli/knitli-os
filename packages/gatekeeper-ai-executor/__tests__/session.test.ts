@@ -13,7 +13,19 @@ import {
 
 class FakeKv implements RunKv {
   readonly values = new Map<string, unknown>();
+  readonly listLimits: number[] = [];
+  readonly mutations: Array<{ key: string; operation: "delete" | "put" }> = [];
+  #expireListedPage = false;
+  #listedPageValues: object[] = [];
   #putFailure: ((key: string, value: unknown) => boolean) | undefined;
+
+  expireListedPageBeforeNextList(): void {
+    this.#expireListedPage = true;
+  }
+
+  resetMutations(): void {
+    this.mutations.length = 0;
+  }
 
   failNextPutWhere(predicate: (key: string, value: unknown) => boolean): void {
     this.#putFailure = predicate;
@@ -29,10 +41,12 @@ class FakeKv implements RunKv {
       this.#putFailure = undefined;
       throw new Error("injected durable storage put failure");
     }
+    this.mutations.push({ key, operation: "put" });
     this.values.set(key, structuredClone(value));
   }
 
   delete(key: string): void {
+    this.mutations.push({ key, operation: "delete" });
     this.values.delete(key);
   }
 
@@ -42,16 +56,27 @@ class FakeKv implements RunKv {
     reverse?: boolean;
     startAfter?: string;
   }): Map<string, T> {
+    this.listLimits.push(options.limit ?? Number.POSITIVE_INFINITY);
+    if (this.#expireListedPage) {
+      for (const value of this.#listedPageValues) {
+        for (const key of Object.keys(value)) Reflect.deleteProperty(value, key);
+      }
+      this.#listedPageValues = [];
+    }
     const entries = [...this.values]
       .filter(([key]) => key.startsWith(options.prefix))
       .filter(([key]) => options.startAfter === undefined || key > options.startAfter)
       .toSorted(([left], [right]) => left.localeCompare(right));
     if (options.reverse) entries.reverse();
-    return new Map(
-      entries
-        .slice(0, options.limit)
-        .map(([key, value]) => [key, structuredClone(value) as T]),
-    );
+    const page = entries
+      .slice(0, options.limit)
+      .map(([key, value]) => [key, structuredClone(value) as T] as const);
+    if (this.#expireListedPage) {
+      this.#listedPageValues = page
+        .map(([, value]) => value)
+        .filter((value): value is T & object => typeof value === "object" && value !== null);
+    }
+    return new Map(page);
   }
 }
 
@@ -175,6 +200,78 @@ describe("AI executor deferred session", () => {
     expect(runtimeCalls).toBe(0);
   });
 
+  it("keeps outcome_unknown terminal when acknowledgement fails during an in-flight call", async () => {
+    let applyPromise: Promise<void> | undefined;
+    let controllerRef: AiExecutorActionController | undefined;
+    let releaseInvoke!: () => void;
+    let runtimeCalls = 0;
+    let invokeStarted!: () => void;
+    const started = new Promise<void>(resolve => { invokeStarted = resolve; });
+    const release = new Promise<void>(resolve => { releaseInvoke = resolve; });
+    const runtime = runtimeFake(async () => {
+      runtimeCalls++;
+      invokeStarted();
+      await release;
+      return { text: "paid completion must not replace uncertainty", finishReason: "stop" };
+    });
+    const queue = queueFake({
+      submitAction: async (runId: number) => {
+        applyPromise = controllerRef!.applyAction(runId);
+        await started;
+        throw new Error("acknowledgement lost while apply was running");
+      },
+    });
+    const { controller, session, store } = harness({ queue, runtime });
+    controllerRef = controller;
+
+    await expect(session.submit(REQUEST)).rejects.toThrow("outcome is unknown");
+    expect(store.get(1)).toEqual({ runId: 1, status: "failed", error: OUTCOME_UNKNOWN });
+    expect(store.getStagedRequest(1)).toBeUndefined();
+
+    releaseInvoke();
+    await expect(applyPromise).rejects.toThrow("outcome is unknown");
+    expect(store.get(1)).toEqual({ runId: 1, status: "failed", error: OUTCOME_UNKNOWN });
+    await expect(controller.applyAction(1)).rejects.toThrow("outcome is unknown");
+    expect(runtimeCalls).toBe(1);
+  });
+
+  it("keeps outcome_unknown terminal when an in-flight call later rejects", async () => {
+    let applyPromise: Promise<void> | undefined;
+    let controllerRef: AiExecutorActionController | undefined;
+    let releaseInvoke!: () => void;
+    let runtimeCalls = 0;
+    let invokeStarted!: () => void;
+    const started = new Promise<void>(resolve => { invokeStarted = resolve; });
+    const release = new Promise<void>(resolve => { releaseInvoke = resolve; });
+    const runtime = runtimeFake(async () => {
+      runtimeCalls++;
+      invokeStarted();
+      await release;
+      throw Object.assign(new Error("late provider body must stay private"), {
+        error: { code: "provider_rejected", retryable: false },
+      });
+    });
+    const queue = queueFake({
+      submitAction: async (runId: number) => {
+        applyPromise = controllerRef!.applyAction(runId);
+        await started;
+        throw new Error("acknowledgement lost while apply was running");
+      },
+    });
+    const { controller, session, store } = harness({ queue, runtime });
+    controllerRef = controller;
+
+    await expect(session.submit(REQUEST)).rejects.toThrow("outcome is unknown");
+    expect(store.get(1)).toEqual({ runId: 1, status: "failed", error: OUTCOME_UNKNOWN });
+
+    releaseInvoke();
+    await expect(applyPromise).rejects.toThrow("outcome is unknown");
+    expect(store.get(1)).toEqual({ runId: 1, status: "failed", error: OUTCOME_UNKNOWN });
+    expect(JSON.stringify(store.get(1))).not.toContain("provider");
+    await expect(controller.applyAction(1)).rejects.toThrow("outcome is unknown");
+    expect(runtimeCalls).toBe(1);
+  });
+
   it("claims before inference and applies a run at most once", async () => {
     let runtimeCalls = 0;
     const runtime = runtimeFake(async (_profileId, request) => {
@@ -250,6 +347,58 @@ describe("AI executor deferred session", () => {
         message: "The inference was interrupted after it started, so its outcome is unknown.",
       },
     });
+  });
+
+  it("recovers a crash before approval registration without retaining a replayable prompt", () => {
+    const kv = new FakeKv();
+    const firstStore = new AiExecutorRunStore(kv);
+    const staged = firstStore.stage(REQUEST);
+
+    const recoveredStore = new AiExecutorRunStore(kv);
+
+    expect(recoveredStore.get(staged.runId)).toEqual({
+      runId: staged.runId,
+      status: "failed",
+      error: OUTCOME_UNKNOWN,
+    });
+    expect(recoveredStore.getStagedRequest(staged.runId)).toBeUndefined();
+  });
+
+  it("preserves an acknowledged pending approval across reactivation", async () => {
+    const kv = new FakeKv();
+    const { session } = harness({ kv });
+    const staged = await session.submit(REQUEST);
+
+    const recoveredStore = new AiExecutorRunStore(kv);
+
+    expect(recoveredStore.get(staged.runId)).toEqual({ runId: staged.runId, status: "pending" });
+    expect(recoveredStore.getStagedRequest(staged.runId)).toEqual(REQUEST);
+  });
+
+  it("allows an accepted action to apply before submit returns", async () => {
+    let controllerRef: AiExecutorActionController | undefined;
+    let runtimeCalls = 0;
+    const runtime = runtimeFake(async () => {
+      runtimeCalls++;
+      return { text: "auto-approved answer", finishReason: "stop" };
+    });
+    const queue = queueFake({
+      submitAction: async (runId: number) => {
+        await controllerRef!.applyAction(runId);
+      },
+    });
+    const { controller, session, store } = harness({ queue, runtime });
+    controllerRef = controller;
+
+    await expect(session.submit(REQUEST)).resolves.toEqual({ runId: 1, status: "pending" });
+
+    expect(store.get(1)).toEqual({
+      runId: 1,
+      status: "completed",
+      result: { text: "auto-approved answer", finishReason: "stop" },
+    });
+    expect(store.getStagedRequest(1)).toBeUndefined();
+    expect(runtimeCalls).toBe(1);
   });
 
   it("rejects a pending run and removes its staged prompt", async () => {
@@ -565,6 +714,28 @@ describe("AI executor deferred session", () => {
     expect([...kv.values]).toEqual(before);
   });
 
+  it("includes orphan request identities in allocator high-water validation", () => {
+    const kv = new FakeKv();
+    kv.put("ai-run:request:7", {
+      messages: [{ role: "user", content: "orphan private prompt must remain on failure" }],
+    });
+    kv.put("ai-run:next-id", 7);
+    const before = structuredClone([...kv.values]);
+    const construct = () => new AiExecutorRunStore(kv);
+
+    let thrown: unknown;
+    try {
+      construct();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect.soft(thrown).toMatchObject({
+      message: expect.stringMatching(/invalid AI inference run id allocator/i),
+    });
+    expect([...kv.values]).toEqual(before);
+  });
+
   it.each([
     ["a missing request", undefined],
     [
@@ -582,6 +753,7 @@ describe("AI executor deferred session", () => {
       messages: [{ role: "user", content: "private running prompt must remain" }],
     });
     kv.put("ai-run:record:2", { runId: 2, status: "pending" });
+    kv.put("ai-run:next-id", 3);
     if (invalidRequest !== undefined) {
       kv.put("ai-run:request:2", invalidRequest);
     }
@@ -599,6 +771,195 @@ describe("AI executor deferred session", () => {
     expect.soft(thrown).toMatchObject({
       message: expect.stringMatching(/invalid persisted AI inference request/i),
     });
+    expect([...kv.values]).toEqual(before);
+  });
+
+  it("paginates requests and cleans bounded orphan provider payloads after valid repair", () => {
+    const kv = new FakeKv();
+    kv.expireListedPageBeforeNextList();
+    for (let runId = 1000; runId <= 1201; runId++) {
+      kv.put(`ai-run:record:${runId}`, {
+        runId,
+        status: "completed",
+        result: { text: `terminal ${runId}`, finishReason: "stop" },
+      });
+    }
+    for (let runId = 2000; runId <= 2201; runId++) {
+      kv.put(`ai-run:request:${runId}`, {
+        messages: [{ role: "user", content: `orphan private prompt ${runId}` }],
+        url: "https://attacker.invalid",
+      });
+    }
+    for (let runId = 9000; runId <= 9049; runId++) {
+      kv.put(`ai-run:record:${runId}`, { runId, status: "pending" });
+      kv.put(`ai-run:request:${runId}`, {
+        messages: [{ role: "user", content: `pending private prompt ${runId}` }],
+      });
+    }
+    kv.put("ai-run:next-id", 10_000);
+
+    const store = new AiExecutorRunStore(kv);
+
+    expect(store.get(1000)).toBeUndefined();
+    expect(store.get(1102)).toMatchObject({ runId: 1102, status: "completed" });
+    expect(store.get(1201)).toMatchObject({ runId: 1201, status: "completed" });
+    expect(kv.get("ai-run:request:2000")).toBeUndefined();
+    expect(kv.get("ai-run:request:2201")).toBeUndefined();
+    expect(store.getStagedRequest(9000)).toMatchObject({
+      messages: [{ content: "pending private prompt 9000" }],
+    });
+    expect(JSON.stringify([...kv.values])).not.toContain("attacker.invalid");
+    expect(JSON.stringify([...kv.values])).not.toContain("orphan private prompt");
+    expect(Math.max(...kv.listLimits)).toBeLessThanOrEqual(8);
+  });
+
+  it("fails closed without mutation when repair exceeds the aggregate serialized-work ceiling", () => {
+    const kv = new FakeKv();
+    const nearLimitCompletion = "x".repeat(1024 * 1024 - 256);
+    kv.put("ai-run:record:1", { runId: 1, status: "running" });
+    kv.put("ai-run:request:1", {
+      messages: [{ role: "user", content: "private running prompt must remain" }],
+    });
+    for (let runId = 2; runId <= 116; runId++) {
+      kv.put(`ai-run:record:${runId}`, {
+        runId,
+        status: "completed",
+        result: { text: nearLimitCompletion, finishReason: "stop" },
+      });
+    }
+    kv.put("ai-run:next-id", 117);
+    kv.resetMutations();
+
+    expect(() => new AiExecutorRunStore(kv)).toThrow(/aggregate repair.*byte ceiling/i);
+
+    expect(kv.mutations).toEqual([]);
+    expect(kv.get("ai-run:record:1")).toEqual({ runId: 1, status: "running" });
+    expect(kv.get("ai-run:request:1")).toMatchObject({
+      messages: [{ content: "private running prompt must remain" }],
+    });
+  });
+
+  it("fails closed before repairing request state beyond the finite ceiling", () => {
+    const kv = new FakeKv();
+    kv.put("ai-run:record:1", { runId: 1, status: "running" });
+    for (let runId = 1; runId <= 1001; runId++) {
+      kv.put(`ai-run:request:${runId}`, {
+        messages: [{ role: "user", content: `private prompt ${runId}` }],
+      });
+    }
+    kv.put("ai-run:next-id", 1002);
+    const before = structuredClone([...kv.values]);
+    const construct = () => new AiExecutorRunStore(kv);
+
+    let thrown: unknown;
+    try {
+      construct();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect.soft(thrown).toMatchObject({
+      message: expect.stringMatching(/request repair ceiling.*1000/i),
+    });
+    expect([...kv.values]).toEqual(before);
+  });
+
+  it("fails closed on a malformed request key before constructor repair", () => {
+    const kv = new FakeKv();
+    kv.put("ai-run:record:1", { runId: 1, status: "running" });
+    kv.put("ai-run:request:1", {
+      messages: [{ role: "user", content: "private running prompt must remain" }],
+    });
+    kv.put("ai-run:request:02", {
+      messages: [{ role: "user", content: "malformed-key private prompt" }],
+    });
+    kv.put("ai-run:next-id", 3);
+    const before = structuredClone([...kv.values]);
+    const construct = () => new AiExecutorRunStore(kv);
+
+    let thrown: unknown;
+    try {
+      construct();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect.soft(thrown).toMatchObject({
+      message: expect.stringMatching(/invalid persisted AI inference request key/i),
+    });
+    expect([...kv.values]).toEqual(before);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["stale", 1],
+  ])("fails closed on a %s allocator when durable state exists", (_label, nextRunId) => {
+    const kv = new FakeKv();
+    kv.put("ai-run:record:1", { runId: 1, status: "running" });
+    kv.put("ai-run:request:1", {
+      messages: [{ role: "user", content: "private running prompt must remain" }],
+    });
+    if (nextRunId !== undefined) kv.put("ai-run:next-id", nextRunId);
+    const before = structuredClone([...kv.values]);
+    const construct = () => new AiExecutorRunStore(kv);
+
+    let thrown: unknown;
+    try {
+      construct();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect.soft(thrown).toMatchObject({
+      message: expect.stringMatching(/invalid AI inference run id allocator/i),
+    });
+    expect([...kv.values]).toEqual(before);
+  });
+
+  it.each([
+    ["run", "ai-run:record:1", { runId: 1, status: "rejected" }],
+    [
+      "request",
+      "ai-run:request:1",
+      {
+        messages: [{ role: "user", content: "late private prompt" }],
+        url: "https://attacker.invalid",
+      },
+    ],
+  ])("rejects a late %s collision before staging or queueing", async (_label, key, value) => {
+    let submitted = 0;
+    const queue = queueFake({ submitAction: async () => { submitted++; } });
+    const { kv, session } = harness({ queue });
+    kv.put(key, value);
+    const before = structuredClone([...kv.values]);
+
+    let thrown: unknown;
+    try {
+      await session.submit(REQUEST);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect.soft(thrown).toMatchObject({
+      message: expect.stringMatching(/run id collision/i),
+    });
+    expect(submitted).toBe(0);
+    expect([...kv.values]).toEqual(before);
+  });
+
+  it("rejects late allocator rollback even after the old identity keys disappear", async () => {
+    let submitted = 0;
+    const queue = queueFake({ submitAction: async () => { submitted++; } });
+    const { controller, kv, session } = harness({ queue });
+    const first = await session.submit(REQUEST);
+    controller.rejectAction(first.runId);
+    kv.delete(`ai-run:record:${first.runId}`);
+    kv.put("ai-run:next-id", first.runId);
+    const before = structuredClone([...kv.values]);
+
+    await expect(session.submit(REQUEST)).rejects.toThrow(/invalid AI inference run id allocator/i);
+
+    expect(submitted).toBe(1);
     expect([...kv.values]).toEqual(before);
   });
 

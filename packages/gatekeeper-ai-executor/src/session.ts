@@ -205,7 +205,7 @@ export class AiExecutorRunStore {
     const repairBudget: RepairScanBudget = { serializedBytes: 0 };
     const records = this.#records(repairBudget);
     const requests = this.#requests(records, repairBudget);
-    const allocator = this.#allocator(records, requests.entries);
+    const allocator = this.#allocator(records, requests.entries, repairBudget);
     this.#nextRunIdFloor = allocator.nextRunId;
     const plan = this.#constructorRepairPlan(records, requests, allocator);
     this.#applyConstructorRepairPlan(plan);
@@ -441,17 +441,25 @@ export class AiExecutorRunStore {
   #consumeRepairBudget(
     key: string,
     value: unknown,
-    label: "request" | "run",
+    label: "allocator" | "request" | "run",
     repairBudget: RepairScanBudget,
   ): void {
     let serialized: string | undefined;
     try {
       serialized = JSON.stringify(value);
     } catch {
-      throw label === "run" ? invalidPersistedRunState() : invalidPersistedRequestState();
+      throw label === "run"
+        ? invalidPersistedRunState()
+        : label === "request"
+          ? invalidPersistedRequestState()
+          : invalidRunIdAllocator();
     }
     if (serialized === undefined) {
-      throw label === "run" ? invalidPersistedRunState() : invalidPersistedRequestState();
+      throw label === "run"
+        ? invalidPersistedRunState()
+        : label === "request"
+          ? invalidPersistedRequestState()
+          : invalidRunIdAllocator();
     }
     repairBudget.serializedBytes +=
       ENCODER.encode(key).byteLength + ENCODER.encode(serialized).byteLength;
@@ -462,7 +470,11 @@ export class AiExecutorRunStore {
     }
   }
 
-  #allocator(records: readonly RunEntry[], requests: readonly RequestEntry[]): AllocatorState {
+  #allocator(
+    records: readonly RunEntry[],
+    requests: readonly RequestEntry[],
+    repairBudget: RepairScanBudget,
+  ): AllocatorState {
     const maxRunId = Math.max(
       0,
       ...records.map(([, record]) => record.runId),
@@ -473,6 +485,7 @@ export class AiExecutorRunStore {
       if (maxRunId !== 0) throw invalidRunIdAllocator();
       return Object.freeze({ initialize: true, nextRunId: 1 });
     }
+    this.#consumeRepairBudget(NEXT_RUN_ID_KEY, stored, "allocator", repairBudget);
     if (
       !Number.isSafeInteger(stored) ||
       (stored as number) <= maxRunId ||

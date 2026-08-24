@@ -839,6 +839,51 @@ describe("AI executor deferred session", () => {
     });
   });
 
+  it("charges the persisted allocator value to the aggregate repair ceiling", () => {
+    const nearLimitCompletion = "x".repeat(1024 * 1024 - 256);
+    const seedNearCeilingRuns = (kv: FakeKv) => {
+      for (let runId = 1; runId <= 112; runId++) {
+        kv.put(`ai-run:record:${runId}`, {
+          runId,
+          status: "completed",
+          result: { text: nearLimitCompletion, finishReason: "stop" },
+        });
+      }
+    };
+
+    const withinBudgetKv = new FakeKv();
+    seedNearCeilingRuns(withinBudgetKv);
+    withinBudgetKv.put("ai-run:next-id", 113);
+
+    expect(() => new AiExecutorRunStore(withinBudgetKv)).not.toThrow();
+    expect(withinBudgetKv.get("ai-run:record:112")).toMatchObject({
+      runId: 112,
+      status: "completed",
+    });
+
+    const overBudgetKv = new FakeKv();
+    seedNearCeilingRuns(overBudgetKv);
+    overBudgetKv.put("ai-run:next-id", "x".repeat(64 * 1024));
+    overBudgetKv.resetMutations();
+    const construct = () => new AiExecutorRunStore(overBudgetKv);
+
+    let thrown: unknown;
+    try {
+      construct();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect.soft(thrown).toMatchObject({
+      message: expect.stringMatching(/aggregate repair.*byte ceiling/i),
+    });
+    expect(overBudgetKv.mutations).toEqual([]);
+    expect(overBudgetKv.get("ai-run:record:1")).toMatchObject({
+      runId: 1,
+      status: "completed",
+    });
+  });
+
   it("fails closed before repairing request state beyond the finite ceiling", () => {
     const kv = new FakeKv();
     kv.put("ai-run:record:1", { runId: 1, status: "running" });

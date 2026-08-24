@@ -3,6 +3,7 @@ import {
   type AiExecutorProvider,
   MAX_EXECUTOR_PROFILE_LABEL_BYTES,
   MAX_EXECUTOR_PROFILE_MODEL_BYTES,
+  MAX_EXECUTOR_PROFILE_PROVIDER_CONFIG_BYTES,
 } from '@gadgets/workshop-shared/api'
 
 const ENCODER = new TextEncoder()
@@ -78,6 +79,47 @@ function exceedsUtf8ByteLimit(value: string, maximumBytes: number): boolean {
   return ENCODER.encode(value).byteLength > maximumBytes
 }
 
+function hasAsciiControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code <= 31 || code === 127) return true
+  }
+  return false
+}
+
+function providerConfigText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function providerConfigError(value: string, label: string): string | undefined {
+  if (value !== value.trim() || hasAsciiControlCharacter(value)) {
+    return `${label} must be trimmed and contain no ASCII control characters.`
+  }
+  if (exceedsUtf8ByteLimit(value, MAX_EXECUTOR_PROFILE_PROVIDER_CONFIG_BYTES)) {
+    return `${label} must be ${MAX_EXECUTOR_PROFILE_PROVIDER_CONFIG_BYTES} UTF-8 bytes or fewer.`
+  }
+  return undefined
+}
+
+function byokAliasError(value: string): string | undefined {
+  const error = providerConfigError(value, 'BYOK alias')
+  if (error) return error
+  if (!/^[A-Za-z0-9._-]+$/.test(value)) {
+    return 'BYOK alias must use only ASCII letters, digits, periods, underscores, or hyphens.'
+  }
+  return undefined
+}
+
+function addProviderConfigError(
+  errors: Partial<Record<AiExecutorFormField, string>>,
+  field: AiExecutorFormField,
+  value: string,
+  label: string,
+): void {
+  const error = providerConfigError(value, label)
+  if (error) errors[field] = error
+}
+
 function draftValue(draft: unknown, field: AiExecutorFormField): unknown {
   return typeof draft === 'object' && draft !== null
     ? (draft as Record<string, unknown>)[field]
@@ -111,15 +153,22 @@ export function buildAiExecutorProfileInput(draft: unknown): AiExecutorFormResul
   if (!isProvider(providerValue)) errors.provider = 'Choose a provider.'
 
   const provider = isProvider(providerValue) ? providerValue : undefined
-  const resource = requiredText(draftValue(draft, 'resource'))
-  const deployment = requiredText(draftValue(draft, 'deployment'))
-  const apiVersion = requiredText(draftValue(draft, 'apiVersion'))
-  const byokAlias = requiredText(draftValue(draft, 'byokAlias'))
+  const resource = providerConfigText(draftValue(draft, 'resource'))
+  const deployment = providerConfigText(draftValue(draft, 'deployment'))
+  const apiVersion = providerConfigText(draftValue(draft, 'apiVersion'))
+  const byokAlias = providerConfigText(draftValue(draft, 'byokAlias'))
 
   if (provider === 'azure-openai') {
     if (!resource) errors.resource = 'Enter an Azure resource.'
+    else addProviderConfigError(errors, 'resource', resource, 'Azure resource')
     if (!deployment) errors.deployment = 'Enter an Azure deployment.'
+    else addProviderConfigError(errors, 'deployment', deployment, 'Azure deployment')
     if (!apiVersion) errors.apiVersion = 'Enter an Azure API version.'
+    else addProviderConfigError(errors, 'apiVersion', apiVersion, 'Azure API version')
+  }
+  if ((provider === 'azure-openai' || provider === 'openrouter') && byokAlias) {
+    const error = byokAliasError(byokAlias)
+    if (error) errors.byokAlias = error
   }
 
   if (Object.keys(errors).length > 0 || !label || !maxInputBytes || !maxOutputTokens ||

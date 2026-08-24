@@ -153,6 +153,141 @@ describe('AI executor form model', () => {
     })
   })
 
+  it('accepts provider configuration at 256 UTF-8 bytes and rejects one byte over', () => {
+    const exactLimit = 'é'.repeat(128)
+    const overLimit = `${exactLimit}a`
+
+    expect(buildAiExecutorProfileInput({
+      ...createAiExecutorFormDraft('azure-openai'),
+      label: 'Azure',
+      maxInputBytes: '1024',
+      maxOutputTokens: '256',
+      timeoutMs: '5000',
+      requestsPerMinute: '10',
+      model: 'gpt-4.1',
+      resource: exactLimit,
+      deployment: exactLimit,
+      apiVersion: exactLimit,
+      byokAlias: 'a'.repeat(256),
+    })).toEqual({
+      ok: true,
+      input: {
+        provider: 'azure-openai',
+        label: 'Azure',
+        maxInputBytes: 1024,
+        maxOutputTokens: 256,
+        timeoutMs: 5000,
+        requestsPerMinute: 10,
+        model: 'gpt-4.1',
+        resource: exactLimit,
+        deployment: exactLimit,
+        apiVersion: exactLimit,
+        byokAlias: 'a'.repeat(256),
+      },
+    })
+
+    expect(buildAiExecutorProfileInput({
+      ...createAiExecutorFormDraft('azure-openai'),
+      label: 'Azure',
+      maxInputBytes: '1024',
+      maxOutputTokens: '256',
+      timeoutMs: '5000',
+      requestsPerMinute: '10',
+      model: 'gpt-4.1',
+      resource: overLimit,
+      deployment: overLimit,
+      apiVersion: overLimit,
+      byokAlias: overLimit,
+    })).toEqual({
+      ok: false,
+      errors: {
+        resource: 'Azure resource must be 256 UTF-8 bytes or fewer.',
+        deployment: 'Azure deployment must be 256 UTF-8 bytes or fewer.',
+        apiVersion: 'Azure API version must be 256 UTF-8 bytes or fewer.',
+        byokAlias: 'BYOK alias must be 256 UTF-8 bytes or fewer.',
+      },
+    })
+  })
+
+  it.each([
+    ['resource', ' contoso', 'Azure resource'],
+    ['deployment', 'production ', 'Azure deployment'],
+    ['apiVersion', '2024-10-21\u007f', 'Azure API version'],
+    ['byokAlias', 'azure\nprod', 'BYOK alias'],
+  ] as const)('rejects untrimmed or controlled Azure %s', (field, value, label) => {
+    const result = buildAiExecutorProfileInput({
+      ...createAiExecutorFormDraft('azure-openai'),
+      label: 'Azure',
+      maxInputBytes: '1024',
+      maxOutputTokens: '256',
+      timeoutMs: '5000',
+      requestsPerMinute: '10',
+      model: 'gpt-4.1',
+      resource: 'contoso',
+      deployment: 'production',
+      apiVersion: '2024-10-21',
+      byokAlias: 'azure-prod',
+      [field]: value,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      errors: {[field]: `${label} must be trimmed and contain no ASCII control characters.`},
+    })
+  })
+
+  it.each([
+    [' router-prod', 'untrimmed'],
+    ['router\tprod', 'controlled'],
+  ] as const)('rejects %s OpenRouter BYOK aliases (%s)', (byokAlias, _kind) => {
+    const result = buildAiExecutorProfileInput({
+      ...createAiExecutorFormDraft('openrouter'),
+      label: 'OpenRouter',
+      maxInputBytes: '1024',
+      maxOutputTokens: '256',
+      timeoutMs: '5000',
+      requestsPerMinute: '10',
+      model: 'openai/gpt-5-mini',
+      byokAlias,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      errors: {byokAlias: 'BYOK alias must be trimmed and contain no ASCII control characters.'},
+    })
+  })
+
+  it.each(['azure-openai', 'openrouter'] as const)(
+    'rejects a non-header-safe %s BYOK alias',
+    (provider) => {
+      const result = buildAiExecutorProfileInput({
+        ...createAiExecutorFormDraft(provider),
+        label: 'Executor',
+        maxInputBytes: '1024',
+        maxOutputTokens: '256',
+        timeoutMs: '5000',
+        requestsPerMinute: '10',
+        model: provider === 'azure-openai' ? 'gpt-4.1' : 'openai/gpt-5-mini',
+        ...(provider === 'azure-openai'
+          ? {
+              resource: 'contoso',
+              deployment: 'production',
+              apiVersion: '2024-10-21',
+            }
+          : {}),
+        byokAlias: 'primary-🚀',
+      })
+
+      expect(result).toEqual({
+        ok: false,
+        errors: {
+          byokAlias:
+            'BYOK alias must use only ASCII letters, digits, periods, underscores, or hyphens.',
+        },
+      })
+    },
+  )
+
   it('switches providers without retaining Azure or BYOK fields', () => {
     const azure = {
       ...createAiExecutorFormDraft('azure-openai'),

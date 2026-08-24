@@ -194,6 +194,13 @@ export type ResourceDescription = {
   title: string;
   snippet: string;
 
+  /**
+   * Declares that this resource can only be used in an owner-only workspace. The Overseer must
+   * refuse sharing while it is installed and must not expose its session until every retained
+   * collaborator capability has been revoked.
+   */
+  observerPolicy?: "owner-only";
+
   // TODO: Other display metadata? Thumbnail, icon, etc?
 
   /**
@@ -1068,6 +1075,17 @@ export type ObservationDescription = {
   //   prompt injection risks).
   // - If this content may contain secrets, who are the users that are allowed to view it? This
   //   can help detect situations where the gadget could leak information.
+
+  /**
+   * If true, this observation contains information that must remain visible only to the account
+   * owner. The observation is blocked when the workspace is already shared, and authorizing it
+   * permanently prevents collaborators and share links from being added later.
+   *
+   * Unlike `prohibitAllSharing`, this does not prohibit the owner from performing later actions
+   * or using public web tools. Use it when collaborator confidentiality is required but the
+   * resource is itself part of an explicitly networked workflow.
+   */
+  prohibitWorkspaceSharing?: boolean;
 
   /**
    * If true, then this observation contains sensitive information that MUST NOT be shared with

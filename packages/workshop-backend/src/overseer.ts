@@ -42,6 +42,12 @@ import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker"
 import { completeAgentCatalogSnapshot, normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
+import { prepareAuthorizedChatCommit } from "./chat-commit-guard";
+import { discardInterruptedGatekeeperInitializations } from
+  "./gatekeeper-initialization-recovery";
+import { KeyedAsyncSequencer } from "./keyed-async-sequencer";
+import { runAuthorizedCollaboratorBookkeeping } from "./collaborator-bookkeeping";
+import { runRevocationCleanup } from "./revocation-cleanup";
 import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext, traced } from "./observability";
@@ -278,6 +284,13 @@ type GatekeeperRecord = {
   class: GatekeeperClass,
   hook?: string,  // export name to which the gatekeeper's hook is connected
 
+  // Present only while addGatekeeper() is awaiting describe(). No capability may use partially
+  // published policy metadata.
+  initializing?: true;
+
+  // Denormalized from ResourceDescription.observerPolicy.
+  ownerOnly?: true;
+
   // Records how this gatekeeper was originally created, enabling blueprint metadata derivation.
   creationSpec?: GatekeeperCreationSpec;
 
@@ -422,11 +435,12 @@ function oneLineReason(reason: string): string {
   return reason.replace(/\p{Cc}/gu, " ").replace(/\s+/g, " ").trim();
 }
 
-// Storage record describing a non-owner collaborator who has configured their gatekeeper accounts
-// and passed all `addObserver` checks -- i.e. is actually set up to observe data the Gadget has
-// read. This is distinct from the sharing table (which records the owner's *intent* that a user
-// have access): opening requires BOTH a reachable role in the sharing graph AND a complete
-// observer record. See observers-implementation-plan.md §3.
+// Durable admission marker for a non-owner collaborator. A zero-scope collaborator receives this
+// record even though no Gatekeeper has asked them to configure an account yet; accountChoices may
+// therefore be empty until their role-sensitive scope expands. This is distinct from the sharing
+// table (which records the owner's *intent* that a user have access): opening requires BOTH a
+// reachable role in the sharing graph and this admitted-capability record. See
+// observers-implementation-plan.md §3.
 type ObserverRecord = {
   // The sharing-table key for this user (their profile.id). Primary key of the collection.
   profileId: string;
@@ -761,7 +775,10 @@ type ExternalMessageRecord = {
 type ExternalMessageResponseTargetRegistration = {
   idempotencyKey: string;
   chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
+  commitGuard: () => void;
 };
+
+class ExternalMessageAccessRevokedError extends Error {}
 
 type ExternalMessageResponseTargetRegistrationDecision =
   | {
@@ -1012,6 +1029,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // True if any past observation was authorized that had the `prohibitAllSharing` flag set
       // in its `ObservationDescription`.
       prohibitAllSharing: false,
+
+      // Sticky owner-only observation policy. Unlike prohibitAllSharing, this does not disable
+      // owner actions, hooks, or public web access.
+      prohibitWorkspaceSharing: false,
     },
 
     collections: {
@@ -1382,6 +1403,17 @@ class OverseerImpl implements AgentHooks {
 
   #preparingChatMessages = new Map<number, Promise<void>>();
 
+  // Admission includes user-DO and gatekeeper RPCs, so same-profile opens can otherwise interleave
+  // after reading the same ObserverRecord and mint different observer IDs.
+  #observerAdmissions = new KeyedAsyncSequencer<string>();
+
+  // Increment before each access-graph contraction. Once a mutation may have changed authority,
+  // restartRequired remains sticky until this DO incarnation is aborted. The counter prevents an
+  // overlapping no-op revocation from clearing another mutation's pause.
+  #activeRevocationMutations = 0;
+  #revocationRestartRequired = false;
+  #revocationRestartScheduled = false;
+
   // Set of chatIds that currently have a running agent turn. Used to manage the DO alarm (held
   // while any agent runs) and to let `alarm()` wait for all agents to finish.
   #runningAgents = new Set<number>();
@@ -1665,6 +1697,10 @@ class OverseerImpl implements AgentHooks {
     // This migration is fully synchronous, so nothing can observe pre-migration state; the
     // git-storage migration below is the asynchronous one, shielded by blockConcurrencyWhile.
     this.#migrateStorage();
+    discardInterruptedGatekeeperInitializations(
+      this.storage,
+      this.ctx.facets,
+    );
     this.defaultGadgetId = this.storage.defaultGadgetId.get();
 
     this.#autoApprovalDrainer = new AutoApprovalDrainer(
@@ -4191,6 +4227,7 @@ class OverseerImpl implements AgentHooks {
   // was applied automatically. For an auto-approval, `resolvedBy` is the user who enabled the rule.
   async applyPendingAction(record: ActionRecord & {type: "action"},
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
+    await this.assertGatekeeperObserverReadiness(record.gatekeeperId);
     let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
     await gatekeeper.applyAction(record.action);
     record.state = "approved";
@@ -4250,6 +4287,7 @@ class OverseerImpl implements AgentHooks {
       id,
       class: cls,
       creationSpec,
+      initializing: true,
     };
     this.storage.gatekeepers.put(gatekeeperRecord);
 
@@ -4259,6 +4297,16 @@ class OverseerImpl implements AgentHooks {
       gatekeeperRecord.resourceTitle = description.title;
       gatekeeperRecord.resourceUrl = description.url;
       gatekeeperRecord.hasSlashCommands = description.hasSlashCommands;
+      if (description.observerPolicy === "owner-only") {
+        let sharing = await this.getSharingManager();
+        // Final synchronous publication guard after every describe/profile await.
+        if (sharing.hasAnyShares() || this.isRevocationPaused()) {
+          throw new Error(
+              "This owner-only connection cannot be added while the workspace is shared.");
+        }
+        gatekeeperRecord.ownerOnly = true;
+      }
+      delete gatekeeperRecord.initializing;
       this.storage.gatekeepers.put(gatekeeperRecord);
     } catch (error) {
       this.removeGatekeeper(id);
@@ -4356,16 +4404,12 @@ class OverseerImpl implements AgentHooks {
 
   async authorizeObservation(gatekeeperId: number, description: ObservationDescription,
                              caller: GatekeeperCaller): Promise<void> {
-    if (description.prohibitAllSharing) {
-      if ((await this.getSharingManager()).hasAnyShares()) {
-        throw new Error(
-            "This observation was blocked because it contains sensitive data that must only be " +
-            "shown to the account owner, but this workspace is shared with other users. Try again " +
-            "from a workspace that is not shared.");
-      }
-
-      this.storage.prohibitAllSharing.put(true);
-    }
+    let gatekeeper = this.#readyGatekeeperRecord(gatekeeperId);
+    let prohibitWorkspaceSharing = gatekeeper.ownerOnly === true ||
+        description.prohibitWorkspaceSharing === true;
+    let sharing = description.prohibitAllSharing || prohibitWorkspaceSharing
+        ? await this.getSharingManager()
+        : undefined;
 
     // Forward exclusion: the gatekeeper may name observers who must not see this observation. Since
     // v1 has no per-thread hiding, the only way to let such an observation proceed is if the named
@@ -4376,10 +4420,21 @@ class OverseerImpl implements AgentHooks {
       await this.#enforceExcludeObservers(description.excludeObservers);
     }
 
+    await this.assertGatekeeperObserverReadiness(gatekeeperId);
+
+    // Final synchronous confidentiality check after all exclusion/readiness awaits. The policy bit
+    // and audit record are then published without another await, so sharing cannot enter between
+    // the check and the sticky state transition.
+    if (sharing?.hasAnyShares()) {
+      throw new Error(
+          "This observation was blocked because it contains owner-only data, but this workspace " +
+          "is shared with other users. Try again from a workspace that is not shared.");
+    }
+    if (description.prohibitAllSharing) this.storage.prohibitAllSharing.put(true);
+    if (prohibitWorkspaceSharing) this.storage.prohibitWorkspaceSharing.put(true);
+
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
-
-    let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
 
     let record: ActionRecord = {
       id: actionId,
@@ -4583,6 +4638,8 @@ class OverseerImpl implements AgentHooks {
           "from performing actions.");
     }
 
+    await this.assertGatekeeperObserverReadiness(gatekeeperId);
+
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
 
@@ -4624,6 +4681,7 @@ class OverseerImpl implements AgentHooks {
         gatekeeperId: number, controller: Fetcher<HookController<Hook>>,
         callback: NativeRpcStub<Hook>, description: HookDescription, caller: GatekeeperCaller)
         : Promise<void> {
+    await this.assertGatekeeperObserverReadiness(gatekeeperId);
     let hookId = this.storage.nextHookId.get();
     this.storage.nextHookId.put(hookId + 1);
 
@@ -4903,14 +4961,17 @@ class OverseerImpl implements AgentHooks {
   // - `ctx.abort()` does not respect the output gate, so we explicitly flush the severed edge to
   //   disk with `ctx.storage.sync()`. Otherwise a restart could come back with the change lost,
   //   leaving the removed user still authorized.
-  // - We delay the abort briefly so the triggering RPC's response can reach the caller (typically
-  //   the owner, who is also connected and will be disconnected) before their connection drops.
-  //   Without the delay their own removeCollaborator()/revokeShareLink() call might reject with a
-  //   connection error even though it succeeded.
-  async scheduleRevocationRestart(): Promise<void> {
-    await this.ctx.storage.sync();
-    await scheduler.wait(100);
-    this.ctx.abort("Gadget restarted to revoke access for a removed collaborator.");
+  // - For access-graph contractions, blockConcurrencyWhile closes the DO input gate immediately;
+  //   no queued call through an already-issued broad capability can run before the abort. Workspace
+  //   deletion already owns that gate, so it opts out rather than nesting the critical section.
+  scheduleRevocationRestart(blockNewInputs = true): void {
+    if (this.#revocationRestartScheduled) return;
+    this.#revocationRestartScheduled = true;
+    let restart = async () => {
+      await this.ctx.storage.sync();
+      this.ctx.abort("Gadget restarted to revoke access for a removed collaborator.");
+    };
+    this.ctx.waitUntil(blockNewInputs ? this.ctx.blockConcurrencyWhile(restart) : restart());
   }
 
   // Last timestamp generated by getChatTimestamp(), if it has been called during this session.
@@ -5182,6 +5243,7 @@ class OverseerImpl implements AgentHooks {
     formats?: MessageFormatRef[],
   ): Promise<number> {
     if (responseTargetRegistration) {
+      responseTargetRegistration.commitGuard();
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
       if (decision.reuseExisting) return decision.record.chatId;
     }
@@ -5190,8 +5252,13 @@ class OverseerImpl implements AgentHooks {
     }
     let canonicalAttachments = this.canonicalizeChatAttachmentRefs(
         attachments, userMeta.aiModel?.config.provider);
-    let prepared = await this.#prepareChatMessage(
-        initialMessage, (canonicalAttachments?.length ?? 0) > 0);
+    let prepared = await prepareAuthorizedChatCommit(
+      () => this.#prepareChatMessage(
+        initialMessage,
+        (canonicalAttachments?.length ?? 0) > 0,
+      ),
+      responseTargetRegistration?.commitGuard,
+    );
 
     // No code base is established at creation: gadgets pin lazily, when their code is first
     // modified in the chat (see ChatCodeBase). Until then the chat reads committed code live at
@@ -5263,6 +5330,7 @@ class OverseerImpl implements AgentHooks {
     formats?: MessageFormatRef[],
   ): Promise<void> {
     if (responseTargetRegistration) {
+      responseTargetRegistration.commitGuard();
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
       if (decision.reuseExisting) return;
     }
@@ -5273,8 +5341,13 @@ class OverseerImpl implements AgentHooks {
         attachments, userMeta.aiModel?.config.provider);
     this.assertChatNotActive(chatId);
     using _chatMessageReservation = this.reserveChatMessagePreparation(chatId);
-    let prepared = await this.#prepareChatMessage(
-        message, (canonicalAttachments?.length ?? 0) > 0);
+    let prepared = await prepareAuthorizedChatCommit(
+      () => this.#prepareChatMessage(
+        message,
+        (canonicalAttachments?.length ?? 0) > 0,
+      ),
+      responseTargetRegistration?.commitGuard,
+    );
 
     let meta = this.assertChatNotActive(chatId, true);
     let result = this.materializeChatChanges(chatId, meta);
@@ -7674,6 +7747,80 @@ class OverseerImpl implements AgentHooks {
   //   - "build" collaborators (full access): every account-requiring gatekeeper.
   //   - "use" collaborators (UI only): only account-requiring gatekeepers bound by some gadget,
   //     since that is all the UI can invoke.
+  #readyGatekeeperRecord(gatekeeperId: number): GatekeeperRecord {
+    let record = this.storage.gatekeepers.get(gatekeeperId);
+    if (!record) throw new Error("No such gatekeeper.");
+    if (record.initializing) throw new Error("This connection is still initializing.");
+    return record;
+  }
+
+  hasOwnerOnlyGatekeeper(): boolean {
+    return [...this.storage.gatekeepers.list()]
+        .some(record => !record.initializing && record.ownerOnly === true);
+  }
+
+  isWorkspaceSharingProhibited(): boolean {
+    return this.storage.prohibitAllSharing.get() ||
+        this.storage.prohibitWorkspaceSharing.get() ||
+        this.hasOwnerOnlyGatekeeper();
+  }
+
+  #assertSharingAuthorityExpansionAllowed(): void {
+    if (this.isRevocationPaused() || this.isWorkspaceSharingProhibited()) {
+      throw new Error("This workspace cannot be shared.");
+    }
+  }
+
+  beginRevocation(): void {
+    this.#activeRevocationMutations++;
+  }
+
+  finishRevocationWithoutEffect(): void {
+    this.#activeRevocationMutations = Math.max(0, this.#activeRevocationMutations - 1);
+  }
+
+  finishRevocationRequiringRestart(): void {
+    this.#revocationRestartRequired = true;
+    this.#activeRevocationMutations = Math.max(0, this.#activeRevocationMutations - 1);
+  }
+
+  isRevocationPaused(): boolean {
+    return this.#activeRevocationMutations > 0 || this.#revocationRestartRequired;
+  }
+
+  assertNoRevocationPending(): void {
+    if (this.isRevocationPaused()) {
+      throw new Error("Workspace access is changing. Please reconnect and try again.");
+    }
+  }
+
+  async assertGatekeeperObserverReadiness(gatekeeperId: number): Promise<void> {
+    this.assertNoRevocationPending();
+    let record = this.#readyGatekeeperRecord(gatekeeperId);
+    if (!observerVendorId(record)) return;
+
+    let sharing = await this.getSharingManager();
+    this.assertNoRevocationPending();
+    record = this.#readyGatekeeperRecord(gatekeeperId);
+    if (!observerVendorId(record)) return;
+
+    let useScopeIncludesTarget = this.#inScopeGatekeepers("use")
+        .some(gatekeeper => gatekeeper.id === gatekeeperId);
+    // Snapshot before SharingManager opens its own typed-storage iterators. typed-storage permits
+    // only one live kv.list() iterator at a time.
+    let observers = [...this.storage.observers.list()];
+    for (let observer of observers) {
+      let role = sharing.getEffectiveRole(observer.profileId);
+      if (!role) continue;
+      if (role === "use" && !useScopeIncludesTarget) continue;
+      if (!Object.hasOwn(observer.accountChoices, gatekeeperId)) {
+        throw new Error(
+            "This connection cannot be used until all current collaborators have re-opened " +
+            "the workspace.");
+      }
+    }
+  }
+
   #inScopeGatekeepers(role: CollaboratorRole): GatekeeperRecord[] {
     let boundIds: Set<WorkpieceId> | undefined;
     if (role === "use") {
@@ -7690,6 +7837,10 @@ class OverseerImpl implements AgentHooks {
 
     let result: GatekeeperRecord[] = [];
     for (let gk of this.storage.gatekeepers.list()) {
+      // The provisional target itself remains inaccessible through #readyGatekeeperRecord(), but
+      // a slow or crashed describe() must not block observer admission for unrelated resources.
+      // If this record later publishes, every direct capability handoff rechecks readiness.
+      if (gk.initializing) continue;
       if (!observerVendorId(gk)) continue;
       if (boundIds && !boundIds.has(gk.id)) continue;
       result.push(gk);
@@ -7774,15 +7925,29 @@ class OverseerImpl implements AgentHooks {
       clientUser: DurableObjectStub<UserDurableObject>,
       role: CollaboratorRole,
       configureCb?: RpcStub<ObserverConfigCallback>): Promise<void> {
-    // 1. Select in-scope gatekeepers. If none require an account, there is nothing to verify and
-    //    no observer record is needed (built-in gatekeepers never name observers in
-    //    excludeObservers).
-    let inScope = this.#inScopeGatekeepers(role);
-    if (inScope.length === 0) return;
+    await this.#observerAdmissions.run(
+        profileId,
+        () => this.#ensureObserverUnserialized(profileId, clientUser, role, configureCb));
+  }
 
-    // 2. Load any existing observer record, and build a working copy of its account choices.
+  async #ensureObserverUnserialized(
+      profileId: string,
+      clientUser: DurableObjectStub<UserDurableObject>,
+      role: CollaboratorRole,
+      configureCb?: RpcStub<ObserverConfigCallback>): Promise<void> {
+    // 1. Select in-scope gatekeepers. If none require an account, there is nothing to verify and
+    //    admission still persists an empty record so later scope expansion can detect this live
+    //    collaborator before exposing the new connection.
+    let inScope = this.#inScopeGatekeepers(role);
     let record = this.storage.observers.get(profileId);
     let accountChoices: {[gatekeeperId: number]: number} = {...record?.accountChoices};
+    let observerId = record?.observerId ?? crypto.randomUUID();
+    if (inScope.length === 0) {
+      this.storage.observers.put({profileId, observerId, accountChoices});
+      return;
+    }
+
+    // 2. Build a working copy of any existing account choices.
 
     // Gatekeeper ids whose account choice came from the persisted record (vs. configured during
     // this call). On a verification failure we only roll back observers we registered *this* call,
@@ -7790,7 +7955,6 @@ class OverseerImpl implements AgentHooks {
     let preConfigured = new Set<number>(
         inScope.filter(gk => gk.id in accountChoices).map(gk => gk.id));
 
-    let observerId = record?.observerId ?? crypto.randomUUID();
     // Gatekeepers we successfully registered the observer with during this call.
     let newlyAdded = new Set<number>();
 
@@ -8008,7 +8172,11 @@ class OverseerImpl implements AgentHooks {
   // Resolving the owner's profile ID may require an RPC on first use; thereafter it's cached.
   async getSharingManager(): Promise<SharingManager> {
     if (!this.#sharingManager) {
-      this.#sharingManager = new SharingManager(this.storage, await this.getOwnerProfileId());
+      this.#sharingManager = new SharingManager(
+        this.storage,
+        await this.getOwnerProfileId(),
+        () => this.#assertSharingAuthorityExpansionAllowed(),
+      );
     }
     return this.#sharingManager;
   }
@@ -8231,7 +8399,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let role: CollaboratorRole = "build";
 
     if (!isOwner) {
-      if (this.impl.storage.prohibitAllSharing.get()) {
+      if (this.impl.isWorkspaceSharingProhibited()) {
         // `prohibitAllSharing` can only have been set when the gadget had no shares (see
         // `authorizeObservation`), and no new shares can be created while it's set, so any
         // non-owner reaching here is necessarily unauthorized.
@@ -8272,24 +8440,47 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // user. The prohibitAllSharing short-circuit above still wins -- lockdown takes precedence.
       await this.impl.ensureObserver(profileId, clientUser, role, configureObservers);
 
-      // Fire-and-forget a call to the collaborator's user DO so the gadget appears on
-      // (or is refreshed on) their home page.
+      // Snapshot metadata for collaborator bookkeeping after the final handoff guard.
       let title = this.impl.storage.title.get();
       let gadgetId = this.impl.ctx.id.toString();
-      void (async () => {
-        try {
-          const ownerProfile = await owner.whoami();
-          await clientUser.recordSharedGadgetOpen(gadgetId, title, ownerProfile, role);
-        } catch (err) {
-          this.impl.logger.warn("failed to record shared gadget open", {
-            event: "shared.gadget.open.record.failed", gadgetId, error: err,
+      // Last synchronous handoff guard: a revocation may have begun while observer verification
+      // awaited remote user/gatekeeper calls.
+      this.impl.assertNoRevocationPending();
+      if (this.impl.isWorkspaceSharingProhibited()) {
+        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+      }
+      if (sharing.getEffectiveRole(profileId) !== role) {
+        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+      }
+
+      // Start collaborator bookkeeping only after the final session handoff checks. The helper
+      // repeats authorization at every remote-call boundary and removes a listing created during
+      // a concurrent revocation before it can remain stale.
+      void runAuthorizedCollaboratorBookkeeping({
+        resolveOwnerProfile: () => owner.whoami(),
+        recordSharedGadgetOpen: (ownerProfile) =>
+          clientUser.recordSharedGadgetOpen(gadgetId, title, ownerProfile, role),
+        reconcileRevokedListing: async () => {
+          let currentRole = sharing.getEffectiveRole(profileId);
+          if (this.impl.isWorkspaceSharingProhibited() || !currentRole) {
+            await clientUser.forgetSharedGadget(gadgetId);
+          } else {
+            await clientUser.updateSharedGadgetRole(gadgetId, currentRole);
+          }
+        },
+        syncOutputs: async () => {
+          await this.impl.syncOutputsTo(clientUser);
+        },
+        isAuthorized: () =>
+          !this.impl.isRevocationPaused() &&
+          !this.impl.isWorkspaceSharingProhibited() &&
+          sharing.getEffectiveRole(profileId) === role,
+        reportError: (operation, error) => {
+          this.impl.logger.warn(`failed shared gadget ${operation}`, {
+            event: `shared.gadget.open.${operation}.failed`, gadgetId, error,
           });
-          return;
-        }
-        // Catch up whatever happened while they were away; changes from here on reach them
-        // through the session fan-out (joinOutputsFanout).
-        await this.impl.syncOutputsTo(clientUser);
-      })();
+        },
+      });
     }
 
     if (role === "use") {
@@ -8344,18 +8535,40 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     // Caller must be the owner or a build collaborator.
+    let collaboratorSharing: SharingManager | undefined;
     if (ownerId !== callerId) {
-      if (this.impl.storage.prohibitAllSharing.get()) {
+      if (this.impl.isWorkspaceSharingProhibited()) {
         return {
           accepted: false,
           message: "This workspace has sharing disabled, so only its owner can access it.",
         };
       }
-      let role = (await this.impl.getSharingManager()).getEffectiveRole(callerProfile.id);
+      let sharing = await this.impl.getSharingManager();
+      collaboratorSharing = sharing;
+      let role = sharing.getEffectiveRole(callerProfile.id);
       if (role !== "build") {
         return {
           accepted: false,
           message: "You do not have access to interact with this workspace through its agent.",
+        };
+      }
+
+      try {
+        await this.impl.ensureObserver(callerProfile.id, caller, "build");
+        // Re-check live authorization and revocation state after observer RPCs released the input
+        // gate, before resolving any model or chat state.
+        this.impl.assertNoRevocationPending();
+        if (sharing.getEffectiveRole(callerProfile.id) !== "build" ||
+            this.impl.isWorkspaceSharingProhibited()) {
+          return {
+            accepted: false,
+            message: "You do not have access to interact with this workspace through its agent.",
+          };
+        }
+      } catch {
+        return {
+          accepted: false,
+          message: "Open this workspace in the Workshop to configure its connected services first.",
         };
       }
     }
@@ -8396,33 +8609,62 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // Re-check because another request may have created the external chat while resolving the model.
     externalChat = this.#getExternalChat(input.externalChatKey);
 
+    // Model/config resolution above releases the input gate. Re-check live collaborator authority
+    // synchronously at the chat-write boundary so a concurrent revocation cannot submit one final
+    // prompt through a retained external capability.
+    if (collaboratorSharing &&
+        (this.impl.isRevocationPaused() ||
+         collaboratorSharing.getEffectiveRole(callerProfile.id) !== "build" ||
+         this.impl.isWorkspaceSharingProhibited())) {
+      return {
+        accepted: false,
+        message: "You do not have access to interact with this workspace through its agent.",
+      };
+    }
+    let commitGuard = collaboratorSharing ? () => {
+      if (this.impl.isRevocationPaused() ||
+          collaboratorSharing.getEffectiveRole(callerProfile.id) !== "build" ||
+          this.impl.isWorkspaceSharingProhibited()) {
+        throw new ExternalMessageAccessRevokedError();
+      }
+    } : undefined;
+
     // Submit the prompt to the existing external chat, or start a new external chat.
     let responseTargetRegistration: ExternalMessageResponseTargetRegistration = {
       idempotencyKey: input.idempotencyKey,
       chatGatewayRpcTarget: input.chatGatewayRpcTarget,
+      commitGuard: commitGuard ?? (() => {}),
     };
     let chatId: number;
-    if (externalChat) {
-      await this.impl.sendChatMessage(
-        caller,
-        userContext,
-        externalChat.chatId,
-        input.prompt,
-        undefined,
-        undefined,
-        responseTargetRegistration,
-      );
-      chatId = externalChat.chatId;
-    } else {
-      chatId = await this.impl.newChat(
-        caller,
-        userContext,
-        input.prompt,
-        undefined,
-        undefined,
-        responseTargetRegistration,
-        input.externalChatKey,
-      );
+    try {
+      if (externalChat) {
+        await this.impl.sendChatMessage(
+          caller,
+          userContext,
+          externalChat.chatId,
+          input.prompt,
+          undefined,
+          undefined,
+          responseTargetRegistration,
+        );
+        chatId = externalChat.chatId;
+      } else {
+        chatId = await this.impl.newChat(
+          caller,
+          userContext,
+          input.prompt,
+          undefined,
+          undefined,
+          responseTargetRegistration,
+          input.externalChatKey,
+        );
+      }
+    } catch (error) {
+      if (!(error instanceof ExternalMessageAccessRevokedError)) throw error;
+      return {
+        accepted: false,
+        message: "You do not have access to interact with this workspace through its agent.",
+      };
     }
 
     return { accepted: true, chatPath: `/workspace/${this.ctx.id.toString()}?chat=${chatId}` };
@@ -8516,6 +8758,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         ambientGatekeeperMode(config, vendorId) === "disabled") {
       throw new Error("Gatekeeper is disabled.");
     }
+
+    await this.impl.assertGatekeeperObserverReadiness(record.gatekeeperId);
+    record = this.impl.storage.boundHooks.get(hookId);
+    if (!record?.enabled) throw new Error("Hook has been deleted or disabled.");
 
     return {
       callback: record.callback,
@@ -9029,7 +9275,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
       totalCost: this.impl.storage.totalCost.get(),
-      sharingProhibited: this.impl.storage.prohibitAllSharing.get(),
+      sharingProhibited: this.impl.isWorkspaceSharingProhibited(),
       role: "build",
       defaultGadgetId: this.impl.defaultGadgetId,
     };
@@ -9048,7 +9294,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
       totalCost: this.impl.storage.totalCost.get(),
-      sharingProhibited: this.impl.storage.prohibitAllSharing.get(),
+      sharingProhibited: this.impl.isWorkspaceSharingProhibited(),
       role: "build",
       defaultGadgetId: this.impl.defaultGadgetId,
     };
@@ -9070,23 +9316,31 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         callback(metadata).catch(unsubscribe);
       }
     };
-    let sharingProhibitedSubscriber = {
-      update(value: boolean | undefined) {
-        metadata.sharingProhibited = value;
-        callback(metadata).catch(unsubscribe);
-      }
+    let updateSharingProhibited = () => {
+      metadata.sharingProhibited = this.impl.isWorkspaceSharingProhibited();
+      callback(metadata).catch(unsubscribe);
+    };
+    let sharingProhibitedSubscriber = { update: updateSharingProhibited };
+    let gatekeeperPolicySubscriber = {
+      add: updateSharingProhibited,
+      update: updateSharingProhibited,
+      remove: updateSharingProhibited,
     };
 
     let unsubscribe = () => {
       this.impl.storage.title.unsubscribe(titleSubscriber);
       this.impl.storage.totalCost.unsubscribe(costSubscriber);
       this.impl.storage.prohibitAllSharing.unsubscribe(sharingProhibitedSubscriber);
+      this.impl.storage.prohibitWorkspaceSharing.unsubscribe(sharingProhibitedSubscriber);
+      this.impl.storage.gatekeepers.unsubscribe(gatekeeperPolicySubscriber);
       callback[Symbol.dispose]();
     };
 
     this.impl.storage.title.subscribe(titleSubscriber);
     this.impl.storage.totalCost.subscribe(costSubscriber);
     this.impl.storage.prohibitAllSharing.subscribe(sharingProhibitedSubscriber);
+    this.impl.storage.prohibitWorkspaceSharing.subscribe(sharingProhibitedSubscriber);
+    this.impl.storage.gatekeepers.subscribe(gatekeeperPolicySubscriber);
 
     callback(metadata).catch(unsubscribe);
 
@@ -9220,7 +9474,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.impl.ctx.blockConcurrencyWhile(async () => {
       await this.#owner.deleteGadget(this.impl.ctx.id.toString());
       await this.impl.ctx.storage.deleteAll();
-      this.impl.scheduleRevocationRestart();
+      this.impl.scheduleRevocationRestart(false);
       this.impl.ownerId = undefined;
     });
 
@@ -10284,7 +10538,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return null;
     }
 
-    if (this.impl.storage.prohibitAllSharing.get()) {
+    if (this.impl.isWorkspaceSharingProhibited()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
           "shared.");
@@ -10304,13 +10558,34 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async removeCollaborator(profileId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
-    let affected = (await this.impl.getSharingManager())
-        .removeCollaborator(this.#sharingCaller(), profileId, keepUsers);
-    // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
-    await this.impl.tearDownLostObservers(affected);
-    // Likewise update or remove their cached workspace listing. Must happen before the restart
-    // below, which destroys this DO.
-    await this.impl.refreshAffectedCollaboratorListings(affected);
+    let sharing = await this.impl.getSharingManager();
+    let caller = this.#sharingCaller();
+    sharing.assertCanRemoveCollaborator(caller, profileId);
+    this.impl.beginRevocation();
+    let affected: AffectedCollaborator[];
+    try {
+      affected = sharing.removeCollaborator(caller, profileId, keepUsers);
+    } catch (error) {
+      this.impl.finishRevocationRequiringRestart();
+      this.impl.scheduleRevocationRestart();
+      throw error;
+    }
+    if (affected.length === 0) {
+      this.impl.finishRevocationWithoutEffect();
+      return affected;
+    }
+    this.impl.finishRevocationRequiringRestart();
+    // Start both best-effort cleanup RPCs, then gate inputs before awaiting either response.
+    try {
+      await runRevocationCleanup({
+        tearDownObservers: () => this.impl.tearDownLostObservers(affected),
+        refreshListings: () => this.impl.refreshAffectedCollaboratorListings(affected),
+        scheduleRestart: () => this.impl.scheduleRevocationRestart(),
+      });
+    } catch (error) {
+      this.impl.scheduleRevocationRestart();
+      throw error;
+    }
     // Only restart if someone actually lost access or was downgraded (kept users are already
     // excluded). A no-op removal -- e.g. severing a share-link edge nobody relied on -- shouldn't
     // disconnect everyone.
@@ -10326,12 +10601,34 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async revokeShareLink(linkId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
-    let affected = (await this.impl.getSharingManager())
-        .revokeShareLink(this.#sharingCaller(), linkId, keepUsers);
-    // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
-    await this.impl.tearDownLostObservers(affected);
-    // Likewise update or remove their cached workspace listing (see removeCollaborator).
-    await this.impl.refreshAffectedCollaboratorListings(affected);
+    let sharing = await this.impl.getSharingManager();
+    let caller = this.#sharingCaller();
+    sharing.assertCanRevokeShareLink(caller, linkId);
+    this.impl.beginRevocation();
+    let affected: AffectedCollaborator[];
+    try {
+      affected = sharing.revokeShareLink(caller, linkId, keepUsers);
+    } catch (error) {
+      this.impl.finishRevocationRequiringRestart();
+      this.impl.scheduleRevocationRestart();
+      throw error;
+    }
+    if (affected.length === 0) {
+      this.impl.finishRevocationWithoutEffect();
+      return affected;
+    }
+    this.impl.finishRevocationRequiringRestart();
+    // See removeCollaborator(): start cleanup RPCs, then gate inputs before awaiting responses.
+    try {
+      await runRevocationCleanup({
+        tearDownObservers: () => this.impl.tearDownLostObservers(affected),
+        refreshListings: () => this.impl.refreshAffectedCollaboratorListings(affected),
+        scheduleRestart: () => this.impl.scheduleRevocationRestart(),
+      });
+    } catch (error) {
+      this.impl.scheduleRevocationRestart();
+      throw error;
+    }
     // Only restart if someone actually lost access or was downgraded (see removeCollaborator).
     if (affected.length > 0) {
       this.impl.scheduleRevocationRestart();
@@ -10343,7 +10640,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async createShareLink(role: CollaboratorRole, note?: string)
       : Promise<{ key: string; linkId: string }> {
-    if (this.impl.storage.prohibitAllSharing.get()) {
+    if (this.impl.isWorkspaceSharingProhibited()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
           "shared.");
@@ -10354,7 +10651,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newShareLinkKey(linkId: string): Promise<{ key: string }> {
-    if (this.impl.storage.prohibitAllSharing.get()) {
+    if (this.impl.isWorkspaceSharingProhibited()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
           "shared.");
@@ -11033,6 +11330,9 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   #getRecord(): GatekeeperRecord {
     let record = this.impl.storage.gatekeepers.get(this.id);
     if (!record) throw new Error("No such gatekeeper.");
+    if (record.initializing) {
+      throw new Error("This workspace connection is still initializing. Please try again.");
+    }
     return record;
   }
 
@@ -11049,12 +11349,24 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   }
 
   async describe(): Promise<ResourceDescription> {
+    this.#getRecord();
     return this.facet.describe();
   }
 
   async openSession(): Promise<RpcStub<Session>> {
+    await this.impl.assertGatekeeperObserverReadiness(this.id);
     // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
-    return this.facet.startSession(new ApprovalQueueImpl(this.impl, this.id, this.caller));
+    let session: RpcStub<Session> = await this.facet.startSession(
+        new ApprovalQueueImpl(this.impl, this.id, this.caller));
+    try {
+      // The remote start may yield. Recheck immediately before handing the capability to caller.
+      await this.impl.assertGatekeeperObserverReadiness(this.id);
+    } catch (error) {
+      // @ts-expect-error Cap'n Web's cyclic generic expands beyond TypeScript's union limit.
+      (session as { [Symbol.dispose](): void })[Symbol.dispose]();
+      throw error;
+    }
+    return session;
   }
 
   async getCreationSpec(): Promise<GatekeeperCreationSpec> {

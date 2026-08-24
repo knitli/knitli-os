@@ -86,9 +86,40 @@ describe("AI executor real Worker RPC boundary", () => {
           implementsRevert: false,
         },
       }],
-      observations: [{ prohibitAllSharing: true }],
+      locked: false,
+    });
+  });
+
+  it("allows a second private executor run after the first result is read", async () => {
+    const hooks = testEnv.TEST_HOOKS.getByName("session-repeated-use");
+    const session = (await hooks.openSession()) as BoundarySession;
+    const first = await session.submit({
+      messages: [{ role: "user", content: "first private prompt" }],
+      maxOutputTokens: 64,
+    });
+    await expect(session.getResult(first.runId)).resolves.toMatchObject({
+      runId: 1,
+      status: "completed",
     });
 
+    const second = await session.submit({
+      messages: [{ role: "user", content: "second private prompt" }],
+      maxOutputTokens: 32,
+    });
+    await expect(session.getResult(second.runId)).resolves.toMatchObject({
+      runId: 2,
+      status: "completed",
+    });
+
+    expect(await testEnv.RUNTIME_CONTROL.calls()).toHaveLength(2);
+    const queue = await hooks.queueState();
+    expect(queue.actions).toHaveLength(2);
+    expect(queue.locked).toBe(false);
+    expect(queue.observations).toHaveLength(2);
+    for (const observation of queue.observations) {
+      expect(observation).toHaveProperty("prohibitWorkspaceSharing", true);
+      expect(observation).not.toHaveProperty("prohibitAllSharing");
+    }
   });
 
   it("crosses the real vendor account resource facet and session boundary", async () => {
@@ -116,6 +147,7 @@ describe("AI executor real Worker RPC boundary", () => {
       url: PROFILE_URL,
       title: "Workerd fake",
       snippet: "openrouter · fake/model",
+      observerPolicy: "owner-only",
       suggestedBindingName: "AI_EXECUTOR",
       tsType: "AiExecutor",
     });

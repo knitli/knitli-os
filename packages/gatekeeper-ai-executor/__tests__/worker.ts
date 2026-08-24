@@ -92,25 +92,40 @@ export class FakeInferenceRuntime extends WorkerEntrypoint {
 type QueueState = {
   actions: Array<{ id: number; description: ActionDescription }>;
   observations: ObservationDescription[];
+  locked: boolean;
   disposed: number;
 };
 
 type GatekeeperRpc = Fetcher<AiExecutorGatekeeperImpl>;
 
 class TestApprovalQueue extends RpcTarget {
-  readonly state: QueueState = { actions: [], observations: [], disposed: 0 };
+  readonly state: QueueState = {
+    actions: [],
+    observations: [],
+    locked: false,
+    disposed: 0,
+  };
 
   constructor(private readonly gatekeeper: GatekeeperRpc) {
     super();
   }
 
-  async submitAction(id: number, description: ActionDescription): Promise<void> {
+  async submitAction(
+    id: number,
+    description: ActionDescription,
+  ): Promise<void> {
+    if (this.state.locked) {
+      throw new Error("Test queue is locked against subsequent actions.");
+    }
     this.state.actions.push({ id, description });
     await this.gatekeeper.applyAction(id);
   }
 
   async authorizeObservation(description: ObservationDescription): Promise<void> {
     this.state.observations.push(description);
+    if (description.prohibitAllSharing === true) {
+      this.state.locked = true;
+    }
   }
 
   [Symbol.dispose](): void {
@@ -151,11 +166,14 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   }
 
   async queueState(): Promise<QueueState> {
-    return structuredClone(this.#queue?.state ?? {
-      actions: [],
-      observations: [],
-      disposed: 0,
-    });
+    return structuredClone(
+      this.#queue?.state ?? {
+        actions: [],
+        observations: [],
+        locked: false,
+        disposed: 0,
+      },
+    );
   }
 
   async vendorDescription(): Promise<VendorDescription> {

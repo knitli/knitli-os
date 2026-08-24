@@ -451,14 +451,15 @@ describe("AI executor deferred session", () => {
 
     expect(returned).toBe(false);
     expect(events[0]).toContain("authorize:");
-    expect(events[0]).toContain('"prohibitAllSharing":true');
+    expect(events[0]).toContain('"prohibitWorkspaceSharing":true');
+    expect(events[0]).not.toContain("prohibitAllSharing");
     expect(events[0]).not.toContain("answer");
     release();
     await expect(result).resolves.toMatchObject({ status: "completed" });
     expect(events.slice(-2)).toEqual(["authorized", "returned"]);
   });
 
-  it("marks completed-result observation as private-only", async () => {
+  it("permanently prevents workspace sharing after reading a completed private result", async () => {
     let observation: Record<string, unknown> | undefined;
     const queue = queueFake({
       authorizeObservation: async (description: Record<string, unknown>) => {
@@ -471,7 +472,8 @@ describe("AI executor deferred session", () => {
 
     await session.getResult(runId);
 
-    expect(observation).toMatchObject({ prohibitAllSharing: true });
+    expect(observation).toHaveProperty("prohibitWorkspaceSharing", true);
+    expect(observation).not.toHaveProperty("prohibitAllSharing");
   });
 
   it("retains only a sanitized failure and removes the staged request", async () => {
@@ -1032,6 +1034,179 @@ describe("AI executor deferred session", () => {
       result: { text: "answer", finishReason: "stop" },
     });
     expect(JSON.stringify([...kv.values])).not.toMatch(/orphaned private prompt/);
+  });
+
+  it("retains a low-id run that settles after 100 later terminal transitions", async () => {
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const runtime = runtimeFake(async (_profileId, request) => {
+      const prompt = request.messages[0]?.content;
+      if (prompt === "delayed first prompt") {
+        firstStarted();
+        await blocked;
+      }
+      if (prompt?.startsWith("failed later prompt")) {
+        throw Object.assign(new Error("provider body"), {
+          error: { code: "provider_unavailable", retryable: true },
+        });
+      }
+      return { text: prompt ?? "answer", finishReason: "stop" };
+    });
+    const { controller, kv, session, store } = harness({ runtime });
+    const first = await session.submit({
+      messages: [{ role: "user", content: "delayed first prompt" }],
+    });
+    const firstApply = controller.applyAction(first.runId);
+    await started;
+
+    for (let index = 0; index < 100; index++) {
+      const later = await session.submit({
+        messages: [
+          {
+            role: "user",
+            content:
+              index % 3 === 1
+                ? `failed later prompt ${index}`
+                : `later prompt ${index}`,
+          },
+        ],
+      });
+      if (index % 3 === 0) {
+        controller.rejectAction(later.runId);
+      } else if (index % 3 === 1) {
+        await expect(controller.applyAction(later.runId)).rejects.toThrow(
+          "provider is unavailable",
+        );
+      } else {
+        await controller.applyAction(later.runId);
+      }
+    }
+
+    releaseFirst();
+    await firstApply;
+
+    expect(store.get(1)).toEqual({
+      runId: 1,
+      status: "completed",
+      result: { text: "delayed first prompt", finishReason: "stop" },
+    });
+    expect(store.get(2)).toBeUndefined();
+    expect(store.get(101)).toMatchObject({ runId: 101, status: "rejected" });
+
+    const reactivated = new AiExecutorRunStore(kv);
+    expect(reactivated.get(1)).toEqual(store.get(1));
+    expect(reactivated.get(2)).toBeUndefined();
+  });
+
+  it("settles interrupted runs after legacy terminals when constructor repair prunes", () => {
+    const kv = new FakeKv();
+    kv.put("ai-run:record:1", { runId: 1, status: "running" });
+    kv.put("ai-run:request:1", REQUEST);
+    for (let runId = 2; runId <= 101; runId++) {
+      kv.put(`ai-run:record:${runId}`, {
+        runId,
+        status: "completed",
+        result: { text: `terminal ${runId}`, finishReason: "stop" },
+      });
+    }
+    kv.put("ai-run:next-id", 102);
+
+    const store = new AiExecutorRunStore(kv);
+
+    expect(store.get(1)).toEqual({
+      runId: 1,
+      status: "failed",
+      error: OUTCOME_UNKNOWN,
+    });
+    expect(store.get(2)).toBeUndefined();
+    expect(store.get(101)).toMatchObject({ runId: 101, status: "completed" });
+    expect(store.getStagedRequest(1)).toBeUndefined();
+  });
+
+  it("advances the durable settlement sequence before writing a terminal record", () => {
+    const kv = new FakeKv();
+    const store = new AiExecutorRunStore(kv);
+    const first = store.stage(REQUEST);
+    store.markSubmitted(first.runId);
+    store.claim(first.runId);
+    kv.failNextPutWhere(
+      (key, value) =>
+        key === "ai-run:record:1" &&
+        typeof value === "object" &&
+        value !== null &&
+        (value as { status?: unknown }).status === "completed",
+    );
+
+    expect(() =>
+      store.complete(first.runId, {
+        text: "completion whose write fails",
+        finishReason: "stop",
+      }),
+    ).toThrow("injected durable storage put failure");
+
+    expect(kv.get("ai-run:next-settlement-sequence")).toBe(2);
+    store.fail(first.runId, OUTCOME_UNKNOWN);
+    const second = store.stage(REQUEST);
+    store.markSubmitted(second.runId);
+    store.reject(second.runId);
+
+    expect(kv.get("ai-run:record:1")).toMatchObject({
+      status: "failed",
+      settlementSequence: 2,
+    });
+    expect(kv.get("ai-run:record:2")).toMatchObject({
+      status: "rejected",
+      settlementSequence: 3,
+    });
+    expect(kv.get("ai-run:next-settlement-sequence")).toBe(4);
+  });
+
+  it("rejects settlement-sequence allocator rollback without changing a pending run", () => {
+    const kv = new FakeKv();
+    const store = new AiExecutorRunStore(kv);
+    const first = store.stage(REQUEST);
+    store.markSubmitted(first.runId);
+    store.reject(first.runId);
+    const second = store.stage(REQUEST);
+    store.markSubmitted(second.runId);
+    kv.put("ai-run:next-settlement-sequence", 1);
+    kv.resetMutations();
+
+    expect(() => store.reject(second.runId)).toThrow(
+      /invalid.*terminal settlement sequence allocator/i,
+    );
+
+    expect(kv.mutations).toEqual([]);
+    expect(store.get(second.runId)).toEqual({
+      runId: second.runId,
+      status: "pending",
+    });
+    expect(store.getStagedRequest(second.runId)).toEqual(REQUEST);
+  });
+
+  it("validates persisted settlement sequence uniqueness before constructor repair", () => {
+    const kv = new FakeKv();
+    for (let runId = 1; runId <= 2; runId++) {
+      kv.put(`ai-run:record:${runId}`, {
+        runId,
+        status: "rejected",
+        settlementSequence: 1,
+      });
+    }
+    kv.put("ai-run:next-id", 3);
+    kv.put("ai-run:next-settlement-sequence", 2);
+    kv.resetMutations();
+
+    expect(() => new AiExecutorRunStore(kv)).toThrow(
+      /invalid persisted AI inference run state/i,
+    );
+    expect(kv.mutations).toEqual([]);
   });
 
   it("fails closed before staging when the run-id space is exhausted", async () => {

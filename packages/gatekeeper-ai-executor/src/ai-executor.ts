@@ -61,6 +61,7 @@ export class AiExecutorGatekeeperImpl extends DurableObject<
       url: canonicalProfileUrl(profile.id),
       title: profile.label,
       snippet: `${profile.provider} · ${profile.model}`,
+      observerPolicy: "owner-only",
       suggestedBindingName: "AI_EXECUTOR",
       tsType: "AiExecutor",
     };

@@ -102,8 +102,10 @@ export {
 } from "./protocol.js";
 export { GatekeeperVendor, AiExecutorAccount, AiExecutorVerifier } from "./vendor.js";
 
-// Keep Wrangler in ES-module format for the RPC entrypoints and Durable Object migration. This
-// Worker has no HTTP API: the handler deliberately ignores every request and exposes no capability.
+/**
+ * Keeps Wrangler in ES-module format for the RPC entrypoints and Durable Object migration.
+ * This Worker has no HTTP API: the handler ignores every request and exposes no capability.
+ */
 export default {
   fetch(): Response {
     return new Response("Not Found", { status: 404 });

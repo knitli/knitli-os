@@ -20,7 +20,8 @@
     "types:check": "pnpm run build",
     "types:scripts": "tsc -p scripts/tsconfig.json",
     "lint": "pnpm run lint:check && pnpm run types:scripts && pnpm run types:check",
-    "types:generate": "node scripts/generate-worker-types.ts"
+    "types:generate": "node scripts/generate-worker-types.ts",
+    "types:generated": "node scripts/generate-worker-types.ts --check --package gatekeeper-ai-executor"
   },
   "devDependencies": {
     "@types/node": "26.1.0",

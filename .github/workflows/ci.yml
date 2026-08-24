@@ -49,6 +49,8 @@ jobs:
 
       - name: Type-check scripts/
         run: pnpm types:scripts
+      - name: Check tracked AI Executor Worker types
+        run: pnpm types:generated
 
   test:
     name: Build and test

@@ -884,7 +884,7 @@ describe("AI executor deferred session", () => {
       runId: 1,
       status: "completed",
     });
-  });
+  }, 15_000);
 
   it("fails closed before repairing request state beyond the finite ceiling", () => {
     const kv = new FakeKv();

@@ -18,6 +18,45 @@
   "manifestVersion": 1,
   "releaseId": "r000000-fixture",
   "workers": {
+    "gatekeeper-ai-executor": {
+      "bindings": [],
+      "compatibilityDate": "2026-02-02",
+      "compatibilityFlags": [
+        "allow_irrevocable_stub_storage"
+      ],
+      "inputs": [],
+      "installable": false,
+      "kind": "gatekeeper",
+      "mainModule": "ai-executor.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "AiExecutorGatekeeperImpl"
+          ],
+          "tag": "v0"
+        }
+      ],
+      "modules": [
+        {
+          "name": "ai-executor.js",
+          "r2Key": "blobs/modules/08fc560072c251e7f07ca9820135d11e115c7e80317df35dfb8ac99621bf0483",
+          "sha256": "08fc560072c251e7f07ca9820135d11e115c7e80317df35dfb8ac99621bf0483",
+          "size": 64,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "shortName": "ai-executor",
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/ai-executor"
+      }
+    },
     "gatekeeper-cloudflare": {
       "bindings": [
         {

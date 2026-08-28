@@ -248,6 +248,7 @@ const ARTIFACTS_CUT_ALLOWED = new Set(["gatekeeper-context"]);
 // Installable gatekeepers that do NOT take third-party OAuth app credentials; everyone else
 // defaults to CLIENT_ID/CLIENT_SECRET secret inputs (overridable via deploy-inputs.json).
 const NO_DEFAULT_CRED_INPUTS = new Set([
+  "gatekeeper-ai-executor", // deployment-injected runtime binding; no OAuth credentials
   "gatekeeper-context",       // no third-party service; uses its own storage
   "gatekeeper-homeassistant", // users connect their own Home Assistant URL + token in-app
   "gatekeeper-scheduler",     // auto-provisioned; no third-party OAuth app
@@ -257,7 +258,7 @@ const NO_DEFAULT_CRED_INPUTS = new Set([
 
 // Not installable on customer instances: Email Routing needs a zone, which workers.dev-hosted
 // instances don't have. The bundle still ships in the release so the entry stays auditable.
-const NOT_INSTALLABLE = new Set(["gatekeeper-email"]);
+const NOT_INSTALLABLE = new Set(["gatekeeper-ai-executor", "gatekeeper-email"]);
 
 // Ambient gatekeepers the deploy service installs on every fresh core deploy, server-side with
 // no user interaction. Members must take no inputs of any kind (enforced below): a preinstall

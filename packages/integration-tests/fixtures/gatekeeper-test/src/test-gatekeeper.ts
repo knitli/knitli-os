@@ -20,26 +20,49 @@
 // is one control knob here, `allow`, and the reason string is what carries the distinction to the
 // user. Tests exercise both narratives by choosing reason text.
 
-import { DurableObject, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
+import {
+  DurableObject,
+  RpcStub as NativeRpcStub,
+  RpcTarget,
+  WorkerEntrypoint,
+} from "cloudflare:workers";
+import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
 import type {
-  AccountDescription, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback,
-  GatekeeperUser, GatekeeperUserVerifier, ResourceDescription, ResourceConfiguratorFrame,
-  SupportedResource, VendorDescription,
+  AccountDescription,
+  ActionKind,
+  ApprovalQueue,
+  Gatekeeper,
+  GatekeeperConnectCallback,
+  GatekeeperUser,
+  GatekeeperUserVerifier,
+  HookController,
+  HookInitiator,
+  HookTargetMetadata,
+  ResourceConfiguratorFrame,
+  ResourceDescription,
+  SupportedResource,
+  VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 
 // Nothing but classes and the default handler may be exported from a Worker entry module: workerd
 // treats every named export as an entrypoint and rejects anything that isn't one.
 const VENDOR_HOST = "gadgets-test.example";
 
-const SUPPORTED_RESOURCES: SupportedResource[] = [{
-  urlPattern: `https://${VENDOR_HOST}/things/*`,
-  title: "Test Thing",
-  description: "A resource that exists only so tests can bind something.",
-}];
+const SUPPORTED_RESOURCES: SupportedResource[] = [
+  {
+    urlPattern: `https://${VENDOR_HOST}/things/*`,
+    title: "Test Thing",
+    description: "A resource that exists only so tests can bind something.",
+  },
+];
 
 const TYPES_CODE = `
 /** A stand-in resource. It has no operations; nothing here is ever called. */
-interface TestThing {}
+interface TestThing {
+  observe(): Promise<void>;
+  act(): Promise<void>;
+  bindHook(): Promise<void>;
+}
 `;
 
 // A 1x1 transparent GIF, so nothing here reaches for a network asset.
@@ -56,23 +79,130 @@ const AVATAR = {
 
 type VerifyOutcome = { allow: true } | { allow: false; reason: string };
 
+/**
+ * A deliberately tiny in-process rendezvous for race tests. The tests arm a unique key, wait until
+ * the fixture reports that production has reached that exact await point, mutate the workspace, and
+ * then release it. Keeping this here makes the overlap real: the paused operation is a normal
+ * Gatekeeper RPC from the real Overseer, not a test-side mock of an internal method.
+ */
+type Barrier = {
+  arrivals: number;
+  released: boolean;
+  waiters: Array<() => void>;
+};
+
 export class TestControl extends DurableObject<Cloudflare.Env> {
+  #barriers = new Map<string, Barrier>();
+
+  armBarrier(key: string): void {
+    const previous = this.#barriers.get(key);
+    if (previous?.waiters.length) {
+      throw new Error(
+        `Cannot re-arm barrier ${key} while waiters are still blocked.`,
+      );
+    }
+    this.#barriers.set(key, { arrivals: 0, released: false, waiters: [] });
+  }
+
+  getBarrierArrivals(key: string): number {
+    return this.#barriers.get(key)?.arrivals ?? 0;
+  }
+
+  async waitAtBarrier(key: string): Promise<void> {
+    const barrier = this.#barriers.get(key);
+    if (!barrier) return;
+    barrier.arrivals++;
+    if (barrier.released) return;
+    await new Promise<void>((resolve) => barrier.waiters.push(resolve));
+  }
+
+  releaseBarrier(key: string): void {
+    const barrier = this.#barriers.get(key);
+    if (!barrier) throw new Error(`Cannot release unarmed barrier ${key}.`);
+    barrier.released = true;
+    for (const resolve of barrier.waiters.splice(0)) resolve();
+  }
+
   setVerifyOutcome(label: string, outcome: VerifyOutcome): void {
     this.ctx.storage.kv.put(`outcome:${label}`, outcome);
   }
 
   getVerifyOutcome(label: string): VerifyOutcome {
     // Default to admitting: a collaborator's first open has to be able to succeed.
-    return this.ctx.storage.kv.get<VerifyOutcome>(`outcome:${label}`) ?? { allow: true };
+    return (
+      this.ctx.storage.kv.get<VerifyOutcome>(`outcome:${label}`) ?? {
+        allow: true,
+      }
+    );
   }
 
   recordAmbientVerification(label: string): void {
     const key = `ambient-verifications:${label}`;
-    this.ctx.storage.kv.put(key, (this.ctx.storage.kv.get<number>(key) ?? 0) + 1);
+    this.ctx.storage.kv.put(
+      key,
+      (this.ctx.storage.kv.get<number>(key) ?? 0) + 1,
+    );
   }
 
   getAmbientVerificationCount(label: string): number {
-    return this.ctx.storage.kv.get<number>(`ambient-verifications:${label}`) ?? 0;
+    return (
+      this.ctx.storage.kv.get<number>(`ambient-verifications:${label}`) ?? 0
+    );
+  }
+
+  recordObserver(label: string, observerId: string): void {
+    this.ctx.storage.kv.put(`observer-id:${label}:${observerId}`, true);
+  }
+
+  getObserverIds(label: string): string[] {
+    return [
+      ...this.ctx.storage.kv.list<boolean>({ prefix: `observer-id:${label}:` }),
+    ]
+      .map(([key]) => key.slice(`observer-id:${label}:`.length))
+      .toSorted();
+  }
+
+  recordSessionStarted(resourceUrl: string): void {
+    const key = `sessions-started:${resourceUrl}`;
+    this.ctx.storage.kv.put(
+      key,
+      (this.ctx.storage.kv.get<number>(key) ?? 0) + 1,
+    );
+  }
+
+  recordSessionDisposed(resourceUrl: string): void {
+    const key = `sessions-disposed:${resourceUrl}`;
+    this.ctx.storage.kv.put(
+      key,
+      (this.ctx.storage.kv.get<number>(key) ?? 0) + 1,
+    );
+  }
+
+  getSessionCounts(resourceUrl: string): { started: number; disposed: number } {
+    return {
+      started:
+        this.ctx.storage.kv.get<number>(`sessions-started:${resourceUrl}`) ?? 0,
+      disposed:
+        this.ctx.storage.kv.get<number>(`sessions-disposed:${resourceUrl}`) ??
+        0,
+    };
+  }
+
+  setHookInitiator(
+    key: string,
+    initiator: Fetcher<HookInitiator<RpcTarget>>,
+  ): void {
+    this.ctx.storage.kv.put(`hook-initiator:${key}`, initiator);
+  }
+
+  async startHook(key: string): Promise<void> {
+    const initiator = this.ctx.storage.kv.get<
+      Fetcher<HookInitiator<RpcTarget>>
+    >(`hook-initiator:${key}`);
+    if (!initiator) throw new Error("Test hook is not enabled.");
+    const started = await initiator.startHook();
+    started.callback[Symbol.dispose]?.();
+    started.approvalQueue[Symbol.dispose]?.();
   }
 }
 
@@ -80,6 +210,12 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
 // here carry their real prop and return types with no casts.
 function control(exports: Cloudflare.Exports): DurableObjectStub<TestControl> {
   return exports.TestControl.getByName("control");
+}
+
+function resourceName(resourceUrl: string): string {
+  return decodeURIComponent(
+    new URL(resourceUrl).pathname.split("/").at(-1) ?? "",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -122,8 +258,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
    * Required by the interface but unreachable: autoProvisionsAccount means the Workshop mints
    * accounts through createAccount() and never offers a connect flow.
    */
-  async connectAccount(_callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
-    throw new Error("The test gatekeeper auto-provisions accounts; it has no connect flow.");
+  async connectAccount(
+    _callback: Fetcher<GatekeeperConnectCallback>,
+  ): Promise<{ url: string }> {
+    throw new Error(
+      "The test gatekeeper auto-provisions accounts; it has no connect flow.",
+    );
   }
 }
 
@@ -131,7 +271,9 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
 // Account
 
 export class TestAccount
-    extends WorkerEntrypoint<Cloudflare.Env, AccountProps> implements GatekeeperUser {
+  extends WorkerEntrypoint<Cloudflare.Env, AccountProps>
+  implements GatekeeperUser
+{
   async describe(): Promise<AccountDescription> {
     return {
       displayName: this.ctx.props.label.split("@")[0],
@@ -142,9 +284,15 @@ export class TestAccount
     };
   }
 
-  async getSingletonGatekeeperClass(): Promise<DurableObjectClass<Gatekeeper<TestSession>>> {
+  async getSingletonGatekeeperClass(): Promise<
+    DurableObjectClass<Gatekeeper<TestSession>>
+  > {
     return this.ctx.exports.TestGatekeeper({
-      props: { label: this.ctx.props.label, resourceUrl: "test://ambient", ambient: true },
+      props: {
+        label: this.ctx.props.label,
+        resourceUrl: "test://ambient",
+        ambient: true,
+      },
     });
   }
 
@@ -161,7 +309,10 @@ export class TestAccount
     resource: SupportedResource;
   }> {
     const parsed = new URL(url);
-    if (parsed.host !== VENDOR_HOST || !parsed.pathname.startsWith("/things/")) {
+    if (
+      parsed.host !== VENDOR_HOST ||
+      !parsed.pathname.startsWith("/things/")
+    ) {
       throw new Error(`Not a test-gatekeeper resource URL: ${url}`);
     }
     return {
@@ -177,7 +328,9 @@ export class TestAccount
     return this.ctx.exports.TestVerifier({ props: this.ctx.props });
   }
 
-  async ensureResources(_resourceUrlPatterns: string[]): Promise<{ url?: string }> {
+  async ensureResources(
+    _resourceUrlPatterns: string[],
+  ): Promise<{ url?: string }> {
     return {};
   }
 
@@ -187,8 +340,12 @@ export class TestAccount
 
   async revoke(): Promise<void> {}
 
-  startResourceConfigurator(_resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
-    throw new Error("The test gatekeeper has no resource configurator; bind a URL directly.");
+  startResourceConfigurator(
+    _resourceUrlPattern: string,
+  ): Promise<ResourceConfiguratorFrame> {
+    throw new Error(
+      "The test gatekeeper has no resource configurator; bind a URL directly.",
+    );
   }
 
   reconnect(): Promise<{ url: string }> {
@@ -208,7 +365,9 @@ export interface TestVerifierApi extends GatekeeperUserVerifier {
 }
 
 export class TestVerifier
-    extends WorkerEntrypoint<Cloudflare.Env, AccountProps> implements TestVerifierApi {
+  extends WorkerEntrypoint<Cloudflare.Env, AccountProps>
+  implements TestVerifierApi
+{
   async identify(): Promise<string> {
     return this.ctx.props.label;
   }
@@ -217,11 +376,79 @@ export class TestVerifier
 // ---------------------------------------------------------------------------
 // Gatekeeper (one per bound resource, running as a facet under the gadget's Overseer)
 
-/** No operations: these tests never open a gadget's session, only verify observers. */
-export type TestSession = Record<string, never>;
+export interface TestSession extends RpcTarget {
+  observe(): Promise<void>;
+  act(): Promise<void>;
+  bindHook(): Promise<void>;
+}
+
+class TestSessionImpl extends RpcTarget implements TestSession {
+  constructor(
+    private approvalQueue: NativeRpcStub<ApprovalQueue>,
+    private controllerFactory: () => Fetcher<HookController<RpcTarget>>,
+    private callbackFactory: () => NativeRpcStub<RpcTarget>,
+    private onDispose: () => void,
+  ) {
+    super();
+  }
+
+  observe(): Promise<void> {
+    return this.approvalQueue.authorizeObservation({
+      title: "Test observation",
+      description: "Records a fixture observation.",
+    });
+  }
+
+  act(): Promise<void> {
+    return this.approvalQueue.submitAction(1, {
+      title: "Test action",
+      description: "Records a fixture action.",
+      implementsRevert: false,
+    });
+  }
+
+  bindHook(): Promise<void> {
+    return this.approvalQueue.bindHook(
+      this.controllerFactory(),
+      this.callbackFactory(),
+      {
+        title: "Test hook",
+        description: "Records a fixture hook.",
+      },
+    );
+  }
+
+  [Symbol.dispose](): void {
+    this.approvalQueue[Symbol.dispose]();
+    this.onDispose();
+  }
+}
+
+export class TestHookCallback extends WorkerEntrypoint<Cloudflare.Env> {
+  async run(): Promise<void> {}
+}
+
+export class TestHookController
+  extends WorkerEntrypoint<Cloudflare.Env, { key: string }>
+  implements HookController<RpcTarget>
+{
+  async enable(
+    initiator: Fetcher<HookInitiator<RpcTarget>>,
+    _target: HookTargetMetadata,
+  ): Promise<void> {
+    await control(this.ctx.exports).setHookInitiator(
+      this.ctx.props.key,
+      initiator,
+    );
+  }
+
+  async disable(): Promise<void> {}
+}
 
 export class TestGatekeeper
-    extends DurableObject<Cloudflare.Env, BindingProps> implements Gatekeeper<TestSession> {
+  extends DurableObject<Cloudflare.Env, BindingProps>
+  implements Gatekeeper<TestSession>
+{
   async describe(): Promise<ResourceDescription> {
     if (this.ctx.props.ambient) {
       return {
@@ -232,12 +459,20 @@ export class TestGatekeeper
         tsType: "TestThing",
       };
     }
-    const name = decodeURIComponent(new URL(this.ctx.props.resourceUrl).pathname.split("/").pop()!);
+    const name = resourceName(this.ctx.props.resourceUrl);
+    if (name.includes("describe-barrier")) {
+      await control(this.ctx.exports).waitAtBarrier(
+        `describe:${this.ctx.props.resourceUrl}`,
+      );
+    }
     return {
       url: this.ctx.props.resourceUrl,
       // Distinct per binding, so a message covering two failing bindings names both.
       title: `Test Thing ${name}`,
       snippet: `The test resource ${name}.`,
+      ...(name.startsWith("owner-only")
+        ? { observerPolicy: "owner-only" as const }
+        : {}),
       suggestedBindingName: "TEST_THING",
       tsType: "TestThing",
     };
@@ -251,8 +486,35 @@ export class TestGatekeeper
     return [];
   }
 
-  async startSession(_approvalQueue: RpcStub<ApprovalQueue>): Promise<TestSession> {
-    return {};
+  async startSession(
+    approvalQueue: NativeRpcStub<ApprovalQueue>,
+  ): Promise<TestSession> {
+    const name = resourceName(this.ctx.props.resourceUrl);
+    if (name.includes("start-session-barrier")) {
+      await control(this.ctx.exports).waitAtBarrier(
+        `start-session:${this.ctx.props.resourceUrl}`,
+      );
+    }
+    await control(this.ctx.exports).recordSessionStarted(
+      this.ctx.props.resourceUrl,
+    );
+    return new TestSessionImpl(
+      approvalQueue.dup(),
+      () =>
+        this.ctx.exports.TestHookController({
+          props: { key: this.ctx.props.resourceUrl },
+        }),
+      () =>
+        this.ctx.exports.TestHookCallback({
+          props: {},
+        }) as unknown as NativeRpcStub<RpcTarget>,
+      () =>
+        this.ctx.waitUntil(
+          control(this.ctx.exports).recordSessionDisposed(
+            this.ctx.props.resourceUrl,
+          ),
+        ),
+    );
   }
 
   /**
@@ -264,6 +526,13 @@ export class TestGatekeeper
    */
   async addObserver(id: string, user: Fetcher<TestVerifierApi>): Promise<void> {
     const label = await user.identify();
+    const name = resourceName(this.ctx.props.resourceUrl);
+    if (name.includes("add-observer-barrier")) {
+      await control(this.ctx.exports).waitAtBarrier(
+        `add-observer:${this.ctx.props.resourceUrl}`,
+      );
+    }
+    await control(this.ctx.exports).recordObserver(label, id);
     if (this.ctx.props.ambient) {
       await control(this.ctx.exports).recordAmbientVerification(label);
       this.ctx.storage.kv.put(`observer:${id}`, label);
@@ -275,11 +544,17 @@ export class TestGatekeeper
   }
 
   async removeObserver(id: string): Promise<void> {
+    const name = resourceName(this.ctx.props.resourceUrl);
+    if (name.includes("remove-observer-barrier")) {
+      await control(this.ctx.exports).waitAtBarrier(
+        `remove-observer:${this.ctx.props.resourceUrl}`,
+      );
+    }
     this.ctx.storage.kv.delete(`observer:${id}`);
   }
 
   async applyAction(_action: number): Promise<void> {
-    throw new Error("The test gatekeeper submits no actions.");
+    // The fixture session submits one no-op action so apply-time readiness can be tested.
   }
 
   async rejectAction(_action: number): Promise<void> {}
@@ -309,8 +584,16 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+class TestChatGatewayTarget extends RpcTarget implements ChatGatewayRpcTarget {
+  async onGadgetResponse(_response: { text: string }): Promise<void> {}
+}
+
 export default {
-  async fetch(req: Request, _env: Cloudflare.Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(
+    req: Request,
+    env: Cloudflare.Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(req.url);
 
     let body: unknown;
@@ -329,23 +612,142 @@ export default {
     // Body: {"label": "...", "allow": false, "reason": "..."}
     if (url.pathname === "/control/verify-outcome" && req.method === "POST") {
       const { label, allow, reason } = body as Record<string, unknown>;
-      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
-      if (typeof allow !== "boolean") return badRequest("`allow` must be a boolean");
+      if (!isNonEmptyString(label))
+        return badRequest("`label` must be a non-empty string");
+      if (typeof allow !== "boolean")
+        return badRequest("`allow` must be a boolean");
       if (reason !== undefined && typeof reason !== "string") {
         return badRequest("`reason` must be a string when present");
       }
 
       const outcome: VerifyOutcome = allow
         ? { allow: true }
-        : { allow: false, reason: reason ?? "The test gatekeeper refused this account." };
+        : {
+            allow: false,
+            reason: reason ?? "The test gatekeeper refused this account.",
+          };
       await control(ctx.exports).setVerifyOutcome(label, outcome);
       return new Response(null, { status: 204 });
     }
 
-    if (url.pathname === "/control/ambient-verification-count" && req.method === "POST") {
+    if (
+      url.pathname === "/control/ambient-verification-count" &&
+      req.method === "POST"
+    ) {
       const { label } = body as Record<string, unknown>;
-      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
-      return Response.json({ count: await control(ctx.exports).getAmbientVerificationCount(label) });
+      if (!isNonEmptyString(label))
+        return badRequest("`label` must be a non-empty string");
+      return Response.json({
+        count: await control(ctx.exports).getAmbientVerificationCount(label),
+      });
+    }
+
+    if (url.pathname === "/control/observer-ids" && req.method === "POST") {
+      const { label } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label))
+        return badRequest("`label` must be a non-empty string");
+      return Response.json({
+        ids: await control(ctx.exports).getObserverIds(label),
+      });
+    }
+
+    if (url.pathname === "/control/session-counts" && req.method === "POST") {
+      const { resourceUrl } = body as Record<string, unknown>;
+      if (!isNonEmptyString(resourceUrl)) {
+        return badRequest("`resourceUrl` must be a non-empty string");
+      }
+      return Response.json(
+        await control(ctx.exports).getSessionCounts(resourceUrl),
+      );
+    }
+
+    if (url.pathname === "/control/arm-barrier" && req.method === "POST") {
+      const { key } = body as Record<string, unknown>;
+      if (!isNonEmptyString(key))
+        return badRequest("`key` must be a non-empty string");
+      try {
+        await control(ctx.exports).armBarrier(key);
+        return new Response(null, { status: 204 });
+      } catch (error) {
+        return Response.json(
+          { error: error instanceof Error ? error.message : String(error) },
+          { status: 409 },
+        );
+      }
+    }
+
+    if (url.pathname === "/control/barrier-arrivals" && req.method === "POST") {
+      const { key } = body as Record<string, unknown>;
+      if (!isNonEmptyString(key))
+        return badRequest("`key` must be a non-empty string");
+      return Response.json({
+        arrivals: await control(ctx.exports).getBarrierArrivals(key),
+      });
+    }
+
+    if (url.pathname === "/control/release-barrier" && req.method === "POST") {
+      const { key } = body as Record<string, unknown>;
+      if (!isNonEmptyString(key))
+        return badRequest("`key` must be a non-empty string");
+      try {
+        await control(ctx.exports).releaseBarrier(key);
+        return new Response(null, { status: 204 });
+      } catch (error) {
+        return Response.json(
+          { error: error instanceof Error ? error.message : String(error) },
+          { status: 409 },
+        );
+      }
+    }
+
+    if (url.pathname === "/control/start-hook" && req.method === "POST") {
+      const { key } = body as Record<string, unknown>;
+      if (!isNonEmptyString(key))
+        return badRequest("`key` must be a non-empty string");
+      try {
+        await control(ctx.exports).startHook(key);
+        return new Response(null, { status: 204 });
+      } catch (error) {
+        return Response.json(
+          { error: error instanceof Error ? error.message : String(error) },
+          { status: 409 },
+        );
+      }
+    }
+
+    if (
+      url.pathname === "/control/submit-external-message" &&
+      req.method === "POST"
+    ) {
+      const { callerEmail, gadgetKey, gadgetTitle } = body as Record<
+        string,
+        unknown
+      >;
+      if (!isNonEmptyString(callerEmail)) {
+        return badRequest("`callerEmail` must be a non-empty string");
+      }
+      if (!isNonEmptyString(gadgetKey))
+        return badRequest("`gadgetKey` must be a non-empty string");
+      if (!isNonEmptyString(gadgetTitle)) {
+        return badRequest("`gadgetTitle` must be a non-empty string");
+      }
+      const responseTarget = new NativeRpcStub(new TestChatGatewayTarget());
+      try {
+        const result = await env.EXTERNAL_MESSAGE_GATEWAY.submitExternalMessage(
+          {
+            callerEmail,
+            gadgetKey,
+            chatKey: gadgetKey,
+            messageKey: crypto.randomUUID(),
+            gadgetTitle,
+            prompt: "test prompt",
+            chatGatewayRpcTarget: responseTarget,
+          },
+        );
+        return Response.json(result);
+      } finally {
+        responseTarget[Symbol.dispose]();
+      }
     }
 
     // Make this Worker issue a subrequest, so a test can prove that Worker-originated fetches really
@@ -357,7 +759,8 @@ export default {
     // Body: {"url": "..."} -> {"status": number} | {"error": string}
     if (url.pathname === "/control/fetch-probe" && req.method === "POST") {
       const { url: target } = body as Record<string, unknown>;
-      if (!isNonEmptyString(target)) return badRequest("`url` must be a non-empty string");
+      if (!isNonEmptyString(target))
+        return badRequest("`url` must be a non-empty string");
       try {
         return Response.json({ status: (await fetch(target)).status });
       } catch (err) {

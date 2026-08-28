@@ -28,6 +28,10 @@ function makeOverseer(
           },
         },
       },
+      // Hook delivery revalidates observer readiness after the async admin-policy
+      // read. These policy tests do not construct a gatekeeper graph, so retain
+      // their focus by supplying the successful async readiness boundary.
+      assertGatekeeperObserverReadiness: async () => {},
     },
   });
   return overseer;

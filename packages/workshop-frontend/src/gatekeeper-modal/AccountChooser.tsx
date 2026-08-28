@@ -40,6 +40,7 @@ export function AccountChooser({
   reconnectingAccountId,
   requiredResourceUrlPatterns,
   grantingAccountId = null,
+  allowAdditionalAccount = true,
   onSelect,
   onConnect,
   onReconnect,
@@ -54,6 +55,8 @@ export function AccountChooser({
   reconnectingAccountId: number | null
   requiredResourceUrlPatterns?: string[]
   grantingAccountId?: number | null
+  /** Whether an account can be added when this vendor already has one. */
+  allowAdditionalAccount?: boolean
   onSelect: (id: number) => void
   onConnect: () => void
   onReconnect: (id: number) => void
@@ -139,7 +142,7 @@ export function AccountChooser({
           )
         })}
 
-        {(!isEmailMailbox || accounts.length === 0) && (
+        {(!isEmailMailbox || accounts.length === 0) && (accounts.length === 0 || allowAdditionalAccount) && (
           <button
             type="button"
             onClick={onConnect}

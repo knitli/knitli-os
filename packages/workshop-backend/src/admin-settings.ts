@@ -1,6 +1,6 @@
-import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
+import { AI_EXECUTOR_ADMIN_ERROR_CODES, AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AiExecutorProfile, AiExecutorProfileInput, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, createAiExecutorAdminError, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
-import { DurableObject } from 'cloudflare:workers';
+import { DurableObject, type WorkerEntrypoint } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
 import { validateRpc } from 'capnweb-validate';
 import { collection, createTypedStorage } from '@gadgets/typed-storage';
@@ -15,6 +15,30 @@ import { formatBlueprintsManifestVersion, installFormatBlueprints } from './form
 import { FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
+
+const AI_EXECUTOR_PROTOCOL_VERSION = 1 as const;
+
+/** Structural version-1 administrator capability duplicated at the private Worker boundary. */
+export interface InferenceAdmin extends WorkerEntrypoint {
+  readonly protocolVersion: typeof AI_EXECUTOR_PROTOCOL_VERSION;
+  listProfiles(): Promise<AiExecutorProfile[]>;
+  createProfile(input: AiExecutorProfileInput): Promise<AiExecutorProfile>;
+  updateProfile(
+    id: string,
+    input: AiExecutorProfileInput,
+    revision: number,
+  ): Promise<AiExecutorProfile>;
+  verifyProfile(id: string, revision: number): Promise<AiExecutorProfile>;
+  activateProfile(id: string, revision: number): Promise<AiExecutorProfile>;
+  disableProfile(id: string, revision: number): Promise<AiExecutorProfile>;
+}
+
+function isCatalogConflict(error: unknown): boolean {
+  return error instanceof Error && (
+    error.name === "CatalogConflictError" ||
+    error.stack?.startsWith("CatalogConflictError:") === true
+  );
+}
 
 function makeAdminSettingsStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
@@ -566,8 +590,84 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
    * `adminUserId` is the requesting admin's identity, forwarded to gatekeepers when listing the
    * resource catalog (some are RBAC-gated per user). It's plain data — not a user-DO dependency.
    */
-  constructor(private admin: DurableObjectStub<AdminSettings>, private adminUserId: string) {
+  constructor(
+    private admin: DurableObjectStub<AdminSettings>,
+    private adminUserId: string,
+    private inferenceAdmin?: Service<InferenceAdmin>,
+  ) {
     super();
+  }
+
+  async #withInferenceAdmin<T>(
+    operation: (inferenceAdmin: Service<InferenceAdmin>) => Promise<T>,
+  ): Promise<T> {
+    const inferenceAdmin = this.inferenceAdmin;
+    if (!inferenceAdmin) {
+      throw createAiExecutorAdminError(
+        AI_EXECUTOR_ADMIN_ERROR_CODES.featureUnavailable,
+      );
+    }
+
+    let protocolVersion: unknown;
+    try {
+      protocolVersion = await inferenceAdmin.protocolVersion;
+    } catch {
+      throw createAiExecutorAdminError(
+        AI_EXECUTOR_ADMIN_ERROR_CODES.serviceUnavailable,
+      );
+    }
+    if (protocolVersion !== AI_EXECUTOR_PROTOCOL_VERSION) {
+      throw createAiExecutorAdminError(
+        AI_EXECUTOR_ADMIN_ERROR_CODES.protocolMismatch,
+      );
+    }
+
+    try {
+      return await operation(inferenceAdmin);
+    } catch (error) {
+      if (isCatalogConflict(error)) {
+        throw createAiExecutorAdminError(
+          AI_EXECUTOR_ADMIN_ERROR_CODES.revisionConflict,
+        );
+      }
+      throw createAiExecutorAdminError(
+        AI_EXECUTOR_ADMIN_ERROR_CODES.serviceUnavailable,
+      );
+    }
+  }
+
+  listAiExecutorProfiles(): Promise<AiExecutorProfile[]> {
+    return this.#withInferenceAdmin(async (inferenceAdmin) =>
+      await inferenceAdmin.listProfiles());
+  }
+
+  createAiExecutorProfile(input: AiExecutorProfileInput): Promise<AiExecutorProfile> {
+    return this.#withInferenceAdmin(async (inferenceAdmin) =>
+      await inferenceAdmin.createProfile(input));
+  }
+
+  updateAiExecutorProfile(
+    id: string,
+    input: AiExecutorProfileInput,
+    revision: number,
+  ): Promise<AiExecutorProfile> {
+    return this.#withInferenceAdmin(async (inferenceAdmin) =>
+      await inferenceAdmin.updateProfile(id, input, revision));
+  }
+
+  verifyAiExecutorProfile(id: string, revision: number): Promise<AiExecutorProfile> {
+    return this.#withInferenceAdmin(async (inferenceAdmin) =>
+      await inferenceAdmin.verifyProfile(id, revision));
+  }
+
+  activateAiExecutorProfile(id: string, revision: number): Promise<AiExecutorProfile> {
+    return this.#withInferenceAdmin(async (inferenceAdmin) =>
+      await inferenceAdmin.activateProfile(id, revision));
+  }
+
+  disableAiExecutorProfile(id: string, revision: number): Promise<AiExecutorProfile> {
+    return this.#withInferenceAdmin(async (inferenceAdmin) =>
+      await inferenceAdmin.disableProfile(id, revision));
   }
 
   getSettings(): Promise<AdminSettingsView> {

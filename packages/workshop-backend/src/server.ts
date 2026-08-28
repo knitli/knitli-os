@@ -596,7 +596,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let adminUserId = this.#userId.name!;
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
-    return new AdminApiImpl(this.adminSettings.getByName(""), adminUserId);
+    return new AdminApiImpl(
+      this.adminSettings.getByName(""),
+      adminUserId,
+      this.env.AI_INFERENCE_ADMIN,
+    );
   }
 }
 

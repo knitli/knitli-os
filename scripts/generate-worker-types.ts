@@ -16,7 +16,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveBinEntry } from "./bin-entry.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
@@ -172,7 +172,24 @@ async function generateOne(pkgDir: string): Promise<void> {
   }
 }
 
-const dirs = await packageDirs();
+let dirs = await packageDirs();
+const selectorIndex = process.argv.indexOf("--package");
+if (selectorIndex >= 0) {
+  if (process.argv.indexOf("--package", selectorIndex + 1) >= 0) {
+    console.error("--package may be specified only once");
+    process.exit(1);
+  }
+  const selected = process.argv[selectorIndex + 1];
+  if (selected === undefined) {
+    console.error("--package requires a package directory name");
+    process.exit(1);
+  }
+  dirs = dirs.filter((dir) => basename(dir) === selected);
+  if (dirs.length === 0) {
+    console.error(`unknown --package ${selected}`);
+    process.exit(1);
+  }
+}
 if (dirs.length === 0) {
   console.error("no packages with wrangler.jsonc found");
   process.exit(1);

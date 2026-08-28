@@ -152,9 +152,14 @@ export interface SharingCaller {
 export class SharingManager {
   /**
    * `ownerProfileId` is stable for the lifetime of a gadget, so it's supplied once at
-   * construction rather than per call.
+   * construction rather than per call. `beforeAuthorityExpansion`, when supplied, is a
+   * synchronous final-write policy check: throwing from it prevents the authority-bearing write.
    */
-  constructor(private storage: SharingStorage, private ownerProfileId: string) {}
+  constructor(
+    private storage: SharingStorage,
+    private ownerProfileId: string,
+    private beforeAuthorityExpansion?: () => void,
+  ) {}
 
   // ---------------------------------------------------------------------------------------
   // Sharing-state queries
@@ -182,6 +187,16 @@ export class SharingManager {
       let link = asLink(record);
       if (link) yield link;
     }
+  }
+
+  // Resolve a key (including an alias) against current storage. Call this again after any await
+  // before granting authority so link revocation cannot race the eventual write.
+  #getActiveLinkForKey(keyId: string): ShareLinkRecord | undefined {
+    let keyRecord = this.storage.shareKeys.get(keyId);
+    if (!keyRecord) return undefined;
+    let link = keyRecord.alias === undefined
+        ? keyRecord : asLink(this.storage.shareKeys.get(keyRecord.alias));
+    return link?.revoked ? undefined : link;
   }
 
   // ---------------------------------------------------------------------------------------
@@ -222,14 +237,8 @@ export class SharingManager {
     fetchProfile: () => Promise<AiChatAuthorInfo>;
   }): Promise<void> {
     let hash = await hashShareKey(opts.rawKey);
-    let keyRecord = this.storage.shareKeys.get(hash);
-    if (!keyRecord) return;
-
-    // Edges point at the link, not the individual key, so a link's keys collapse to one grant.
-    // A copy of a link is an alias; follow it to the link that owns the metadata.
-    let link = keyRecord.alias === undefined
-        ? keyRecord : asLink(this.storage.shareKeys.get(keyRecord.alias));
-    if (!link || link.revoked) return;
+    let link = this.#getActiveLinkForKey(hash);
+    if (!link) return;
     let linkId = link.id;
     let role = link.role ?? "build";
 
@@ -240,17 +249,45 @@ export class SharingManager {
       let alreadyHasEdge = existing.addedBy.some(
           e => e.type === "shareKey" && e.keyId === linkId);
       if (!alreadyHasEdge) {
-        existing.addedBy.push({
-          type: "shareKey",
-          keyId: linkId,
-          created: new Date(),
-          role,
-        });
-        this.storage.collaborators.put(existing);
+        let updated: CollaboratorRecord = {
+          ...existing,
+          addedBy: [...existing.addedBy, {
+            type: "shareKey",
+            keyId: linkId,
+            created: new Date(),
+            role,
+          }],
+        };
+        this.beforeAuthorityExpansion?.();
+        this.storage.collaborators.put(updated);
       }
     } else {
       // New collaborator -- need full profile from their user DO.
       let profile = await opts.fetchProfile();
+      link = this.#getActiveLinkForKey(hash);
+      if (!link) return;
+      linkId = link.id;
+      role = link.role ?? "build";
+      existing = this.storage.collaborators.get(opts.profileId);
+      if (existing) {
+        let alreadyHasEdge = existing.addedBy.some(
+            e => e.type === "shareKey" && e.keyId === linkId);
+        if (!alreadyHasEdge) {
+          let updated: CollaboratorRecord = {
+            ...existing,
+            addedBy: [...existing.addedBy, {
+              type: "shareKey",
+              keyId: linkId,
+              created: new Date(),
+              role,
+            }],
+          };
+          this.beforeAuthorityExpansion?.();
+          this.storage.collaborators.put(updated);
+        }
+        return;
+      }
+      this.beforeAuthorityExpansion?.();
       this.storage.collaborators.put({
         profile,
         addedBy: [{
@@ -319,19 +356,31 @@ export class SharingManager {
     if (existing) {
       // Already a collaborator -- add an edge if they don't have one from this sharer, otherwise
       // upgrade the existing edge's role (never silently downgrade).
-      let existingEdge = existing.addedBy.find(
+      let existingEdgeIndex = existing.addedBy.findIndex(
           e => e.type === "user" && e.sharer === opts.caller.profileId);
+      let existingEdge = existing.addedBy[existingEdgeIndex];
+      let addedBy = [...existing.addedBy];
+      let expandsAuthority = false;
       if (existingEdge && existingEdge.type === "user") {
-        existingEdge.role = maxRole(edgeGrantedRole(existingEdge), opts.role);
-        if (opts.note !== undefined) existingEdge.note = opts.note;
+        let currentRole = edgeGrantedRole(existingEdge);
+        let grantedRole = maxRole(currentRole, opts.role);
+        expandsAuthority = roleRank(grantedRole) > roleRank(currentRole);
+        addedBy[existingEdgeIndex] = {
+          ...existingEdge,
+          role: grantedRole,
+          note: opts.note ?? existingEdge.note,
+        };
       } else {
-        existing.addedBy.push(edge);
+        expandsAuthority = true;
+        addedBy.push(edge);
       }
-      this.storage.collaborators.put(existing);
+      let updated: CollaboratorRecord = { ...existing, addedBy };
+      if (expandsAuthority) this.beforeAuthorityExpansion?.();
+      this.storage.collaborators.put(updated);
       return {
-        profile: existing.profile,
-        addedBy: existing.addedBy,
-        role: this.computeEffectiveRoles().get(existing.profile.id) ?? opts.role,
+        profile: updated.profile,
+        addedBy: updated.addedBy,
+        role: this.computeEffectiveRoles().get(updated.profile.id) ?? opts.role,
       };
     }
 
@@ -339,6 +388,7 @@ export class SharingManager {
       profile: opts.profile,
       addedBy: [edge],
     };
+    this.beforeAuthorityExpansion?.();
     this.storage.collaborators.put(record);
     return {
       profile: record.profile,
@@ -361,6 +411,22 @@ export class SharingManager {
   }
 
   /**
+   * Validate a collaborator removal before the Overseer enters its revocation critical section.
+   * `removeCollaborator()` repeats this synchronous check immediately before mutation; the split
+   * lets expected caller errors avoid conservatively restarting the whole workspace.
+   */
+  assertCanRemoveCollaborator(caller: SharingCaller, profileId: string): void {
+    let target = this.storage.collaborators.get(profileId);
+    if (!target) {
+      throw new Error("User is not a collaborator.");
+    }
+    if (!caller.isOwner && !target.addedBy.some(
+      edge => edge.type === "user" && edge.sharer === caller.profileId)) {
+      throw new Error("You can only remove users that you added.");
+    }
+  }
+
+  /**
    * Remove a collaborator by severing the edges that grant them access. This is a *lazy* removal:
    * nothing cascades and no records are deleted. The target's record (and crucially, any edges
    * where the target is the *sharer* of access to others) is left intact, and dependents who lose
@@ -379,20 +445,8 @@ export class SharingManager {
    */
   removeCollaborator(
       caller: SharingCaller, profileId: string, keepUsers: string[]): AffectedCollaborator[] {
-    let target = this.storage.collaborators.get(profileId);
-    if (!target) {
-      throw new Error("User is not a collaborator.");
-    }
-
-    // Permission check: owner can remove anyone; collaborators can only remove users
-    // they themselves added.
-    if (!caller.isOwner) {
-      let hasEdgeFromCaller = target.addedBy.some(
-          e => e.type === "user" && e.sharer === caller.profileId);
-      if (!hasEdgeFromCaller) {
-        throw new Error("You can only remove users that you added.");
-      }
-    }
+    this.assertCanRemoveCollaborator(caller, profileId);
+    let target = this.storage.collaborators.get(profileId)!;
 
     let baseline = this.computeEffectiveRoles();
 
@@ -441,6 +495,11 @@ export class SharingManager {
 
     // The link is stored as its first key: the record is keyed by that key's hash.
     let { key, hash } = await this.#mintKey();
+    callerRole = this.#requireCallerRole(opts.caller);
+    if (roleRank(opts.role) > roleRank(callerRole)) {
+      throw new Error("You cannot grant a role higher than your own.");
+    }
+    this.beforeAuthorityExpansion?.();
     this.storage.shareKeys.put({
       id: hash,
       note: opts.note,
@@ -467,6 +526,16 @@ export class SharingManager {
     }
 
     let { key, hash } = await this.#mintKey();
+    link = this.#requireLink(opts.linkId);
+    if (link.revoked) {
+      throw new Error("Share link not found.");
+    }
+    this.#requireLinkManager(opts.caller, link, "copy");
+    callerRole = this.#requireCallerRole(opts.caller);
+    if (roleRank(link.role ?? "build") > roleRank(callerRole)) {
+      throw new Error("You cannot grant a role higher than your own.");
+    }
+    this.beforeAuthorityExpansion?.();
     this.storage.shareKeys.put({ id: hash, alias: link.id });
     return { key };
   }
@@ -530,8 +599,8 @@ export class SharingManager {
    */
   revokeShareLink(
       caller: SharingCaller, linkId: string, keepUsers: string[]): AffectedCollaborator[] {
+    this.assertCanRevokeShareLink(caller, linkId);
     let link = this.#requireLink(linkId);
-    this.#requireLinkManager(caller, link, "revoke");
 
     let baseline = this.computeEffectiveRoles();
 
@@ -544,6 +613,12 @@ export class SharingManager {
     this.#reRootKeptUsers(caller, baseline, new Set(keepUsers));
 
     return this.#computeAffected(baseline, this.computeEffectiveRoles());
+  }
+
+  /** See `assertCanRemoveCollaborator()`; this is the share-link equivalent. */
+  assertCanRevokeShareLink(caller: SharingCaller, linkId: string): void {
+    let link = this.#requireLink(linkId);
+    this.#requireLinkManager(caller, link, "revoke");
   }
 
   // ---------------------------------------------------------------------------------------

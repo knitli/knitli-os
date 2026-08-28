@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { resolveBinEntry } from "./bin-entry.ts";
 import { getDevServerConfig } from "./dev-server-config.ts";
+import { isStandaloneGatekeeperPackage } from "./gatekeeper-discovery-policy.ts";
 import { killProcessTree } from "./kill-process-tree.ts";
 import { pnpmCommand } from "./pnpm-command.ts";
 import type { ServiceBinding, WranglerBuild } from "./release/manifest-lib.ts";
@@ -84,7 +85,7 @@ try {
 function findGatekeepers(parentDir: string): Gatekeeper[] {
   try {
     return readdirSync(parentDir)
-        .filter(name => name.startsWith("gatekeeper-"))
+        .filter(isStandaloneGatekeeperPackage)
         .filter(name => {
       try {
         return statSync(join(parentDir, name, "wrangler.jsonc")).isFile();

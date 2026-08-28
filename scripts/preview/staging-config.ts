@@ -31,6 +31,10 @@ import {
   findDeployablePackages, readWranglerConfig,
   type BindingDecl, type ObservabilityConfig, type ServiceBinding, type WranglerConfig,
 } from "../release/manifest-lib.ts";
+import {
+  isGatekeeperPackage,
+  isStandaloneGatekeeperPackage,
+} from "../gatekeeper-discovery-policy.ts";
 
 /**
  * A service binding in a preview config. `preview_id` is what points a binding at a *sibling*
@@ -135,13 +139,14 @@ export const R2_MAX_BUCKET_NAME_LENGTH = 63;
  */
 export const MAX_PREVIEW_NAME_LENGTH = 28;
 const PREVIEW_NAME_HASH_LENGTH = 8;
-
 const GATEKEEPER_PREFIX = "gatekeeper-";
 
 /** True for the packages that are gatekeeper workers (as opposed to the router and backend). */
 export function isGatekeeper(pkgName: string): boolean {
-  return pkgName.startsWith(GATEKEEPER_PREFIX);
+  return isGatekeeperPackage(pkgName);
 }
+
+export { isStandaloneGatekeeperPackage };
 
 /**
  * The vendor id a gatekeeper is reached by: `gatekeeper-mcp-portal` -> `mcp-portal`. Matches
@@ -409,8 +414,7 @@ function applyRouter(config: StagingConfig, { gatekeepers }: PreviewContext): vo
 }
 
 /**
- * Build every package's preview config. Pure: `packages` is `[{ name, config }]` with `config`
- * the parsed wrangler.jsonc, and the result is a `Map` from package name to its preview config.
+ * Build every standalone package's preview config. Outer-deployment-only gatekeepers are omitted.
  */
 export function buildPreviewConfigs({
   previewName,
@@ -427,11 +431,13 @@ export function buildPreviewConfigs({
     throw new Error("buildPreviewConfigs needs both accountId and workersDevHost");
   }
   const baseUrl = routerPreviewUrl(previewName, workersDevHost);
-  const gatekeepers = packages.map((pkg) => pkg.name).filter(isGatekeeper).toSorted();
+  const gatekeepers = packages.map((pkg) => pkg.name)
+      .filter(isStandaloneGatekeeperPackage).toSorted();
   const context: PreviewContext = { baseUrl, gatekeepers };
   const configs = new Map<string, StagingConfig>();
 
   for (const pkg of packages) {
+    if (isGatekeeper(pkg.name) && !isStandaloneGatekeeperPackage(pkg.name)) continue;
     const config: StagingConfig = structuredClone(pkg.config);
     if (config.name !== pkg.name) {
       // Checked before the rename below, not after: every URL and service binding here is
@@ -697,7 +703,8 @@ export function generatePreviewConfigs(options: {
 } {
   const previewName = options.previewName ?? resolvePreviewName();
   const { accountId, workersDevHost } = resolveTarget();
-  const packages = readPackages();
+  const packages = readPackages().filter((pkg) =>
+    !isGatekeeper(pkg.name) || isStandaloneGatekeeperPackage(pkg.name));
   const configs = buildPreviewConfigs({
     previewName,
     packages,

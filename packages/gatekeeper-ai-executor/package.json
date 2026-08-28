@@ -1,0 +1,29 @@
+{
+  "name": "@gadgets/gatekeeper-ai-executor",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/ai-executor.ts",
+  "scripts": {
+    "clean": "rm -rf .wrangler dist src/generated",
+    "deploy": "vp run --no-cache build:configurator && wrangler deploy",
+    "test:node": "vitest run --config vite.config.ts",
+    "test:workerd": "vitest run --config vitest.worker.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@gadgets/configurator-ui": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
+    "capnweb": "catalog:",
+    "capnweb-validate": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "catalog:",
+    "@cloudflare/workers-types": "^5.20260808.1",
+    "miniflare": "5.20260801.0-alpha",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

@@ -101,6 +101,8 @@ type ConnectionType = {
   resourceUrlPattern?: string
   // Whether this resource type is independently grantable.
   grantable?: boolean
+  // Whether this vendor creates a connected account locally, without an OAuth flow.
+  autoProvisionsAccount?: boolean
 }
 
 type VendorOption = {
@@ -160,6 +162,7 @@ function connectionForResource(vendor: VendorOption, resource: SupportedResource
     accent: vendor.description.color,
     resourceUrlPattern: resource.urlPattern,
     grantable: Boolean(resource.grantable),
+    autoProvisionsAccount: Boolean(vendor.description.autoProvisionsAccount),
   }
 }
 
@@ -594,16 +597,28 @@ export default function GatekeeperModal({
     else setSelectedAccountId(null)
   }
 
-  const handleConnectAccount = async (vendorId: string, resourceUrlPatterns?: string[]) => {
+  const handleConnectAccount = async (connection: ConnectionType, resourceUrlPatterns?: string[]) => {
+    const vendorId = connection.vendorId
+    if (!vendorId) return
     setConnectingVendor(vendorId)
     try {
+      if (connection.autoProvisionsAccount) {
+        await authenticatedApi.provisionAmbientAccount(vendorId)
+        toasts.add({ title: 'Service added.', variant: 'success' })
+        return
+      }
       const result = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
       window.open(result.url, '_blank', 'noopener,noreferrer')
       toasts.add({ title: 'Complete the account connection in the new tab.', variant: 'success' })
     } catch (error) {
       console.error('Failed to initiate connection:', error)
       reportIssue('gatekeeper.connect-start', error, { gatekeeperVendorId: vendorId })
-      toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
+      toasts.add({
+        title: connection.autoProvisionsAccount
+          ? 'Could not add this service.'
+          : 'Failed to start connection flow',
+        variant: 'error',
+      })
     } finally {
       setConnectingVendor(null)
     }
@@ -837,12 +852,13 @@ export default function GatekeeperModal({
                     reconnectingAccountId={reconnectingAccountId}
                     requiredResourceUrlPatterns={requiredResourceUrlPatterns(selectedConnection)}
                     grantingAccountId={grantingAccountId}
+                    allowAdditionalAccount={!(selectedConnection.autoProvisionsAccount && matchingAccounts.length > 0)}
                     onSelect={setSelectedAccountId}
                     onConnect={() => {
                       if (!selectedConnection.vendorId) return
                       const required = requiredResourceUrlPatterns(selectedConnection)
                       // No grantable requirement -> request authorization for everything
-                      handleConnectAccount(selectedConnection.vendorId, required.length ? required : undefined)
+                      handleConnectAccount(selectedConnection, required.length ? required : undefined)
                     }}
                     onReconnect={handleReconnectAccount}
                     onGrantAccess={handleGrantResourceAccess}

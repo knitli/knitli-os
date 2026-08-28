@@ -16,6 +16,7 @@ import {
   gatekeeperBindingName,
   gatekeeperShortName,
   isGatekeeper,
+  isStandaloneGatekeeperPackage,
   previewPullRequestNumber,
   readPackages,
   resolveAccess,
@@ -188,10 +189,13 @@ test("a reserved prefix shrinks the slug budget rather than overflowing it", () 
   assert.equal(slugifyPreviewName("feature/foo", { reserve: 9 }), "feature-foo");
 });
 
-test("every deployable package gets a preview config, on the configured account", () => {
+test("every standalone package gets a preview config, on the configured account", () => {
   const { packages, configs } = buildAll();
 
-  assert.equal(configs.size, packages.length);
+  const standalone = packages.filter((pkg) =>
+    !isGatekeeper(pkg.name) || isStandaloneGatekeeperPackage(pkg.name));
+  assert.equal(configs.size, standalone.length);
+  assert.equal(configs.has("gatekeeper-ai-executor"), false);
   assert.ok(configs.has("router") && configs.has("workshop-backend"),
       "the router and backend are the two non-gatekeeper deployables");
   for (const [name, config] of configs) {
@@ -367,9 +371,10 @@ test("no generated config carries a secret's value anywhere", () => {
   }
 });
 
-test("every gatekeeper is bound to the backend by RPC and to the router by HTTP", () => {
+test("every standalone gatekeeper is bound to the backend by RPC and to the router by HTTP", () => {
   const { packages, configs } = buildAll();
-  const gatekeepers = packages.map((pkg) => pkg.name).filter(isGatekeeper).toSorted();
+  const gatekeepers = packages.map((pkg) => pkg.name)
+      .filter(isStandaloneGatekeeperPackage).toSorted();
   assert.ok(gatekeepers.length >= 16, `only found ${gatekeepers.length} gatekeepers`);
 
   // A service binding names a worker, which is the package name; the binding name — what the
@@ -393,12 +398,14 @@ test("every gatekeeper is bound to the backend by RPC and to the router by HTTP"
     // The router forwards whole HTTP requests, so it binds the default entrypoint.
     assert.equal(service.entrypoint, undefined, service.service);
   }
+  assert.ok(!backend.some((service) => service.service === "gatekeeper-ai-executor"));
+  assert.ok(!router.some((service) => service.service === "gatekeeper-ai-executor"));
 });
 
-test("every gatekeeper is mounted under the router's origin", () => {
+test("every standalone gatekeeper is mounted under the router's origin", () => {
   const { packages, configs } = buildAll();
 
-  for (const { name } of packages.filter((pkg) => isGatekeeper(pkg.name))) {
+  for (const { name } of packages.filter((pkg) => isStandaloneGatekeeperPackage(pkg.name))) {
     assert.equal(previewsOf(configs, name).vars?.BASE_URL,
         `${BASE_URL}/gatekeeper/${gatekeeperShortName(name)}`);
   }

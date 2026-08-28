@@ -422,6 +422,29 @@ async function configuratorPackages(): Promise<string[]> {
  * `gatekeeper-slack`: a local `vp run -F <pkg> build` still looks right, which is the trap.
  */
 describe("configurator task wiring", () => {
+  it("imports every generated configurator artifact by its exact output name", async () => {
+    for (const name of await configuratorPackages()) {
+      const packageDir = join("packages", name);
+      const configurators = await readdir(join(packageDir, "src", "configurator"));
+      const sourcePaths = (
+        await readdir(join(packageDir, "src"), { recursive: true })
+      ).filter(path => path.endsWith(".ts") && !path.startsWith("configurator/"));
+      const consumers = await Promise.all(
+        sourcePaths.map(path => readFile(join(packageDir, "src", path), "utf8")),
+      );
+
+      for (const configurator of configurators.filter(path => path.endsWith(".tsx"))) {
+        const generatedName = `${basename(configurator, ".tsx")}.txt`;
+        assert.ok(
+          consumers.some(source => source.includes(`generated/${generatedName}`)),
+          `packages/${name} does not import generated configurator artifact ${generatedName}; ` +
+            "the builder emits the .tsx basename with a .txt extension, and Wrangler bundles " +
+            "that exact path from disk.",
+        );
+      }
+    }
+  });
+
   it("routes every package the builder builds through the shared task", async () => {
     const names = await configuratorPackages();
     assert.ok(names.length > 0, "expected to find packages with configurator UI sources");

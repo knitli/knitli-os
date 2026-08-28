@@ -12,6 +12,13 @@ declare namespace Cloudflare {
     // Storage classes exposed as DO namespaces on ctx.exports.
     durableNamespaces: "TestGatekeeper" | "TestControl";
   }
+
+  interface Env {
+    EXTERNAL_MESSAGE_GATEWAY: Fetcher<
+      import("cloudflare:workers").WorkerEntrypoint &
+        import("@gadgets/workshop-shared/external-message-gateway").ExternalMessageGateway
+    >;
+  }
 }
 
 interface ExecutionContext<Props = unknown> {

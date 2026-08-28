@@ -27,9 +27,12 @@ function makeStorage(): SharingStorage {
 
 const OWNER = "owner@example.com";
 
-function makeManager(): { storage: SharingStorage; mgr: SharingManager } {
+function makeManager(beforeAuthorityExpansion?: () => void): {
+  storage: SharingStorage;
+  mgr: SharingManager;
+} {
   let storage = makeStorage();
-  return { storage, mgr: new SharingManager(storage, OWNER) };
+  return { storage, mgr: new SharingManager(storage, OWNER, beforeAuthorityExpansion) };
 }
 
 function profile(id: string): AiChatAuthorInfo {
@@ -120,6 +123,57 @@ describe("authorization", () => {
 });
 
 describe("redeemShareKey", () => {
+  it("rechecks sharing policy after fetching a new collaborator's profile", async () => {
+    let sharingAllowed = true;
+    let { storage, mgr } = makeManager(() => {
+      if (!sharingAllowed) throw new Error("Sharing is no longer allowed.");
+    });
+    let { key } = await mgr.createShareLink({ caller: owner, role: "build" });
+
+    let { promise: profilePending, resolve: resolveProfile } =
+        Promise.withResolvers<AiChatAuthorInfo>();
+    let { promise: fetchStarted, resolve: markFetchStarted } = Promise.withResolvers<void>();
+    let redemption = mgr.redeemShareKey({
+      rawKey: key,
+      profileId: "newbie",
+      fetchProfile: () => {
+        markFetchStarted();
+        return profilePending;
+      },
+    });
+    await fetchStarted;
+
+    sharingAllowed = false;
+    resolveProfile(profile("newbie"));
+
+    await expect(redemption).rejects.toThrow("Sharing is no longer allowed.");
+    expect(storage.collaborators.get("newbie")).toBeUndefined();
+  });
+
+  it("does not redeem a link revoked while fetching a new collaborator's profile", async () => {
+    let { storage, mgr } = makeManager();
+    let { key, linkId } = await mgr.createShareLink({ caller: owner, role: "build" });
+
+    let { promise: profilePending, resolve: resolveProfile } =
+        Promise.withResolvers<AiChatAuthorInfo>();
+    let { promise: fetchStarted, resolve: markFetchStarted } = Promise.withResolvers<void>();
+    let redemption = mgr.redeemShareKey({
+      rawKey: key,
+      profileId: "newbie",
+      fetchProfile: () => {
+        markFetchStarted();
+        return profilePending;
+      },
+    });
+    await fetchStarted;
+
+    mgr.revokeShareLink(owner, linkId, []);
+    resolveProfile(profile("newbie"));
+    await redemption;
+
+    expect(storage.collaborators.get("newbie")).toBeUndefined();
+  });
+
   it("creates a new collaborator (fetching profile) when the key is valid", async () => {
     let { storage, mgr } = makeManager();
     let { key } = await mgr.createShareLink({ caller: owner, role: "build" });
@@ -165,6 +219,24 @@ describe("redeemShareKey", () => {
     expect(storage.collaborators.get("a")!.addedBy).toHaveLength(2);
   });
 
+  it("checks sharing policy before adding a key edge to an existing collaborator", async () => {
+    let sharingAllowed = true;
+    let { storage, mgr } = makeManager(() => {
+      if (!sharingAllowed) throw new Error("Sharing is no longer allowed.");
+    });
+    let { key } = await mgr.createShareLink({ caller: owner, role: "build" });
+    seedCollaborator(storage, "a", [userEdge(OWNER)]);
+
+    sharingAllowed = false;
+    await expect(mgr.redeemShareKey({
+      rawKey: key,
+      profileId: "a",
+      fetchProfile: async () => profile("a"),
+    })).rejects.toThrow("Sharing is no longer allowed.");
+
+    expect(storage.collaborators.get("a")!.addedBy).toHaveLength(1);
+  });
+
   it("does not duplicate an edge for the same key", async () => {
     let { storage, mgr } = makeManager();
     let { key } = await mgr.createShareLink({ caller: owner, role: "build" });
@@ -193,6 +265,20 @@ describe("redeemShareKey", () => {
 });
 
 describe("addCollaborator", () => {
+  it("checks sharing policy only when an edge is added or upgraded", () => {
+    let expansionChecks = 0;
+    let { mgr } = makeManager(() => { expansionChecks++; });
+
+    mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "use" });
+    expect(expansionChecks).toBe(1);
+
+    mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "use", note: "rename" });
+    expect(expansionChecks).toBe(1);
+
+    mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "build" });
+    expect(expansionChecks).toBe(2);
+  });
+
   it("adds a new collaborator with a user edge from the caller", () => {
     let { storage, mgr } = makeManager();
     let info = mgr.addCollaborator({ caller: owner, profile: profile("a"), role: "build", note: "hi" });
@@ -484,6 +570,23 @@ describe("revokeShareLink", () => {
 });
 
 describe("createShareLink", () => {
+  it("rechecks sharing policy after the asynchronous key-mint gap", async () => {
+    let sharingAllowed = true;
+    let { storage, mgr } = makeManager(() => {
+      if (!sharingAllowed) throw new Error("Sharing is no longer allowed.");
+    });
+
+    // createShareLink runs synchronously through its initial authorization checks, then yields
+    // while importing/signing the key. Flip policy before that continuation can persist authority.
+    let creation = mgr.createShareLink({ caller: owner, role: "use" });
+    sharingAllowed = false;
+
+    await expect(creation)
+        .rejects.toThrow("Sharing is no longer allowed.");
+    expect([...storage.shareKeys.list()]).toEqual([]);
+    expect(mgr.listShareLinkRecords()).toEqual([]);
+  });
+
   it("persists the granted role", async () => {
     let { mgr } = makeManager();
     let { key, linkId } = await mgr.createShareLink({ caller: owner, role: "use" });
@@ -495,15 +598,32 @@ describe("createShareLink", () => {
     expect(linkId).toBe(records[0].id);
   });
 
-  it("forbids creating a link with a higher role than the caller's own", () => {
+  it("forbids creating a link with a higher role than the caller's own", async () => {
     let { storage, mgr } = makeManager();
     seedCollaborator(storage, "a", [userEdge(OWNER, "use")]);
-    expect(() => mgr.createShareLink({ caller: collab("a"), role: "build" }))
+    await expect(mgr.createShareLink({ caller: collab("a"), role: "build" }))
         .rejects.toThrow(/higher than your own/);
   });
 });
 
 describe("newShareLinkKey", () => {
+  it("rechecks sharing policy after the copied key's asynchronous mint gap", async () => {
+    let sharingAllowed = true;
+    let { storage, mgr } = makeManager(() => {
+      if (!sharingAllowed) throw new Error("Sharing is no longer allowed.");
+    });
+    let { linkId } = await mgr.createShareLink({ caller: owner, role: "use" });
+
+    // The call has passed its initial link/caller checks before it yields in #mintKey. Changing
+    // policy now must be observed by the final synchronous guard immediately before storage.put.
+    let copy = mgr.newShareLinkKey({ caller: owner, linkId });
+    sharingAllowed = false;
+    await expect(copy)
+        .rejects.toThrow("Sharing is no longer allowed.");
+    expect([...storage.shareKeys.list()]).toHaveLength(1);
+    expect([...storage.shareKeys.list()][0]).toMatchObject({ id: linkId });
+  });
+
   it("mints a new key for the same link that redeems to one grant", async () => {
     let { storage, mgr } = makeManager();
     let { key: key1 } = await mgr.createShareLink({ caller: owner, role: "use", note: "team" });
@@ -545,20 +665,20 @@ describe("newShareLinkKey", () => {
     expect(storage.collaborators.get("a")).toBeUndefined();
   });
 
-  it("forbids a non-owner from copying a link they didn't create", () => {
+  it("forbids a non-owner from copying a link they didn't create", async () => {
     let { storage, mgr } = makeManager();
     seedLink(storage, "k1", OWNER);
     seedCollaborator(storage, "a", [userEdge(OWNER, "build")]);
-    expect(mgr.newShareLinkKey({ caller: collab("a"), linkId: "k1" }))
+    await expect(mgr.newShareLinkKey({ caller: collab("a"), linkId: "k1" }))
         .rejects.toThrow(/only copy/);
   });
 
-  it("forbids copying a link that now grants a higher role than the caller's own", () => {
+  it("forbids copying a link that now grants a higher role than the caller's own", async () => {
     let { storage, mgr } = makeManager();
     // "a" created a build link, then was downgraded to use.
     seedLink(storage, "k1", "a", "build");
     seedCollaborator(storage, "a", [userEdge(OWNER, "use")]);
-    expect(mgr.newShareLinkKey({ caller: collab("a"), linkId: "k1" }))
+    await expect(mgr.newShareLinkKey({ caller: collab("a"), linkId: "k1" }))
         .rejects.toThrow(/higher than your own/);
   });
 
@@ -572,7 +692,8 @@ describe("newShareLinkKey", () => {
     // silent no-op: redemption resolves the copy through to the link, which would go untouched.
     let aliasId = [...storage.shareKeys.list()].find(r => r.alias !== undefined)!.id;
     expect(mgr.listShareLinkRecords().map(r => r.id)).toEqual([linkId]);
-    expect(mgr.newShareLinkKey({ caller: owner, linkId: aliasId })).rejects.toThrow(/not found/);
+    await expect(mgr.newShareLinkKey({ caller: owner, linkId: aliasId }))
+        .rejects.toThrow(/not found/);
     expect(() => mgr.updateShareLink(owner, aliasId, "x")).toThrow(/not found/);
     expect(() => mgr.revokeShareLink(owner, aliasId, [])).toThrow(/not found/);
   });

@@ -171,13 +171,23 @@ Intentional, reviewed differences from upstream. Keep this current.
   currently fail. The 100 ms delay upstream relies on is preserved; the gate is what these two tests
   disagree with. **Unresolved — see "Open questions".**
 
-### Upstream's CLA and review-bot workflows are removed
+### Upstream's CLA, review-bot and contribution-policy workflows are removed
 
-- **Where:** `.github/workflows/cla.yml`, `bonk.yml`, `bonk-pr.yml` — deleted
-- **What:** Cloudflare's CLA assistant and their internal "Bonk" review bot.
-- **Why:** Neither can work here. The CLA action signs against `cloudflare.com/cla` and stores
-  signatures on a `cla-signatures` branch this fork does not have, so it only ever fails; Bonk needs
-  a GitHub App installation the fork does not have, and was failing at startup.
+- **Where:** `.github/workflows/cla.yml`, `bonk.yml`, `bonk-pr.yml`, `contribution-policy.yml`, plus
+  `scripts/contribution-policy.ts` and its test — all deleted
+- **What:** Cloudflare's CLA assistant, their internal "Bonk" review bot, and the automation that
+  enforces their contribution policy.
+- **Why:** The first two cannot work here at all. The CLA action signs against `cloudflare.com/cla`
+  and stores signatures on a `cla-signatures` branch this fork does not have, so it only ever fails;
+  Bonk needs a GitHub App installation the fork does not have, and was failing at startup. The
+  contribution policy did pass, but it enforces Cloudflare's rules for Cloudflare's repository —
+  closing outside PRs and directing people to `cloudflare/cloudflare-os` — which is a decision this
+  fork should make for itself rather than inherit.
+- **Still upstream's, still unresolved:** `.github/pull_request_template.md` and the "Contributing"
+  section of the README are the front end of that same policy. Their checkboxes fed the workflow
+  that is now gone, so they are inert, and they point contributors at Cloudflare's issue tracker.
+  Left in place deliberately: whether this fork accepts outside contributions is a call for the
+  maintainers, not a cleanup.
 - **How it is kept:** listed in `REMOVED_UPSTREAM_PATHS` in `scripts/fork/upstream-merge-audit.ts`,
   with the reason. When upstream touches one of these, a sync raises a modify/delete conflict, which
   is visible — but resolving that toward upstream restores the file silently, which is not. The

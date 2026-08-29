@@ -76,6 +76,13 @@ export const REMOVED_UPSTREAM_PATHS: Record<string, string> = {
     "Cloudflare's internal review bot, which needs a GitHub App installation this fork lacks.",
   ".github/workflows/bonk-pr.yml":
     "The PR half of the same bot; its break-glass path also assumes that App.",
+  ".github/workflows/contribution-policy.yml":
+    "Enforces Cloudflare's policy on Cloudflare's repository -- it closes outside PRs and points " +
+    "contributors at cloudflare/cloudflare-os. Whether this fork takes contributions is our call.",
+  "scripts/contribution-policy.ts":
+    "Only consumer was contribution-policy.yml, via actions/github-script.",
+  "scripts/contribution-policy.test.ts":
+    "Tests the above, and reads the workflow file, so it cannot outlive either.",
 };
 
 /** Extensions the formatting comparison understands. Anything else is left alone. */

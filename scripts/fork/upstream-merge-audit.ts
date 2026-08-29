@@ -146,6 +146,15 @@ export function isSourceFile(path: string): boolean {
   return SOURCE_EXTENSIONS.some(ext => path.endsWith(ext));
 }
 
+/**
+ * True when `commit` is part of upstream's history. This repo merges its own PRs with merge
+ * commits, so "HEAD is a merge" is not enough to conclude a sync happened -- without this, every
+ * merged PR on main gets audited with our own branch cast as upstream.
+ */
+function isUpstreamCommit(commit: string, upstreamRef: string): boolean {
+  return gitOrNull(["merge-base", "--is-ancestor", commit, upstreamRef]) !== null;
+}
+
 /** The parent commits of `ref`, first parent first. */
 function parentsOf(ref: string): string[] {
   const line = gitOrNull(["rev-list", "--parents", "-n", "1", ref])?.trim();
@@ -161,9 +170,12 @@ function resolves(ref: string): boolean {
  * itself a merge commit. Returns `null` when there is no merge to look at, which is the ordinary
  * case on a feature branch and not an error.
  */
-export function locateMerge(mergeRef?: string, headRef = "HEAD"): MergeUnderAudit | null {
-  // An explicit --merge is a claim that `mergeRef` *is* a merge; being wrong about that is worth
-  // an error. `headRef` is only a place to look, so a non-merge there is simply "nothing to audit".
+export function locateMerge(
+  mergeRef?: string, headRef = "HEAD", upstreamHint?: string,
+): MergeUnderAudit | null {
+  // An explicit --merge is a claim that `mergeRef` *is* the merge to audit; being wrong about that
+  // is worth an error, and the claim overrides the upstream check below. `headRef` is only a place
+  // to look, so finding nothing there is simply "nothing to audit".
   if (mergeRef) return fromMergeCommit(mergeRef);
 
   const inProgress = gitOrNull(["rev-parse", "--git-path", "MERGE_HEAD"])?.trim();
@@ -179,7 +191,12 @@ export function locateMerge(mergeRef?: string, headRef = "HEAD"): MergeUnderAudi
     };
   }
 
-  return parentsOf(headRef).length > 1 ? fromMergeCommit(headRef) : null;
+  if (parentsOf(headRef).length < 2) return null;
+  const candidate = fromMergeCommit(headRef);
+  // A merge of something that is not upstream is an ordinary PR merge, not a sync. Without an
+  // upstream ref to check against we cannot tell, so the merge is taken at face value.
+  if (upstreamHint && !isUpstreamCommit(candidate.upstreamRef, upstreamHint)) return null;
+  return candidate;
 }
 
 function fromMergeCommit(ref: string): MergeUnderAudit {
@@ -310,8 +327,9 @@ function main(argv: string[]): number {
   };
 
   const oursRef = flag("--ours") ?? "HEAD";
-  const merge = locateMerge(flag("--merge"), oursRef);
-  const upstreamRef = resolveUpstreamRef(flag("--upstream"), merge);
+  const explicitUpstream = flag("--upstream");
+  const merge = locateMerge(flag("--merge"), oursRef, explicitUpstream);
+  const upstreamRef = resolveUpstreamRef(explicitUpstream, merge);
 
   const dropped = merge ? auditDroppedHunks(merge) : [];
   const formatChurn = upstreamRef ? auditFormatDrift({ oursRef, upstreamRef }) : [];
@@ -319,7 +337,8 @@ function main(argv: string[]): number {
 
   console.log(merge
     ? `Merge audited: ${merge.description}`
-    : "No merge to audit (none in progress, and HEAD is not a merge commit).");
+    : `No upstream sync to audit (${oursRef === "HEAD" ? "HEAD" : oursRef.slice(0, 12)} is not a ` +
+      "merge of upstream; an ordinary PR merge is not a sync).");
   console.log(upstreamRef
     ? `Formatting checked against: ${shortRef(upstreamRef)}`
     : "Formatting NOT checked: no upstream ref. Pass --upstream, or fetch the foundation remote.");

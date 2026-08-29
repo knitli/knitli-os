@@ -88,3 +88,19 @@ test("every deliberately-removed upstream path records why", () => {
     assert.ok(reason.length > 30, `${path} needs a reason someone can act on, got: ${reason}`);
   }
 });
+
+test("a merge of something that is not upstream is not treated as a sync", () => {
+  // The bug this guards: this repo merges its own PRs with merge commits, so "HEAD is a merge" was
+  // enough to make the audit cast our own branch as upstream and report on it.
+  const headIsMerge = execFileSync("git", ["rev-list", "--parents", "-n", "1", "HEAD"],
+    { encoding: "utf8" }).trim().split(/\s+/).length > 2;
+  if (!headIsMerge) return; // Nothing to discriminate on a linear branch.
+
+  // Nothing descends from the root commit but itself, so no merge parent can be "upstream" by it.
+  const root = execFileSync("git", ["rev-list", "--max-parents=0", "-n", "1", "HEAD"],
+    { encoding: "utf8" }).trim();
+  assert.equal(locateMerge(undefined, "HEAD", root), null);
+
+  // Without a hint there is nothing to check against, so the merge is taken at face value.
+  assert.notEqual(locateMerge(undefined, "HEAD"), null);
+});

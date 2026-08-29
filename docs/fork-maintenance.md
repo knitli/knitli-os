@@ -121,6 +121,8 @@ Then, in order:
 
    It finds the merge on its own, whether one is in progress (resolutions in the index) or already
    committed (resolutions in the merge commit), so it works during the sync and afterwards on the PR.
+   It only counts a merge whose second parent is upstream: this repo merges its own PRs with merge
+   commits, and an ordinary PR merge is not a sync.
    `--merge <ref>` audits any past merge; `--upstream <ref>` picks what the formatting check compares
    against, defaulting to the upstream side of the merge, then to the last upstream commit merged,
    then to `foundation/main` if fetched.

@@ -154,6 +154,8 @@ export default defineConfig({
     // test in the file finishes in tens of milliseconds. The timeout has to clear that cold
     // start, not the steady-state cost, or the first test fails wherever the runner is slow.
     testTimeout: 60_000,
+    // Fix for failing tests in Gateway AI executor
+    hookTimeout: 70_000,
     // A rejected future capability is reported independently from the awaited pipelined call.
     // The tests assert these exact rejections; all unrelated unhandled errors remain fatal.
     onUnhandledError(error) {

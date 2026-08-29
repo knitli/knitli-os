@@ -46,12 +46,9 @@ describe("AI executor active resource selection", () => {
         meta: "gpt-5",
       },
     ]);
-    await expect(configurator.resourceUrl(PROFILE.id)).resolves.toBe(
+    await expect(configurator.resourceUrl()).resolves.toBe(
       canonicalProfileUrl(PROFILE.id),
     );
-    await expect(
-      configurator.resourceUrl("0198ddb0-7ac5-7ee9-8e65-62da80270036"),
-    ).rejects.toThrow("not active");
     expect(JSON.stringify(await configurator.listProfiles())).not.toMatch(
       /revision|token|secret|resource|deployment/i,
     );

@@ -5,6 +5,7 @@ import type {
   AiRunError,
   AiTool,
 } from "./types.js";
+import { extraKey, isPlainRecord, utf8Bytes } from "./validate.js";
 
 export const AI_EXECUTOR_PROTOCOL_VERSION = 1 as const;
 
@@ -17,7 +18,6 @@ export const MAX_OUTPUT_TOKENS = 16_384;
 
 const MAX_COMPLETION_BYTES = 1024 * 1024;
 const MAX_GATEWAY_LOG_ID_BYTES = 512;
-const encoder = new TextEncoder();
 
 const ERROR_MESSAGES: Record<AiRunError["code"], string> = {
   profile_unavailable: "The bound AI executor profile is unavailable.",
@@ -122,7 +122,12 @@ export function parseAiCompletion(value: unknown): AiCompletion {
 }
 
 export function sanitizeInvocationError(value: unknown): AiRunError {
-  const nested = isRecord(value) && isRecord(value.error) ? value.error : undefined;
+  // The value is a caught Error instance, not a plain record; only its `error` payload is data.
+  const payload =
+    typeof value === "object" && value !== null
+      ? (value as { error?: unknown }).error
+      : undefined;
+  const nested = isPlainRecord(payload) ? payload : undefined;
   const code = nested && isRunErrorCode(nested.code) ? nested.code : "provider_unavailable";
   const retryable = nested && typeof nested.retryable === "boolean" ? nested.retryable : true;
   return { code, retryable, message: ERROR_MESSAGES[code] };
@@ -212,12 +217,8 @@ function parseUsage(value: unknown): AiCompletion["usage"] {
 }
 
 function requireRecord(value: unknown, field: string): Record<string, unknown> {
-  if (!isRecord(value)) throw new AiExecutorValidationError(`${field} must be an object`);
+  if (!isPlainRecord(value)) throw new AiExecutorValidationError(`${field} must be an object`);
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function requireArray(value: unknown, field: string): unknown[] {
@@ -230,8 +231,7 @@ function requireExactKeys(
   allowed: readonly string[],
   field: string,
 ): void {
-  const allowedSet = new Set(allowed);
-  const unsupported = Object.keys(value).find(key => !allowedSet.has(key));
+  const unsupported = extraKey(value, allowed);
   if (unsupported) {
     throw new AiExecutorValidationError(`${field} has unsupported field ${unsupported}`);
   }
@@ -257,7 +257,7 @@ function requireBoundedString(
   requireNonEmpty = false,
 ): string {
   const result = requireNonEmpty ? requireNonEmptyString(value, field) : requireString(value, field);
-  if (encoder.encode(result).byteLength > maximumBytes) {
+  if (utf8Bytes(result) > maximumBytes) {
     throw new AiExecutorValidationError(`${field} exceeds ${maximumBytes} UTF-8 bytes`);
   }
   return result;
@@ -281,24 +281,22 @@ function requireEnum<const T extends readonly string[]>(
   return value as T[number];
 }
 
-function cloneJson(value: unknown, field: string): unknown {
+function encodeJson(value: unknown, field: string): string {
   try {
     const encoded = JSON.stringify(value);
     if (encoded === undefined) throw new Error("not JSON-compatible");
-    return JSON.parse(encoded) as unknown;
+    return encoded;
   } catch {
     throw new AiExecutorValidationError(`${field} must be JSON-compatible`);
   }
 }
 
+function cloneJson(value: unknown, field: string): unknown {
+  return JSON.parse(encodeJson(value, field)) as unknown;
+}
+
 function jsonBytes(value: unknown, field: string): number {
-  try {
-    const encoded = JSON.stringify(value);
-    if (encoded === undefined) throw new Error("not JSON-compatible");
-    return encoder.encode(encoded).byteLength;
-  } catch {
-    throw new AiExecutorValidationError(`${field} must be JSON-compatible`);
-  }
+  return utf8Bytes(encodeJson(value, field));
 }
 
 function isRunErrorCode(value: unknown): value is AiRunError["code"] {

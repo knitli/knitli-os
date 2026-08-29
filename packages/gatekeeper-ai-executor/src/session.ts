@@ -20,13 +20,15 @@ import type {
   AiRunPending,
   AiRunResult,
 } from "./types.js";
+import { hasExactKeys, isPlainRecord, utf8Bytes } from "./validate.js";
 
 export { AI_EXECUTOR_PROTOCOL_VERSION } from "./protocol.js";
 export type { InferenceRuntime } from "./protocol.js";
 export type { AiRequest } from "./types.js";
 
-const NEXT_RUN_ID_KEY = "ai-run:next-id";
-const NEXT_SETTLEMENT_SEQUENCE_KEY = "ai-run:next-settlement-sequence";
+// One monotonic ticket counter serves both purposes: it names a run when the run is staged, and
+// orders a run against its siblings when the run settles. Ids are opaque, so the gaps cost nothing.
+const NEXT_ID_KEY = "ai-run:next-id";
 const RUN_PREFIX = "ai-run:record:";
 const REQUEST_PREFIX = "ai-run:request:";
 const MAX_OUTSTANDING_RUNS = 50;
@@ -42,7 +44,6 @@ const MAX_REPAIR_REQUESTS = 1000;
 // state and modest record/key overhead, but bound total deserialization/validation work during one
 // repair activation independently of the entry-count ceilings.
 const MAX_REPAIR_SERIALIZED_BYTES = 112 * 1024 * 1024;
-const ENCODER = new TextEncoder();
 
 const ACTION_DESCRIPTION: ActionDescription = {
   title: "Run AI inference",
@@ -60,7 +61,6 @@ export interface RunKv {
   list<T>(options: {
     prefix: string;
     limit?: number;
-    reverse?: boolean;
     startAfter?: string;
   }): Iterable<[string, T]>;
 }
@@ -72,7 +72,7 @@ type TerminalRunResult =
 type RunRecord =
   | { runId: number; status: "pending" | "running" }
   | { runId: number; status: "submitting" }
-  | (TerminalRunResult & { settlementSequence?: number });
+  | (TerminalRunResult & { settlementSequence: number });
 type RunMetadata = Readonly<{
   runId: number;
   settlementSequence?: number;
@@ -87,21 +87,12 @@ type RequestScan = Readonly<{
 type RepairScanBudget = { serializedBytes: number };
 type AllocatorState = Readonly<{
   initialize: boolean;
-  nextRunId: number;
-}>;
-type SettlementAllocatorState = Readonly<{
-  initialize: boolean;
-  nextSettlementSequence: number;
+  nextId: number;
 }>;
 type ConstructorRepairPlan = Readonly<{
   keysToDelete: readonly string[];
-  legacyTerminalsToMigrate: readonly (readonly [
-    key: string,
-    settlementSequence: number,
-  ])[];
-  nextRunIdToPut?: number;
-  nextSettlementSequenceFloor: number;
-  nextSettlementSequenceToPut?: number;
+  nextIdFloor: number;
+  nextIdToPut?: number;
   recordsToPut: readonly (readonly [key: string, record: RunRecord])[];
 }>;
 
@@ -121,48 +112,24 @@ function invalidRunIdAllocator(): Error {
   return new Error("Invalid AI inference run id allocator.");
 }
 
-function invalidSettlementSequenceAllocator(): Error {
-  return new Error(
-    "Invalid AI inference terminal settlement sequence allocator.",
-  );
-}
-
 function requirePersistedObject(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw invalidPersistedRunState();
-  }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw invalidPersistedRunState();
-  }
-  return value as Record<string, unknown>;
+  if (!isPlainRecord(value)) throw invalidPersistedRunState();
+  return value;
 }
 
 function requirePersistedKeys(
   value: Record<string, unknown>,
   expected: readonly string[],
 ): void {
-  const keys = Object.keys(value);
-  if (keys.length !== expected.length || expected.some(key => !Object.hasOwn(value, key))) {
-    throw invalidPersistedRunState();
-  }
+  if (!hasExactKeys(value, expected)) throw invalidPersistedRunState();
 }
 
-function requirePersistedTerminalKeys(
+function requirePersistedSettlementSequence(
   value: Record<string, unknown>,
-  legacyKeys: readonly string[],
-): number | undefined {
-  const keys = Object.keys(value);
+  keys: readonly string[],
+): number {
+  requirePersistedKeys(value, [...keys, "settlementSequence"]);
   if (
-    keys.length === legacyKeys.length &&
-    legacyKeys.every((key) => Object.hasOwn(value, key))
-  ) {
-    return undefined;
-  }
-  const persistedKeys = [...legacyKeys, "settlementSequence"];
-  if (
-    keys.length !== persistedKeys.length ||
-    persistedKeys.some((key) => !Object.hasOwn(value, key)) ||
     !Number.isSafeInteger(value.settlementSequence) ||
     (value.settlementSequence as number) < 1
   ) {
@@ -197,14 +164,14 @@ function parsePersistedRunRecord(
         status = input.status;
         break;
       case "rejected":
-        settlementSequence = requirePersistedTerminalKeys(input, [
+        settlementSequence = requirePersistedSettlementSequence(input, [
           "runId",
           "status",
         ]);
         status = "rejected";
         break;
       case "failed": {
-        settlementSequence = requirePersistedTerminalKeys(input, [
+        settlementSequence = requirePersistedSettlementSequence(input, [
           "runId",
           "status",
           "error",
@@ -228,7 +195,7 @@ function parsePersistedRunRecord(
         break;
       }
       case "completed":
-        settlementSequence = requirePersistedTerminalKeys(input, [
+        settlementSequence = requirePersistedSettlementSequence(input, [
           "runId",
           "status",
           "result",
@@ -275,8 +242,7 @@ function parsePersistedRequestKey(key: string, seenRunIds: Set<number>): number 
 
 export class AiExecutorRunStore {
   #kv: RunKv;
-  #nextRunIdFloor: number;
-  #nextSettlementSequenceFloor: number;
+  #nextIdFloor: number;
 
   constructor(kv: RunKv) {
     this.#kv = kv;
@@ -284,18 +250,8 @@ export class AiExecutorRunStore {
     const records = this.#records(repairBudget);
     const requests = this.#requests(records, repairBudget);
     const allocator = this.#allocator(records, requests.entries, repairBudget);
-    const settlementAllocator = this.#settlementAllocator(
-      records,
-      repairBudget,
-    );
-    this.#nextRunIdFloor = allocator.nextRunId;
-    const plan = this.#constructorRepairPlan(
-      records,
-      requests,
-      allocator,
-      settlementAllocator,
-    );
-    this.#nextSettlementSequenceFloor = plan.nextSettlementSequenceFloor;
+    const plan = this.#constructorRepairPlan(records, requests, allocator);
+    this.#nextIdFloor = plan.nextIdFloor;
     this.#applyConstructorRepairPlan(plan);
   }
 
@@ -306,14 +262,7 @@ export class AiExecutorRunStore {
         `${MAX_OUTSTANDING_RUNS} AI inference runs are already awaiting approval or running.`,
       );
     }
-    const runId = this.#kv.get<unknown>(NEXT_RUN_ID_KEY);
-    if (!Number.isSafeInteger(runId) || (runId as number) < this.#nextRunIdFloor) {
-      throw invalidRunIdAllocator();
-    }
-    if ((runId as number) >= Number.MAX_SAFE_INTEGER) {
-      throw new Error("AI inference run id space is exhausted.");
-    }
-    const allocatedRunId = runId as number;
+    const allocatedRunId = this.#nextId();
     const runKey = this.#runKey(allocatedRunId);
     const requestKey = this.#requestKey(allocatedRunId);
     if (
@@ -322,8 +271,7 @@ export class AiExecutorRunStore {
     ) {
       throw new Error("AI inference run id collision.");
     }
-    this.#kv.put(NEXT_RUN_ID_KEY, allocatedRunId + 1);
-    this.#nextRunIdFloor = allocatedRunId + 1;
+    this.#commitId(allocatedRunId);
     this.#kv.put(requestKey, request);
     try {
       this.#kv.put<RunRecord>(runKey, { runId: allocatedRunId, status: "submitting" });
@@ -401,7 +349,7 @@ export class AiExecutorRunStore {
       );
     }
     const completion = parseAiCompletion(result);
-    const settlementSequence = this.#allocateSettlementSequence();
+    const settlementSequence = this.#allocateId();
     this.#kv.delete(this.#requestKey(runId));
     this.#kv.put<RunRecord>(this.#runKey(runId), {
       runId,
@@ -421,7 +369,7 @@ export class AiExecutorRunStore {
     if (current.status === "completed" || current.status === "rejected") {
       throw new Error(`AI inference run ${runId} is already ${current.status}.`);
     }
-    const settlementSequence = this.#allocateSettlementSequence();
+    const settlementSequence = this.#allocateId();
     this.#kv.delete(this.#requestKey(runId));
     this.#kv.put<RunRecord>(this.#runKey(runId), {
       runId,
@@ -439,7 +387,7 @@ export class AiExecutorRunStore {
     if (record.status !== "submitting" && record.status !== "pending") {
       throw new Error(`AI inference run ${runId} is already ${record.status}.`);
     }
-    const settlementSequence = this.#allocateSettlementSequence();
+    const settlementSequence = this.#allocateId();
     this.#kv.delete(this.#requestKey(runId));
     this.#kv.put<RunRecord>(this.#runKey(runId), {
       runId,
@@ -558,25 +506,20 @@ export class AiExecutorRunStore {
     label: "allocator" | "request" | "run",
     repairBudget: RepairScanBudget,
   ): void {
+    const invalid =
+      label === "run"
+        ? invalidPersistedRunState
+        : label === "request"
+          ? invalidPersistedRequestState
+          : invalidRunIdAllocator;
     let serialized: string | undefined;
     try {
       serialized = JSON.stringify(value);
     } catch {
-      throw label === "run"
-        ? invalidPersistedRunState()
-        : label === "request"
-          ? invalidPersistedRequestState()
-          : invalidRunIdAllocator();
+      throw invalid();
     }
-    if (serialized === undefined) {
-      throw label === "run"
-        ? invalidPersistedRunState()
-        : label === "request"
-          ? invalidPersistedRequestState()
-          : invalidRunIdAllocator();
-    }
-    repairBudget.serializedBytes +=
-      ENCODER.encode(key).byteLength + ENCODER.encode(serialized).byteLength;
+    if (serialized === undefined) throw invalid();
+    repairBudget.serializedBytes += utf8Bytes(key) + utf8Bytes(serialized);
     if (repairBudget.serializedBytes > MAX_REPAIR_SERIALIZED_BYTES) {
       throw new Error(
         `AI inference aggregate repair state exceeds the finite byte ceiling of ${MAX_REPAIR_SERIALIZED_BYTES} bytes.`,
@@ -589,80 +532,49 @@ export class AiExecutorRunStore {
     requests: readonly RequestEntry[],
     repairBudget: RepairScanBudget,
   ): AllocatorState {
-    const maxRunId = Math.max(
+    const maxAllocatedId = Math.max(
       0,
       ...records.map(([, record]) => record.runId),
+      ...records.map(([, record]) => record.settlementSequence ?? 0),
       ...requests.map(([, runId]) => runId),
     );
-    const stored = this.#kv.get<unknown>(NEXT_RUN_ID_KEY);
+    const stored = this.#kv.get<unknown>(NEXT_ID_KEY);
     if (stored === undefined) {
-      if (maxRunId !== 0) throw invalidRunIdAllocator();
-      return Object.freeze({ initialize: true, nextRunId: 1 });
+      if (maxAllocatedId !== 0) throw invalidRunIdAllocator();
+      return Object.freeze({ initialize: true, nextId: 1 });
     }
-    this.#consumeRepairBudget(NEXT_RUN_ID_KEY, stored, "allocator", repairBudget);
+    this.#consumeRepairBudget(NEXT_ID_KEY, stored, "allocator", repairBudget);
     if (
       !Number.isSafeInteger(stored) ||
-      (stored as number) <= maxRunId ||
+      (stored as number) <= maxAllocatedId ||
       (stored as number) > Number.MAX_SAFE_INTEGER
     ) {
       throw invalidRunIdAllocator();
     }
-    return Object.freeze({ initialize: false, nextRunId: stored as number });
+    return Object.freeze({ initialize: false, nextId: stored as number });
   }
 
-  #settlementAllocator(
-    records: readonly RunEntry[],
-    repairBudget: RepairScanBudget,
-  ): SettlementAllocatorState {
-    const persistedSequences = records.flatMap(([, record]) =>
-      record.settlementSequence === undefined
-        ? []
-        : [record.settlementSequence],
-    );
-    const maxSettlementSequence = Math.max(0, ...persistedSequences);
-    const stored = this.#kv.get<unknown>(NEXT_SETTLEMENT_SEQUENCE_KEY);
-    if (stored === undefined) {
-      if (persistedSequences.length !== 0) {
-        throw invalidSettlementSequenceAllocator();
-      }
-      return Object.freeze({ initialize: true, nextSettlementSequence: 1 });
-    }
-    this.#consumeRepairBudget(
-      NEXT_SETTLEMENT_SEQUENCE_KEY,
-      stored,
-      "allocator",
-      repairBudget,
-    );
-    if (
-      !Number.isSafeInteger(stored) ||
-      (stored as number) <= maxSettlementSequence ||
-      (stored as number) > Number.MAX_SAFE_INTEGER
-    ) {
-      throw invalidSettlementSequenceAllocator();
-    }
-    return Object.freeze({
-      initialize: false,
-      nextSettlementSequence: stored as number,
-    });
-  }
-
-  #allocateSettlementSequence(): number {
-    const stored = this.#kv.get<unknown>(NEXT_SETTLEMENT_SEQUENCE_KEY);
-    if (
-      !Number.isSafeInteger(stored) ||
-      (stored as number) < this.#nextSettlementSequenceFloor
-    ) {
-      throw invalidSettlementSequenceAllocator();
+  /** Reads the next ticket without spending it, so a caller can fail closed before mutating. */
+  #nextId(): number {
+    const stored = this.#kv.get<unknown>(NEXT_ID_KEY);
+    if (!Number.isSafeInteger(stored) || (stored as number) < this.#nextIdFloor) {
+      throw invalidRunIdAllocator();
     }
     if ((stored as number) >= Number.MAX_SAFE_INTEGER) {
-      throw new Error(
-        "AI inference terminal settlement sequence space is exhausted.",
-      );
+      throw new Error("AI inference run id space is exhausted.");
     }
-    const sequence = stored as number;
-    this.#kv.put(NEXT_SETTLEMENT_SEQUENCE_KEY, sequence + 1);
-    this.#nextSettlementSequenceFloor = sequence + 1;
-    return sequence;
+    return stored as number;
+  }
+
+  #commitId(id: number): void {
+    this.#kv.put(NEXT_ID_KEY, id + 1);
+    this.#nextIdFloor = id + 1;
+  }
+
+  #allocateId(): number {
+    const id = this.#nextId();
+    this.#commitId(id);
+    return id;
   }
 
   #outstandingRunCount(): number {
@@ -674,25 +586,14 @@ export class AiExecutorRunStore {
 
   #pruneTerminalRuns(): void {
     const terminalRuns = this.#records()
-      .filter(
-        ([, record]) =>
-          record.status !== "submitting" &&
-          record.status !== "pending" &&
-          record.status !== "running",
+      .flatMap(([key, record]) =>
+        record.settlementSequence === undefined
+          ? []
+          : [{ key, runId: record.runId, sequence: record.settlementSequence }],
       )
-      .toSorted((left, right) => {
-        if (
-          left[1].settlementSequence === undefined ||
-          right[1].settlementSequence === undefined
-        ) {
-          throw invalidPersistedRunState();
-        }
-        return right[1].settlementSequence - left[1].settlementSequence;
-      });
-    for (const [key, record] of terminalRuns.slice(
-      MAX_RETAINED_TERMINAL_RUNS,
-    )) {
-      this.#kv.delete(this.#requestKey(record.runId));
+      .toSorted((left, right) => right.sequence - left.sequence);
+    for (const { key, runId } of terminalRuns.slice(MAX_RETAINED_TERMINAL_RUNS)) {
+      this.#kv.delete(this.#requestKey(runId));
       this.#kv.delete(key);
     }
   }
@@ -701,7 +602,6 @@ export class AiExecutorRunStore {
     records: readonly RunEntry[],
     requests: RequestScan,
     allocator: AllocatorState,
-    settlementAllocator: SettlementAllocatorState,
   ): ConstructorRepairPlan {
     const recordsByRunId = new Map(records.map(([, record]) => [record.runId, record]));
     const keysToDelete = new Set<string>();
@@ -721,131 +621,72 @@ export class AiExecutorRunStore {
       }
     }
 
-    const recovered = records.map(([key, record]) => ({
-      key,
-      wasInterrupted: record.status === "submitting" || record.status === "running",
-      runId: record.runId,
-      settlementSequence:
-        "settlementSequence" in record ? record.settlementSequence : undefined,
-      status:
+    // A terminal record always carries its settlement sequence; an interrupted one never does,
+    // so the interrupted runs are exactly the records that settle now, after every stored one.
+    const settled = records.flatMap(([key, record]) =>
+      record.settlementSequence === undefined
+        ? []
+        : [{ key, sequence: record.settlementSequence }],
+    );
+    let nextId = allocator.nextId;
+    const interrupted = records
+      .flatMap(([key, record]) =>
         record.status === "submitting" || record.status === "running"
-          ? ("failed" as const)
-          : record.status,
-    }));
-    let nextSettlementSequence = settlementAllocator.nextSettlementSequence;
-    const needsSettlementSequence = recovered
-      .filter(
-        ({ status, settlementSequence }) =>
-          status !== "pending" && settlementSequence === undefined,
+          ? [{ key, runId: record.runId }]
+          : [],
       )
-      .toSorted((left, right) => {
-        if (left.wasInterrupted !== right.wasInterrupted) {
-          return left.wasInterrupted ? 1 : -1;
+      .toSorted((left, right) => left.runId - right.runId)
+      .map((record) => {
+        if (nextId >= Number.MAX_SAFE_INTEGER) {
+          throw new Error("AI inference run id space is exhausted.");
         }
-        return left.runId - right.runId;
-      });
-    for (const recoveredRecord of needsSettlementSequence) {
-      if (nextSettlementSequence >= Number.MAX_SAFE_INTEGER) {
-        throw new Error(
-          "AI inference terminal settlement sequence space is exhausted.",
-        );
-      }
-      recoveredRecord.settlementSequence = nextSettlementSequence;
-      nextSettlementSequence++;
-    }
-    const terminal = recovered
-      .filter(({ status }) => status !== "pending")
-      .toSorted((left, right) => {
-        if (
-          left.settlementSequence === undefined ||
-          right.settlementSequence === undefined
-        ) {
-          throw invalidPersistedRunState();
-        }
-        return right.settlementSequence - left.settlementSequence;
+        return { ...record, sequence: nextId++ };
       });
     const prunedKeys = new Set(
-      terminal.slice(MAX_RETAINED_TERMINAL_RUNS).map(({ key }) => key),
+      [...settled, ...interrupted]
+        .toSorted((left, right) => right.sequence - left.sequence)
+        .slice(MAX_RETAINED_TERMINAL_RUNS)
+        .map(({ key }) => key),
     );
     const recordsToPut: Array<readonly [string, RunRecord]> = [];
-    const legacyTerminalsToMigrate: Array<readonly [string, number]> = [];
 
-    for (const {
-      key,
-      runId,
-      settlementSequence,
-      status,
-      wasInterrupted,
-    } of recovered) {
-      if (status !== "pending") {
-        keysToDelete.add(this.#requestKey(runId));
+    for (const [key, record] of records) {
+      if (record.status !== "pending") {
+        keysToDelete.add(this.#requestKey(record.runId));
       }
-      if (prunedKeys.has(key)) {
-        keysToDelete.add(key);
-      } else if (wasInterrupted) {
-        recordsToPut.push(
-          Object.freeze([
-            key,
-            {
-              runId,
-              status: "failed",
-              error: outcomeUnknownError(),
-              settlementSequence,
-            },
-          ] as const),
-        );
-      } else if (status !== "pending" && settlementSequence !== undefined) {
-        const original = recordsByRunId.get(runId);
-        if (original?.settlementSequence === undefined) {
-          legacyTerminalsToMigrate.push(
-            Object.freeze([key, settlementSequence] as const),
-          );
-        }
-      }
+      if (prunedKeys.has(key)) keysToDelete.add(key);
+    }
+    for (const { key, runId, sequence } of interrupted) {
+      if (prunedKeys.has(key)) continue;
+      recordsToPut.push(
+        Object.freeze([
+          key,
+          {
+            runId,
+            status: "failed",
+            error: outcomeUnknownError(),
+            settlementSequence: sequence,
+          },
+        ] as const),
+      );
     }
 
     return Object.freeze({
       keysToDelete: Object.freeze([...keysToDelete]),
-      legacyTerminalsToMigrate: Object.freeze(
-        legacyTerminalsToMigrate.toSorted((left, right) => left[1] - right[1]),
-      ),
-      ...(allocator.initialize ? { nextRunIdToPut: allocator.nextRunId } : {}),
-      nextSettlementSequenceFloor: nextSettlementSequence,
-      ...(settlementAllocator.initialize ||
-      nextSettlementSequence !== settlementAllocator.nextSettlementSequence
-        ? { nextSettlementSequenceToPut: nextSettlementSequence }
+      nextIdFloor: nextId,
+      ...(allocator.initialize || nextId !== allocator.nextId
+        ? { nextIdToPut: nextId }
         : {}),
       recordsToPut: Object.freeze(recordsToPut),
     });
   }
 
   #applyConstructorRepairPlan(plan: ConstructorRepairPlan): void {
-    if (plan.nextRunIdToPut !== undefined) {
-      this.#kv.put(NEXT_RUN_ID_KEY, plan.nextRunIdToPut);
-    }
-    if (plan.nextSettlementSequenceToPut !== undefined) {
-      this.#kv.put(
-        NEXT_SETTLEMENT_SEQUENCE_KEY,
-        plan.nextSettlementSequenceToPut,
-      );
+    if (plan.nextIdToPut !== undefined) {
+      this.#kv.put(NEXT_ID_KEY, plan.nextIdToPut);
     }
     for (const key of plan.keysToDelete) {
       this.#kv.delete(key);
-    }
-    for (const [key, settlementSequence] of plan.legacyTerminalsToMigrate) {
-      const record = this.#kv.get<RunRecord>(key);
-      if (
-        record === undefined ||
-        record.status === "submitting" ||
-        record.status === "pending" ||
-        record.status === "running"
-      ) {
-        throw invalidPersistedRunState();
-      }
-      this.#kv.put<RunRecord>(key, {
-        ...record,
-        settlementSequence,
-      } as RunRecord);
     }
     for (const [key, record] of plan.recordsToPut) {
       this.#kv.put<RunRecord>(key, record);
@@ -871,22 +712,6 @@ export class AiExecutorActionController {
     this.#store = store;
     this.#runtime = runtime;
     this.#profileId = profileId;
-  }
-
-  stage(request: unknown): AiRunPending {
-    return this.#store.stage(request);
-  }
-
-  markSubmitted(runId: number): void {
-    this.#store.markSubmitted(runId);
-  }
-
-  markSubmissionOutcomeUnknown(runId: number): void {
-    this.#store.markSubmissionOutcomeUnknown(runId);
-  }
-
-  get(runId: number): AiRunResult | undefined {
-    return this.#store.get(runId);
   }
 
   async applyAction(runId: number): Promise<void> {
@@ -947,12 +772,12 @@ export class AiExecutorActionController {
 
 @validateRpc()
 export class AiExecutorSession extends RpcTarget {
-  #controller: AiExecutorActionController;
+  #store: AiExecutorRunStore;
   #queue: RpcStub<ApprovalQueue>;
 
-  constructor(controller: AiExecutorActionController, queue: RpcStub<ApprovalQueue>) {
+  constructor(store: AiExecutorRunStore, queue: RpcStub<ApprovalQueue>) {
     super();
-    this.#controller = controller;
+    this.#store = store;
     this.#queue = queue;
   }
 
@@ -961,12 +786,12 @@ export class AiExecutorSession extends RpcTarget {
   }
 
   async submit(request: AiRequest): Promise<AiRunPending> {
-    const staged = this.#controller.stage(request);
+    const staged = this.#store.stage(request);
     try {
       await this.#queue.submitAction(staged.runId, ACTION_DESCRIPTION);
-      this.#controller.markSubmitted(staged.runId);
+      this.#store.markSubmitted(staged.runId);
     } catch {
-      this.#controller.markSubmissionOutcomeUnknown(staged.runId);
+      this.#store.markSubmissionOutcomeUnknown(staged.runId);
       throw new Error(outcomeUnknownError().message);
     }
     return staged;
@@ -974,7 +799,7 @@ export class AiExecutorSession extends RpcTarget {
 
   async getResult(runId: number): Promise<AiRunResult> {
     requireRunId(runId, "getResult");
-    const record = this.#controller.get(runId);
+    const record = this.#store.get(runId);
     if (!record) throw new Error(`No AI inference run with id ${runId}.`);
     // Pending/rejected/failed records contain bounded control-plane status only. The completed
     // provider payload is the private observation that permanently closes workspace sharing.

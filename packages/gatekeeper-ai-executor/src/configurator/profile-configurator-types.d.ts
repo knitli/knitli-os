@@ -12,6 +12,6 @@ export type AiExecutorProfileOption = {
 export interface AiExecutorProfileConfiguratorRpc {
   /** Lists the single active profile selected for this resource. */
   listProfiles(): Promise<AiExecutorProfileOption[]>;
-  /** Returns only the selected profile's canonical resource URL. */
-  resourceUrl(profileId: string): Promise<string>;
+  /** Returns only the bound profile's canonical resource URL. */
+  resourceUrl(): Promise<string>;
 }

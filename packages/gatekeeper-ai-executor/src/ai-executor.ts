@@ -15,11 +15,7 @@ import {
 } from "./session.js";
 import type { AiExecutor } from "./types.js";
 import TYPES_CODE from "./types.txt";
-import {
-  canonicalProfileUrl,
-  rejectPrivateObserver,
-  requireActiveProfile,
-} from "./resources.js";
+import { canonicalProfileUrl, requireActiveProfile } from "./resources.js";
 
 export type AiExecutorGatekeeperProps = {
   profileId: string;
@@ -35,14 +31,16 @@ export class AiExecutorGatekeeperImpl extends DurableObject<
   AiExecutorGatekeeperProps
 > implements Gatekeeper<AiExecutor> {
   #controller: AiExecutorActionController;
+  #store: AiExecutorRunStore;
 
   constructor(
     ctx: DurableObjectState<AiExecutorGatekeeperProps>,
     env: AiExecutorGatekeeperEnv,
   ) {
     super(ctx, env);
+    this.#store = new AiExecutorRunStore(ctx.storage.kv);
     this.#controller = new AiExecutorActionController(
-      new AiExecutorRunStore(ctx.storage.kv),
+      this.#store,
       env.AI_INFERENCE_RUNTIME,
       ctx.props.profileId,
     );
@@ -71,7 +69,9 @@ export class AiExecutorGatekeeperImpl extends DurableObject<
     _id: string,
     _user: Fetcher<GatekeeperUserVerifier>,
   ): Promise<void> {
-    rejectPrivateObserver(_user);
+    throw new Error(
+      "Knitli AI executor bindings are private and cannot be shared.",
+    );
   }
 
   async removeObserver(_id: string): Promise<void> {}
@@ -81,7 +81,7 @@ export class AiExecutorGatekeeperImpl extends DurableObject<
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<AiExecutor> {
-    return new AiExecutorSession(this.#controller, approvalQueue.dup());
+    return new AiExecutorSession(this.#store, approvalQueue.dup());
   }
 
   async applyAction(runId: number): Promise<void> {

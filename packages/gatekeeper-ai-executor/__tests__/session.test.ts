@@ -117,7 +117,7 @@ function harness(options: {
   const runtime = options.runtime ?? runtimeFake();
   const controller = new AiExecutorActionController(store, runtime, "profile-7");
   const queue = options.queue ?? queueFake();
-  const session = new AiExecutorSession(controller, queue as never);
+  const session = new AiExecutorSession(store, queue as never);
   return { controller, kv, queue, runtime, session, store };
 }
 
@@ -128,9 +128,9 @@ describe("AI executor deferred session", () => {
       async submitAction(): Promise<void> {}
     }
     const queue = new RpcStub(new DisposableQueue());
-    const { controller } = harness();
-    const session = new AiExecutorSession(controller, queue as never);
-    const staged = controller.stage(REQUEST);
+    const { controller, store } = harness();
+    const session = new AiExecutorSession(store, queue as never);
+    const staged = store.stage(REQUEST);
     await controller.applyAction(staged.runId);
 
     session[Symbol.dispose]();
@@ -619,6 +619,7 @@ describe("AI executor deferred session", () => {
         runId,
         status: "completed",
         result: { text: `terminal ${runId}`, finishReason: "stop" },
+        settlementSequence: runId - 999,
       });
     }
     // These keys sort after every terminal key. The old single-page scan pruned only its first
@@ -784,6 +785,7 @@ describe("AI executor deferred session", () => {
         runId,
         status: "completed",
         result: { text: `terminal ${runId}`, finishReason: "stop" },
+        settlementSequence: runId - 999,
       });
     }
     for (let runId = 2000; runId <= 2201; runId++) {
@@ -827,6 +829,7 @@ describe("AI executor deferred session", () => {
         runId,
         status: "completed",
         result: { text: nearLimitCompletion, finishReason: "stop" },
+        settlementSequence: runId - 1,
       });
     }
     kv.put("ai-run:next-id", 117);
@@ -849,6 +852,7 @@ describe("AI executor deferred session", () => {
           runId,
           status: "completed",
           result: { text: nearLimitCompletion, finishReason: "stop" },
+          settlementSequence: runId,
         });
       }
     };
@@ -964,7 +968,7 @@ describe("AI executor deferred session", () => {
   });
 
   it.each([
-    ["run", "ai-run:record:1", { runId: 1, status: "rejected" }],
+    ["run", "ai-run:record:1", { runId: 1, status: "rejected", settlementSequence: 1 }],
     [
       "request",
       "ai-run:request:1",
@@ -1012,24 +1016,29 @@ describe("AI executor deferred session", () => {
 
   it("evicts old terminal records and orphaned staged payloads while retaining the newest 100", async () => {
     const { controller, kv, session, store } = harness();
+    const runIds: number[] = [];
     for (let index = 0; index < 105; index++) {
       const { runId } = await session.submit({
         messages: [{ role: "user", content: `private prompt ${index}` }],
       });
+      runIds.push(runId);
       await controller.applyAction(runId);
-      if (runId === 1) {
-        kv.put("ai-run:request:1", {
+      if (index === 0) {
+        kv.put(`ai-run:request:${runId}`, {
           messages: [{ role: "user", content: "orphaned private prompt" }],
         });
       }
     }
 
-    expect(store.get(1)).toBeUndefined();
-    expect(store.get(5)).toBeUndefined();
-    expect(store.getStagedRequest(1)).toBeUndefined();
-    expect(store.get(6)).toMatchObject({ runId: 6, status: "completed" });
-    expect(store.get(105)).toEqual({
-      runId: 105,
+    expect(store.get(runIds[0]!)).toBeUndefined();
+    expect(store.get(runIds[4]!)).toBeUndefined();
+    expect(store.getStagedRequest(runIds[0]!)).toBeUndefined();
+    expect(store.get(runIds[5]!)).toMatchObject({
+      runId: runIds[5],
+      status: "completed",
+    });
+    expect(store.get(runIds[104]!)).toEqual({
+      runId: runIds[104],
       status: "completed",
       result: { text: "answer", finishReason: "stop" },
     });
@@ -1065,6 +1074,7 @@ describe("AI executor deferred session", () => {
     const firstApply = controller.applyAction(first.runId);
     await started;
 
+    const laterIds: number[] = [];
     for (let index = 0; index < 100; index++) {
       const later = await session.submit({
         messages: [
@@ -1077,6 +1087,7 @@ describe("AI executor deferred session", () => {
           },
         ],
       });
+      laterIds.push(later.runId);
       if (index % 3 === 0) {
         controller.rejectAction(later.runId);
       } else if (index % 3 === 1) {
@@ -1096,15 +1107,18 @@ describe("AI executor deferred session", () => {
       status: "completed",
       result: { text: "delayed first prompt", finishReason: "stop" },
     });
-    expect(store.get(2)).toBeUndefined();
-    expect(store.get(101)).toMatchObject({ runId: 101, status: "rejected" });
+    expect(store.get(laterIds[0]!)).toBeUndefined();
+    expect(store.get(laterIds[99]!)).toMatchObject({
+      runId: laterIds[99],
+      status: "rejected",
+    });
 
     const reactivated = new AiExecutorRunStore(kv);
     expect(reactivated.get(1)).toEqual(store.get(1));
-    expect(reactivated.get(2)).toBeUndefined();
+    expect(reactivated.get(laterIds[0]!)).toBeUndefined();
   });
 
-  it("settles interrupted runs after legacy terminals when constructor repair prunes", () => {
+  it("settles interrupted runs after stored terminals when constructor repair prunes", () => {
     const kv = new FakeKv();
     kv.put("ai-run:record:1", { runId: 1, status: "running" });
     kv.put("ai-run:request:1", REQUEST);
@@ -1113,6 +1127,7 @@ describe("AI executor deferred session", () => {
         runId,
         status: "completed",
         result: { text: `terminal ${runId}`, finishReason: "stop" },
+        settlementSequence: runId - 1,
       });
     }
     kv.put("ai-run:next-id", 102);
@@ -1129,7 +1144,7 @@ describe("AI executor deferred session", () => {
     expect(store.getStagedRequest(1)).toBeUndefined();
   });
 
-  it("advances the durable settlement sequence before writing a terminal record", () => {
+  it("advances the durable ticket counter before writing a terminal record", () => {
     const kv = new FakeKv();
     const store = new AiExecutorRunStore(kv);
     const first = store.stage(REQUEST);
@@ -1150,7 +1165,7 @@ describe("AI executor deferred session", () => {
       }),
     ).toThrow("injected durable storage put failure");
 
-    expect(kv.get("ai-run:next-settlement-sequence")).toBe(2);
+    expect(kv.get("ai-run:next-id")).toBe(3);
     store.fail(first.runId, OUTCOME_UNKNOWN);
     const second = store.stage(REQUEST);
     store.markSubmitted(second.runId);
@@ -1158,16 +1173,16 @@ describe("AI executor deferred session", () => {
 
     expect(kv.get("ai-run:record:1")).toMatchObject({
       status: "failed",
-      settlementSequence: 2,
-    });
-    expect(kv.get("ai-run:record:2")).toMatchObject({
-      status: "rejected",
       settlementSequence: 3,
     });
-    expect(kv.get("ai-run:next-settlement-sequence")).toBe(4);
+    expect(kv.get(`ai-run:record:${second.runId}`)).toMatchObject({
+      status: "rejected",
+      settlementSequence: 5,
+    });
+    expect(kv.get("ai-run:next-id")).toBe(6);
   });
 
-  it("rejects settlement-sequence allocator rollback without changing a pending run", () => {
+  it("rejects ticket-counter rollback without changing a pending run", () => {
     const kv = new FakeKv();
     const store = new AiExecutorRunStore(kv);
     const first = store.stage(REQUEST);
@@ -1175,11 +1190,11 @@ describe("AI executor deferred session", () => {
     store.reject(first.runId);
     const second = store.stage(REQUEST);
     store.markSubmitted(second.runId);
-    kv.put("ai-run:next-settlement-sequence", 1);
+    kv.put("ai-run:next-id", 1);
     kv.resetMutations();
 
     expect(() => store.reject(second.runId)).toThrow(
-      /invalid.*terminal settlement sequence allocator/i,
+      /invalid AI inference run id allocator/i,
     );
 
     expect(kv.mutations).toEqual([]);
@@ -1200,7 +1215,6 @@ describe("AI executor deferred session", () => {
       });
     }
     kv.put("ai-run:next-id", 3);
-    kv.put("ai-run:next-settlement-sequence", 2);
     kv.resetMutations();
 
     expect(() => new AiExecutorRunStore(kv)).toThrow(

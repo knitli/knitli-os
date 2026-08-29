@@ -25,11 +25,8 @@ export default {
       : {};
   },
 
-  resourceUrl({ values, ui }) {
-    if (typeof values.profileId !== "string") {
-      throw new Error("An active AI executor profile must be selected.");
-    }
-    return ui.resourceUrl(values.profileId);
+  resourceUrl({ ui }) {
+    return ui.resourceUrl();
   },
 
   render({ values, setValues, ui }) {

@@ -140,8 +140,11 @@ Then, in order:
    broken audit rather than a broken clone. `git fetch --unshallow origin` repairs it.
 
    The audit no longer draws conclusions from that failure. `git merge-base --is-ancestor` exits 1
-   for a definitive "not an ancestor" and 128 when it cannot answer at all, and those are kept
-   apart: only a definitive no marks a merge as "not a sync". Anything it cannot answer is audited
+   for "not an ancestor" and 128 when it cannot answer at all, and those are kept apart — but a 1 is
+   only believed when the clone is complete. A shallow clone grafts its boundary into a root, so git
+   stops traversing there and returns a confident 1 for a commit that genuinely *is* upstream, even
+   when the object is sitting in the local store just behind the boundary. In a shallow clone,
+   therefore, only "yes" is evidence; "no" is downgraded to "cannot tell". Anything it cannot answer is audited
    anyway and reported `[UNVERIFIED]`, and a shallow clone is called out by name. A noisy audit of
    something that was not a sync is recoverable; silently skipping a real one is the failure this
    tool exists to prevent.

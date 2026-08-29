@@ -221,19 +221,37 @@ test("history git cannot traverse is audited, not skipped", () => {
   }
 });
 
-test("a shallow clone really does break ancestry, and is detected", () => {
-  const origin = scratchRepo();
+test("a shallow boundary reports a false 'no', which must not be trusted", () => {
+  // The scenario, reproduced rather than approximated: `main` cloned at depth 1, then the true
+  // ancestor A fetched separately so the object is present locally but sits behind main's shallow
+  // boundary. Git treats that boundary as a root, so it exits 1 -- a confident "not an ancestor"
+  // for a commit that genuinely is one. Reading that as "no" skips a real sync's audit.
+  const origin = mkdtempSync(join(tmpdir(), "fork-audit-origin-"));
   const shallow = mkdtempSync(join(tmpdir(), "fork-audit-shallow-"));
+  const run = (dir: string, ...args: string[]) =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
   try {
+    run(origin, "init", "-q", "-b", "main");
+    run(origin, "config", "user.email", "test@example.invalid");
+    run(origin, "config", "user.name", "Test");
+    run(origin, "commit", "-q", "--allow-empty", "-m", "A");
+    const ancestorCommit = run(origin, "rev-parse", "HEAD");
+    run(origin, "branch", "side");
+    run(origin, "commit", "-q", "--allow-empty", "-m", "B");
+    run(origin, "commit", "-q", "--allow-empty", "-m", "C");
+
     execFileSync("git", ["clone", "-q", "--depth=1", `file://${origin}`, shallow],
       { encoding: "utf8", stdio: "pipe" });
+    // Brings A into the object store without deepening main's history.
+    run(shallow, "fetch", "-q", "--depth=1", "origin", "side");
+
     inRepo(shallow, () => {
-      assert.equal(isShallowRepository(), true, "the clone should be shallow");
-      // The grafted boundary makes the base commit unreachable, so this is "unknown" rather than
-      // the "no" that the old boolean would have produced.
-      const unreachable = execFileSync("git", ["-C", origin, "rev-parse", "upstream"],
-        { encoding: "utf8" }).trim();
-      assert.notEqual(ancestry(unreachable, "HEAD"), "yes");
+      assert.equal(isShallowRepository(), true);
+      assert.equal(run(shallow, "cat-file", "-t", ancestorCommit), "commit",
+        "the ancestor object must be present locally for this to be the reported case");
+      // Git's own answer here is a false 1. The point of the check is that we do not repeat it.
+      assert.equal(ancestry(ancestorCommit, "origin/main"), "unknown",
+        "a shallow boundary cannot support a definitive 'no'");
     });
   } finally {
     rmSync(origin, { recursive: true, force: true });

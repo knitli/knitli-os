@@ -169,7 +169,15 @@ export function ancestry(commit: string, upstreamRef: string): Ancestry {
       { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] });
     return "yes";
   } catch (error) {
-    return (error as { status?: number }).status === 1 ? "no" : "unknown";
+    const status = (error as { status?: number }).status;
+    // 128 and friends: git could not answer at all.
+    if (status !== 1) return "unknown";
+    // Status 1 means "not an ancestor" only when git could see the whole history. A shallow clone
+    // grafts its boundary into a root, so traversal stops there and reports a confident 1 for a
+    // commit that really is upstream -- even when the object is present locally, just behind the
+    // boundary. Verified: with `main` shallow at depth 1 and its parent fetched separately,
+    // `--is-ancestor <parent> origin/main` exits 1 despite the parent being a true ancestor.
+    return isShallowRepository() ? "unknown" : "no";
   }
 }
 

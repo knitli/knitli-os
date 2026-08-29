@@ -115,8 +115,31 @@ function gitOrNull(args: string[]): string | null {
   }
 }
 
+/**
+ * Reads `path` at `ref`, returning null *only* when the path is confirmed absent there.
+ *
+ * `git show ref:path` reports "this path is not in that tree" and "that ref is broken" with the
+ * same failure, so treating every failure as absence is the same mistake as reading a nonzero
+ * `--is-ancestor` as "no": a file that could not be read would be silently skipped by the
+ * dropped-hunk audit, or count as removed by the restored-path check. On a miss, ask a question
+ * that distinguishes the two rather than assuming the benign answer.
+ */
 function blob(ref: string, path: string): string | null {
-  return gitOrNull(["show", `${ref}:${path}`]);
+  const content = gitOrNull(["show", `${ref}:${path}`]);
+  if (content !== null) return content;
+
+  // The index (`ref` is empty) is listed by ls-files; a commit's tree by ls-tree. Both print
+  // nothing for an absent path and fail outright for an unreadable ref.
+  const listing = ref === ""
+    ? gitOrNull(["ls-files", "--", path])
+    : gitOrNull(["ls-tree", "--name-only", ref, "--", path]);
+  if (listing === null) {
+    throw new Error(`cannot read ${ref === "" ? "the index" : ref}: history may be incomplete`);
+  }
+  if (listing.trim() !== "") {
+    throw new Error(`${path} exists at ${ref === "" ? "the index" : ref} but could not be read`);
+  }
+  return null;
 }
 
 function changedFiles(from: string, to: string): Set<string> {
@@ -250,7 +273,8 @@ function committedMerge(headRef: string): MergeUnderAudit | null {
 function fromMergeCommit(ref: string): MergeUnderAudit {
   const parents = parentsOf(ref);
   if (parents.length < 2) {
-    throw new Error(`${ref} is not a merge commit, so there is no merge to audit.`);
+    // Only reachable from an explicit --merge; committedMerge() checks the parent count first.
+    throw new UsageError(`${ref} is not a merge commit, so there is no merge to audit.`);
   }
   const [oursRef, upstreamRef] = parents as [string, string];
   const resolved = git(["rev-parse", ref]).trim();
@@ -346,6 +370,9 @@ export function auditRemovedPaths(oursRef: string): string[] {
     .toSorted();
 }
 
+/** Bad invocation, as opposed to a finding. Exits 2 so callers can tell them apart. */
+export class UsageError extends Error {}
+
 /** The remote-tracking ref for upstream, by convention. See docs/fork-maintenance.md. */
 const UPSTREAM_REF = "foundation/main";
 
@@ -359,7 +386,16 @@ const UPSTREAM_REF = "foundation/main";
  * construction, and reassuring for no reason.
  */
 export function authoritativeUpstreamRef(explicit?: string): string | null {
-  if (explicit) return resolves(explicit) ? explicit : null;
+  if (explicit !== undefined) {
+    // An explicit --upstream is a requirement, not a preference. Falling back to a default here
+    // would run the audit against a baseline nobody asked for and still exit 0, which is worse
+    // than not running: an automated caller would take it as a pass.
+    if (!resolves(explicit)) {
+      throw new UsageError(`--upstream ${explicit} does not resolve to a commit. ` +
+        `Fetch it first, or correct the ref.`);
+    }
+    return explicit;
+  }
   return resolves(UPSTREAM_REF) ? UPSTREAM_REF : null;
 }
 
@@ -371,7 +407,12 @@ function shortRef(ref: string): string {
 function main(argv: string[]): number {
   const flag = (name: string): string | undefined => {
     const i = argv.indexOf(name);
-    return i >= 0 ? argv[i + 1] : undefined;
+    if (i < 0) return undefined;
+    const value = argv[i + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new UsageError(`${name} needs a value.`);
+    }
+    return value;
   };
 
   const oursRef = flag("--ours") ?? "HEAD";
@@ -448,5 +489,13 @@ function main(argv: string[]): number {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  process.exitCode = main(process.argv.slice(2));
+  try {
+    process.exitCode = main(process.argv.slice(2));
+  } catch (error) {
+    // 2 for "this invocation cannot be honoured", distinct from 1 for "the audit found something".
+    console.error(error instanceof UsageError
+      ? `fork:audit: ${error.message}`
+      : `fork:audit: ${(error as Error).message}`);
+    process.exitCode = 2;
+  }
 }

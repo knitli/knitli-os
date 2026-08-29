@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   ancestry,
+  auditRemovedPaths,
   authoritativeUpstreamRef,
   FORK_OWNED_PREFIXES,
   isForkOwned,
@@ -14,6 +15,7 @@ import {
   locateMerge,
   normalizeForFormatComparison,
   REMOVED_UPSTREAM_PATHS,
+  UsageError,
 } from "./upstream-merge-audit.ts";
 
 test("reflow is normalised away, so a reformat reads as no change", () => {
@@ -111,8 +113,16 @@ test("a merge of something that is not upstream is not treated as a sync", () =>
   assert.notEqual(locateMerge(undefined, "HEAD"), null);
 });
 
-test("an upstream ref that does not resolve is not silently accepted", () => {
-  assert.equal(authoritativeUpstreamRef("refs/heads/definitely-not-a-real-ref"), null);
+test("an explicit upstream ref that does not resolve is a usage error, not a fallback", () => {
+  // Falling back would audit against a baseline the caller did not ask for and still exit 0, which
+  // an automated caller would read as a pass.
+  assert.throws(() => authoritativeUpstreamRef("refs/heads/definitely-not-a-real-ref"),
+    UsageError);
+});
+
+test("an absent upstream ref is not an error, just nothing to compare against", () => {
+  // Distinct from the case above: no argument was given, so nothing was promised.
+  assert.doesNotThrow(() => authoritativeUpstreamRef(undefined));
 });
 
 test("an explicit upstream ref that resolves is used as given", () => {
@@ -256,5 +266,23 @@ test("a shallow boundary reports a false 'no', which must not be trusted", () =>
   } finally {
     rmSync(origin, { recursive: true, force: true });
     rmSync(shallow, { recursive: true, force: true });
+  }
+});
+
+test("a path that cannot be read is not reported as absent", () => {
+  // `git show ref:path` fails identically for "not in that tree" and "that ref is unreadable".
+  // Reading the second as absence silently drops a file from the dropped-hunk audit, and makes a
+  // deliberately-removed file look like it is still removed.
+  const dir = scratchRepo();
+  try {
+    inRepo(dir, () => {
+      // A genuine absence: the ref is fine, the path is not there.
+      assert.equal(auditRemovedPaths("HEAD").length, 0);
+      // A broken ref must raise rather than answer "absent" for everything.
+      assert.throws(() => auditRemovedPaths("refs/heads/no-such-branch"),
+        /cannot read|not a valid/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

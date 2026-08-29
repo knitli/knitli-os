@@ -124,7 +124,10 @@ Then, in order:
    It only counts a merge whose second parent is upstream: this repo merges its own PRs with merge
    commits, and an ordinary PR merge is not a sync.
    `--merge <ref>` audits any past merge; `--upstream <ref>` overrides what everything is compared
-   against, which otherwise means `foundation/main`.
+   against, which otherwise means `foundation/main`. An explicit argument is a requirement: a
+   `--upstream` that does not resolve exits 2 rather than quietly falling back to the default, so a
+   scripted caller cannot mistake "audited against something else" for a pass. Exit codes are 0 for
+   clean, 1 for findings, 2 for an invocation that could not be honoured.
 
    **Fetch upstream before running it.** Upstream is never inferred from local history — doing so is
    circular, because this repo merges its own PRs, so "the second parent of the last merge" is

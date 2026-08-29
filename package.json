@@ -21,11 +21,13 @@
     "types:scripts": "tsc -p scripts/tsconfig.json",
     "lint": "pnpm run lint:check && pnpm run types:scripts && pnpm run types:check",
     "types:generate": "node scripts/generate-worker-types.ts",
-    "types:generated": "node scripts/generate-worker-types.ts --check --package gatekeeper-ai-executor"
+    "types:generated": "node scripts/generate-worker-types.ts --check --package gatekeeper-ai-executor",
+    "fork:audit": "node scripts/fork/upstream-merge-audit.ts"
   },
   "devDependencies": {
     "@types/node": "26.1.0",
     "aws4fetch": "^1.0.20",
+    "jsdom": "^26.1.0",
     "jsonc-parser": "^3.3.1",
     "typescript": "catalog:",
     "typescript6": "npm:typescript@6.0.3",

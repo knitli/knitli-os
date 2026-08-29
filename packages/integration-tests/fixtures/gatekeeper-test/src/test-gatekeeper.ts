@@ -20,12 +20,8 @@
 // is one control knob here, `allow`, and the reason string is what carries the distinction to the
 // user. Tests exercise both narratives by choosing reason text.
 
-import {
-  DurableObject,
-  RpcStub as NativeRpcStub,
-  RpcTarget,
-  WorkerEntrypoint,
-} from "cloudflare:workers";
+import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
 import type {
   AccountDescription,
@@ -57,8 +53,10 @@ const SUPPORTED_RESOURCES: SupportedResource[] = [
 ];
 
 const TYPES_CODE = `
-/** A stand-in resource. It has no operations; nothing here is ever called. */
+/** A stand-in resource whose reads and writes are deterministic and audited. */
 interface TestThing {
+  readValue(): Promise<number>;
+  writeValue(value: number): Promise<number>;
   observe(): Promise<void>;
   act(): Promise<void>;
   bindHook(): Promise<void>;
@@ -80,6 +78,13 @@ const AVATAR = {
 type VerifyOutcome = { allow: true } | { allow: false; reason: string };
 
 /**
+ * One addObserver()/removeObserver() call, mirrored here as it happens: the gatekeeper is a facet
+ * under the gadget's Overseer, unreachable from this worker's routes, and a log (not a boolean)
+ * also pins the add/remove ordering.
+ */
+type ObserverEvent = { resourceUrl: string; type: "add" | "remove"; id: string };
+
+/**
  * A deliberately tiny in-process rendezvous for race tests. The tests arm a unique key, wait until
  * the fixture reports that production has reached that exact await point, mutate the workspace, and
  * then release it. Keeping this here makes the overlap real: the paused operation is a normal
@@ -91,15 +96,28 @@ type Barrier = {
   waiters: Array<() => void>;
 };
 
+type PendingTestAction = { id: number; value: number };
+type TestActionState = {
+  nextId: number;
+  pending: PendingTestAction[];
+  value?: number;
+  applyCount: number;
+};
+
+function outcomeKey(label: string, resourceUrl?: string): string {
+  return resourceUrl ? `outcome:${label}:${resourceUrl}` : `outcome:${label}`;
+}
+
+@validateRpc()
 export class TestControl extends DurableObject<Cloudflare.Env> {
+  // Barriers live in memory, not storage: a rendezvous only has meaning within the one
+  // instance whose await points the test is pausing.
   #barriers = new Map<string, Barrier>();
 
   armBarrier(key: string): void {
     const previous = this.#barriers.get(key);
     if (previous?.waiters.length) {
-      throw new Error(
-        `Cannot re-arm barrier ${key} while waiters are still blocked.`,
-      );
+      throw new Error(`Cannot re-arm barrier ${key} while waiters are still blocked.`);
     }
     this.#barriers.set(key, { arrivals: 0, released: false, waiters: [] });
   }
@@ -113,7 +131,7 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     if (!barrier) return;
     barrier.arrivals++;
     if (barrier.released) return;
-    await new Promise<void>((resolve) => barrier.waiters.push(resolve));
+    await new Promise<void>(resolve => barrier.waiters.push(resolve));
   }
 
   releaseBarrier(key: string): void {
@@ -123,17 +141,28 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     for (const resolve of barrier.waiters.splice(0)) resolve();
   }
 
-  setVerifyOutcome(label: string, outcome: VerifyOutcome): void {
-    this.ctx.storage.kv.put(`outcome:${label}`, outcome);
+  setVerifyOutcome(label: string, outcome: VerifyOutcome, resourceUrl?: string): void {
+    this.ctx.storage.kv.put(outcomeKey(label, resourceUrl), outcome);
   }
 
-  getVerifyOutcome(label: string): VerifyOutcome {
-    // Default to admitting: a collaborator's first open has to be able to succeed.
-    return (
-      this.ctx.storage.kv.get<VerifyOutcome>(`outcome:${label}`) ?? {
-        allow: true,
-      }
-    );
+  getVerifyOutcome(label: string, resourceUrl?: string): VerifyOutcome {
+    // A resource-specific outcome wins over a label-wide one. Default to admitting: a
+    // collaborator's first open has to be able to succeed.
+    return this.ctx.storage.kv.get<VerifyOutcome>(outcomeKey(label, resourceUrl))
+        ?? this.ctx.storage.kv.get<VerifyOutcome>(outcomeKey(label))
+        ?? { allow: true };
+  }
+
+  recordObserverEvent(event: ObserverEvent): void {
+    const events = this.ctx.storage.kv.get<ObserverEvent[]>("observer-events") ?? [];
+    events.push(event);
+    this.ctx.storage.kv.put("observer-events", events);
+  }
+
+  /** Filtered here rather than in the test: tests run concurrently against one shared log. */
+  getObserverEvents(resourceUrl: string): ObserverEvent[] {
+    return (this.ctx.storage.kv.get<ObserverEvent[]>("observer-events") ?? [])
+        .filter(e => e.resourceUrl === resourceUrl);
   }
 
   recordAmbientVerification(label: string): void {
@@ -204,6 +233,38 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     started.callback[Symbol.dispose]?.();
     started.approvalQueue[Symbol.dispose]?.();
   }
+
+  getActionState(label: string): TestActionState {
+    return this.ctx.storage.kv.get<TestActionState>(`actions:${label}`) ?? {
+      nextId: 1,
+      pending: [],
+      applyCount: 0,
+    };
+  }
+
+  stageAction(label: string, value: number): number {
+    const state = this.getActionState(label);
+    const id = state.nextId++;
+    state.pending.push({ id, value });
+    this.ctx.storage.kv.put(`actions:${label}`, state);
+    return id;
+  }
+
+  discardAction(label: string, id: number): void {
+    const state = this.getActionState(label);
+    state.pending = state.pending.filter(action => action.id !== id);
+    this.ctx.storage.kv.put(`actions:${label}`, state);
+  }
+
+  applyAction(label: string, id: number): void {
+    const state = this.getActionState(label);
+    const action = state.pending.find(candidate => candidate.id === id);
+    if (action === undefined) throw new Error(`Unknown pending test action ${id}`);
+    state.pending = state.pending.filter(candidate => candidate.id !== id);
+    state.value = action.value;
+    state.applyCount++;
+    this.ctx.storage.kv.put(`actions:${label}`, state);
+  }
 }
 
 // ctx.exports is typed via the Cloudflare.GlobalProps declaration in env.d.ts, so loopback bindings
@@ -224,6 +285,7 @@ function resourceName(resourceUrl: string): string {
 type AccountProps = { label: string };
 type BindingProps = AccountProps & { resourceUrl: string; ambient?: true };
 
+@validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
   async describe(): Promise<VendorDescription> {
     return {
@@ -241,6 +303,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
    * Reached via provisionAmbientAccount(). Each call mints a distinct account, so two users -- or two
    * concurrent tests -- never share one.
    */
+  @skipRpcValidation()
   async createAccount(): Promise<Fetcher<GatekeeperUser>> {
     const label = `test-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}@${VENDOR_HOST}`;
     return this.ctx.exports.TestAccount({ props: { label } });
@@ -270,6 +333,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
 // ---------------------------------------------------------------------------
 // Account
 
+@validateRpc()
 export class TestAccount
   extends WorkerEntrypoint<Cloudflare.Env, AccountProps>
   implements GatekeeperUser
@@ -324,6 +388,7 @@ export class TestAccount
   }
 
   /** The capability the overseer hands to addObserver() to say "this is the user asking". */
+  @skipRpcValidation()
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
     return this.ctx.exports.TestVerifier({ props: this.ctx.props });
   }
@@ -364,6 +429,7 @@ export interface TestVerifierApi extends GatekeeperUserVerifier {
   identify(): Promise<string>;
 }
 
+@validateRpc()
 export class TestVerifier
   extends WorkerEntrypoint<Cloudflare.Env, AccountProps>
   implements TestVerifierApi
@@ -376,46 +442,84 @@ export class TestVerifier
 // ---------------------------------------------------------------------------
 // Gatekeeper (one per bound resource, running as a facet under the gadget's Overseer)
 
-export interface TestSession extends RpcTarget {
+export interface TestSession {
+  readValue(): Promise<number>;
+  writeValue(value: number): Promise<number>;
   observe(): Promise<void>;
   act(): Promise<void>;
   bindHook(): Promise<void>;
 }
 
-class TestSessionImpl extends RpcTarget implements TestSession {
+@validateRpc()
+class TestSessionTarget extends RpcTarget implements TestSession {
+  private readonly approvalQueue: RpcStub<ApprovalQueue>;
+
   constructor(
-    private approvalQueue: NativeRpcStub<ApprovalQueue>,
-    private controllerFactory: () => Fetcher<HookController<RpcTarget>>,
-    private callbackFactory: () => NativeRpcStub<RpcTarget>,
-    private onDispose: () => void,
-  ) {
+      approvalQueue: RpcStub<ApprovalQueue>,
+      private readonly state: DurableObjectStub<TestControl>,
+      private readonly label: string,
+      private readonly controllerFactory: () => Fetcher<HookController<RpcTarget>>,
+      private readonly callbackFactory: () => RpcStub<RpcTarget>,
+      private readonly onDispose: () => void) {
     super();
+    this.approvalQueue = approvalQueue.dup();
   }
 
-  observe(): Promise<void> {
-    return this.approvalQueue.authorizeObservation({
+  async readValue(): Promise<number> {
+    await this.approvalQueue.authorizeObservation({
+      title: "Read the test value",
+      description: "Read the deterministic value exposed by the integration-test gatekeeper.",
+    });
+    return 42;
+  }
+
+  async writeValue(value: number): Promise<number> {
+    const id = await this.state.stageAction(this.label, value);
+    try {
+      await this.approvalQueue.submitAction(id, {
+        title: `Set the test value to ${value}`,
+        description: `Set the deterministic integration-test value to **${value}**.`,
+        implementsRevert: false,
+        awaitDecision: true,
+        actionKind: { tag: "set-value", label: "Set value" },
+      });
+      return id;
+    } catch (error) {
+      await this.state.discardAction(this.label, id);
+      throw error;
+    }
+  }
+
+  async observe(): Promise<void> {
+    await this.approvalQueue.authorizeObservation({
       title: "Test observation",
       description: "Records a fixture observation.",
     });
   }
 
-  act(): Promise<void> {
-    return this.approvalQueue.submitAction(1, {
-      title: "Test action",
-      description: "Records a fixture action.",
-      implementsRevert: false,
-    });
+  /**
+   * Stages before submitting, exactly as writeValue() does, so the id the queue is handed is one
+   * applyAction()/rejectAction() can resolve rather than a placeholder they would reject.
+   */
+  async act(): Promise<void> {
+    const id = await this.state.stageAction(this.label, 0);
+    try {
+      await this.approvalQueue.submitAction(id, {
+        title: "Test action",
+        description: "Records a fixture action.",
+        implementsRevert: false,
+      });
+    } catch (error) {
+      await this.state.discardAction(this.label, id);
+      throw error;
+    }
   }
 
-  bindHook(): Promise<void> {
-    return this.approvalQueue.bindHook(
-      this.controllerFactory(),
-      this.callbackFactory(),
-      {
-        title: "Test hook",
-        description: "Records a fixture hook.",
-      },
-    );
+  async bindHook(): Promise<void> {
+    await this.approvalQueue.bindHook(this.controllerFactory(), this.callbackFactory(), {
+      title: "Test hook",
+      description: "Records a fixture hook.",
+    });
   }
 
   [Symbol.dispose](): void {
@@ -428,23 +532,17 @@ export class TestHookCallback extends WorkerEntrypoint<Cloudflare.Env> {
   async run(): Promise<void> {}
 }
 
-export class TestHookController
-  extends WorkerEntrypoint<Cloudflare.Env, { key: string }>
-  implements HookController<RpcTarget>
-{
+export class TestHookController extends WorkerEntrypoint<Cloudflare.Env, { key: string }>
+    implements HookController<RpcTarget> {
   async enable(
-    initiator: Fetcher<HookInitiator<RpcTarget>>,
-    _target: HookTargetMetadata,
-  ): Promise<void> {
-    await control(this.ctx.exports).setHookInitiator(
-      this.ctx.props.key,
-      initiator,
-    );
+      initiator: Fetcher<HookInitiator<RpcTarget>>, _target: HookTargetMetadata): Promise<void> {
+    await control(this.ctx.exports).setHookInitiator(this.ctx.props.key, initiator);
   }
 
   async disable(): Promise<void> {}
 }
 
+@validateRpc()
 export class TestGatekeeper
   extends DurableObject<Cloudflare.Env, BindingProps>
   implements Gatekeeper<TestSession>
@@ -486,35 +584,22 @@ export class TestGatekeeper
     return [];
   }
 
-  async startSession(
-    approvalQueue: NativeRpcStub<ApprovalQueue>,
-  ): Promise<TestSession> {
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<TestSession> {
     const name = resourceName(this.ctx.props.resourceUrl);
     if (name.includes("start-session-barrier")) {
       await control(this.ctx.exports).waitAtBarrier(
-        `start-session:${this.ctx.props.resourceUrl}`,
-      );
+          `start-session:${this.ctx.props.resourceUrl}`);
     }
-    await control(this.ctx.exports).recordSessionStarted(
-      this.ctx.props.resourceUrl,
-    );
-    return new TestSessionImpl(
-      approvalQueue.dup(),
-      () =>
-        this.ctx.exports.TestHookController({
-          props: { key: this.ctx.props.resourceUrl },
-        }),
-      () =>
-        this.ctx.exports.TestHookCallback({
-          props: {},
-        }) as unknown as NativeRpcStub<RpcTarget>,
-      () =>
-        this.ctx.waitUntil(
-          control(this.ctx.exports).recordSessionDisposed(
-            this.ctx.props.resourceUrl,
-          ),
-        ),
-    );
+    await control(this.ctx.exports).recordSessionStarted(this.ctx.props.resourceUrl);
+    return new TestSessionTarget(
+        approvalQueue,
+        control(this.ctx.exports),
+        this.ctx.props.label,
+        () => this.ctx.exports.TestHookController(
+            { props: { key: this.ctx.props.resourceUrl } }),
+        () => this.ctx.exports.TestHookCallback({ props: {} }) as unknown as RpcStub<RpcTarget>,
+        () => this.ctx.waitUntil(
+            control(this.ctx.exports).recordSessionDisposed(this.ctx.props.resourceUrl)));
   }
 
   /**
@@ -526,21 +611,19 @@ export class TestGatekeeper
    */
   async addObserver(id: string, user: Fetcher<TestVerifierApi>): Promise<void> {
     const label = await user.identify();
-    const name = resourceName(this.ctx.props.resourceUrl);
-    if (name.includes("add-observer-barrier")) {
-      await control(this.ctx.exports).waitAtBarrier(
-        `add-observer:${this.ctx.props.resourceUrl}`,
-      );
+    const { resourceUrl } = this.ctx.props;
+    if (resourceName(resourceUrl).includes("add-observer-barrier")) {
+      await control(this.ctx.exports).waitAtBarrier(`add-observer:${resourceUrl}`);
     }
     await control(this.ctx.exports).recordObserver(label, id);
     if (this.ctx.props.ambient) {
       await control(this.ctx.exports).recordAmbientVerification(label);
-      this.ctx.storage.kv.put(`observer:${id}`, label);
-      return;
+    } else {
+      const outcome = await control(this.ctx.exports).getVerifyOutcome(label, resourceUrl);
+      if (!outcome.allow) throw new Error(outcome.reason);
     }
-    const outcome = await control(this.ctx.exports).getVerifyOutcome(label);
-    if (!outcome.allow) throw new Error(outcome.reason);
     this.ctx.storage.kv.put(`observer:${id}`, label);
+    await control(this.ctx.exports).recordObserverEvent({ resourceUrl, type: "add", id });
   }
 
   async removeObserver(id: string): Promise<void> {
@@ -551,16 +634,20 @@ export class TestGatekeeper
       );
     }
     this.ctx.storage.kv.delete(`observer:${id}`);
+    await control(this.ctx.exports).recordObserverEvent(
+        { resourceUrl: this.ctx.props.resourceUrl, type: "remove", id });
   }
 
-  async applyAction(_action: number): Promise<void> {
-    // The fixture session submits one no-op action so apply-time readiness can be tested.
+  async applyAction(action: number): Promise<void> {
+    await control(this.ctx.exports).applyAction(this.ctx.props.label, action);
   }
 
-  async rejectAction(_action: number): Promise<void> {}
+  async rejectAction(action: number): Promise<void> {
+    await control(this.ctx.exports).discardAction(this.ctx.props.label, action);
+  }
 
   async revertAction(_action: number): Promise<void> {
-    throw new Error("The test gatekeeper submits no actions.");
+    throw new Error("Test actions do not support revert.");
   }
 }
 
@@ -608,32 +695,39 @@ export default {
       }
     }
 
-    // Set what addObserver() should do for one account.
-    // Body: {"label": "...", "allow": false, "reason": "..."}
+    // Set what addObserver() should do for one account, either everywhere or (when `resourceUrl`
+    // is given) at one binding only.
+    // Body: {"label": "...", "allow": false, "reason": "...", "resourceUrl": "..."}
     if (url.pathname === "/control/verify-outcome" && req.method === "POST") {
-      const { label, allow, reason } = body as Record<string, unknown>;
-      if (!isNonEmptyString(label))
-        return badRequest("`label` must be a non-empty string");
-      if (typeof allow !== "boolean")
-        return badRequest("`allow` must be a boolean");
+      const { label, allow, reason, resourceUrl } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      if (typeof allow !== "boolean") return badRequest("`allow` must be a boolean");
       if (reason !== undefined && typeof reason !== "string") {
         return badRequest("`reason` must be a string when present");
+      }
+      if (resourceUrl !== undefined && !isNonEmptyString(resourceUrl)) {
+        return badRequest("`resourceUrl` must be a non-empty string when present");
       }
 
       const outcome: VerifyOutcome = allow
         ? { allow: true }
-        : {
-            allow: false,
-            reason: reason ?? "The test gatekeeper refused this account.",
-          };
-      await control(ctx.exports).setVerifyOutcome(label, outcome);
+        : { allow: false, reason: reason ?? "The test gatekeeper refused this account." };
+      await control(ctx.exports).setVerifyOutcome(label, outcome, resourceUrl);
       return new Response(null, { status: 204 });
     }
 
-    if (
-      url.pathname === "/control/ambient-verification-count" &&
-      req.method === "POST"
-    ) {
+    // Read back the addObserver()/removeObserver() calls one binding's gatekeeper has seen, in
+    // order.
+    // Body: {"resourceUrl": "..."} -> {"events": [{"resourceUrl", "type", "id"}, ...]}
+    if (url.pathname === "/control/observer-events" && req.method === "POST") {
+      const { resourceUrl } = body as Record<string, unknown>;
+      if (!isNonEmptyString(resourceUrl)) {
+        return badRequest("`resourceUrl` must be a non-empty string");
+      }
+      return Response.json({ events: await control(ctx.exports).getObserverEvents(resourceUrl) });
+    }
+
+    if (url.pathname === "/control/ambient-verification-count" && req.method === "POST") {
       const { label } = body as Record<string, unknown>;
       if (!isNonEmptyString(label))
         return badRequest("`label` must be a non-empty string");
@@ -731,7 +825,7 @@ export default {
       if (!isNonEmptyString(gadgetTitle)) {
         return badRequest("`gadgetTitle` must be a non-empty string");
       }
-      const responseTarget = new NativeRpcStub(new TestChatGatewayTarget());
+      const responseTarget = new RpcStub(new TestChatGatewayTarget());
       try {
         const result = await env.EXTERNAL_MESSAGE_GATEWAY.submitExternalMessage(
           {
@@ -748,6 +842,17 @@ export default {
       } finally {
         responseTarget[Symbol.dispose]();
       }
+    }
+
+    if (url.pathname === "/control/action-state" && req.method === "POST") {
+      const { label } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      const state = await control(ctx.exports).getActionState(label);
+      return Response.json({
+        pending: state.pending,
+        value: state.value,
+        applyCount: state.applyCount,
+      });
     }
 
     // Make this Worker issue a subrequest, so a test can prove that Worker-originated fetches really

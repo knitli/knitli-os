@@ -1,4 +1,57 @@
+# Knitli OS
+
+Knitli OS is Knitli's fork of [Cloudflare OS](https://github.com/cloudflare/cloudflare-os), an
+"operating system" for AI productivity. The upstream product description follows below and still
+describes what this is; this section covers what the fork changes and how we keep it in step.
+
+## What this fork adds
+
+- **`packages/gatekeeper-ai-executor/`** — the AI Executor gatekeeper, which runs deferred AI
+  workloads through the AI Gateway under the same Gatekeeper guardrails as every other capability.
+  It ships in the release bundle but is bound by the outer deployment rather than deployed as a
+  worker of its own, so it has no router mount and no preview worker.
+- **Gatekeeper privacy-readiness enforcement** in the Workshop backend, including a revocation
+  restart that holds the Durable Object input gate so a collaborator whose access was just revoked
+  cannot slip a call through the window before the restart.
+- Supporting tests across `packages/integration-tests/` and `packages/workshop-backend/`.
+
+Everything else is upstream's, and we work to keep it that way: **we add functionality, and change
+upstream code only where an addition genuinely cannot work otherwise.** Staying close to upstream is
+what keeps the next sync cheap, so it is a constraint on how changes are written, not a cleanup task
+afterwards.
+
+## Working with upstream
+
+`foundation` is the upstream remote (`cloudflare/cloudflare-os`); `origin` is ours. To sync:
+
+```bash
+git fetch foundation
+git merge foundation/main
+pnpm fork:audit          # catches the failures git does NOT flag
+mise x node@24 -- pnpm lint && mise x node@24 -- pnpm test
+```
+
+`pnpm fork:audit` exists because the expensive problems in a sync are the silent ones. It reports
+upstream changes that vanished without ever raising a conflict (a file resolved as "take ours" drops
+every upstream hunk in it), and upstream-owned files whose entire diff is reformatting — churn that
+buys nothing and conflicts forever.
+
+Two environment notes that will otherwise cost you an afternoon:
+
+- **Use Node 24.** Node 26 ships a global `localStorage` that shadows jsdom's and fails ~12 frontend
+  tests for reasons unrelated to your change.
+- **Run integration tests through `pnpm test` or `vp run`,** never a bare `vitest run`. They execute
+  prebuilt worker bundles from `.wrangler/validate/`, and a bare run will silently reuse a stale one.
+
+The full playbook — the rules that keep upstream edits small, and the inventory of every intentional
+divergence — is in **[docs/fork-maintenance.md](docs/fork-maintenance.md)**. Read it before changing
+a file upstream also owns.
+
+---
+
 # Cloudflare OS: An AI productivity environment
+
+*The remainder of this README is upstream's, and describes the underlying product.*
 
 Cloudflare OS is an "operating system" for AI productivity originally developed for use inside Cloudflare. A large portion of Cloudflare's workforce -- from engineering to sales and everything in between -- uses Cloudflare OS every day to help them do their jobs.
 
@@ -227,6 +280,8 @@ When developing, you'll want to run the front-end and back-end as two separate c
 Then visit: http://localhost:3000
 
 ### Contributing
+
+*(Upstream's policy, about the upstream repository. For this fork, see [docs/fork-maintenance.md](docs/fork-maintenance.md).)*
 
 At this time, we are not seeking outside contribution.
 

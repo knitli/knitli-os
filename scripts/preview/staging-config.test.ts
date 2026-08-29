@@ -7,18 +7,18 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { BindingDecl } from "../release/manifest-lib.ts";
+import {
+  gatekeeperShortName, isGatekeeperPackage, readDeployablePackages, type BindingDecl,
+} from "../release/manifest-lib.ts";
+import { isStandaloneGatekeeperPackage } from "../gatekeeper-discovery-policy.ts";
 import {
   MAX_PREVIEW_NAME_LENGTH,
+  PACKAGES_DIR,
   R2_MAX_BUCKET_NAME_LENGTH,
   backendSecrets,
   buildPreviewConfigs,
   gatekeeperBindingName,
-  gatekeeperShortName,
-  isGatekeeper,
-  isStandaloneGatekeeperPackage,
   previewPullRequestNumber,
-  readPackages,
   resolveAccess,
   resolveAiGateway,
   resolvePreviewName,
@@ -97,7 +97,7 @@ function previewsOf(configs: Map<string, StagingConfig>, name: string): PreviewO
 }
 
 function buildAll() {
-  const packages = readPackages();
+  const packages = readDeployablePackages(PACKAGES_DIR);
   const configs = buildPreviewConfigs({
     previewName: PREVIEW_NAME,
     packages,
@@ -192,8 +192,10 @@ test("a reserved prefix shrinks the slug budget rather than overflowing it", () 
 test("every standalone package gets a preview config, on the configured account", () => {
   const { packages, configs } = buildAll();
 
-  const standalone = packages.filter((pkg) =>
-    !isGatekeeper(pkg.name) || isStandaloneGatekeeperPackage(pkg.name));
+  // Outer-deployment-only gatekeepers are deliberately absent: they ship in the release bundle
+  // but never get a preview worker of their own.
+  const standalone = packages.filter(
+      (pkg) => !isGatekeeperPackage(pkg.name) || isStandaloneGatekeeperPackage(pkg.name));
   assert.equal(configs.size, standalone.length);
   assert.equal(configs.has("gatekeeper-ai-executor"), false);
   assert.ok(configs.has("router") && configs.has("workshop-backend"),
@@ -373,8 +375,8 @@ test("no generated config carries a secret's value anywhere", () => {
 
 test("every standalone gatekeeper is bound to the backend by RPC and to the router by HTTP", () => {
   const { packages, configs } = buildAll();
-  const gatekeepers = packages.map((pkg) => pkg.name)
-      .filter(isStandaloneGatekeeperPackage).toSorted();
+  const gatekeepers =
+      packages.map((pkg) => pkg.name).filter(isStandaloneGatekeeperPackage).toSorted();
   assert.ok(gatekeepers.length >= 16, `only found ${gatekeepers.length} gatekeepers`);
 
   // A service binding names a worker, which is the package name; the binding name — what the

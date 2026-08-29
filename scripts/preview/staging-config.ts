@@ -28,13 +28,11 @@ import { createHash } from "node:crypto";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  findDeployablePackages, readWranglerConfig,
-  type BindingDecl, type ObservabilityConfig, type ServiceBinding, type WranglerConfig,
+  gatekeeperShortName, isGatekeeperPackage, readDeployablePackages,
+  type BindingDecl, type DeployablePackage, type ObservabilityConfig, type ServiceBinding,
+  type WranglerConfig,
 } from "../release/manifest-lib.ts";
-import {
-  isGatekeeperPackage,
-  isStandaloneGatekeeperPackage,
-} from "../gatekeeper-discovery-policy.ts";
+import { isStandaloneGatekeeperPackage } from "../gatekeeper-discovery-policy.ts";
 
 /**
  * A service binding in a preview config. `preview_id` is what points a binding at a *sibling*
@@ -96,19 +94,7 @@ export interface StagingConfig extends WranglerConfig {
   previews?: PreviewOverrides;
 }
 
-/** A deployable package as the generator sees it: its name and its parsed wrangler.jsonc. */
-export interface PackageConfig {
-  /** The workspace package directory name, which is also the worker name. */
-  name: string;
-  /** The parsed wrangler.jsonc. */
-  config: WranglerConfig;
-}
-
-/** A deployable package on disk, as {@link readPackages} returns it. */
-export interface DeployablePackage extends PackageConfig {
-  /** Absolute path to the package directory. */
-  dir: string;
-}
+type PackageConfig = Pick<DeployablePackage, "name" | "config">;
 
 /** The values every `apply*` function derives its config from. */
 interface PreviewContext {
@@ -139,22 +125,7 @@ export const R2_MAX_BUCKET_NAME_LENGTH = 63;
  */
 export const MAX_PREVIEW_NAME_LENGTH = 28;
 const PREVIEW_NAME_HASH_LENGTH = 8;
-const GATEKEEPER_PREFIX = "gatekeeper-";
 
-/** True for the packages that are gatekeeper workers (as opposed to the router and backend). */
-export function isGatekeeper(pkgName: string): boolean {
-  return isGatekeeperPackage(pkgName);
-}
-
-export { isStandaloneGatekeeperPackage };
-
-/**
- * The vendor id a gatekeeper is reached by: `gatekeeper-mcp-portal` -> `mcp-portal`. Matches
- * manifest-lib.ts's shortName, and hence the `/gatekeeper/<short>` path the router serves.
- */
-export function gatekeeperShortName(pkgName: string): string {
-  return pkgName.slice(GATEKEEPER_PREFIX.length);
-}
 
 /**
  * The service binding name a gatekeeper is bound as: `gatekeeper-mcp-portal` ->
@@ -414,7 +385,8 @@ function applyRouter(config: StagingConfig, { gatekeepers }: PreviewContext): vo
 }
 
 /**
- * Build every standalone package's preview config. Outer-deployment-only gatekeepers are omitted.
+ * Build every package's preview config. Pure: `packages` is `[{ name, config }]` with `config`
+ * the parsed wrangler.jsonc, and the result is a `Map` from package name to its preview config.
  */
 export function buildPreviewConfigs({
   previewName,
@@ -431,13 +403,15 @@ export function buildPreviewConfigs({
     throw new Error("buildPreviewConfigs needs both accountId and workersDevHost");
   }
   const baseUrl = routerPreviewUrl(previewName, workersDevHost);
-  const gatekeepers = packages.map((pkg) => pkg.name)
-      .filter(isStandaloneGatekeeperPackage).toSorted();
+  const gatekeepers =
+      packages.map((pkg) => pkg.name).filter(isStandaloneGatekeeperPackage).toSorted();
   const context: PreviewContext = { baseUrl, gatekeepers };
   const configs = new Map<string, StagingConfig>();
 
   for (const pkg of packages) {
-    if (isGatekeeper(pkg.name) && !isStandaloneGatekeeperPackage(pkg.name)) continue;
+    // Outer-deployment-only gatekeepers (see gatekeeper-discovery-policy.ts) ship in the
+    // release bundle but never get a preview worker, so there is nothing to generate.
+    if (isGatekeeperPackage(pkg.name) && !isStandaloneGatekeeperPackage(pkg.name)) continue;
     const config: StagingConfig = structuredClone(pkg.config);
     if (config.name !== pkg.name) {
       // Checked before the rename below, not after: every URL and service binding here is
@@ -461,7 +435,7 @@ export function buildPreviewConfigs({
     delete config.routes;
     stripBaselineResources(config);
 
-    if (isGatekeeper(pkg.name)) applyGatekeeper(pkg.name, config, context);
+    if (isGatekeeperPackage(pkg.name)) applyGatekeeper(pkg.name, config, context);
     else if (pkg.name === "workshop-backend") applyBackend(config, context);
     else if (pkg.name === "router") applyRouter(config, context);
     else throw new Error(`cannot build a preview config for package: ${pkg.name}`);
@@ -678,11 +652,6 @@ export function backendSecrets({
   };
 }
 
-/** Read every deployable package's wrangler.jsonc off disk. */
-export function readPackages(): DeployablePackage[] {
-  return findDeployablePackages(PACKAGES_DIR)
-      .map(({ name, dir }) => ({ name, dir, config: readWranglerConfig(dir) }));
-}
 
 /** Write one package's generated preview config to its `wrangler.staging.jsonc`. */
 export function writePreviewConfig(pkgDir: string, config: StagingConfig): void {
@@ -703,8 +672,8 @@ export function generatePreviewConfigs(options: {
 } {
   const previewName = options.previewName ?? resolvePreviewName();
   const { accountId, workersDevHost } = resolveTarget();
-  const packages = readPackages().filter((pkg) =>
-    !isGatekeeper(pkg.name) || isStandaloneGatekeeperPackage(pkg.name));
+  const packages = readDeployablePackages(PACKAGES_DIR).filter(
+      (pkg) => !isGatekeeperPackage(pkg.name) || isStandaloneGatekeeperPackage(pkg.name));
   const configs = buildPreviewConfigs({
     previewName,
     packages,

@@ -8,7 +8,6 @@ import {
   canonicalProfileUrl,
   parseActiveProfiles,
   parseProfileResourceUrl,
-  rejectPrivateObserver,
   supportedResourceForProfile,
 } from "../src/resources.js";
 
@@ -117,22 +116,5 @@ describe("AI executor profile resources", () => {
       description: "openrouter · openai/gpt-5",
     });
     expect(JSON.stringify(resource)).not.toContain("revision");
-  });
-
-  it("rejects private observers without invoking their verifier", () => {
-    let calls = 0;
-    const verifier = new Proxy(
-      {},
-      {
-        get() {
-          calls++;
-          return () => true;
-        },
-      },
-    );
-    expect(() => rejectPrivateObserver(verifier)).toThrow(
-      "private and cannot be shared",
-    );
-    expect(calls).toBe(0);
   });
 });

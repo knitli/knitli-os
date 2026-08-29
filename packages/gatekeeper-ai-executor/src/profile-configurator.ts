@@ -27,9 +27,7 @@ export class AiExecutorProfileConfigurator
     ];
   }
 
-  async resourceUrl(profileId: string): Promise<string> {
-    if (profileId !== this.profile.id)
-      throw new Error("AI executor profile selection is not active.");
+  async resourceUrl(): Promise<string> {
     return canonicalProfileUrl(this.profile.id);
   }
 }

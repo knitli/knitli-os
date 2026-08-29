@@ -23,13 +23,15 @@ const MAX_SCHEDULE_DESCRIPTION_LENGTH = 2_000;
 const MAX_TIME_ZONE_LENGTH = 128;
 const MAX_WEEKDAYS = 7;
 const EPOCH_DATE = Temporal.PlainDate.from("1970-01-01");
+/** C0 and C1 control characters, including DEL. */
+const CONTROL_CHARACTER_RE = /\p{Cc}/u;
 
 /** Validates and trims schedule presentation metadata. */
 export function normalizeScheduleOptions(options: ScheduleOptions): ScheduleOptions {
   if (!options || typeof options !== "object")
     throw new TypeError("Schedule options are required.");
   const title = boundedText(options.title, "Schedule title", MAX_SCHEDULE_TITLE_LENGTH);
-  if (hasControlCharacter(title)) {
+  if (CONTROL_CHARACTER_RE.test(title)) {
     throw new TypeError("Schedule title must not contain control characters.");
   }
   return {
@@ -471,14 +473,6 @@ function boundedText(value: string, label: string, maximum: number): string {
     throw new RangeError(`${label} must be at most ${maximum} characters.`);
   }
   return normalized;
-}
-
-function hasControlCharacter(value: string): boolean {
-  for (const character of value) {
-    const codePoint = character.codePointAt(0)!;
-    if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) return true;
-  }
-  return false;
 }
 
 function requiredHour(hour: number | undefined, frequency: string): number {

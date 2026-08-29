@@ -107,7 +107,7 @@ describe("AI executor real Worker RPC boundary", () => {
       maxOutputTokens: 32,
     });
     await expect(session.getResult(second.runId)).resolves.toMatchObject({
-      runId: 2,
+      runId: second.runId,
       status: "completed",
     });
 

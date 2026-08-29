@@ -123,9 +123,14 @@ Then, in order:
    committed (resolutions in the merge commit), so it works during the sync and afterwards on the PR.
    It only counts a merge whose second parent is upstream: this repo merges its own PRs with merge
    commits, and an ordinary PR merge is not a sync.
-   `--merge <ref>` audits any past merge; `--upstream <ref>` picks what the formatting check compares
-   against, defaulting to the upstream side of the merge, then to the last upstream commit merged,
-   then to `foundation/main` if fetched.
+   `--merge <ref>` audits any past merge; `--upstream <ref>` overrides what everything is compared
+   against, which otherwise means `foundation/main`.
+
+   **Fetch upstream before running it.** Upstream is never inferred from local history — doing so is
+   circular, because this repo merges its own PRs, so "the second parent of the last merge" is
+   usually one of our own branches. Without `foundation/main` (or an explicit `--upstream`) the audit
+   says so loudly and declines to report a clean bill of health, because a check comparing the tree
+   against itself is clean by construction.
 
    The formatting half needs no merge at all and runs on every PR in CI (`.github/workflows/fork-audit.yml`),
    which is the point: reflow arrives through ordinary PRs, not through syncs.

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import {
+  authoritativeUpstreamRef,
   FORK_OWNED_PREFIXES,
   isForkOwned,
   isSourceFile,
@@ -103,4 +104,22 @@ test("a merge of something that is not upstream is not treated as a sync", () =>
 
   // Without a hint there is nothing to check against, so the merge is taken at face value.
   assert.notEqual(locateMerge(undefined, "HEAD"), null);
+});
+
+test("an upstream ref that does not resolve is not silently accepted", () => {
+  assert.equal(authoritativeUpstreamRef("refs/heads/definitely-not-a-real-ref"), null);
+});
+
+test("an explicit upstream ref that resolves is used as given", () => {
+  assert.equal(authoritativeUpstreamRef("HEAD"), "HEAD");
+});
+
+test("upstream is never derived from local history", () => {
+  // The bug this guards: the old fallback took "second parent of the most recent merge", which on
+  // a repo that merges its own PRs is one of our own branches -- so the formatting check compared
+  // the tree against itself and was clean by construction.
+  const withoutRemote = authoritativeUpstreamRef(undefined);
+  if (withoutRemote === null) return; // No foundation remote fetched here; nothing to assert.
+  assert.equal(withoutRemote, "foundation/main",
+    "the only non-explicit source of truth is the upstream remote");
 });

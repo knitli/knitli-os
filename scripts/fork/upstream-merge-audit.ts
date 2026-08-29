@@ -297,22 +297,21 @@ export function auditRemovedPaths(oursRef: string): string[] {
     .toSorted();
 }
 
+/** The remote-tracking ref for upstream, by convention. See docs/fork-maintenance.md. */
+const UPSTREAM_REF = "foundation/main";
+
 /**
- * The upstream ref to measure standing divergence against: whatever was explicitly asked for, else
- * the upstream side of the merge under audit, else the last upstream commit we merged, else the
- * `foundation` remote when it has been fetched.
+ * An upstream ref that owes nothing to local history, so it can be trusted to decide whether a
+ * given merge is a sync at all.
+ *
+ * Deriving upstream from local merges is circular, and quietly wrong: this repo merges its own PRs
+ * with merge commits, so "the second parent of the most recent merge" is usually one of our own
+ * branches. That produced a formatting check comparing the tree against itself -- clean by
+ * construction, and reassuring for no reason.
  */
-export function resolveUpstreamRef(
-  explicit: string | undefined, merge: MergeUnderAudit | null,
-): string | null {
+export function authoritativeUpstreamRef(explicit?: string): string | null {
   if (explicit) return resolves(explicit) ? explicit : null;
-  if (merge) return merge.upstreamRef;
-  const lastMerge = gitOrNull(["rev-list", "--merges", "-n", "1", "HEAD"])?.trim();
-  if (lastMerge) {
-    const [, upstream] = parentsOf(lastMerge);
-    if (upstream) return upstream;
-  }
-  return resolves("foundation/main") ? "foundation/main" : null;
+  return resolves(UPSTREAM_REF) ? UPSTREAM_REF : null;
 }
 
 /** Abbreviates a SHA for display, but leaves a symbolic ref like `foundation/main` intact. */
@@ -327,9 +326,11 @@ function main(argv: string[]): number {
   };
 
   const oursRef = flag("--ours") ?? "HEAD";
-  const explicitUpstream = flag("--upstream");
-  const merge = locateMerge(flag("--merge"), oursRef, explicitUpstream);
-  const upstreamRef = resolveUpstreamRef(explicitUpstream, merge);
+  const authoritative = authoritativeUpstreamRef(flag("--upstream"));
+  const merge = locateMerge(flag("--merge"), oursRef, authoritative ?? undefined);
+  // With no authoritative ref the only upstream on hand is the merge's own second parent, which is
+  // a guess: it is only upstream if the merge really was a sync, which is what we could not check.
+  const upstreamRef = authoritative ?? merge?.upstreamRef ?? null;
 
   const dropped = merge ? auditDroppedHunks(merge) : [];
   const formatChurn = upstreamRef ? auditFormatDrift({ oursRef, upstreamRef }) : [];
@@ -340,8 +341,13 @@ function main(argv: string[]): number {
     : `No upstream sync to audit (${oursRef === "HEAD" ? "HEAD" : oursRef.slice(0, 12)} is not a ` +
       "merge of upstream; an ordinary PR merge is not a sync).");
   console.log(upstreamRef
-    ? `Formatting checked against: ${shortRef(upstreamRef)}`
+    ? `Formatting checked against: ${shortRef(upstreamRef)}${authoritative ? "" : " (UNVERIFIED)"}`
     : "Formatting NOT checked: no upstream ref. Pass --upstream, or fetch the foundation remote.");
+  if (!authoritative) {
+    console.log(`\nWARNING: no upstream ref. Without one, a merge cannot be told apart from an\n` +
+      `ordinary PR merge, and any "clean" below is worth little. Run:\n` +
+      `  git fetch foundation main    (or pass --upstream <ref>)`);
+  }
   console.log("");
 
   if (dropped.length > 0) {
@@ -374,8 +380,9 @@ function main(argv: string[]): number {
   }
 
   if (dropped.length === 0 && formatChurn.length === 0 && restored.length === 0) {
-    console.log("Clean: no dropped upstream hunks, no formatting-only divergence, " +
-      "no removed files restored.");
+    console.log(authoritative
+      ? "Clean: no dropped upstream hunks, no formatting-only divergence, no removed files restored."
+      : "No findings -- but upstream was not verified, so this is not a clean bill of health.");
     return 0;
   }
   return 1;

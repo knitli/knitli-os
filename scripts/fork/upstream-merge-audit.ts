@@ -1,7 +1,7 @@
 /**
- * Audits a fork merge for the two failure modes that this repo's upstream syncs actually hit, both
- * of which are silent: git reports a clean tree and the damage only surfaces as confusing test
- * failures much later.
+ * Audits the fork against upstream for the two failure modes our syncs actually hit, both of which
+ * are silent: git reports a clean tree and the damage only surfaces as confusing test failures much
+ * later.
  *
  * 1. Dropped upstream hunks. When a file is resolved as "take ours" -- by hand, by `-X ours`, or by
  *    a re-run of a partially resolved merge -- every upstream change to that file vanishes without
@@ -14,49 +14,82 @@
  *    semantic edit into a two-hundred-line diff. Those lines conflict with every upstream touch of
  *    the same file forever, at zero benefit.
  *
- * Both checks compare against a *recomputed* merge rather than trusting the working tree, so they
- * work during a merge, after one, or on a branch that is about to be merged.
+ * Check 1 needs a merge to look at, and finds one whether it is in progress (resolutions in the
+ * index) or already committed (resolutions in the merge commit) -- so it runs during a sync, on the
+ * PR that carries it, and on any past merge by ref. Check 2 needs no merge at all and runs on every
+ * branch, which is the point: reflow arrives through ordinary PRs, not through syncs.
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** A file whose upstream changes went missing without a conflict being raised. */
 export interface DroppedFile {
   path: string;
-  /** Lines a clean three-way merge would have added that the resolved file does not have. */
+  /** Lines a clean three-way merge would have kept that the resolved file does not have. */
   lostLines: number;
 }
 
-/** A file where our diff against upstream is wholly or mostly reflow. */
+/** A file whose divergence from upstream is nothing but reflow. */
 export interface FormatChurnFile {
   path: string;
-  /** Lines added+removed in the raw diff. */
+  /** Lines added+removed between upstream's version and ours. */
   rawChurn: number;
-  /** True when the two sides are identical once formatting is normalised away. */
-  formattingOnly: boolean;
 }
 
-export interface AuditResult {
-  dropped: DroppedFile[];
-  formatChurn: FormatChurnFile[];
+/** The merge being audited: who merged what, and where to read the resolved content from. */
+export interface MergeUnderAudit {
+  baseRef: string;
+  oursRef: string;
+  upstreamRef: string;
+  readResolved: (path: string) => string | null;
+  /** How this merge was found, so the CLI can report what it looked at. */
+  description: string;
 }
+
+/**
+ * Paths the fork owns outright. Upstream has no file here, so nothing in these trees can ever
+ * conflict -- which is exactly why new work belongs in them. Keep in sync with
+ * `docs/fork-maintenance.md`.
+ */
+export const FORK_OWNED_PREFIXES = [
+  "packages/gatekeeper-ai-executor/",
+  "packages/integration-tests/__tests__/fork/",
+  "scripts/fork/",
+  ".github/workflows/fork-audit.yml",
+  "docs/fork-maintenance.md",
+];
+
+/** Extensions the formatting comparison understands. Anything else is left alone. */
+const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 
 function git(args: string[]): string {
   return execFileSync("git", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
 }
 
+/**
+ * Runs git where failure is an expected answer rather than a problem -- a path that does not exist
+ * at a ref, a ref that does not resolve. stderr is discarded because those are questions, not
+ * errors, and git writes "fatal: path ... does not exist" for each one.
+ */
 function gitOrNull(args: string[]): string | null {
   try {
-    return git(args);
+    return execFileSync("git", args, {
+      encoding: "utf8",
+      maxBuffer: 256 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
   } catch {
     return null;
   }
 }
 
-/** Files changed between two refs, restricted to those git treats as text we can merge. */
+function blob(ref: string, path: string): string | null {
+  return gitOrNull(["show", `${ref}:${path}`]);
+}
+
 function changedFiles(from: string, to: string): Set<string> {
   return new Set(git(["diff", "--name-only", from, to]).split("\n").filter(Boolean));
 }
@@ -65,7 +98,7 @@ function changedFiles(from: string, to: string): Set<string> {
  * Normalises away everything a reformat can change but a compiler cannot see: comments, all
  * whitespace, parentheses around a lone arrow parameter, and trailing commas before a closer.
  * Deliberately crude -- it only has to be good enough to separate "reflowed" from "rewritten", and
- * a false "semantic" reading is the safe direction to err in.
+ * reading a reflow as semantic is the safe direction to err in.
  */
 export function normalizeForFormatComparison(source: string): string {
   let text = source.replaceAll(/\/\*[\s\S]*?\*\//g, "");
@@ -83,62 +116,80 @@ export function isForkOwned(path: string): boolean {
 }
 
 /**
- * Paths the fork owns outright. Upstream has no file here, so nothing in these trees can ever
- * conflict -- which is exactly why new work belongs in them. Keep in sync with
- * `docs/fork-maintenance.md`.
+ * True for files the formatting comparison can read. Lockfiles, JSON and generated data are
+ * excluded: reflow is not a risk there, and the JS-shaped normalisation would misread them.
  */
-export const FORK_OWNED_PREFIXES = [
-  "packages/gatekeeper-ai-executor/",
-  "packages/integration-tests/__tests__/fork/",
-  "scripts/fork/",
-  "docs/fork-maintenance.md",
-];
+export function isSourceFile(path: string): boolean {
+  return SOURCE_EXTENSIONS.some(ext => path.endsWith(ext));
+}
 
-function blob(ref: string, path: string): string | null {
-  return gitOrNull(["show", `${ref}:${path}`]);
+/** The parent commits of `ref`, first parent first. */
+function parentsOf(ref: string): string[] {
+  const line = gitOrNull(["rev-list", "--parents", "-n", "1", ref])?.trim();
+  return line ? line.split(/\s+/).slice(1) : [];
+}
+
+function resolves(ref: string): boolean {
+  return gitOrNull(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]) !== null;
 }
 
 /**
- * Recomputes the three-way merge for one file and returns it, or `null` when the merge conflicts
- * (in which case git would have raised the conflict and a human is already looking at it).
+ * Finds the merge to audit: an explicit ref, else a merge in progress, else `HEAD` when `HEAD` is
+ * itself a merge commit. Returns `null` when there is no merge to look at, which is the ordinary
+ * case on a feature branch and not an error.
  */
-function recomputeMerge(
-  scratch: string, base: string, ours: string, theirs: string,
-): string | null {
-  const files = { ours: join(scratch, "ours"), base: join(scratch, "base"), theirs: join(scratch, "theirs") };
-  writeFileSync(files.ours, ours);
-  writeFileSync(files.base, base);
-  writeFileSync(files.theirs, theirs);
-  try {
-    return execFileSync("git", ["merge-file", "-p", files.ours, files.base, files.theirs],
-      { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
-  } catch {
-    // Non-zero exit means conflict hunks, which git surfaces on its own.
-    return null;
+export function locateMerge(mergeRef?: string, headRef = "HEAD"): MergeUnderAudit | null {
+  // An explicit --merge is a claim that `mergeRef` *is* a merge; being wrong about that is worth
+  // an error. `headRef` is only a place to look, so a non-merge there is simply "nothing to audit".
+  if (mergeRef) return fromMergeCommit(mergeRef);
+
+  const inProgress = gitOrNull(["rev-parse", "--git-path", "MERGE_HEAD"])?.trim();
+  if (inProgress && existsSync(inProgress)) {
+    const upstreamRef = git(["rev-parse", "MERGE_HEAD"]).trim();
+    return {
+      baseRef: git(["merge-base", "HEAD", upstreamRef]).trim(),
+      oursRef: git(["rev-parse", "HEAD"]).trim(),
+      upstreamRef,
+      // A merge in progress keeps its resolutions in the index.
+      readResolved: path => blob("", path),
+      description: `merge in progress (${upstreamRef.slice(0, 12)} into HEAD)`,
+    };
   }
+
+  return parentsOf(headRef).length > 1 ? fromMergeCommit(headRef) : null;
+}
+
+function fromMergeCommit(ref: string): MergeUnderAudit {
+  const parents = parentsOf(ref);
+  if (parents.length < 2) {
+    throw new Error(`${ref} is not a merge commit, so there is no merge to audit.`);
+  }
+  const [oursRef, upstreamRef] = parents as [string, string];
+  const resolved = git(["rev-parse", ref]).trim();
+  return {
+    baseRef: git(["merge-base", oursRef, upstreamRef]).trim(),
+    oursRef,
+    upstreamRef,
+    readResolved: path => blob(resolved, path),
+    description:
+      `merge commit ${resolved.slice(0, 12)} (${upstreamRef.slice(0, 12)} into ${oursRef.slice(0, 12)})`,
+  };
 }
 
 /**
- * Audits the merge of `upstreamRef` into `oursRef`, reading resolved content from `resolvedRef`
- * (the index, by default, which is where a merge in progress keeps its resolutions).
+ * Files both sides changed where the resolution kept our side exactly, even though a clean
+ * three-way merge would have taken upstream's work as well.
  */
-export function auditMerge(opts: {
-  baseRef: string;
-  oursRef: string;
-  upstreamRef: string;
-  /** Reads the resolved content of a path; defaults to the git index. */
-  readResolved?: (path: string) => string | null;
-}): AuditResult {
-  const { baseRef, oursRef, upstreamRef } = opts;
-  const readResolved = opts.readResolved ?? ((path: string) => blob("", path));
+export function auditDroppedHunks(merge: MergeUnderAudit): DroppedFile[] {
+  const { baseRef, oursRef, upstreamRef, readResolved } = merge;
+  const upstreamChanged = changedFiles(baseRef, upstreamRef);
   const bothChanged = [...changedFiles(baseRef, oursRef)]
-    .filter(path => changedFiles(baseRef, upstreamRef).has(path))
+    .filter(path => upstreamChanged.has(path))
     .filter(path => !isForkOwned(path))
     .toSorted();
 
   const scratch = mkdtempSync(join(tmpdir(), "fork-merge-audit-"));
   const dropped: DroppedFile[] = [];
-  const formatChurn: FormatChurnFile[] = [];
   try {
     for (const path of bothChanged) {
       const base = blob(baseRef, path);
@@ -146,57 +197,125 @@ export function auditMerge(opts: {
       const theirs = blob(upstreamRef, path);
       const resolved = readResolved(path);
       if (base === null || ours === null || theirs === null || resolved === null) continue;
+      if (resolved !== ours) continue;
 
-      // (1) Resolved to exactly our side, when a clean merge would have taken upstream's work too.
-      if (resolved === ours) {
-        const merged = recomputeMerge(scratch, base, ours, theirs);
-        if (merged !== null && merged !== ours) {
-          dropped.push({ path, lostLines: Math.abs(merged.split("\n").length - ours.split("\n").length) });
-        }
-      }
-
-      // (2) Our divergence from upstream in a file upstream owns, that survives no normalisation.
-      if (ours !== theirs) {
-        const raw = gitOrNull(["diff", "--numstat", baseRef, oursRef, "--", path]) ?? "";
-        const [added = "0", removed = "0"] = raw.trim().split(/\s+/);
-        const rawChurn = (Number(added) || 0) + (Number(removed) || 0);
-        const formattingOnly =
-          normalizeForFormatComparison(blob(baseRef, path) ?? "") === normalizeForFormatComparison(ours);
-        if (formattingOnly && rawChurn > 0) formatChurn.push({ path, rawChurn, formattingOnly });
-      }
+      const merged = recomputeMerge(scratch, base, ours, theirs);
+      // A conflicting recomputation means git raised the conflict itself; a human already saw it.
+      if (merged === null || merged === ours) continue;
+      dropped.push({
+        path,
+        lostLines: Math.abs(merged.split("\n").length - ours.split("\n").length),
+      });
     }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-  return { dropped, formatChurn };
+  return dropped;
+}
+
+function recomputeMerge(
+  scratch: string, base: string, ours: string, theirs: string,
+): string | null {
+  const paths = {
+    ours: join(scratch, "ours"),
+    base: join(scratch, "base"),
+    theirs: join(scratch, "theirs"),
+  };
+  writeFileSync(paths.ours, ours);
+  writeFileSync(paths.base, base);
+  writeFileSync(paths.theirs, theirs);
+  return gitOrNull(["merge-file", "-p", paths.ours, paths.base, paths.theirs]);
+}
+
+/**
+ * Upstream-owned source files whose difference from upstream survives no normalisation -- pure
+ * reflow, which buys nothing and conflicts forever. Needs no merge: this is our standing divergence
+ * from `upstreamRef`, so it catches reflow arriving through an ordinary PR.
+ */
+export function auditFormatDrift(opts: { oursRef: string; upstreamRef: string }): FormatChurnFile[] {
+  const { oursRef, upstreamRef } = opts;
+  const churn: FormatChurnFile[] = [];
+  for (const path of [...changedFiles(upstreamRef, oursRef)].toSorted()) {
+    if (isForkOwned(path) || !isSourceFile(path)) continue;
+    const theirs = blob(upstreamRef, path);
+    const ours = blob(oursRef, path);
+    // A file upstream does not have cannot have been reformatted away from it.
+    if (theirs === null || ours === null || ours === theirs) continue;
+    if (normalizeForFormatComparison(ours) !== normalizeForFormatComparison(theirs)) continue;
+
+    const stat = gitOrNull(["diff", "--numstat", upstreamRef, oursRef, "--", path])?.trim() ?? "";
+    const [added = "0", removed = "0"] = stat.split(/\s+/);
+    churn.push({ path, rawChurn: (Number(added) || 0) + (Number(removed) || 0) });
+  }
+  return churn;
+}
+
+/**
+ * The upstream ref to measure standing divergence against: whatever was explicitly asked for, else
+ * the upstream side of the merge under audit, else the last upstream commit we merged, else the
+ * `foundation` remote when it has been fetched.
+ */
+export function resolveUpstreamRef(
+  explicit: string | undefined, merge: MergeUnderAudit | null,
+): string | null {
+  if (explicit) return resolves(explicit) ? explicit : null;
+  if (merge) return merge.upstreamRef;
+  const lastMerge = gitOrNull(["rev-list", "--merges", "-n", "1", "HEAD"])?.trim();
+  if (lastMerge) {
+    const [, upstream] = parentsOf(lastMerge);
+    if (upstream) return upstream;
+  }
+  return resolves("foundation/main") ? "foundation/main" : null;
+}
+
+/** Abbreviates a SHA for display, but leaves a symbolic ref like `foundation/main` intact. */
+function shortRef(ref: string): string {
+  return /^[0-9a-f]{40}$/.test(ref) ? ref.slice(0, 12) : ref;
 }
 
 function main(argv: string[]): number {
-  const arg = (flag: string, fallback: string): string => {
-    const i = argv.indexOf(flag);
-    return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1]! : fallback;
+  const flag = (name: string): string | undefined => {
+    const i = argv.indexOf(name);
+    return i >= 0 ? argv[i + 1] : undefined;
   };
-  const upstreamRef = arg("--upstream", "MERGE_HEAD");
-  const oursRef = arg("--ours", "HEAD");
-  const baseRef = arg("--base", git(["merge-base", oursRef, upstreamRef]).trim());
 
-  const { dropped, formatChurn } = auditMerge({ baseRef, oursRef, upstreamRef });
+  const oursRef = flag("--ours") ?? "HEAD";
+  const merge = locateMerge(flag("--merge"), oursRef);
+  const upstreamRef = resolveUpstreamRef(flag("--upstream"), merge);
+
+  const dropped = merge ? auditDroppedHunks(merge) : [];
+  const formatChurn = upstreamRef ? auditFormatDrift({ oursRef, upstreamRef }) : [];
+
+  console.log(merge
+    ? `Merge audited: ${merge.description}`
+    : "No merge to audit (none in progress, and HEAD is not a merge commit).");
+  console.log(upstreamRef
+    ? `Formatting checked against: ${shortRef(upstreamRef)}`
+    : "Formatting NOT checked: no upstream ref. Pass --upstream, or fetch the foundation remote.");
+  console.log("");
 
   if (dropped.length > 0) {
     console.error("Upstream changes were dropped without a conflict being raised:\n");
     for (const { path, lostLines } of dropped) {
       console.error(`  ${path}  (~${lostLines} lines a clean three-way merge would have kept)`);
-      console.error(`     re-merge with: git merge-file -p <ours> <base> <theirs> > ${path}`);
     }
-    console.error("");
+    console.error("\n  Recover one with:");
+    console.error("    git show <base>:<path> >base && git show <ours>:<path> >ours && \\");
+    console.error("      git show <upstream>:<path> >theirs");
+    console.error("    git merge-file -p ours base theirs > <path>\n");
   }
+
   if (formatChurn.length > 0) {
-    console.error("Upstream-owned files whose whole diff is reflow (drop these to stop future conflicts):\n");
-    for (const { path, rawChurn } of formatChurn) console.error(`  ${path}  (${rawChurn} lines, 0 semantic)`);
-    console.error("");
+    console.error("Upstream-owned files that differ from upstream by formatting alone:\n");
+    for (const { path, rawChurn } of formatChurn) {
+      console.error(`  ${path}  (${rawChurn} lines, 0 semantic)`);
+    }
+    console.error(
+      `\n  Restore upstream's formatting: git checkout ${upstreamRef ?? "<upstream>"} -- <path>\n`);
   }
+
   if (dropped.length === 0 && formatChurn.length === 0) {
-    console.log(`No dropped upstream hunks or formatting-only churn between ${baseRef.slice(0, 12)} and ${upstreamRef}.`);
+    console.log("Clean: no dropped upstream hunks, no formatting-only divergence.");
     return 0;
   }
   return 1;

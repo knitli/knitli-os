@@ -119,6 +119,19 @@ Then, in order:
    It reports upstream hunks that vanished without a conflict, and upstream-owned files whose diff is
    pure reflow. Run it *before* the checks below — a dropped hunk usually still typechecks.
 
+   It finds the merge on its own, whether one is in progress (resolutions in the index) or already
+   committed (resolutions in the merge commit), so it works during the sync and afterwards on the PR.
+   `--merge <ref>` audits any past merge; `--upstream <ref>` picks what the formatting check compares
+   against, defaulting to the upstream side of the merge, then to the last upstream commit merged,
+   then to `foundation/main` if fetched.
+
+   The formatting half needs no merge at all and runs on every PR in CI (`.github/workflows/fork-audit.yml`),
+   which is the point: reflow arrives through ordinary PRs, not through syncs.
+
+   One trap, since it cost an hour here: **never fetch upstream shallow.** `git fetch --depth=1
+   foundation main` grafts the history, and `git merge-base` then fails outright — which looks like a
+   broken audit rather than a broken clone. `git fetch --unshallow origin` repairs it.
+
 3. **Re-verify the divergence inventory.** For each entry, confirm it is still present and still
    necessary; upstream may have adopted, moved, or obsoleted it.
 

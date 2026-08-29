@@ -6,6 +6,7 @@ import {
   isForkOwned,
   isSourceFile,
   locateMerge,
+  REMOVED_UPSTREAM_PATHS,
   normalizeForFormatComparison,
 } from "./upstream-merge-audit.ts";
 
@@ -76,4 +77,14 @@ test("a branch tip that is not a merge is 'nothing to audit', not an error", () 
 test("an explicit --merge that is not a merge is an error", () => {
   // Being wrong about an explicit claim is worth failing on, unlike a place-to-look default.
   assert.throws(() => locateMerge(rootCommit), /not a merge commit/);
+});
+
+test("every deliberately-removed upstream path records why", () => {
+  const entries = Object.entries(REMOVED_UPSTREAM_PATHS);
+  assert.ok(entries.length > 0, "the list should not be silently emptied");
+  for (const [path, reason] of entries) {
+    assert.ok(path.includes("/"), `${path} must be a repository path`);
+    // The reason is the whole point: a bare list rots into "why is this here?" within a sync or two.
+    assert.ok(reason.length > 30, `${path} needs a reason someone can act on, got: ${reason}`);
+  }
 });

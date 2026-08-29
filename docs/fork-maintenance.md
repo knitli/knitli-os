@@ -171,6 +171,21 @@ Intentional, reviewed differences from upstream. Keep this current.
   currently fail. The 100 ms delay upstream relies on is preserved; the gate is what these two tests
   disagree with. **Unresolved — see "Open questions".**
 
+### Upstream's CLA and review-bot workflows are removed
+
+- **Where:** `.github/workflows/cla.yml`, `bonk.yml`, `bonk-pr.yml` — deleted
+- **What:** Cloudflare's CLA assistant and their internal "Bonk" review bot.
+- **Why:** Neither can work here. The CLA action signs against `cloudflare.com/cla` and stores
+  signatures on a `cla-signatures` branch this fork does not have, so it only ever fails; Bonk needs
+  a GitHub App installation the fork does not have, and was failing at startup.
+- **How it is kept:** listed in `REMOVED_UPSTREAM_PATHS` in `scripts/fork/upstream-merge-audit.ts`,
+  with the reason. When upstream touches one of these, a sync raises a modify/delete conflict, which
+  is visible — but resolving that toward upstream restores the file silently, which is not. The
+  audit fails if one comes back.
+- **Left alone deliberately:** `.github/dependabot.yml` still carries an `ignore` entry for
+  `ask-bonk/ask-bonk`. It is inert once the workflows are gone, and removing it would add a
+  divergence to an upstream-owned file to no benefit.
+
 ### AI Executor is not a standalone worker
 
 - **Where:** `scripts/gatekeeper-discovery-policy.ts`, consumed by `scripts/preview/staging-config.ts`

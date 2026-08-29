@@ -62,6 +62,22 @@ export const FORK_OWNED_PREFIXES = [
   "docs/fork-maintenance.md",
 ];
 
+/**
+ * Upstream files this fork deliberately does not have, and why. A sync raises a modify/delete
+ * conflict when upstream touches one, which is visible -- but resolving that conflict by taking
+ * upstream's side restores the file silently, which is not. Checked so each removal stays a
+ * decision rather than something that quietly drifts back.
+ */
+export const REMOVED_UPSTREAM_PATHS: Record<string, string> = {
+  ".github/workflows/cla.yml":
+    "Cloudflare's CLA assistant: signs against cloudflare.com/cla and stores signatures on a " +
+    "`cla-signatures` branch this fork does not have, so it only ever fails here.",
+  ".github/workflows/bonk.yml":
+    "Cloudflare's internal review bot, which needs a GitHub App installation this fork lacks.",
+  ".github/workflows/bonk-pr.yml":
+    "The PR half of the same bot; its break-glass path also assumes that App.",
+};
+
 /** Extensions the formatting comparison understands. Anything else is left alone. */
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 
@@ -250,6 +266,13 @@ export function auditFormatDrift(opts: { oursRef: string; upstreamRef: string })
   return churn;
 }
 
+/** Deliberately-removed upstream files that have come back. */
+export function auditRemovedPaths(oursRef: string): string[] {
+  return Object.keys(REMOVED_UPSTREAM_PATHS)
+    .filter(path => blob(oursRef, path) !== null)
+    .toSorted();
+}
+
 /**
  * The upstream ref to measure standing divergence against: whatever was explicitly asked for, else
  * the upstream side of the merge under audit, else the last upstream commit we merged, else the
@@ -285,6 +308,7 @@ function main(argv: string[]): number {
 
   const dropped = merge ? auditDroppedHunks(merge) : [];
   const formatChurn = upstreamRef ? auditFormatDrift({ oursRef, upstreamRef }) : [];
+  const restored = auditRemovedPaths(oursRef);
 
   console.log(merge
     ? `Merge audited: ${merge.description}`
@@ -314,8 +338,18 @@ function main(argv: string[]): number {
       `\n  Restore upstream's formatting: git checkout ${upstreamRef ?? "<upstream>"} -- <path>\n`);
   }
 
-  if (dropped.length === 0 && formatChurn.length === 0) {
-    console.log("Clean: no dropped upstream hunks, no formatting-only divergence.");
+  if (restored.length > 0) {
+    console.error("Upstream files this fork removed on purpose have come back:\n");
+    for (const path of restored) {
+      console.error(`  ${path}\n     removed because: ${REMOVED_UPSTREAM_PATHS[path]}`);
+    }
+    console.error("\n  Remove again, or drop it from REMOVED_UPSTREAM_PATHS if the removal is " +
+      "no longer wanted.\n");
+  }
+
+  if (dropped.length === 0 && formatChurn.length === 0 && restored.length === 0) {
+    console.log("Clean: no dropped upstream hunks, no formatting-only divergence, " +
+      "no removed files restored.");
     return 0;
   }
   return 1;

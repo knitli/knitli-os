@@ -479,13 +479,20 @@ function main(argv: string[]): number {
       "no longer wanted.\n");
   }
 
-  if (dropped.length === 0 && formatChurn.length === 0 && restored.length === 0) {
-    console.log(trustworthy
-      ? "Clean: no dropped upstream hunks, no formatting-only divergence, no removed files restored."
-      : "No findings -- but the history could not be trusted, so this is not a clean bill of health.");
-    return 0;
+  if (dropped.length > 0 || formatChurn.length > 0 || restored.length > 0) return 1;
+
+  // Nothing found -- but "found nothing" and "could not look" are different answers, and only one
+  // of them is a pass. Exiting 0 here would let a shell script or a habit-formed developer read an
+  // audit that skipped its checks as a clean one.
+  if (!trustworthy) {
+    console.log("No findings -- but the history could not be trusted, so the checks above did not " +
+      "all run.\nThis is not a clean bill of health; fix the warnings and re-run.");
+    return 2;
   }
-  return 1;
+
+  console.log("Clean: no dropped upstream hunks, no formatting-only divergence, " +
+    "no removed files restored.");
+  return 0;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

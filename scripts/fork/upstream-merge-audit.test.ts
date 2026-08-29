@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   ancestry,
@@ -73,18 +74,24 @@ test("only files the normaliser can read are format-checked", () => {
   }
 });
 
-// A real commit with no parents: the ordinary-PR case, where the branch tip is not a merge.
-const rootCommit = execFileSync("git", ["rev-list", "--max-parents=0", "-n", "1", "HEAD"],
-  { encoding: "utf8" }).trim();
-
 test("a branch tip that is not a merge is 'nothing to audit', not an error", () => {
   // What CI hits on every ordinary PR. It must not fail the build.
-  assert.equal(locateMerge(undefined, rootCommit), null);
+  const dir = scratchRepo();
+  try {
+    inRepo(dir, () => assert.equal(locateMerge(undefined, "HEAD"), null));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("an explicit --merge that is not a merge is an error", () => {
   // Being wrong about an explicit claim is worth failing on, unlike a place-to-look default.
-  assert.throws(() => locateMerge(rootCommit), /not a merge commit/);
+  const dir = scratchRepo();
+  try {
+    inRepo(dir, () => assert.throws(() => locateMerge("HEAD"), /not a merge commit/));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("every deliberately-removed upstream path records why", () => {
@@ -203,15 +210,25 @@ test("an in-progress merge of upstream is a sync", () => {
 });
 
 test("ancestry separates a definitive no from an unanswerable question", () => {
-  const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-  const root = execFileSync("git", ["rev-list", "--max-parents=0", "-n", "1", "HEAD"],
-    { encoding: "utf8" }).trim();
-
-  assert.equal(ancestry(root, head), "yes");
-  assert.equal(ancestry(head, root), "no");
-  // git exits 128 here, not 1. Reading that as "no" is what demotes a real sync to an ordinary
-  // merge and skips its audit.
-  assert.equal(ancestry("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", head), "unknown");
+  // Built in a scratch repo rather than against this one: CI checks out shallow, where
+  // `rev-list --max-parents=0` returns HEAD itself and the question answers itself.
+  const dir = scratchRepo();
+  const run = (...args: string[]) =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+  try {
+    const base = run("rev-parse", "main");
+    const upstreamTip = run("rev-parse", "upstream");
+    inRepo(dir, () => {
+      assert.equal(isShallowRepository(), false, "the scratch repo has complete history");
+      assert.equal(ancestry(base, upstreamTip), "yes");
+      assert.equal(ancestry(upstreamTip, base), "no");
+      // git exits 128 here, not 1. Reading that as "no" is what demotes a real sync to an
+      // ordinary merge and skips its audit.
+      assert.equal(ancestry("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", base), "unknown");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("history git cannot traverse is audited, not skipped", () => {
@@ -282,6 +299,41 @@ test("a path that cannot be read is not reported as absent", () => {
       assert.throws(() => auditRemovedPaths("refs/heads/no-such-branch"),
         /cannot read|not a valid/);
     });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const AUDIT_CLI = fileURLToPath(new URL("./upstream-merge-audit.ts", import.meta.url));
+
+/** Runs the CLI in `dir` and returns its exit status. */
+function runAudit(dir: string, ...args: string[]): number {
+  try {
+    execFileSync("node", [AUDIT_CLI, ...args], { cwd: dir, encoding: "utf8", stdio: "pipe" });
+    return 0;
+  } catch (error) {
+    return (error as { status?: number }).status ?? -1;
+  }
+}
+
+test("an audit that could not run its checks does not exit 0", () => {
+  // A scratch repo has no `foundation` remote, so there is nothing to compare against and both
+  // checks are skipped. Exiting 0 would let a shell script read that as a pass.
+  const dir = scratchRepo();
+  try {
+    assert.equal(runAudit(dir), 2, "an untrustworthy audit must not report success");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("exit codes distinguish clean, findings, and could-not-check", () => {
+  const dir = scratchRepo();
+  try {
+    // Could not be honoured: an explicit ref that does not resolve.
+    assert.equal(runAudit(dir, "--upstream", "refs/heads/nope"), 2);
+    // Trustworthy and clean: an upstream ref that exists, nothing diverging in a fresh repo.
+    assert.equal(runAudit(dir, "--upstream", "upstream"), 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

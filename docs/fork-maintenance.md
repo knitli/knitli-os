@@ -126,8 +126,12 @@ Then, in order:
    `--merge <ref>` audits any past merge; `--upstream <ref>` overrides what everything is compared
    against, which otherwise means `foundation/main`. An explicit argument is a requirement: a
    `--upstream` that does not resolve exits 2 rather than quietly falling back to the default, so a
-   scripted caller cannot mistake "audited against something else" for a pass. Exit codes are 0 for
-   clean, 1 for findings, 2 for an invocation that could not be honoured.
+   scripted caller cannot mistake "audited against something else" for a pass.
+
+   Exit codes: **0** clean, **1** findings, **2** the audit could not be trusted — an invocation
+   that could not be honoured, or a run whose checks were skipped because upstream was unavailable
+   or the clone was shallow. "Found nothing" and "could not look" are different answers, and only
+   the first is a pass, so the second is never 0.
 
    **Fetch upstream before running it.** Upstream is never inferred from local history — doing so is
    circular, because this repo merges its own PRs, so "the second parent of the last merge" is

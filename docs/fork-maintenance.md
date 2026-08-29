@@ -121,16 +121,48 @@ Then, in order:
 
    It finds the merge on its own, whether one is in progress (resolutions in the index) or already
    committed (resolutions in the merge commit), so it works during the sync and afterwards on the PR.
-   `--merge <ref>` audits any past merge; `--upstream <ref>` picks what the formatting check compares
-   against, defaulting to the upstream side of the merge, then to the last upstream commit merged,
-   then to `foundation/main` if fetched.
+   It only counts a merge whose second parent is upstream: this repo merges its own PRs with merge
+   commits, and an ordinary PR merge is not a sync.
+   `--merge <ref>` audits any past merge; `--upstream <ref>` overrides what everything is compared
+   against, which otherwise means `foundation/main`. An explicit argument is a requirement: a
+   `--upstream` that does not resolve exits 2 rather than quietly falling back to the default, so a
+   scripted caller cannot mistake "audited against something else" for a pass.
+
+   Exit codes: **0** clean, **1** findings, **2** the audit could not be trusted — an invocation
+   that could not be honoured, or a run whose checks were skipped because upstream was unavailable
+   or the clone was shallow. "Found nothing" and "could not look" are different answers, and only
+   the first is a pass, so the second is never 0.
+
+   **Fetch upstream before running it.** Upstream is never inferred from local history — doing so is
+   circular, because this repo merges its own PRs, so "the second parent of the last merge" is
+   usually one of our own branches. Without `foundation/main` (or an explicit `--upstream`) the audit
+   says so loudly and declines to report a clean bill of health, because a check comparing the tree
+   against itself is clean by construction.
 
    The formatting half needs no merge at all and runs on every PR in CI (`.github/workflows/fork-audit.yml`),
    which is the point: reflow arrives through ordinary PRs, not through syncs.
 
    One trap, since it cost an hour here: **never fetch upstream shallow.** `git fetch --depth=1
    foundation main` grafts the history, and `git merge-base` then fails outright — which looks like a
-   broken audit rather than a broken clone. `git fetch --unshallow origin` repairs it.
+   broken audit rather than a broken clone. Repair it by unshallowing **the remote the graft is on**:
+
+   ```bash
+   git fetch --unshallow foundation main
+   ```
+
+   `git fetch --unshallow origin` is not enough and exits 0 while leaving the clone shallow, because
+   origin does not have the foundation-only commits the graft sits on — which is every commit
+   upstream has made since the last sync. Verified both ways.
+
+   The audit no longer draws conclusions from that failure. `git merge-base --is-ancestor` exits 1
+   for "not an ancestor" and 128 when it cannot answer at all, and those are kept apart — but a 1 is
+   only believed when the clone is complete. A shallow clone grafts its boundary into a root, so git
+   stops traversing there and returns a confident 1 for a commit that genuinely *is* upstream, even
+   when the object is sitting in the local store just behind the boundary. In a shallow clone,
+   therefore, only "yes" is evidence; "no" is downgraded to "cannot tell". Anything it cannot answer is audited
+   anyway and reported `[UNVERIFIED]`, and a shallow clone is called out by name. A noisy audit of
+   something that was not a sync is recoverable; silently skipping a real one is the failure this
+   tool exists to prevent.
 
 3. **Re-verify the divergence inventory.** For each entry, confirm it is still present and still
    necessary; upstream may have adopted, moved, or obsoleted it.

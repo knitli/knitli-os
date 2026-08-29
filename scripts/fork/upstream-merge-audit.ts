@@ -445,8 +445,10 @@ function main(argv: string[]): number {
   if (shallow) {
     console.log(`\nWARNING: this clone is shallow, so git cannot always trace a commit back to\n` +
       `upstream. Ancestry it cannot answer is treated as "audit anyway", never as "not a sync",\n` +
-      `but the result is not authoritative. Repair with:\n` +
-      `  git fetch --unshallow origin && git fetch foundation main`);
+      `but the result is not authoritative. Unshallow the remote the graft is on -- for a\n` +
+      `--depth fetch of upstream that means foundation, not origin, which does not have the\n` +
+      `commits the graft sits on:\n` +
+      `  git fetch --unshallow foundation main`);
   }
   console.log("");
 

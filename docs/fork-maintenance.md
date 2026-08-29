@@ -144,7 +144,15 @@ Then, in order:
 
    One trap, since it cost an hour here: **never fetch upstream shallow.** `git fetch --depth=1
    foundation main` grafts the history, and `git merge-base` then fails outright — which looks like a
-   broken audit rather than a broken clone. `git fetch --unshallow origin` repairs it.
+   broken audit rather than a broken clone. Repair it by unshallowing **the remote the graft is on**:
+
+   ```bash
+   git fetch --unshallow foundation main
+   ```
+
+   `git fetch --unshallow origin` is not enough and exits 0 while leaving the clone shallow, because
+   origin does not have the foundation-only commits the graft sits on — which is every commit
+   upstream has made since the last sync. Verified both ways.
 
    The audit no longer draws conclusions from that failure. `git merge-base --is-ancestor` exits 1
    for "not an ancestor" and 128 when it cannot answer at all, and those are kept apart — but a 1 is

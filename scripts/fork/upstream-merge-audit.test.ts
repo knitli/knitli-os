@@ -5,13 +5,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  ancestry,
   authoritativeUpstreamRef,
   FORK_OWNED_PREFIXES,
   isForkOwned,
+  isShallowRepository,
   isSourceFile,
   locateMerge,
-  REMOVED_UPSTREAM_PATHS,
   normalizeForFormatComparison,
+  REMOVED_UPSTREAM_PATHS,
 } from "./upstream-merge-audit.ts";
 
 test("reflow is normalised away, so a reformat reads as no change", () => {
@@ -187,5 +189,54 @@ test("an in-progress merge of upstream is a sync", () => {
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ancestry separates a definitive no from an unanswerable question", () => {
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const root = execFileSync("git", ["rev-list", "--max-parents=0", "-n", "1", "HEAD"],
+    { encoding: "utf8" }).trim();
+
+  assert.equal(ancestry(root, head), "yes");
+  assert.equal(ancestry(head, root), "no");
+  // git exits 128 here, not 1. Reading that as "no" is what demotes a real sync to an ordinary
+  // merge and skips its audit.
+  assert.equal(ancestry("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", head), "unknown");
+});
+
+test("history git cannot traverse is audited, not skipped", () => {
+  // The shallow-clone case: the upstream tip cannot be traced back to the sync's second parent, so
+  // ancestry is unanswerable. The merge must still be audited, and must be marked unverified.
+  const dir = scratchRepo();
+  try {
+    execFileSync("git", ["-C", dir, "merge", "--no-commit", "--no-ff", "upstream"],
+      { encoding: "utf8", stdio: "pipe" });
+    inRepo(dir, () => {
+      const merge = locateMerge(undefined, "HEAD", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+      assert.ok(merge, "an unanswerable ancestry must not skip the merge");
+      assert.equal(merge.classification, "unverified");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a shallow clone really does break ancestry, and is detected", () => {
+  const origin = scratchRepo();
+  const shallow = mkdtempSync(join(tmpdir(), "fork-audit-shallow-"));
+  try {
+    execFileSync("git", ["clone", "-q", "--depth=1", `file://${origin}`, shallow],
+      { encoding: "utf8", stdio: "pipe" });
+    inRepo(shallow, () => {
+      assert.equal(isShallowRepository(), true, "the clone should be shallow");
+      // The grafted boundary makes the base commit unreachable, so this is "unknown" rather than
+      // the "no" that the old boolean would have produced.
+      const unreachable = execFileSync("git", ["-C", origin, "rev-parse", "upstream"],
+        { encoding: "utf8" }).trim();
+      assert.notEqual(ancestry(unreachable, "HEAD"), "yes");
+    });
+  } finally {
+    rmSync(origin, { recursive: true, force: true });
+    rmSync(shallow, { recursive: true, force: true });
   }
 });

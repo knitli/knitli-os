@@ -139,6 +139,13 @@ Then, in order:
    foundation main` grafts the history, and `git merge-base` then fails outright — which looks like a
    broken audit rather than a broken clone. `git fetch --unshallow origin` repairs it.
 
+   The audit no longer draws conclusions from that failure. `git merge-base --is-ancestor` exits 1
+   for a definitive "not an ancestor" and 128 when it cannot answer at all, and those are kept
+   apart: only a definitive no marks a merge as "not a sync". Anything it cannot answer is audited
+   anyway and reported `[UNVERIFIED]`, and a shallow clone is called out by name. A noisy audit of
+   something that was not a sync is recoverable; silently skipping a real one is the failure this
+   tool exists to prevent.
+
 3. **Re-verify the divergence inventory.** For each entry, confirm it is still present and still
    necessary; upstream may have adopted, moved, or obsoleted it.
 

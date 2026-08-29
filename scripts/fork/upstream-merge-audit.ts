@@ -47,6 +47,12 @@ export interface MergeUnderAudit {
   readResolved: (path: string) => string | null;
   /** How this merge was found, so the CLI can report what it looked at. */
   description: string;
+  /**
+   * `sync` when the second parent was confirmed to be upstream's. `unverified` when that could not
+   * be established -- no upstream ref, or git could not answer. Never a reason to skip the audit:
+   * auditing a merge that turns out not to be a sync is noise, and skipping a real sync is silence.
+   */
+  classification: "sync" | "unverified";
 }
 
 /**
@@ -146,13 +152,30 @@ export function isSourceFile(path: string): boolean {
   return SOURCE_EXTENSIONS.some(ext => path.endsWith(ext));
 }
 
+/** Whether a commit belongs to upstream's history, or whether git could not say. */
+export type Ancestry = "yes" | "no" | "unknown";
+
 /**
- * True when `commit` is part of upstream's history. This repo merges its own PRs with merge
- * commits, so "HEAD is a merge" is not enough to conclude a sync happened -- without this, every
- * merged PR on main gets audited with our own branch cast as upstream.
+ * Asks whether `commit` is in `upstreamRef`'s history, keeping "no" and "could not tell" apart.
+ *
+ * `git merge-base --is-ancestor` exits 1 for a definitive no and 128 when it cannot answer at all --
+ * a shallow clone whose upstream tip cannot be traversed back to the commit, a missing object, a
+ * bad ref. Collapsing those together is how a real sync gets demoted to "ordinary merge" and its
+ * dropped-hunk audit skipped, which is the precise false clean this tool exists to prevent.
  */
-function isUpstreamCommit(commit: string, upstreamRef: string): boolean {
-  return gitOrNull(["merge-base", "--is-ancestor", commit, upstreamRef]) !== null;
+export function ancestry(commit: string, upstreamRef: string): Ancestry {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", commit, upstreamRef],
+      { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] });
+    return "yes";
+  } catch (error) {
+    return (error as { status?: number }).status === 1 ? "no" : "unknown";
+  }
+}
+
+/** True when this clone's history is truncated, so ancestry questions may be unanswerable. */
+export function isShallowRepository(): boolean {
+  return gitOrNull(["rev-parse", "--is-shallow-repository"])?.trim() === "true";
 }
 
 /** The parent commits of `ref`, first parent first. */
@@ -175,7 +198,7 @@ export function locateMerge(
 ): MergeUnderAudit | null {
   // An explicit --merge is a claim that `mergeRef` *is* the merge to audit. Being wrong about that
   // is worth an error, and the claim deliberately bypasses the upstream check below.
-  if (mergeRef) return fromMergeCommit(mergeRef);
+  if (mergeRef) return { ...fromMergeCommit(mergeRef), classification: "sync" };
 
   const candidate = inProgressMerge() ?? committedMerge(headRef);
   if (!candidate) return null;
@@ -183,10 +206,17 @@ export function locateMerge(
   // One gate for every path that *found* a merge rather than being handed one. A merge of
   // something outside upstream's history is an ordinary branch or PR merge, not a sync, and
   // auditing it casts one of our own branches as upstream. Kept here, once, because this check has
-  // now been missed twice by being attached to individual paths instead. With no upstream ref
-  // there is nothing to test against, so the merge is taken at face value.
-  if (upstreamHint && !isUpstreamCommit(candidate.upstreamRef, upstreamHint)) return null;
-  return candidate;
+  // been missed twice by being attached to individual paths instead.
+  //
+  // Only a definitive "no" skips the merge. With no upstream ref, or when git cannot answer, the
+  // merge is audited anyway and marked unverified -- erring towards a noisy audit rather than a
+  // quiet skip, because a skipped sync is exactly the failure this tool exists to catch.
+  if (!upstreamHint) return { ...candidate, classification: "unverified" };
+  switch (ancestry(candidate.upstreamRef, upstreamHint)) {
+    case "no": return null;
+    case "yes": return { ...candidate, classification: "sync" };
+    default: return { ...candidate, classification: "unverified" };
+  }
 }
 
 /** The merge git is part-way through, if any. Its resolutions live in the index. */
@@ -200,6 +230,7 @@ function inProgressMerge(): MergeUnderAudit | null {
     upstreamRef,
     readResolved: path => blob("", path),
     description: `merge in progress (${upstreamRef.slice(0, 12)} into HEAD)`,
+    classification: "unverified",
   };
 }
 
@@ -222,6 +253,7 @@ function fromMergeCommit(ref: string): MergeUnderAudit {
     readResolved: path => blob(resolved, path),
     description:
       `merge commit ${resolved.slice(0, 12)} (${upstreamRef.slice(0, 12)} into ${oursRef.slice(0, 12)})`,
+    classification: "unverified",
   };
 }
 
@@ -345,8 +377,12 @@ function main(argv: string[]): number {
   const formatChurn = upstreamRef ? auditFormatDrift({ oursRef, upstreamRef }) : [];
   const restored = auditRemovedPaths(oursRef);
 
+  const shallow = isShallowRepository();
+  const trustworthy = authoritative !== null && !shallow && merge?.classification !== "unverified";
+
   console.log(merge
-    ? `Merge audited: ${merge.description}`
+    ? `Merge audited: ${merge.description}` +
+      (merge.classification === "unverified" ? "  [UNVERIFIED: not confirmed to be an upstream sync]" : "")
     : `No upstream sync to audit (${oursRef === "HEAD" ? "HEAD" : oursRef.slice(0, 12)} is not a ` +
       "merge of upstream; an ordinary PR merge is not a sync).");
   console.log(upstreamRef
@@ -356,6 +392,12 @@ function main(argv: string[]): number {
     console.log(`\nWARNING: no upstream ref. Without one, a merge cannot be told apart from an\n` +
       `ordinary PR merge, and any "clean" below is worth little. Run:\n` +
       `  git fetch foundation main    (or pass --upstream <ref>)`);
+  }
+  if (shallow) {
+    console.log(`\nWARNING: this clone is shallow, so git cannot always trace a commit back to\n` +
+      `upstream. Ancestry it cannot answer is treated as "audit anyway", never as "not a sync",\n` +
+      `but the result is not authoritative. Repair with:\n` +
+      `  git fetch --unshallow origin && git fetch foundation main`);
   }
   console.log("");
 
@@ -389,9 +431,9 @@ function main(argv: string[]): number {
   }
 
   if (dropped.length === 0 && formatChurn.length === 0 && restored.length === 0) {
-    console.log(authoritative
+    console.log(trustworthy
       ? "Clean: no dropped upstream hunks, no formatting-only divergence, no removed files restored."
-      : "No findings -- but upstream was not verified, so this is not a clean bill of health.");
+      : "No findings -- but the history could not be trusted, so this is not a clean bill of health.");
     return 0;
   }
   return 1;

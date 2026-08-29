@@ -173,30 +173,39 @@ function resolves(ref: string): boolean {
 export function locateMerge(
   mergeRef?: string, headRef = "HEAD", upstreamHint?: string,
 ): MergeUnderAudit | null {
-  // An explicit --merge is a claim that `mergeRef` *is* the merge to audit; being wrong about that
-  // is worth an error, and the claim overrides the upstream check below. `headRef` is only a place
-  // to look, so finding nothing there is simply "nothing to audit".
+  // An explicit --merge is a claim that `mergeRef` *is* the merge to audit. Being wrong about that
+  // is worth an error, and the claim deliberately bypasses the upstream check below.
   if (mergeRef) return fromMergeCommit(mergeRef);
 
-  const inProgress = gitOrNull(["rev-parse", "--git-path", "MERGE_HEAD"])?.trim();
-  if (inProgress && existsSync(inProgress)) {
-    const upstreamRef = git(["rev-parse", "MERGE_HEAD"]).trim();
-    return {
-      baseRef: git(["merge-base", "HEAD", upstreamRef]).trim(),
-      oursRef: git(["rev-parse", "HEAD"]).trim(),
-      upstreamRef,
-      // A merge in progress keeps its resolutions in the index.
-      readResolved: path => blob("", path),
-      description: `merge in progress (${upstreamRef.slice(0, 12)} into HEAD)`,
-    };
-  }
+  const candidate = inProgressMerge() ?? committedMerge(headRef);
+  if (!candidate) return null;
 
-  if (parentsOf(headRef).length < 2) return null;
-  const candidate = fromMergeCommit(headRef);
-  // A merge of something that is not upstream is an ordinary PR merge, not a sync. Without an
-  // upstream ref to check against we cannot tell, so the merge is taken at face value.
+  // One gate for every path that *found* a merge rather than being handed one. A merge of
+  // something outside upstream's history is an ordinary branch or PR merge, not a sync, and
+  // auditing it casts one of our own branches as upstream. Kept here, once, because this check has
+  // now been missed twice by being attached to individual paths instead. With no upstream ref
+  // there is nothing to test against, so the merge is taken at face value.
   if (upstreamHint && !isUpstreamCommit(candidate.upstreamRef, upstreamHint)) return null;
   return candidate;
+}
+
+/** The merge git is part-way through, if any. Its resolutions live in the index. */
+function inProgressMerge(): MergeUnderAudit | null {
+  const mergeHeadPath = gitOrNull(["rev-parse", "--git-path", "MERGE_HEAD"])?.trim();
+  if (!mergeHeadPath || !existsSync(mergeHeadPath)) return null;
+  const upstreamRef = git(["rev-parse", "MERGE_HEAD"]).trim();
+  return {
+    baseRef: git(["merge-base", "HEAD", upstreamRef]).trim(),
+    oursRef: git(["rev-parse", "HEAD"]).trim(),
+    upstreamRef,
+    readResolved: path => blob("", path),
+    description: `merge in progress (${upstreamRef.slice(0, 12)} into HEAD)`,
+  };
+}
+
+/** The merge commit at `headRef`, if `headRef` is one. */
+function committedMerge(headRef: string): MergeUnderAudit | null {
+  return parentsOf(headRef).length > 1 ? fromMergeCommit(headRef) : null;
 }
 
 function fromMergeCommit(ref: string): MergeUnderAudit {

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   authoritativeUpstreamRef,
@@ -122,4 +125,67 @@ test("upstream is never derived from local history", () => {
   if (withoutRemote === null) return; // No foundation remote fetched here; nothing to assert.
   assert.equal(withoutRemote, "foundation/main",
     "the only non-explicit source of truth is the upstream remote");
+});
+
+/**
+ * A throwaway repo with three lines of history: a shared base, an `upstream` branch, and an
+ * unrelated `feature` branch. Enough to ask "is this merge a sync?" for real.
+ */
+function scratchRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "fork-audit-repo-"));
+  const run = (...args: string[]) =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" });
+  run("init", "-q", "-b", "main");
+  run("config", "user.email", "test@example.invalid");
+  run("config", "user.name", "Test");
+  run("commit", "-q", "--allow-empty", "-m", "base");
+  run("branch", "upstream");
+  run("branch", "feature");
+  run("checkout", "-q", "upstream");
+  run("commit", "-q", "--allow-empty", "-m", "upstream work");
+  run("checkout", "-q", "feature");
+  run("commit", "-q", "--allow-empty", "-m", "feature work");
+  run("checkout", "-q", "main");
+  return dir;
+}
+
+function inRepo<T>(dir: string, body: () => T): T {
+  const previous = process.cwd();
+  process.chdir(dir);
+  try {
+    return body();
+  } finally {
+    process.chdir(previous);
+  }
+}
+
+test("an in-progress merge of a non-upstream branch is not a sync", () => {
+  // Regression: the MERGE_HEAD path used to return before the upstream check, so merging an
+  // ordinary local branch made the audit treat that branch as upstream.
+  const dir = scratchRepo();
+  try {
+    execFileSync("git", ["-C", dir, "merge", "--no-commit", "--no-ff", "feature"],
+      { encoding: "utf8", stdio: "pipe" });
+    inRepo(dir, () => {
+      assert.equal(locateMerge(undefined, "HEAD", "upstream"), null,
+        "merging `feature` is not a sync just because a merge is in progress");
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an in-progress merge of upstream is a sync", () => {
+  const dir = scratchRepo();
+  try {
+    execFileSync("git", ["-C", dir, "merge", "--no-commit", "--no-ff", "upstream"],
+      { encoding: "utf8", stdio: "pipe" });
+    inRepo(dir, () => {
+      const merge = locateMerge(undefined, "HEAD", "upstream");
+      assert.ok(merge, "merging upstream is a sync and must be audited");
+      assert.match(merge.description, /merge in progress/);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

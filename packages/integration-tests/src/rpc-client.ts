@@ -3,18 +3,14 @@
 import { createHash } from "node:crypto";
 import { RpcStub, RpcTarget, newWebSocketRpcSession } from "capnweb";
 import type {
-  AuthenticatedApi,
-  ConnectedAccountsSubscriber,
-  ObserverAccountChoice,
-  ObserverBindingNeed,
-  ObserverConfigCallback,
-  PublicApi,
+  AuthenticatedApi, ConnectedAccountsSubscriber, ObserverAccountChoice, ObserverBindingNeed,
+  ObserverConfigCallback, PublicApi,
 } from "@gadgets/workshop-shared/api";
 import type {
-  AccountDescription,
-  SupportedResource,
-  VendorDescription,
+  AccountDescription, SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+
+export { RpcTarget };
 
 /**
  * Poll `attempt` until it returns non-null.
@@ -23,15 +19,12 @@ import type {
  * (an account appearing in the user's list, say) rather than by awaiting a promise.
  */
 export async function waitFor<T>(
-  what: string,
-  attempt: () => Promise<T | null>,
-  timeoutMs = 30_000,
-): Promise<T> {
+    what: string, attempt: () => Promise<T | null>, timeoutMs = 30_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const result = await attempt();
     if (result !== null) return result;
-    await new Promise((r) => setTimeout(r, 25));
+    await new Promise(r => setTimeout(r, 25));
   }
   throw new Error(`Timed out after ${timeoutMs}ms waiting for ${what}`);
 }
@@ -49,7 +42,7 @@ let userSeq = 0;
  */
 export function nextUsernames(...prefixes: string[]): string[] {
   const n = ++userSeq;
-  return prefixes.map((prefix) => `${prefix}${n}`);
+  return prefixes.map(prefix => `${prefix}${n}`);
 }
 
 /** Open an RPC session against the Workshop's /api endpoint. */
@@ -80,21 +73,17 @@ function passwordHashFor(username: string): Uint8Array {
 }
 
 export async function signUp(
-  api: RpcStub<PublicApi>,
-  username: string,
-): Promise<RpcStub<AuthenticatedApi>> {
+    api: RpcStub<PublicApi>, username: string): Promise<RpcStub<AuthenticatedApi>> {
   const token = await api.createAccount(username, username, passwordHashFor(username));
   if (!token) throw new Error(`Signup failed for "${username}" -- username already taken?`);
   return (await api.authenticate(token)) as unknown as RpcStub<AuthenticatedApi>;
 }
 
-/** Re-authenticate a fixture account on a fresh WebSocket after a deliberate workspace restart. */
+/** Authenticate an existing integration-test account. */
 export async function logIn(
-  api: RpcStub<PublicApi>,
-  username: string,
-): Promise<RpcStub<AuthenticatedApi>> {
+    api: RpcStub<PublicApi>, username: string): Promise<RpcStub<AuthenticatedApi>> {
   const token = await api.login(username, passwordHashFor(username));
-  if (!token) throw new Error(`Login failed for "${username}"`);
+  if (token === null) throw new Error(`Login failed for "${username}"`);
   return (await api.authenticate(token)) as unknown as RpcStub<AuthenticatedApi>;
 }
 
@@ -118,32 +107,21 @@ export function accountLabel(account: ConnectedAccount): string {
 
 /** Read the user's connected accounts by driving subscribeConnectedAccounts() to its ready() call. */
 export async function listConnectedAccounts(
-  api: RpcStub<AuthenticatedApi>,
-): Promise<ConnectedAccount[]> {
+    api: RpcStub<AuthenticatedApi>): Promise<ConnectedAccount[]> {
   const accounts: ConnectedAccount[] = [];
   let settle: () => void;
-  const ready = new Promise<void>((resolve) => {
-    settle = resolve;
-  });
+  const ready = new Promise<void>(resolve => { settle = resolve; });
 
   class Subscriber extends RpcTarget implements ConnectedAccountsSubscriber {
-    add(
-      id: number,
-      description: AccountDescription,
-      _vendor: VendorDescription,
-      _supportedResources: SupportedResource[],
-      credentialsValid: boolean,
-      vendorId: string,
-    ) {
+    add(id: number, description: AccountDescription, _vendor: VendorDescription,
+        _supportedResources: SupportedResource[], credentialsValid: boolean, vendorId: string) {
       accounts.push({ id, description, credentialsValid, vendorId });
     }
     remove(id: number) {
-      const at = accounts.findIndex((a) => a.id === id);
+      const at = accounts.findIndex(a => a.id === id);
       if (at >= 0) accounts.splice(at, 1);
     }
-    ready() {
-      settle();
-    }
+    ready() { settle(); }
   }
 
   // 'using' disposes in reverse order -- the subscription first, which tells the server to drop its
@@ -170,10 +148,15 @@ export const MAX_OBSERVER_PROMPTS = 2;
  */
 export class ObserverConfigRecorder extends RpcTarget implements ObserverConfigCallback {
   readonly calls: ObserverBindingNeed[][] = [];
-  #responses: ((needs: ObserverBindingNeed[]) => ObserverAccountChoice[])[] = [];
+  #responses: ((needs: ObserverBindingNeed[]) =>
+      ObserverAccountChoice[] | Promise<ObserverAccountChoice[]>)[] = [];
 
-  /** Queue one response. The nth configure() call is answered by the nth queued responder. */
-  respondWith(responder: (needs: ObserverBindingNeed[]) => ObserverAccountChoice[]): this {
+  /**
+   * Queue one response. The nth configure() call is answered by the nth queued responder; a
+   * responder may be async (e.g. to flip gatekeeper control state between verification passes).
+   */
+  respondWith(responder: (needs: ObserverBindingNeed[]) =>
+      ObserverAccountChoice[] | Promise<ObserverAccountChoice[]>): this {
     this.#responses.push(responder);
     return this;
   }
@@ -187,7 +170,7 @@ export class ObserverConfigRecorder extends RpcTarget implements ObserverConfigC
    */
   alwaysChoose(accountId: number, times: number): this {
     for (let i = 0; i < times; i++) {
-      this.respondWith((needs) => needs.map((n) => ({ gatekeeperId: n.gatekeeperId, accountId })));
+      this.respondWith(needs => needs.map(n => ({ gatekeeperId: n.gatekeeperId, accountId })));
     }
     return this;
   }
@@ -211,8 +194,7 @@ export class ObserverConfigRecorder extends RpcTarget implements ObserverConfigC
     if (!responder) {
       throw new Error(
         `configure() called ${this.calls.length} time(s) but only ` +
-          `${this.calls.length - 1} response(s) were queued`,
-      );
+        `${this.calls.length - 1} response(s) were queued`);
     }
     return responder(needs);
   }

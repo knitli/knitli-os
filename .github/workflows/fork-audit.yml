@@ -1,0 +1,57 @@
+# Fork-owned workflow: upstream has no file at this path, so it can never conflict on a sync.
+# Deliberately its own workflow rather than a step in ci.yml -- ci.yml is upstream's, and the audit
+# needs full history and the upstream remote, which the other jobs should not pay for.
+name: Fork audit
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24.19.0"
+
+jobs:
+  audit:
+    name: Upstream divergence
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 because the audit walks merge parents and recomputes three-way merges
+      # against the merge base. A shallow clone has neither.
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The formatting check measures divergence from upstream, so upstream has to be present. It
+      # is what makes this useful on an ordinary PR -- which is where reflow actually arrives, since
+      # a sync is not needed to reformat a file.
+      - name: Fetch upstream
+        run: |
+          git remote add foundation https://github.com/cloudflare/cloudflare-os.git
+          # Not --depth: the audit needs merge-base between our history and upstream's, and a
+          # shallow fetch grafts the history so merge-base cannot resolve.
+          git fetch --no-tags foundation main
+
+      # Same action the other jobs use, for a pinned Node that can run the audit's TypeScript
+      # directly. `run-install: false`: the audit shells out to git and imports nothing.
+      - name: Set up Node.js
+        uses: voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca # v1.17.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: false
+          run-install: false
+
+      # On a pull_request, the checked-out HEAD is GitHub's synthetic merge of the branch into the
+      # base, whose parents are the base and the branch tip -- never an upstream sync. Auditing that
+      # would compare the fork against itself, so point the audit at the branch tip and let it work
+      # out whether there is a real merge there. `--ours` is a SHA, not free text.
+      - name: Audit upstream divergence
+        env:
+          OURS: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node scripts/fork/upstream-merge-audit.ts --ours "$OURS" --upstream foundation/main

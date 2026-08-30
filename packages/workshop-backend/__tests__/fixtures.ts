@@ -87,6 +87,12 @@ export async function openFakeOverseer(
       ensureObserver: async () => {},
       syncOutputsTo: async () => {},
       getSharingManager: async () => ({ getEffectiveRole: () => role }),
+      // Fork additions: open() routes the sharing and revocation guards through the impl rather
+      // than reading storage.prohibitAllSharing directly, so the fake has to answer them. All
+      // three describe an idle, shareable workspace, matching that flag below.
+      isWorkspaceSharingProhibited: () => false,
+      isRevocationPaused: () => false,
+      assertNoRevocationPending: () => {},
       ctx: { id: { toString: () => "workspace-id" }, exports: opts.exports ?? {} },
       users: {
         idFromString: (id: string) => id,

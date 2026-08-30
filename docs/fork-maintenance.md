@@ -180,6 +180,13 @@ Then, in order:
    happily reuse a stale one. Always go through `pnpm test` or `vp run -F integration-tests test`,
    which rebuild first. A confusing integration failure is a stale bundle until proven otherwise.
 
+   The mirror-image trap: `pnpm test` passes `--cache`, so a package whose inputs have not moved
+   replays a recorded pass without running anything. A fork change that breaks an *upstream* test in
+   a package we did not touch this time therefore stays invisible until something else invalidates
+   that package — which can be several PRs later, by which point it no longer looks like ours. After
+   a change that reaches upstream code, run the suite once with `vp run --filter '!cloudflare-os'
+   --no-cache test`.
+
 ## Divergence inventory
 
 Intentional, reviewed differences from upstream. Keep this current.
@@ -191,17 +198,45 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **What:** Upstream syncs storage, waits 100 ms, then `ctx.abort()`s. We additionally wrap the
   restart in `ctx.blockConcurrencyWhile()` (except on the workspace-deletion path, which already owns
   the gate) so no call arriving through an already-issued broad capability can run between the
-  revocation landing in storage and the abort.
+  revocation landing in storage and the abort. `removeCollaborator()`/`revokeShareLink()` also arm
+  the restart *before* the cross-DO cleanup rather than after it, via `runRevocationCleanup()`,
+  which is what shrinks that window to nothing.
 - **Why:** Authorization is only checked at `open()`, so a collaborator whose access was just revoked
   keeps a usable session for the length of that window. Our
   `severs retained collaborator writes and preserves owner state across revocation restart` test
   covers it; removing the gate fails 14 tests.
-- **Known cost:** Holding the gate through the abort strands calls that are queued behind it,
-  including a client's own session teardown. Upstream's
-  `workshop-sharing.test.ts` tests (`grants and revokes a use-only collaborator`,
-  `revokes every key and recipient of one share link`) surface that as an unhandled RPC rejection and
-  currently fail. The 100 ms delay upstream relies on is preserved; the gate is what these two tests
-  disagree with. **Unresolved — see "Open questions".**
+- **Known cost:** Holding the gate through the abort strands calls that are queued behind it, and
+  the cross-DO cleanup is deliberately left unfinished: its replies are inputs, so with the gate shut
+  they cannot land. `tearDownLostObservers()` and `refreshAffectedCollaboratorListings()` are
+  best-effort by construction and the abort would discard the remainder anyway, so
+  `runRevocationCleanup()` dispatches both, arms the restart, and drops the replies. The 100 ms delay
+  upstream relies on is preserved.
+- **Was mistaken for an upstream/fork test conflict.** Until `2026-08-29` this made upstream's
+  `workshop-sharing.test.ts` revocation tests (`grants and revokes a use-only collaborator`,
+  `revokes every key and recipient of one share link`) fail, and it was recorded here as a genuine
+  tension between their tests and ours. It was not: `runRevocationCleanup()` still *awaited* the
+  replies after arming the gate, so the two revocation RPCs deadlocked behind their own gate until
+  the abort and rejected with the abort reason — a revocation that had in fact succeeded reported as
+  a failure to the owner who asked for it. Dropping the await fixes it with no change to the gate.
+  Worth remembering when the next upstream test fails after a fork change: check for our own bug
+  before writing down a divergence.
+
+### `open()` routes sharing and revocation guards through the impl
+
+- **Where:** `OverseerDurableObject.open()` in `packages/workshop-backend/src/overseer.ts`, mirrored
+  by `openFakeOverseer()` in `packages/workshop-backend/__tests__/fixtures.ts`
+- **Introduced:** `a811be9`
+- **What:** Upstream reads `this.impl.storage.prohibitAllSharing` directly. We added
+  `isWorkspaceSharingProhibited()` (which also covers `prohibitWorkspaceSharing` and owner-only
+  gatekeepers), plus `isRevocationPaused()` and `assertNoRevocationPending()`, and `open()` calls all
+  three.
+- **Why:** Gatekeeper privacy readiness and the revocation guards need more than the one flag, and
+  the checks belong next to the state they read.
+- **Known cost:** `openFakeOverseer()` is upstream's fake `impl`, and a method we add to the real one
+  is a method the fake silently lacks. That is what broke upstream's `action-log-pagination.test.ts`
+  — an unhandled `TypeError` from a fake missing `isWorkspaceSharingProhibited`, which the task cache
+  then hid for several PRs. Anything new that `open()` reaches off `impl` needs a matching line in
+  the fake, added additively (see rule 4).
 
 ### Upstream's CLA, review-bot and contribution-policy workflows are removed
 
@@ -246,10 +281,10 @@ Intentional, reviewed differences from upstream. Keep this current.
 
 ## Open questions
 
-- **The revocation gate versus upstream's sharing tests.** The two properties are genuinely in
-  tension: our tests require the gate held from revocation through abort, upstream's require queued
-  work to drain before the abort. Four mechanical variants were tried (gate only, gate + delay,
-  delay only, gate around the storage sync only); none satisfies both. Resolving it needs a design
-  decision — sever revoked sessions explicitly before aborting, reject queued calls with a
-  close rather than an error, or carry the divergence and adapt the two upstream tests — rather than
-  another variant.
+- **Severing revoked sessions instead of gating the whole Durable Object.** The gate is a blunt
+  instrument: it strands every queued input and abandons the cross-DO cleanup, when the only thing
+  that must not run is a write through a capability the revocation just invalidated. Upstream is
+  building the precise version on `foundation/revocable-session-stubs` (`8477413`, "sever individual
+  sessions on revocation via `RpcStub.revocable()`"), which needs a patched workerd. If that lands on
+  `foundation/main`, the gate, `runRevocationCleanup()` and this whole divergence entry should be
+  able to go.

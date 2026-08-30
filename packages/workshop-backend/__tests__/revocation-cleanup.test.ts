@@ -3,11 +3,12 @@ import { describe, expect, it } from "vitest";
 import { runRevocationCleanup } from "../src/revocation-cleanup.js";
 
 describe("revocation cleanup", () => {
-  it("arms capability invalidation before awaiting remote cleanup", async () => {
+  it("arms capability invalidation without waiting for remote cleanup", () => {
     const releaseObservers = Promise.withResolvers<void>();
     const releaseListings = Promise.withResolvers<void>();
     const events: string[] = [];
-    const cleanup = runRevocationCleanup({
+
+    runRevocationCleanup({
       tearDownObservers: async () => {
         events.push("observers:start");
         await releaseObservers.promise;
@@ -21,23 +22,26 @@ describe("revocation cleanup", () => {
       scheduleRestart: () => events.push("restart"),
     });
 
-    try {
-      expect(events).toEqual(["observers:start", "listings:start", "restart"]);
-      releaseObservers.resolve();
-      releaseListings.resolve();
-      await cleanup;
-    } finally {
-      releaseObservers.resolve();
-      releaseListings.resolve();
-      await cleanup.catch(() => undefined);
-    }
+    // Both calls are dispatched, then the gate is armed -- and control is back here with neither
+    // remote operation finished. Awaiting one would deadlock behind the gate it just closed.
+    expect(events).toEqual(["observers:start", "listings:start", "restart"]);
 
-    expect(events).toEqual([
-      "observers:start",
-      "listings:start",
-      "restart",
-      "observers:end",
-      "listings:end",
-    ]);
+    releaseObservers.resolve();
+    releaseListings.resolve();
+  });
+
+  it("swallows a cleanup failure rather than failing the revocation", async () => {
+    const events: string[] = [];
+
+    runRevocationCleanup({
+      tearDownObservers: () => Promise.reject(new Error("gatekeeper DO unreachable")),
+      refreshListings: () => Promise.reject(new Error("user DO unreachable")),
+      scheduleRestart: () => events.push("restart"),
+    });
+
+    expect(events).toEqual(["restart"]);
+    // Both rejections are handled inside; an escaping one would take the Durable Object down, and
+    // vitest fails the run on it.
+    await new Promise(resolve => setTimeout(resolve, 0));
   });
 });

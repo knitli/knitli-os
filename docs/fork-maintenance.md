@@ -180,6 +180,13 @@ Then, in order:
    happily reuse a stale one. Always go through `pnpm test` or `vp run -F integration-tests test`,
    which rebuild first. A confusing integration failure is a stale bundle until proven otherwise.
 
+   The mirror-image trap: `pnpm test` passes `--cache`, so a package whose inputs have not moved
+   replays a recorded pass without running anything. A fork change that breaks an *upstream* test in
+   a package we did not touch this time therefore stays invisible until something else invalidates
+   that package — which can be several PRs later, by which point it no longer looks like ours. After
+   a change that reaches upstream code, run the suite once with `vp run --filter '!cloudflare-os'
+   --no-cache test`.
+
 ## Divergence inventory
 
 Intentional, reviewed differences from upstream. Keep this current.
@@ -213,6 +220,23 @@ Intentional, reviewed differences from upstream. Keep this current.
   a failure to the owner who asked for it. Dropping the await fixes it with no change to the gate.
   Worth remembering when the next upstream test fails after a fork change: check for our own bug
   before writing down a divergence.
+
+### `open()` routes sharing and revocation guards through the impl
+
+- **Where:** `OverseerDurableObject.open()` in `packages/workshop-backend/src/overseer.ts`, mirrored
+  by `openFakeOverseer()` in `packages/workshop-backend/__tests__/fixtures.ts`
+- **Introduced:** `a811be9`
+- **What:** Upstream reads `this.impl.storage.prohibitAllSharing` directly. We added
+  `isWorkspaceSharingProhibited()` (which also covers `prohibitWorkspaceSharing` and owner-only
+  gatekeepers), plus `isRevocationPaused()` and `assertNoRevocationPending()`, and `open()` calls all
+  three.
+- **Why:** Gatekeeper privacy readiness and the revocation guards need more than the one flag, and
+  the checks belong next to the state they read.
+- **Known cost:** `openFakeOverseer()` is upstream's fake `impl`, and a method we add to the real one
+  is a method the fake silently lacks. That is what broke upstream's `action-log-pagination.test.ts`
+  — an unhandled `TypeError` from a fake missing `isWorkspaceSharingProhibited`, which the task cache
+  then hid for several PRs. Anything new that `open()` reaches off `impl` needs a matching line in
+  the fake, added additively (see rule 4).
 
 ### Upstream's CLA, review-bot and contribution-policy workflows are removed
 

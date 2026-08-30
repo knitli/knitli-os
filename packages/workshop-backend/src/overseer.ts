@@ -10702,17 +10702,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return affected;
     }
     this.impl.finishRevocationRequiringRestart();
-    // Start both best-effort cleanup RPCs, then gate inputs before awaiting either response.
-    try {
-      await runRevocationCleanup({
-        tearDownObservers: () => this.impl.tearDownLostObservers(affected),
-        refreshListings: () => this.impl.refreshAffectedCollaboratorListings(affected),
-        scheduleRestart: () => this.impl.scheduleRevocationRestart(),
-      });
-    } catch (error) {
-      this.impl.scheduleRevocationRestart();
-      throw error;
-    }
+    // Start both best-effort cleanup RPCs, then gate inputs. Their replies are not awaited; see
+    // runRevocationCleanup().
+    runRevocationCleanup({
+      tearDownObservers: () => this.impl.tearDownLostObservers(affected),
+      refreshListings: () => this.impl.refreshAffectedCollaboratorListings(affected),
+      scheduleRestart: () => this.impl.scheduleRevocationRestart(),
+    });
     // Only restart if someone actually lost access or was downgraded (kept users are already
     // excluded). A no-op removal -- e.g. severing a share-link edge nobody relied on -- shouldn't
     // disconnect everyone.
@@ -10745,17 +10741,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return affected;
     }
     this.impl.finishRevocationRequiringRestart();
-    // See removeCollaborator(): start cleanup RPCs, then gate inputs before awaiting responses.
-    try {
-      await runRevocationCleanup({
-        tearDownObservers: () => this.impl.tearDownLostObservers(affected),
-        refreshListings: () => this.impl.refreshAffectedCollaboratorListings(affected),
-        scheduleRestart: () => this.impl.scheduleRevocationRestart(),
-      });
-    } catch (error) {
-      this.impl.scheduleRevocationRestart();
-      throw error;
-    }
+    // Start both best-effort cleanup RPCs, then gate inputs. Their replies are not awaited; see
+    // runRevocationCleanup().
+    runRevocationCleanup({
+      tearDownObservers: () => this.impl.tearDownLostObservers(affected),
+      refreshListings: () => this.impl.refreshAffectedCollaboratorListings(affected),
+      scheduleRestart: () => this.impl.scheduleRevocationRestart(),
+    });
     // Only restart if someone actually lost access or was downgraded (see removeCollaborator).
     if (affected.length > 0) {
       this.impl.scheduleRevocationRestart();

@@ -46,3 +46,6 @@ wrangler.dev.jsonc
 **/.dev.vars.*
 .claude/.headroom*
 *.local*
+
+.headroom*
+*.local.*

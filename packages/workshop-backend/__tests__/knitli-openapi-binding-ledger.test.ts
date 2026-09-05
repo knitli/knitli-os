@@ -260,3 +260,26 @@ it("acknowledges retired-key cleanup after the host revocation fence", () => {
   ledger.finishRevocation(identity.draftId);
   ledger.revokeKey(identity, registration);
 });
+
+it.each([12, 0])("supports account zero with host-assigned workpiece ID %s", gatekeeperId => {
+  const { ledger, draft, identity, restart } = fixture();
+  const firstIdentity = { ...identity, draftId: "account-zero-draft", providerAccountId: 0, gatekeeperId, facetName: `gatekeeper${gatekeeperId}` };
+  const firstDraft = {
+    ...draft,
+    reference: { ...draft.reference, draftId: firstIdentity.draftId },
+    providerAccountId: 0,
+  };
+  expect(() => ledger.register(firstDraft)).not.toThrow();
+  expect(ledger.reserve(firstIdentity).identity).toEqual(firstIdentity);
+  ledger.beginActivation(firstIdentity);
+  ledger.activate(firstIdentity, firstIdentity.selectionDigest);
+  const keyEpoch = ledger.authorizeKey(firstIdentity, "key", "digest");
+  restart().assertActive(firstIdentity, keyEpoch);
+  const registration = { keyId: "key", publicKeyDigest: "digest", keyEpoch };
+  ledger.revokeKey(firstIdentity, registration);
+  rejects(() => ledger.assertActive(firstIdentity, keyEpoch), "DISPATCH_KEY_REVOKED");
+  ledger.beginRevocation(firstIdentity.draftId);
+  ledger.revokeKey(firstIdentity, registration);
+  ledger.finishRevocation(firstIdentity.draftId);
+  rejects(() => restart().reserve(firstIdentity), "BINDING_REVOKED");
+});

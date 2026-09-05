@@ -67,8 +67,8 @@ function identity(value: BoundIdentity) {
   id(value.accountIncarnation);
   id(value.workspaceId);
   id(value.facetName);
-  integer(value.providerAccountId);
-  integer(value.gatekeeperId);
+  integer(value.providerAccountId, 0);
+  integer(value.gatekeeperId, 0);
   integer(value.generation);
   if (value.facetName !== `gatekeeper${value.gatekeeperId}`) fail("BINDING_IDENTITY_MISMATCH");
 }
@@ -133,7 +133,7 @@ export function createHostBindingLedger(store: BindingStore, now: () => number):
       id(row.ownerId);
       id(row.accountIncarnation);
       id(row.intendedWorkspaceId);
-      integer(row.providerAccountId);
+      integer(row.providerAccountId, 0);
       integer(row.expiresAt, 0);
       if (row.state !== "draft" || row.identity || row.key || row.keyEpoch !== 0)
         fail("BINDING_INVALID_INPUT");

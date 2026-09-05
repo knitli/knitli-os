@@ -44,6 +44,13 @@ Upstream has no file there, so nothing in them can ever conflict. Today:
 
 - `packages/gatekeeper-ai-executor/` — the AI Executor gatekeeper, ~19k lines, zero conflict surface.
 - `packages/integration-tests/__tests__/fork/` — fork integration tests.
+- `packages/workshop-shared/src/fork/` — authenticated OpenAPI host binding.
+- `packages/workshop-backend/src/fork/` — authenticated OpenAPI host binding.
+- `packages/workshop-backend/__tests__/knitli-openapi-binding-ledger.test.ts` — authenticated OpenAPI host binding.
+- `packages/workshop-backend/__tests__/knitli-openapi-user-binding.test.ts` — authenticated OpenAPI host binding.
+- `packages/workshop-backend/__tests__/knitli-openapi-facet-binding.test.ts` — authenticated OpenAPI host binding.
+- `packages/workshop-frontend/src/GatekeeperModal.knitli-binding.test.tsx` — authenticated OpenAPI host binding.
+- `packages/integration-tests/fixtures/gatekeeper-test/src/fork/` — authenticated OpenAPI host binding.
 - `scripts/fork/` — fork tooling.
 - `docs/fork-maintenance.md` — this file.
 

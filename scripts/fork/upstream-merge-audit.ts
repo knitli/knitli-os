@@ -61,6 +61,14 @@ export interface MergeUnderAudit {
  * `docs/fork-maintenance.md`.
  */
 export const FORK_OWNED_PREFIXES = [
+  "packages/workshop-shared/src/fork/",
+  "packages/workshop-backend/src/fork/",
+  "packages/workshop-backend/__tests__/knitli-openapi-binding-ledger.test.ts",
+  "packages/workshop-backend/__tests__/knitli-openapi-user-binding.test.ts",
+  "packages/workshop-backend/__tests__/knitli-openapi-facet-binding.test.ts",
+  "packages/workshop-frontend/src/GatekeeperModal.knitli-binding.test.tsx",
+  "packages/integration-tests/fixtures/gatekeeper-test/src/fork/",
+
   "packages/gatekeeper-ai-executor/",
   "packages/integration-tests/__tests__/fork/",
   "scripts/fork/",

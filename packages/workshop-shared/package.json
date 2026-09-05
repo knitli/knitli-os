@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "exports": {
+    "./fork/openapi-host-binding": {
+      "types": "./src/fork/openapi-host-binding.ts",
+      "import": "./src/fork/openapi-host-binding.ts"
+    },
     "./api": {
       "types": "./src/api.ts",
       "import": "./src/api.ts"

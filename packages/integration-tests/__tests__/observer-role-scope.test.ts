@@ -92,22 +92,20 @@ async function newWorkspace(publicApi: RpcStub<PublicApi>, thingName: string): P
 // the workspace, so `ws`'s stubs -- and the whole session they came from -- are dead afterwards.
 async function reopenAfterRestart(ws: Workspace): Promise<{
   publicApi: RpcStub<PublicApi>;
-  session: RpcStub<TestSession>;
+  overseer: RpcStub<Overseer>;
 }> {
   await waitFor("the restart to fell the old workspace instance", () =>
-      ws.session.readValue().then(() => null, () => true));
+      ws.overseer.getMetadata().then(() => null, () => true));
 
   return waitFor("the workspace to come back after the restart", async () => {
     const publicApi = connect(harness.url);
     try {
       const aliceApi = await logIn(publicApi, ws.alice);
       const overseer = await aliceApi.openGadget(ws.gadgetId);
-      const gatekeeper = await overseer.getGatekeeperById(ws.gatekeeperId);
-      const session = await gatekeeper.openSession() as RpcStub<TestSession>;
-      // Probe with a benign read, so a session felled by the reset retries here rather than
-      // failing an assertion below.
-      await session.readValue();
-      return { publicApi, session };
+      // Workspace readiness is separate from connection admission: the fork quarantines the
+      // newly in-scope connection until every affected collaborator has re-opened.
+      await overseer.getMetadata();
+      return { publicApi, overseer };
     } catch {
       publicApi[Symbol.dispose]();
       return null;
@@ -176,9 +174,15 @@ describe("role-scoped observer enforcement", () => {
 
       const reopened = await reopenAfterRestart(ws);
       try {
-        // The owner is back on the workspace with a working session: the restart is a re-open for
-        // everyone, not a lockout.
-        await expect(reopened.session.readValue()).resolves.toBe(42);
+        // The owner can re-open the workspace, but connection use remains quarantined until
+        // Carol verifies the connection that just entered her scope.
+        using gatekeeper = await reopened.overseer.getGatekeeperById(ws.gatekeeperId);
+        await expect((async () => {
+          const session = await gatekeeper.openSession();
+          session[Symbol.dispose]();
+        })()).rejects.toThrow(
+            "This connection cannot be used until all current collaborators have re-opened " +
+            "the workspace.");
 
         // Carol's forced re-open is where the newly in-scope connection gets verified, and she is
         // asked about exactly it -- the one connection her role's scope just gained.
@@ -188,6 +192,9 @@ describe("role-scoped observer enforcement", () => {
         carolReopened.close();
         expect(recorder.callCount).toBe(1);
         expect(recorder.calls[0].map(need => need.gatekeeperId)).toEqual([ws.gatekeeperId]);
+
+        using session = await gatekeeper.openSession() as RpcStub<TestSession>;
+        await expect(session.readValue()).resolves.toBe(42);
       } finally {
         reopened.publicApi[Symbol.dispose]();
       }

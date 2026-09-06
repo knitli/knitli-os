@@ -765,7 +765,11 @@ describe("observer readiness and privacy", () => {
 
       const denied = await submitExternalMessage(bob, gadgetKey, title);
       expect(denied.accepted).toBe(false);
-      expect(denied.message).toMatch(/open.*workspace.*configure/i);
+      expect(denied.message).toBe(
+          "Your access to the data this workspace has read could not be verified. " +
+          "Open the workspace in your browser to verify your access, then try again. " +
+          "(To open this workspace, you must choose connected accounts for the services it " +
+          "uses, but no configuration channel was provided.)");
       expect(denied.message).not.toMatch(/AI model/i);
     });
   });

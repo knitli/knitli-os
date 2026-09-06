@@ -35,7 +35,8 @@ export function assertReference(draft: ConnectorDraft, reference: DraftReference
 }
 export function assertDraftLive(draft: ConnectorDraft): void {
   if (draft.cancelled) throw new Error("DRAFT_CANCELLED");
-  if (draft.expired || Date.now() >= draft.expiresAt) throw new Error("DRAFT_EXPIRED");
+  // Draft TTL ends at activation; active replay/recovery is governed by binding revocation.
+  if ((draft.state === "draft" || draft.state === "activating") && (draft.expired || Date.now() >= draft.expiresAt)) throw new Error("DRAFT_EXPIRED");
   if (draft.state === "revoking" || draft.state === "revoked") throw new Error("BINDING_REVOKED");
 }
 
@@ -123,7 +124,7 @@ export function openApiFinalizer(control: DurableObjectStub<TestControl>, label:
 
 export async function openApiControlRequest(path: string, body: unknown, control: DurableObjectStub<TestControl>): Promise<Response | undefined> {
   const action = path.replace("/control/", "");
-  if (!["pauseBeforeActivation", "releaseActivation", "pauseRevocation", "releaseRevocation", "readBindingEvents", "expireDraft", "cancelDraft", "pauseDispatch", "releaseDispatch", "pauseResolution", "releaseResolution", "rotateDispatchKey", "checkDispatchUse", "crossoverBinding", "setDraftFailure", "readFixtureObservations", "dropRuntimeCaps"].includes(action)) return undefined;
+  if (!["pauseBeforeActivation", "releaseActivation", "pauseRevocation", "releaseRevocation", "readBindingEvents", "expireDraft", "cancelDraft", "pauseDispatch", "releaseDispatch", "pauseResolution", "releaseResolution", "rotateDispatchKey", "checkDispatchUse", "crossoverBinding", "setDraftFailure", "setDraftExpiry", "readFixtureObservations", "dropRuntimeCaps"].includes(action)) return undefined;
   const input = body as Record<string, unknown>;
   if (action === "readFixtureObservations") {
     if (typeof input.label !== "string" || !input.label) return new Response("label is required", { status: 400 });
@@ -132,8 +133,12 @@ export async function openApiControlRequest(path: string, body: unknown, control
   if (typeof input.draftId !== "string" || !input.draftId) return new Response("draftId is required", { status: 400 });
   const draftId = input.draftId;
   if (action === "readBindingEvents") return Response.json({ events: await control.readBindingEvents(draftId) });
-  if (["rotateDispatchKey", "checkDispatchUse", "crossoverBinding", "setDraftFailure", "readFixtureObservations", "dropRuntimeCaps"].includes(action)) {
+  if (["rotateDispatchKey", "checkDispatchUse", "crossoverBinding", "setDraftFailure", "setDraftExpiry", "readFixtureObservations", "dropRuntimeCaps"].includes(action)) {
     if (typeof input.label !== "string" || !input.label) return new Response("label is required", { status: 400 });
+    if (action === "setDraftExpiry") {
+      if (typeof input.expiresAt !== "number" || !Number.isSafeInteger(input.expiresAt) || input.expiresAt < 0) return new Response("expiresAt must be a nonnegative safe integer", { status: 400 });
+      await control.setOpenApiDraftExpiry(input.label, draftId, input.expiresAt);
+    }
     if (action === "setDraftFailure") {
       if (input.failure !== "confirm-selection" && input.failure !== "activation" && input.failure !== "describe") return new Response("failure must be confirm-selection, activation or describe", { status: 400 });
       await control.setOpenApiDraftFailure(input.label, draftId, input.failure);

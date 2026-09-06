@@ -117,6 +117,13 @@ function outcomeKey(label: string, resourceUrl?: string): string {
 export class TestControl extends DurableObject<Cloudflare.Env> {
   #openApiRuntime = new OpenApiRuntime();
 
+  /** Test-only timestamp input; simulates past draft expiry without advancing runtime clocks. */
+  setOpenApiDraftExpiry(label: string, draftId: string, expiresAt: number): void {
+    const draft = this.getOpenApiDraft(label, draftId);
+    draft.expiresAt = expiresAt;
+    this.ctx.storage.kv.put(`openapi:draft:${label}:${draftId}`, draft);
+  }
+
   /** Test-only failure configuration contains no authority or caller-supplied identity. */
   setOpenApiDraftFailure(label: string, draftId: string, failure: "confirm-selection" | "activation" | "describe"): void {
     const draft = this.getOpenApiDraft(label, draftId);

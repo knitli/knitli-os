@@ -719,7 +719,18 @@ describe("ScheduleDriver", () => {
       });
     });
 
-    await runDurableObjectAlarm(driver);
+    // Hold callbacks until all four delivery slots are occupied. A short callback delay
+    // cannot guarantee saturation when RPC admission is slower on a contended runner.
+    await testEnv.TEST_HOOKS.blockAt("callback");
+    const alarm = runDurableObjectAlarm(driver);
+    try {
+      await vi.waitFor(async () => {
+        expect((await testEnv.TEST_HOOKS.read()).maxActiveCallbacks).toBe(4);
+      });
+    } finally {
+      await testEnv.TEST_HOOKS.release();
+      await alarm;
+    }
     await vi.waitFor(async () => {
       const events = (await testEnv.TEST_HOOKS.read()).events;
       expect(events.filter((event) => event.startsWith("callback:"))).toHaveLength(21);

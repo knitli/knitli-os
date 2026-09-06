@@ -124,8 +124,15 @@ export function openApiFinalizer(control: DurableObjectStub<TestControl>, label:
 
 export async function openApiControlRequest(path: string, body: unknown, control: DurableObjectStub<TestControl>): Promise<Response | undefined> {
   const action = path.replace("/control/", "");
-  if (!["pauseBeforeActivation", "releaseActivation", "pauseRevocation", "releaseRevocation", "readBindingEvents", "expireDraft", "cancelDraft", "pauseDispatch", "releaseDispatch", "pauseResolution", "releaseResolution", "rotateDispatchKey", "checkDispatchUse", "crossoverBinding", "setDraftFailure", "setDraftExpiry", "readFixtureObservations", "dropRuntimeCaps"].includes(action)) return undefined;
+  if (!["pauseBeforeActivation", "releaseActivation", "pauseRevocation", "releaseRevocation", "readBindingEvents", "expireDraft", "cancelDraft", "pauseDispatch", "releaseDispatch", "pauseResolution", "releaseResolution", "rotateDispatchKey", "checkDispatchUse", "crossoverBinding", "setDraftFailure", "setDraftExpiry", "readFixtureObservations", "dropRuntimeCaps", "revokeAccountExternally"].includes(action)) return undefined;
   const input = body as Record<string, unknown>;
+  // Opt-in fixture control: simulate provider-side revocation independently of User disconnect.
+  if (action === "revokeAccountExternally") {
+    if (typeof input.label !== "string" || !input.label) return new Response("label is required", { status: 400 });
+    await control.revokeOpenApiAccount(input.label);
+    await control.recordFixtureObservation(input.label, { method: "external-revoke", arity: 0 });
+    return new Response(null, { status: 204 });
+  }
   if (action === "readFixtureObservations") {
     if (typeof input.label !== "string" || !input.label) return new Response("label is required", { status: 400 });
     return Response.json({ calls: await control.readFixtureObservations(input.label) });

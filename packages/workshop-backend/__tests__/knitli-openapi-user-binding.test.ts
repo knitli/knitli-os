@@ -397,6 +397,10 @@ describe("private authenticated User draft authority", () => {
       ),
     ).rejects.toThrow("provider refused revoke");
     expect(committed).toBe(false);
+    expect(f.recipients).toHaveLength(1);
+    expect(f.cleanup.size).toBe(0);
+    expect(f.rows.get("draft")?.state).toBe("revoked");
+    await expect(f.restart().start(0, pattern, "workspace")).rejects.toThrow("BINDING_ACCOUNT_REPLACED");
     await expect(f.binding.start(0, pattern, "workspace")).rejects.toThrow(
       "BINDING_ACCOUNT_REPLACED",
     );
@@ -465,6 +469,8 @@ describe("actual User DO lifecycle hooks", () => {
           uniqueName: "same-account",
           hostBindingProtocol: "openapi-v1" as const,
         };
+        let secondEntered!: () => void;
+        const secondStarted = new Promise<void>(resolve => { secondEntered = resolve; });
         let revokeCalls = 0;
         const oldAccount = new (class extends RpcTarget {
           async describe() {
@@ -472,6 +478,7 @@ describe("actual User DO lifecycle hooks", () => {
           }
           async revoke() {
             revokeCalls++;
+            if (revokeCalls === 2) secondEntered();
             entered();
             await paused;
           }
@@ -529,6 +536,7 @@ describe("actual User DO lifecycle hooks", () => {
             expect(storage.openApiAccountEpochs.get(0)).toEqual(successorEpoch);
           } else {
             const disconnect = user.disconnectAccount(0);
+            await secondStarted;
             expect(revokeCalls).toBe(2);
             release();
             await expect(first).rejects.toThrow("BINDING_ACCOUNT_REPLACED");
@@ -567,9 +575,9 @@ describe("account cleanup recipients and historical authority", () => {
     });
     let committed = false;
     const mutation = f.binding.mutateAccount(0, async () => {
-      expect(f.cleanup.get(incarnation)?.recipients).toHaveLength(2);
+      expect(f.cleanup.size).toBe(0);
       expect(f.epochs.get(0)?.live).toBe(false);
-      expect(f.rows.get("second")?.state).toBe("revoking");
+      expect(f.rows.get("second")?.state).toBe("revoked");
       expect(f.scheduled()).toBeGreaterThan(0);
     }, () => { committed = true; });
     await Promise.race([started, mutation]);
@@ -590,8 +598,10 @@ describe("account cleanup recipients and historical authority", () => {
     const old = structuredClone(f.rows.get("draft")!);
     f.pauseRecipient(async () => { throw new Error("recipient unavailable"); });
     let committed = false;
-    await expect(f.binding.mutateAccount(0, noPause, () => { committed = true; }))
+    const operation = vi.fn(noPause);
+    await expect(f.binding.mutateAccount(0, operation, () => { committed = true; }))
       .rejects.toThrow("recipient unavailable");
+    expect(operation).not.toHaveBeenCalled();
     expect(committed).toBe(false);
     expect(f.cleanup.get(old.accountIncarnation)?.recipients).toHaveLength(1);
     f.binding.replace(0);
@@ -677,14 +687,19 @@ async function durableCleanupFixture() {
 }
 
 describe("actual User durable account cleanup", () => {
-  it("captures unreserved draft recipients before provider await and waits for connector acknowledgement", async () => {
+  it("fences actual recipient workspace before provider revoke and waits for connector acknowledgement", async () => {
     const f = await durableCleanupFixture();
     await f.control.pause("provider");
     await f.control.pause("cleanup");
     let completed = false;
     const disconnect = f.user.disconnectAccount(0).then(() => { completed = true; });
     try {
-      await f.control.waitEntered("provider");
+      // Race entry events so the former order fails an assertion, not a timeout.
+      const first = await Promise.race([
+        f.control.waitEntered("provider").then(() => "provider"),
+        f.control.waitEntered("cleanup").then(() => "cleanup"),
+      ]);
+      expect(first).toBe("cleanup");
       const fenced = await f.inspect();
       expect(fenced.epoch?.live).toBe(false);
       expect(fenced.row?.identity).toBeUndefined();
@@ -692,11 +707,18 @@ describe("actual User durable account cleanup", () => {
         {workspaceId: f.workspace.id.toString(), drafts: [reference]},
       ]);
       expect(completed).toBe(false);
-      await f.control.release("provider");
-      await f.control.waitEntered("cleanup");
+      await runInDurableObject(f.workspace, instance => {
+        expect(instance["impl"].storage.openApiAccountFences.get(fenced.row!.accountIncarnation))
+          .toMatchObject({drafts: [{reference, revoked: false}]});
+      });
+      expect((await f.control.events()).provider).toBe(0);
       expect(completed).toBe(false);
       expect((await f.inspect()).pending).toHaveLength(1);
       await f.control.release("cleanup");
+      await f.control.waitEntered("provider");
+      expect((await f.inspect()).pending).toEqual([]);
+      expect(completed).toBe(false);
+      await f.control.release("provider");
       await disconnect;
       expect(completed).toBe(true);
       expect(await f.inspect()).toMatchObject({pending: [], connected: false, row: {state: "revoked"}});
@@ -704,6 +726,7 @@ describe("actual User durable account cleanup", () => {
     } finally {
       await f.control.release("provider");
       await f.control.release("cleanup");
+      await disconnect;
     }
   });
 
@@ -717,6 +740,7 @@ describe("actual User durable account cleanup", () => {
         expect(recipient).toHaveBeenCalledOnce();
       } finally { recipient.mockRestore(); }
     });
+    expect((await f.control.events()).provider).toBe(0);
     const failed = await f.inspect();
     expect(failed.pending).toHaveLength(1);
     expect(failed.epoch?.live).toBe(false);

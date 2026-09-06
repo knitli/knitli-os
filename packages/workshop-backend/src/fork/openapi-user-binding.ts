@@ -345,11 +345,16 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
     drainCleanup,
     snapshot,
     assertUnchanged,
-    /** Fence before provider work, then conditionally commit only that exact lifecycle operation. */
+    /**
+     * Deliver recipient fences and finish connector cleanup before provider work.
+     * A failed recipient leaves durable retry work and the provider operation uninvoked;
+     * remote fencing takes effect on receipt, not atomically with the User-side fence.
+     * Commit only if this exact lifecycle operation still owns the account epoch.
+     */
     async mutateAccount(accountId: number, operation: () => Promise<void>, commit: () => void) {
       const expected = fence(accountId);
-      await operation();
       await drainCleanup(accountId);
+      await operation();
       context.transaction(() => {
         assertUnchanged(accountId, expected);
         commit();

@@ -367,6 +367,11 @@ describe("authenticated OpenAPI host binding", () => {
         await expect(read).resolves.toBe(1);
         await arrived("revocation", draftId);
         expect(finished).toBe(false);
+        if (cleanup === "disconnect") {
+          const response = await control("readFixtureObservations", { label: accountLabel(account) });
+          expect(response.status).toBe(200);
+          expect((await response.json() as { calls: object[] }).calls).not.toContainEqual({ method: "revoke", arity: 0 });
+        }
       } finally {
         await command("releaseDispatch", input);
         await command("releaseRevocation", input);
@@ -374,6 +379,11 @@ describe("authenticated OpenAPI host binding", () => {
       await closing;
       if (closeError) throw closeError;
       expect(finished).toBe(true);
+      if (cleanup === "disconnect") {
+        const response = await control("readFixtureObservations", { label: accountLabel(account) });
+        expect(response.status).toBe(200);
+        expect((await response.json() as { calls: object[] }).calls).toContainEqual({ method: "revoke", arity: 0 });
+      }
       expect((await events(draftId)).filter(e => e.event === "revoked")).toHaveLength(1);
       if (cleanup === "delete") {
         // Deleted workspaces must still acknowledge a later account cleanup fanout.
@@ -436,6 +446,10 @@ describe("authenticated OpenAPI host binding", () => {
       draftId = selection.reference.draftId;
       resourceUrl = selection.resourceUrl;
       using _connection = await workspace.newGatekeeper(account.id, resourceUrl);
+      // Simulate independent provider revocation using the same durable account state
+      // as account.revoke(), before the host begins its recipient-first cleanup.
+      await command("revokeAccountExternally", { label });
+      await expect(Promise.resolve(workspace.startBoundResourceConfigurator(account.id, account.pattern)).then(() => "configurator-opened")).rejects.toThrow("ACCOUNT_REVOKED");
       await command("pauseRevocation", { draftId });
       // The old transport is expected to close on reload; its rejection is not revocation evidence.
       const interrupted = Promise.resolve(api.disconnectAccount(accountId)).then(() => "completed", () => "transport interrupted");
@@ -443,7 +457,9 @@ describe("authenticated OpenAPI host binding", () => {
       expect((await events(draftId)).some(e => e.event === "revoked")).toBe(false);
       const beforeReload = await control("readFixtureObservations", { label });
       expect(beforeReload.status).toBe(200);
-      expect((await beforeReload.json() as { calls: object[] }).calls).toContainEqual({ method: "revoke", arity: 0 });
+      const beforeCalls = (await beforeReload.json() as { calls: object[] }).calls;
+      expect(beforeCalls).toContainEqual({ method: "external-revoke", arity: 0 });
+      expect(beforeCalls).not.toContainEqual({ method: "revoke", arity: 0 });
       await reloadWorkers();
       await interrupted;
     });
@@ -452,7 +468,7 @@ describe("authenticated OpenAPI host binding", () => {
       using workspace = await api.openGadget(workspaceId!);
       const afterReload = await control("readFixtureObservations", { label: label! });
       expect(afterReload.status).toBe(200);
-      expect((await afterReload.json() as { calls: object[] }).calls).toContainEqual({ method: "revoke", arity: 0 });
+      expect((await afterReload.json() as { calls: object[] }).calls).toContainEqual({ method: "external-revoke", arity: 0 });
       await api.disconnectAccount(accountId!);
       await api.disconnectAccount(accountId!);
       expect((await events(draftId!)).filter(e => e.event === "revoked")).toHaveLength(1);

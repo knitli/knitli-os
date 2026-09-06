@@ -358,6 +358,49 @@ describe("actual Overseer durable publication integration", () => {
       } finally { restore(); }
     });
   });
+  it("account recipient fence blocks Add already awaiting description", async () => {
+    await withActualOverseer(async impl => {
+      const { f, restore } = installActualHostFakes(impl);
+      const description = barrier();
+      const revocation = barrier();
+      let publications = 0;
+      const put = impl.storage.gatekeepers.put.bind(impl.storage.gatekeepers);
+      const publication = vi.spyOn(impl.storage.gatekeepers, "put").mockImplementation(record => {
+        if (record.id === 0 && !record.initializing) publications++;
+        return put(record);
+      });
+      try {
+        f.pauseDescription(description.pause);
+        f.pauseRevoke(revocation.pause);
+        const creation = impl.createBoundOpenApiGatekeeper(0, url);
+        const rejected = expect(creation).rejects.toThrow("BINDING_REVOKED");
+        await description.reached;
+        expect(impl.storage.openApiBindings.get("draft")).toMatchObject({ state: "active", published: false });
+        const disconnect = impl.revokeOpenApiAccountBindings("owner", 0, "incarnation", [f.userRows.get("draft")!.reference]);
+        await revocation.reached;
+        expect(impl.storage.openApiAccountFences.get("incarnation")).toBeDefined();
+        description.release();
+        // Failed creation also waits for cleanup acknowledgement, so inspect the
+        // publication state before releasing the revocation barrier.
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(impl.storage.openApiBindings.get("draft")).toMatchObject({ state: "revoking", published: false });
+        expect(impl.storage.gatekeepers.get(0)?.initializing).toBe(true);
+        revocation.release();
+        await rejected;
+        await disconnect;
+        expect(publication).toHaveBeenCalled();
+        expect(publications).toBe(0);
+        expect(impl.storage.gatekeepers.get(0)).toBeUndefined();
+        expect(impl.storage.openApiBindings.get("draft")).toMatchObject({ state: "revoked", published: false });
+      } finally {
+        description.release();
+        revocation.release();
+        publication.mockRestore();
+        restore();
+      }
+    });
+  });
   it("actual synchronous removal fences first and retains the facet record until acknowledgement", async () => {
     await withActualOverseer(async impl => {
       const { f, restore } = installActualHostFakes(impl);

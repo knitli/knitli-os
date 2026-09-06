@@ -10,6 +10,8 @@ export default defineConfig({
     },
   }],
   test: {
+    // Report completed cases so long files show real progress to the 60-second idle watchdog.
+    reporters: ["verbose"],
     include: ["__tests__/**/*.test.ts"],
     globalSetup: ["./src/global-setup.ts"],
     // Absolute source globs over the same set, so a change rebuilds the Worker before rerunning.

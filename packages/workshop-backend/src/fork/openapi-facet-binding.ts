@@ -8,6 +8,8 @@ import { BindingError, createHostBindingLedger, type BindingRow } from "./openap
 export type OpenApiFacetRow = BindingRow & {
   resourceUrl: string;
   published: boolean;
+  /** Published authority remains locally unavailable until restart verification completes. */
+  recoveryPending?: boolean;
   revocationReason?: "removed" | "account-disconnected" | "creation-failed";
 };
 /** Result of the authenticated User resolver, including its registered draft. */
@@ -90,6 +92,7 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
   }, context.now);
   const dispatch = createOpenApiDispatchBinding({ ledger,
     assertActiveNow: identity => current(identity, true),
+    assertUseActiveNow: identity => available(identity),
     assertAccountReady: identity => context.assertAccountReady(identity),
   });
   const pending = new Map<string, Promise<Result>>();
@@ -104,6 +107,20 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
     if (active && row.state !== "active") fail("BINDING_NOT_ACTIVE");
     context.assertHostReady?.(row);
     return row;
+  }
+  function available(identity: BoundIdentity) {
+    const row = current(identity, true);
+    if (row.recoveryPending) fail("BINDING_RECOVERY_PENDING");
+    return row;
+  }
+  function preserveRecovery(draftId: string, error: unknown) {
+    const row = read(draftId);
+    // Only locally verified semantic failures retire published authority. RPC failures
+    // are not evidence of revocation; durable host/account fences remain authoritative.
+    if (row.state !== "active" || !row.published || error instanceof BindingError) return false;
+    // Another concurrent replay may have cleared its marker while this RPC awaited.
+    context.store.put(draftId, { ...row, recoveryPending: true });
+    return true;
   }
   async function ready(identity: BoundIdentity, active = false) {
     current(identity, active);
@@ -199,9 +216,10 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
         if (descriptionUrl !== read(draftId).resourceUrl) fail("BINDING_RESOURCE_URL_MISMATCH");
       });
       current(identity, true);
-      context.store.put(draftId, { ...read(draftId), published: true });
+      context.store.put(draftId, { ...read(draftId), published: true, recoveryPending: false });
       return result;
     } catch (error) {
+      if (preserveRecovery(draftId, error)) throw error;
       fence(draftId, "creation-failed");
       // Failed cleanup remains a durable revoking row. Preserve the original creation error.
       try { await cleanup(draftId, resolved); } catch { /* Retried by resume(). */ }
@@ -232,6 +250,9 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
         context.store.put(row.reference.draftId, row);
         ledger.reserve(identity);
       }
+      if (row.state === "active" && row.published) {
+        context.store.put(row.reference.draftId, { ...row, recoveryPending: true });
+      }
       current(read(row.reference.draftId).identity ?? fail("BINDING_NOT_RESERVED"));
       return await start(row.reference.draftId, resolved);
     },
@@ -240,12 +261,16 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
       const row = read(draftId);
       if (row.state === "revoked") return;
       if (row.state === "revoking") { await cleanup(draftId); return; }
+      if (row.state === "active" && row.published) {
+        context.store.put(draftId, { ...row, recoveryPending: true });
+      }
       let resolved: OpenApiResolvedDraft | undefined;
       try {
         resolved = await context.lookup(row.providerAccountId, row.resourceUrl, context.workspaceId);
         validateResolved(row.providerAccountId, row.resourceUrl, resolved);
       } catch (error) {
         resolved?.finalizer[Symbol.dispose]();
+        if (preserveRecovery(draftId, error)) throw error;
         fence(draftId, "creation-failed");
         try { await cleanup(draftId); } catch { /* Durable retry required. */ }
         throw error;
@@ -261,10 +286,18 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
     async checkAccountReadiness(gatekeeperId: number, generation: number): Promise<void> {
       const row = context.store.list().find(candidate => candidate.identity?.gatekeeperId === gatekeeperId);
       if (!row?.identity || row.identity.generation !== generation) return fail("BINDING_IDENTITY_MISMATCH");
+      available(row.identity);
       await ready(structuredClone(row.identity), true);
+      available(row.identity);
     },
     /** Local synchronous captured-generation guard for the approval integration. */
     assertActiveNow(gatekeeperId: number, generation: number) {
+      const row = context.store.list().find(candidate => candidate.identity?.gatekeeperId === gatekeeperId);
+      if (!row?.identity || row.identity.generation !== generation) return fail("BINDING_IDENTITY_MISMATCH");
+      available(row.identity);
+    },
+    /** Internal publication replay guard; never grants dispatch access during recovery. */
+    assertReplayActiveNow(gatekeeperId: number, generation: number) {
       const row = context.store.list().find(candidate => candidate.identity?.gatekeeperId === gatekeeperId);
       if (!row?.identity || row.identity.generation !== generation) return fail("BINDING_IDENTITY_MISMATCH");
       current(row.identity, true);

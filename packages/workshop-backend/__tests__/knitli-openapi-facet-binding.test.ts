@@ -25,6 +25,7 @@ function fixture(workspaceId = "workspace", initialClock = 1_000) {
   let shared = false;
   let descriptionUrl = url;
   let resolvedUrl = url;
+  let lookupError: Error | undefined;
   let descriptionError: Error | undefined;
   let activationError: Error | undefined;
   let revokeError: Error | undefined;
@@ -66,6 +67,7 @@ function fixture(workspaceId = "workspace", initialClock = 1_000) {
     allocateWorkpieceId: () => { events.push("allocate"); return nextId++; },
     lookup: async (accountId, requestedUrl, workspaceId) => {
       events.push("lookup");
+      if (lookupError) throw lookupError;
       if (!accountLive) throw new Error("BINDING_ACCOUNT_REPLACED");
       if (accountId !== 0 || workspaceId !== draft.intendedWorkspaceId) throw new Error("BINDING_IDENTITY_MISMATCH");
       if (!requestedUrl.includes("/grants/grant")) throw new Error("DRAFT_NOT_FOUND");
@@ -107,8 +109,9 @@ function fixture(workspaceId = "workspace", initialClock = 1_000) {
     isShared: () => shared, describe: async () => { await descriptionPause(); if (descriptionError) throw descriptionError; return { url: descriptionUrl, title: "API", observerPolicy: "owner-only" as const }; },
     expire: () => { now += 900_001; }, disconnect: () => { accountLive = false; }, share: () => { shared = true; },
     setDescriptionUrl: (value: string) => { descriptionUrl = value; }, setResolvedUrl: (value: string) => { resolvedUrl = value; },
-    rejectDescription: () => { descriptionError = new Error("DESCRIPTION_REJECTED"); },
-    rejectActivation: () => { activationError = new Error("ACTIVATION_REJECTED"); },
+    rejectLookup: (reject = true) => { lookupError = reject ? new Error("LOOKUP_UNAVAILABLE") : undefined; },
+    rejectDescription: (reject = true) => { descriptionError = reject ? new Error("DESCRIPTION_REJECTED") : undefined; },
+    rejectActivation: (reject = true) => { activationError = reject ? new Error("ACTIVATION_REJECTED") : undefined; },
     rejectRevoke: (reject: boolean) => { revokeError = reject ? new Error("REVOKE_REJECTED") : undefined; },
     setDigest: (value: string) => { digest = value; },
     pauseReserve: (pause: () => Promise<void>) => { reservePause = pause; },
@@ -283,6 +286,57 @@ describe("durable OpenAPI facet reservation and activation", () => {
     f.rejectRevoke(false); await f.restart().resume("draft");
     expect(f.rows.get("draft")!.state).toBe("revoked"); expect(f.facets.size).toBe(0);
     const events = [...f.events]; await f.restart().resume("draft"); expect(f.events).toEqual(events);
+  });
+  it("permits recovery key registration while withholding dispatch use until publication", async () => {
+    const f = fixture(); await f.binding.create(0, url);
+    const restarted = f.restart(); const pause = barrier(); f.pauseActivation(pause.pause);
+    const recovery = restarted.resume("draft");
+    try {
+      await pause.reached;
+      using use = (await f.authorities.at(-1)!.authorizeDispatchKey({ keyId: "recovery-key", publicKeyDigest: "digest" })).use;
+      expect(f.rows.get("draft")).toMatchObject({ state: "active", published: true, recoveryPending: true });
+      expect(() => restarted.assertActiveNow(0, 1)).toThrow("BINDING_RECOVERY_PENDING");
+      await expect(Promise.resolve(use.assertActive())).rejects.toThrow("BINDING_RECOVERY_PENDING");
+      pause.release(); await recovery;
+      await expect(Promise.resolve(use.assertActive())).resolves.toBeUndefined();
+      expect(() => restarted.assertActiveNow(0, 1)).not.toThrow();
+      expect(f.events).not.toContain("revoke:creation-failed");
+    } finally { pause.release(); await recovery; }
+  });
+  it("retries an idempotent Add after transient published activation failure", async () => {
+    const f = fixture(); await f.binding.create(0, url); f.rejectActivation();
+    await expect(f.binding.create(0, url)).rejects.toThrow("ACTIVATION_REJECTED");
+    expect(f.rows.get("draft")).toMatchObject({ state: "active", published: true, recoveryPending: true });
+    expect(() => f.binding.assertActiveNow(0, 1)).toThrow("BINDING_RECOVERY_PENDING");
+    expect(f.events).not.toContain("revoke:creation-failed");
+    f.rejectActivation(false); await f.binding.resume("draft");
+    expect(f.rows.get("draft")).toMatchObject({ state: "active", published: true, recoveryPending: false });
+    expect(f.events.filter(event => event === "allocate")).toHaveLength(1);
+  });
+  it("keeps a published binding retryable when a concurrent recovery lookup fails late", async () => {
+    const f = fixture(); await f.binding.create(0, url);
+    const pause = barrier(); const lookup = f.context.lookup; let calls = 0;
+    f.context.lookup = async (...args) => {
+      if (++calls === 1) { await pause.pause(); throw new Error("LOOKUP_UNAVAILABLE"); }
+      return lookup(...args);
+    };
+    const restarted = f.restart(); const lateFailure = restarted.resume("draft");
+    const rejected = expect(lateFailure).rejects.toThrow("LOOKUP_UNAVAILABLE");
+    try {
+      await pause.reached; await restarted.resume("draft");
+      expect(f.rows.get("draft")?.recoveryPending).toBe(false);
+      pause.release(); await rejected;
+      expect(f.rows.get("draft")).toMatchObject({ state: "active", published: true, recoveryPending: true });
+      expect(f.events).not.toContain("revoke:creation-failed");
+      await restarted.resume("draft");
+      expect(() => restarted.assertActiveNow(0, 1)).not.toThrow();
+    } finally { pause.release(); }
+  });
+  it("revokes published recovery after a locally verified identity mismatch", async () => {
+    const f = fixture(); await f.binding.create(0, url); f.setResolvedUrl(`${url}/substituted`);
+    await expect(f.restart().resume("draft")).rejects.toThrow("BINDING_RESOURCE_URL_MISMATCH");
+    expect(f.rows.get("draft")?.state).toBe("revoked");
+    expect(f.events).toContain("revoke:creation-failed");
   });
   it("fences failed restart resolution and uses the separate historical cleanup path", async () => {
     const f = fixture(); f.seed("active"); f.disconnect();
@@ -762,6 +816,10 @@ describe("actual Overseer durable publication integration", () => {
       const f = fixture(); f.seed("active", true);
       impl.storage.ownerId.put("owner");
       impl.storage.openApiBindings.put(f.rows.get("draft")!);
+      const second = structuredClone(f.rows.get("draft")!);
+      second.reference.draftId = "second";
+      second.identity = { ...second.identity!, draftId: "second", gatekeeperId: 1, facetName: "gatekeeper1" };
+      impl.storage.openApiBindings.put(second);
       impl.storage.openApiRecoveryAt.put(undefined);
       // Observe the production constructor's recovery dispatch, not a fake clock.
       const prototype = Object.getPrototypeOf(impl) as ActualOverseer;
@@ -770,7 +828,53 @@ describe("actual Overseer durable publication integration", () => {
         const restarted = new OverseerDurableObject(impl.ctx, impl.env);
         expect(restarted["impl"].storage.openApiRecoveryAt.get()).toBeUndefined();
         expect(recover).toHaveBeenCalledOnce();
+        expect(Array.from(restarted["impl"].storage.openApiBindings.list()).map(row => row.recoveryPending)).toEqual([true, true]);
       } finally { recover.mockRestore(); }
+    });
+  });
+  it.each(["lookup", "activation", "description"] as const)("constructor retries a published binding after transient %s failure without revocation", async stage => {
+    await withActualOverseer(async impl => {
+      const originalHost = installActualHostFakes(impl);
+      try {
+        await impl.createBoundOpenApiGatekeeper(0, url);
+        impl.storage.ownerId.put("owner");
+        const before = impl.storage.openApiBindings.get("draft")!;
+        const prototype = Object.getPrototypeOf(impl) as ActualOverseer;
+        const originalResume = prototype.resumeOpenApiBindings;
+        const setup = barrier(); let recovery!: Promise<void>;
+        const constructorRecovery = vi.spyOn(prototype, "resumeOpenApiBindings").mockImplementation(function(this: ActualOverseer, ...args) {
+          recovery = setup.pause().then(() => originalResume.apply(this, args));
+          return recovery;
+        });
+        let restarted: ActualOverseer;
+        try { restarted = new OverseerDurableObject(impl.ctx, impl.env)["impl"]; }
+        finally { constructorRecovery.mockRestore(); }
+        const host = installActualHostFakes(restarted);
+        host.f.userRows.set("draft", structuredClone(originalHost.f.userRows.get("draft")!));
+        const reject = stage === "lookup" ? host.f.rejectLookup : stage === "activation" ? host.f.rejectActivation : host.f.rejectDescription;
+        reject(); setup.release();
+        try {
+          await recovery;
+          expect(restarted.storage.openApiBindings.get("draft")).toMatchObject({
+            state: "active", published: true, recoveryPending: true, identity: before.identity, keyEpoch: before.keyEpoch,
+          });
+          expect(restarted.storage.gatekeepers.get(0)).toBeDefined();
+          expect(restarted.storage.openApiRecoveryAt.get()).toBeGreaterThanOrEqual(Date.now());
+          expect(() => restarted.assertOpenApiBindingActiveNow(0)).toThrow("BINDING_RECOVERY_PENDING");
+          expect(host.f.events).not.toContain("revoke:creation-failed");
+          reject(false);
+          const pause = barrier(); host.f.pauseDescription(pause.pause);
+          const retry = restarted.resumeOpenApiBindings(true);
+          try {
+            await pause.reached;
+            expect(() => restarted.assertOpenApiBindingActiveNow(0)).toThrow("BINDING_RECOVERY_PENDING");
+          } finally { pause.release(); await retry; }
+          expect(restarted.storage.openApiBindings.get("draft")).toMatchObject({ state: "active", published: true, recoveryPending: false, identity: before.identity });
+          expect(restarted.storage.openApiRecoveryAt.get()).toBeUndefined();
+          expect(() => restarted.assertOpenApiBindingActiveNow(0)).not.toThrow();
+          expect(host.f.events).not.toContain("revoke:creation-failed");
+        } finally { setup.release(); host.restore(); }
+      } finally { originalHost.restore(); }
     });
   });
   it("constructor preserves a reserved initialization while discarding legacy provisional records", async () => {

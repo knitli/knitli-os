@@ -1,5 +1,6 @@
 import type { DraftReference } from "@gadgets/workshop-shared/fork/openapi-host-binding";
 import { createOpenApiFacetBinding, type OpenApiFacetRow } from "./fork/openapi-facet-binding";
+import { BindingError } from "./fork/openapi-binding-ledger";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
@@ -1669,7 +1670,7 @@ class OverseerImpl implements AgentHooks {
 
   #refreshOpenApiRecoveryAlarm(retry = false): void {
     const pending = Array.from(this.storage.openApiBindings.list())
-      .some(row => row.state !== "revoked" && (row.state !== "active" || !row.published)) ||
+      .some(row => row.state !== "revoked" && (row.state !== "active" || !row.published || row.recoveryPending)) ||
       Array.from(this.storage.openApiAccountFences.list()).some(row => row.drafts.some(draft => !draft.revoked));
     if (!pending) this.storage.openApiRecoveryAt.put(undefined);
     else if (retry || this.storage.openApiRecoveryAt.get() === undefined) {
@@ -1779,6 +1780,13 @@ class OverseerImpl implements AgentHooks {
     this.defaultGadgetId = this.storage.defaultGadgetId.get();
     if (this.ownerId && (Array.from(this.storage.openApiBindings.list()).some(row => row.state !== "revoked") ||
         Array.from(this.storage.openApiAccountFences.list()).some(row => row.drafts.some(draft => !draft.revoked)))) {
+      // Block every persisted connection before the first recovery await, including rows
+      // later in the recovery loop. Transient failures retain their identity for retry.
+      for (const row of this.storage.openApiBindings.list()) {
+        if (row.state === "active" && row.published && !row.recoveryPending) {
+          this.storage.openApiBindings.put({ ...row, recoveryPending: true });
+        }
+      }
       this.ctx.waitUntil(this.resumeOpenApiBindings());
     }
 
@@ -4421,9 +4429,9 @@ class OverseerImpl implements AgentHooks {
       },
       now: Date.now,
       assertHostReady: row => {
-        if (this.ownerId !== ownerId) throw new Error("BINDING_IDENTITY_MISMATCH");
-        if (this.storage.openApiWorkspaceClosing.get()) throw new Error("BINDING_WORKSPACE_CLOSING");
-        if (this.storage.openApiAccountFences.get(row.accountIncarnation)) throw new Error("BINDING_ACCOUNT_REPLACED");
+        if (this.ownerId !== ownerId) throw new BindingError("BINDING_IDENTITY_MISMATCH");
+        if (this.storage.openApiWorkspaceClosing.get()) throw new BindingError("BINDING_WORKSPACE_CLOSING");
+        if (this.storage.openApiAccountFences.get(row.accountIncarnation)) throw new BindingError("BINDING_ACCOUNT_REPLACED");
       },
       allocateWorkpieceId: () => this.allocateWorkpieceId(),
       lookup: (accountId, url, workspaceId) => owner().lookupOpenApiDraft(accountId, url, workspaceId),
@@ -4463,15 +4471,16 @@ class OverseerImpl implements AgentHooks {
     for (const fence of Array.from(this.storage.openApiAccountFences.list())) {
       if (fence.drafts.every(draft => draft.revoked)) continue;
       try { await this.revokeOpenApiAccountBindings(fence.ownerId, fence.providerAccountId, fence.accountIncarnation, []); }
-      catch { this.logger.warn("OpenAPI account cleanup remains pending", { event: "openapi.account.cleanup.pending" }); }
+      catch (error) { this.logger.warn("OpenAPI account cleanup remains pending", { event: "openapi.account.cleanup.pending", error }); }
     }
     for (const row of Array.from(this.storage.openApiBindings.list())) {
       // Published bindings need replay after restart, but unrelated alarm retries must leave them alone.
-      if (row.state === "revoked" || (pendingOnly && row.state === "active" && row.published)) continue;
+      if (row.state === "revoked" || (pendingOnly && row.state === "active" && row.published && !row.recoveryPending)) continue;
       try { await this.resumeOpenApiBinding(row.reference.draftId); }
-      catch {
+      catch (error) {
         this.logger.warn("OpenAPI binding recovery remains pending", {
           event: "openapi.binding.recovery.pending",
+          error,
         });
       }
     }
@@ -4579,7 +4588,7 @@ class OverseerImpl implements AgentHooks {
     if (reservedId !== undefined && (!binding?.identity || !beforePublication)) {
       throw new Error("BINDING_NOT_RESERVED");
     }
-    if (binding) this.assertOpenApiBindingActiveNow(id, binding.identity!.generation);
+    if (binding) this.#getOpenApiBinding().assertReplayActiveNow(id, binding.identity!.generation);
     let gatekeeperRecord: GatekeeperRecord;
     if (reservedId !== undefined) {
       const existing = this.storage.gatekeepers.get(id);
@@ -4608,8 +4617,9 @@ class OverseerImpl implements AgentHooks {
       delete gatekeeperRecord.initializing;
       this.storage.gatekeepers.put(gatekeeperRecord);
     } catch (error) {
-      if (binding) this.#getOpenApiBinding().fence(binding.reference.draftId, "creation-failed");
-      else this.removeGatekeeper(id);
+      // The binding lifecycle decides whether a bound failure needs cleanup or recovery.
+      // A transient replay failure must not remove an already published connection.
+      if (!binding) this.removeGatekeeper(id);
       throw error;
     }
     return new GatekeeperClientImpl<any>(this, id, facet);

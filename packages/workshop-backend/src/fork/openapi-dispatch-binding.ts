@@ -11,6 +11,8 @@ import { BindingError, type BindingRow, type HostBindingLedger } from "./openapi
 export interface OpenApiDispatchBindingContext {
   ledger: HostBindingLedger;
   assertActiveNow(identity: BoundIdentity): BindingRow;
+  /** Use can remain fenced during private key registration for restart recovery. */
+  assertUseActiveNow?(identity: BoundIdentity): BindingRow;
   assertAccountReady(identity: BoundIdentity): Promise<void>;
 }
 
@@ -43,9 +45,10 @@ export function createOpenApiDispatchBinding(context: OpenApiDispatchBindingCont
       context.assertActiveNow(captured);
       const keyEpoch = context.ledger.authorizeKey(captured, keyId, publicKeyDigest);
       const use = new OpenApiHostDispatchUseAuthority(async () => {
-        context.assertActiveNow(captured);
+        const assertUseActiveNow = context.assertUseActiveNow ?? context.assertActiveNow;
+        assertUseActiveNow(captured);
         await context.assertAccountReady(captured);
-        const row = context.assertActiveNow(captured);
+        const row = assertUseActiveNow(captured);
         context.ledger.assertActive(captured, keyEpoch);
         if (row.key?.keyId !== keyId || row.key.publicKeyDigest !== publicKeyDigest) {
           throw new BindingError("DISPATCH_KEY_CONFLICT");

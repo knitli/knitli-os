@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { deflate } from "pako";
 import { createTypedStorage } from "@gadgets/typed-storage";
 import type { GitPullHints, GitOid } from "@gadgets/workshop-shared/gatekeeper";
 import { makeMockStorage } from "./mock-storage";
@@ -416,12 +417,12 @@ describe("pull driver", () => {
     expect(t.pulls.map(p => p.gatekeeperId)).toStrictEqual([G1, G2]);
   });
 
-  it("reports an object with no viable source, naming the last failure", async () => {
+  it("reports an object with no viable source, without exposing remote diagnostics", async () => {
     let t = makeCache();
     await t.cache.putFromGatekeeper(G1, "commit", fixture(COMMIT_1).payload);
     t.sources.set(G1, async () => { throw new Error("connection deleted; reconnect it"); });
     await expect(t.cache.ensureObject(TREE_1, { type: "tree" }))
-        .rejects.toThrow(/Could not pull git object .* reconnect it/s);
+        .rejects.toThrow(/Could not pull git object [0-9a-f]{8}: .*git\.pull\.source\.failed/s);
 
     await expect(t.cache.ensureObject("f".repeat(40), { type: "blob" }))
         .rejects.toThrow(/no connection is known to provide it/);
@@ -793,7 +794,7 @@ describe("buildPack", () => {
     t.cache.markPushClosure(G2, ACTION, [t.child]);
     t.sources.delete(G1);  // the source connection is gone
     await expect(new GitCacheImpl(t.cache, G2, ACTION).buildPack())
-        .rejects.toThrow(/unreachable/);
+        .rejects.toThrow(/git\.pull\.source\.failed/);
   });
 });
 
@@ -1111,5 +1112,82 @@ describe("resolveCommitRef", () => {
     // caller's pull lets the decoded bytes decide).
     expect(t.cache.resolveCommitRef("bbbb1111".padEnd(40, "0")))
         .toBe("bbbb1111".padEnd(40, "0"));
+  });
+});
+
+// A copy-only thin pack needs only the base OID and size, never its contents.
+async function copyOnlyThinPack(oid: GitOid, size: number): Promise<Uint8Array> {
+  let delta = new Uint8Array([size, size, 0x91, 0, size]);
+  let header = new Uint8Array(12);
+  header.set(new TextEncoder().encode("PACK"));
+  new DataView(header.buffer).setUint32(4, 2);
+  new DataView(header.buffer).setUint32(8, 1);
+  let body = concatBytes([header, new Uint8Array([0x75]),
+    Uint8Array.from(oid.match(/../g)!.map(byte => parseInt(byte, 16))), deflate(delta)]);
+  return concatBytes([body, new Uint8Array(await crypto.subtle.digest("SHA-1", body))]);
+}
+
+describe("thin-pack gatekeeper isolation", () => {
+  it.each(["other remote", "other pending push", "local only", "advertised only"])(
+    "rejects a copy-only delta against an inaccessible %s base", async visibility => {
+      let t = makeCache();
+      let payload = new TextEncoder().encode("private base contents");
+      let oid = visibility === "other remote"
+        ? await t.cache.putFromGatekeeper(G2, "blob", payload)
+        : await storeLocal(t.storage, { type: "blob", payload });
+      if (visibility === "advertised only") t.cache.advertiseCommit(G1, oid);
+      if (visibility === "other pending push") t.storage.gitObjectMetadata.put({
+        oid, type: "blob", onRemote: [], pullableFrom: [],
+        pendingPush: [{ gatekeeperId: G2, actionId: ACTION }],
+      });
+      expect(await t.cache.readForGatekeeper(G1, oid)).toBeNull();
+      let before = t.storage.gitObjectMetadata.get(oid);
+      await expect(t.cache.consumePackFromGatekeeper(G1,
+        await streamOf([await copyOnlyThinPack(oid, payload.length)])))
+        .rejects.toThrow(/delta base .* unavailable/);
+      expect(await t.cache.readForGatekeeper(G1, oid)).toBeNull();
+      expect(t.storage.gitObjectMetadata.get(oid)).toStrictEqual(before);
+    });
+
+  it.each(["onRemote", "pendingPush"])("accepts an authorized %s external base", async visibility => {
+    let t = makeCache();
+    let payload = new TextEncoder().encode("authorized base contents");
+    let oid = await t.cache.putFromGatekeeper(visibility === "onRemote" ? G1 : G2, "blob", payload);
+    if (visibility === "pendingPush") {
+      let meta = t.storage.gitObjectMetadata.get(oid)!;
+      meta.pendingPush.push({ gatekeeperId: G1, actionId: ACTION });
+      t.storage.gitObjectMetadata.put(meta);
+    }
+    expect(await t.cache.readForGatekeeper(G1, oid)).toStrictEqual({ type: "blob", payload });
+    await expect(t.cache.consumePackFromGatekeeper(G1,
+      await streamOf([await copyOnlyThinPack(oid, payload.length)]))).resolves.toStrictEqual([oid]);
+    expect(await t.cache.readForGatekeeper(G1, oid)).toStrictEqual({ type: "blob", payload });
+  });
+});
+
+describe("pull failure privacy", () => {
+  it.each(["warning", "propagated failure"])("keeps remote messages and stacks out of the %s", async boundary => {
+    let t = makeCache();
+    t.cache.advertiseCommit(G1, COMMIT_1);
+    let failure = new Error(`git fetch did not provide requested objects ${COMMIT_1}, ${TREE_1}`);
+    failure.stack = `remote stack containing ${COMMIT_1} and secret diagnostic`;
+    t.sources.set(G1, async () => { throw failure; });
+    let warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      let caught = await t.cache.ensureGitObjects([COMMIT_1], { type: "commit" }).catch(error => error);
+      expect(t.pulls).toHaveLength(1);
+      expect(warning).toHaveBeenCalledTimes(1);
+      let serialized = JSON.stringify(warning.mock.calls);
+      expect(serialized).toContain("git.pull.source.failed");
+      expect(caught).toBeInstanceOf(Error);
+      let diagnostics = boundary === "warning" ? serialized : `${caught.message}\n${caught.stack}`;
+      expect(diagnostics).not.toContain(COMMIT_1);
+      expect(diagnostics).not.toContain(TREE_1);
+      expect(diagnostics).not.toContain("secret diagnostic");
+      expect(diagnostics).not.toContain(failure.message);
+      expect(diagnostics).toContain(COMMIT_1.slice(0, 8));
+    } finally {
+      warning.mockRestore();
+    }
   });
 });

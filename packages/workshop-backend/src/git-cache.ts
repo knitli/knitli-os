@@ -323,7 +323,12 @@ export class WorkspaceGitCache {
     let bytes = await collectByteStream(pack, MAX_GIT_PACK_BYTES);
     let objects = await decodePackBytes(bytes, {
       maxObjectSize: MAX_GIT_PACK_BYTES,
-      resolveBase: oid => this.readLocalObject(oid),
+      resolveBase: oid => {
+        // An external base OID is not proof of possession: scope cached delta bytes
+        // exactly like get(), before decoding can attribute them to this gatekeeper.
+        let meta = this.storage.gitObjectMetadata.get(oid);
+        return this.#isVisibleToGatekeeper(gatekeeperId, meta) ? this.readLocalObject(oid) : undefined;
+      },
     });
     // Hash and deflate outside the storage transaction (hashing is async; deflate is just CPU
     // that needn't run under the write lock).
@@ -354,6 +359,11 @@ export class WorkspaceGitCache {
   // -------------------------------------------------------------------------------------
   // The scoped gatekeeper read view
 
+  #isVisibleToGatekeeper(gatekeeperId: WorkpieceId, meta: GitObjectMetadataRecord | undefined): boolean {
+    return meta !== undefined && (meta.onRemote.includes(gatekeeperId) ||
+      meta.pendingPush.some(p => p.gatekeeperId === gatekeeperId));
+  }
+
   /**
    * The single read behind `GitCache.get()`/`has()`/`stat()`: answers exactly
    * `onRemote(G) ∪ pendingPush(G)` for gatekeeper G and null for everything else. A pendingPush
@@ -365,10 +375,8 @@ export class WorkspaceGitCache {
       : Promise<PackableObject | null> {
     validateGitOid(oid);
     let meta = this.storage.gitObjectMetadata.get(oid);
-    if (meta === undefined) return null;
-    let onRemote = meta.onRemote.includes(gatekeeperId);
+    if (meta === undefined || !this.#isVisibleToGatekeeper(gatekeeperId, meta)) return null;
     let pendingPush = meta.pendingPush.some(p => p.gatekeeperId === gatekeeperId);
-    if (!onRemote && !pendingPush) return null;
 
     let local = this.readLocalObject(oid);
     if (local === undefined && pendingPush) {
@@ -405,7 +413,6 @@ export class WorkspaceGitCache {
     }
 
     let triedSources = new Map<GitOid, Set<WorkpieceId>>();
-    let lastError: unknown;
     while (true) {
       missing = missing.filter(oid => !this.hasLocalObject(oid));
       if (missing.length === 0) return;
@@ -419,11 +426,10 @@ export class WorkspaceGitCache {
         let next = sources.find(source => !tried.has(source));
         if (next === undefined) {
           throw new Error(
-              `Could not pull git object ${oid}: ` +
+              `Could not pull git object ${oid.slice(0, 8)}: ` +
               (sources.length === 0
                   ? "no connection is known to provide it."
-                  : `every connection that could provide it failed. Last error: ` +
-                    `${lastError instanceof Error ? lastError.message : String(lastError)}`));
+                  : `every connection that could provide it failed (git.pull.source.failed).`));
         }
         let group = groups.get(next);
         if (group === undefined) groups.set(next, group = []);
@@ -438,11 +444,12 @@ export class WorkspaceGitCache {
         }
         try {
           await this.puller.pull(gatekeeperId, groupOids, hints);
-        } catch (err) {
-          lastError = err;
+        } catch {
+          // Remote messages and stacks can contain capability OIDs or response bodies.
+          // Keep this log and the exhausted-source error categorical.
           logger.warn("git pull from source failed", {
             event: "git.pull.source.failed", gatekeeperId, oidCount: groupOids.length,
-            error: err,
+            oidPrefix: groupOids[0].slice(0, 8),
           });
           continue;
         }

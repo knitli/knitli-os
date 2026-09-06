@@ -13,6 +13,7 @@
 // signalled.
 
 import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 // The pids a child-lister prints for one parent. Resolves empty when the parent has no children or
 // the lister reports failure -- `pgrep` exits 1 for "no matches", which is not an error here.
@@ -63,10 +64,20 @@ function signalPid(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
-// Whether `pid` still exists. Signal 0 delivers nothing and only checks for the process.
+// Signal 0 also succeeds for zombies, which cannot run or respond to another signal.
 function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
+    if (process.platform === "linux") {
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        // The comm field can contain spaces and parentheses; state follows its final ')'.
+        const commEnd = stat.lastIndexOf(")");
+        if (commEnd !== -1 && /^\s+Z\s/.test(stat.slice(commEnd + 1))) return false;
+      } catch {
+        // Missing/inaccessible procfs is not proof of death. Keep the signal-0 result.
+      }
+    }
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";

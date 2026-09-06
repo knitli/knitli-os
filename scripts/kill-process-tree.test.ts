@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { describe, it } from "node:test";
 import { killProcessTree, killProcessTreeEscalating } from "./kill-process-tree.ts";
 
@@ -115,6 +116,60 @@ async function spawnWrapper(grandchildBody: string): Promise<{
   }
   return { wrapperPid, grandchildPid, cleanUp };
 }
+
+// Simulated OS boundaries, isolated from the real-process tests below. This exercises the Linux
+// procfs path on any host; it does not claim to reproduce Linux PID 1's orphan-reaping behavior.
+describe("killProcessTreeEscalating Linux zombie detection", { concurrency: true }, () => {
+  for (const [name, platform, stat, expected] of [
+    ["zombie", "linux", "123 (worker) Z 1 0 0", ["SIGTERM"]],
+    ["zombie with parentheses in comm", "linux", "123 (worker ) (name)) Z 1 0 0", ["SIGTERM"]],
+    ["live process with zombie-looking comm", "linux", "123 (worker) Z (name) S 1 0 0", ["SIGTERM", "SIGKILL"]],
+    ["malformed stat", "linux", " Z ", ["SIGTERM", "SIGKILL"]],
+    ["missing procfs", "linux", "ENOENT", ["SIGTERM", "SIGKILL"]],
+    ["inaccessible procfs", "linux", "EACCES", ["SIGTERM", "SIGKILL"]],
+    ["non-Linux host", "darwin", "123 (worker) Z 1 0 0", ["SIGTERM", "SIGKILL"]],
+  ] as const) {
+    it(name, async () => {
+      const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "-e", `
+        import assert from "node:assert/strict";
+        import childProcess from "node:child_process";
+        import { EventEmitter } from "node:events";
+        import fs from "node:fs";
+        import { syncBuiltinESMExports } from "node:module";
+        import { killProcessTreeEscalating } from ${JSON.stringify(new URL("./kill-process-tree.ts", import.meta.url).href)};
+        const signals = [];
+        let reads = 0;
+        process.kill = (pid, signal) => {
+          assert.equal(pid, 123);
+          if (signal !== 0) signals.push(signal);
+          return true;
+        };
+        Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });
+        childProcess.spawn = () => {
+          const child = new EventEmitter();
+          child.stdout = new EventEmitter();
+          queueMicrotask(() => child.emit("close", 0));
+          return child;
+        };
+        fs.readFileSync = (path, encoding) => {
+          assert.equal(path, "/proc/123/stat");
+          assert.equal(encoding, "utf8");
+          reads++;
+          const stat = ${JSON.stringify(stat)};
+          if (stat === "ENOENT" || stat === "EACCES") throw Object.assign(new Error(stat), { code: stat });
+          return stat;
+        };
+        syncBuiltinESMExports();
+        await killProcessTreeEscalating(123, { graceMs: 25 });
+        process.stdout.write(JSON.stringify({ signals, reads }));
+      `]);
+      const result = JSON.parse(stdout);
+      assert.deepEqual(result.signals, expected);
+      if (platform === "linux") assert.ok(result.reads > 0, "Linux procfs was not inspected");
+      else assert.equal(result.reads, 0, "non-Linux behavior must not read procfs");
+    });
+  }
+});
 
 describe("killProcessTreeEscalating", { concurrency: true }, () => {
   it("SIGKILLs a descendant that ignored the SIGTERM", async () => {

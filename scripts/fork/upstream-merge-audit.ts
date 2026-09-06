@@ -65,6 +65,8 @@ export const FORK_OWNED_PREFIXES = [
   "packages/workshop-backend/src/fork/",
   "packages/workshop-backend/__tests__/knitli-openapi-binding-ledger.test.ts",
   "packages/workshop-backend/__tests__/knitli-openapi-user-binding.test.ts",
+  "packages/workshop-backend/__tests__/fork-fixtures/",
+  "packages/workshop-backend/__tests__/knitli-openapi-dispatch-binding.test.ts",
   "packages/workshop-backend/__tests__/knitli-openapi-facet-binding.test.ts",
   "packages/workshop-frontend/src/GatekeeperModal.knitli-binding.test.tsx",
   "packages/integration-tests/fixtures/gatekeeper-test/src/fork/",

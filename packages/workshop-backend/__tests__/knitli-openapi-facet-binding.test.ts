@@ -1,5 +1,7 @@
-import { RpcTarget, RpcStub } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
+import type { OverseerDurableObject } from "../src/overseer";
+import { env, RpcTarget, RpcStub } from "cloudflare:workers";
+import { describe, expect, it, vi } from "vitest";
 import type { BoundIdentity, HostFacetBinding, OpenApiFacetFinalizer } from "@gadgets/workshop-shared/fork/openapi-host-binding";
 import { createHostBindingLedger, type BindingRow } from "../src/fork/openapi-binding-ledger";
 import { createOpenApiFacetBinding, type OpenApiFacetBindingContext, type OpenApiFacetRow, type OpenApiResolvedDraft } from "../src/fork/openapi-facet-binding";
@@ -14,8 +16,8 @@ function barrier() {
   return { reached, release, pause: async () => { entered(); await wait; } };
 }
 const noPause = async () => {};
-function fixture() {
-  let now = 1_000;
+function fixture(workspaceId = "workspace", initialClock = 1_000) {
+  let now = initialClock;
   let nextId = 0;
   let accountLive = true;
   let shared = false;
@@ -30,7 +32,7 @@ function fixture() {
   let descriptionPause = noPause;
   let accountPause = noPause;
   let revokePause = noPause;
-  const draft: BindingRow = { reference: { draftId: "draft", grantId: "grant", selectionDigest: "digest" }, ownerId: "owner", providerAccountId: 0, accountIncarnation: "incarnation", intendedWorkspaceId: "workspace", expiresAt: now + 900_000, state: "draft", keyEpoch: 0 };
+  const draft: BindingRow = { reference: { draftId: "draft", grantId: "grant", selectionDigest: "digest" }, ownerId: "owner", providerAccountId: 0, accountIncarnation: "incarnation", intendedWorkspaceId: workspaceId, expiresAt: now + 900_000, state: "draft", keyEpoch: 0 };
   const userRows = new Map<string, BindingRow>([["draft", structuredClone(draft)]]);
   const userLedger = createHostBindingLedger({ get: id => userRows.get(id), put: (id, row) => { userRows.set(id, structuredClone(row)); } }, () => now);
   const rows = new Map<string, OpenApiFacetRow>();
@@ -57,7 +59,7 @@ function fixture() {
     }
   }();
   const context: OpenApiFacetBindingContext<number> = {
-    ownerId: "owner", workspaceId: "workspace", now: () => now,
+    ownerId: "owner", workspaceId, now: () => now,
     store: { get: id => rows.get(id), put: (id, row) => { rows.set(id, structuredClone(row)); }, list: () => [...rows.values()] },
     allocateWorkpieceId: () => { events.push("allocate"); return nextId++; },
     lookup: async (accountId, requestedUrl, workspaceId) => {
@@ -100,6 +102,7 @@ function fixture() {
     if (published) { connections.add(0); facets.add(0); }
   }
   return { binding, restart, context, rows, userRows, facets, connections, authorities, observed, events, seed,
+    isShared: () => shared, describe: async () => { await descriptionPause(); if (descriptionError) throw descriptionError; return { url: descriptionUrl, title: "API", observerPolicy: "owner-only" as const }; },
     expire: () => { now += 900_001; }, disconnect: () => { accountLive = false; }, share: () => { shared = true; },
     setDescriptionUrl: (value: string) => { descriptionUrl = value; }, setResolvedUrl: (value: string) => { resolvedUrl = value; },
     rejectDescription: () => { descriptionError = new Error("DESCRIPTION_REJECTED"); },
@@ -256,5 +259,203 @@ describe("durable OpenAPI facet reservation and activation", () => {
     const f = fixture(); f.seed("active"); f.context.resolveForCleanup = undefined; f.disconnect();
     await expect(f.restart().resume("draft")).rejects.toThrow("BINDING_ACCOUNT_REPLACED");
     expect(f.rows.get("draft")!.state).toBe("revoking"); expect(f.events).not.toContain("remove-facet");
+  });
+});
+
+
+declare module "cloudflare:workers" {
+  interface ProvidedEnv {
+    TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
+  }
+}
+
+type ActualOverseer = OverseerDurableObject["impl"];
+async function withActualOverseer(body: (impl: ActualOverseer) => Promise<void>) {
+  const stub = env.TEST_OVERSEER.getByName(`openapi-facet-${crypto.randomUUID()}`);
+  await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+    await body(instance["impl"]);
+  });
+}
+function installActualHostFakes(impl: ActualOverseer) {
+  const f = fixture(impl.ctx.id.toString(), Date.now());
+  impl.ownerId = "owner";
+  // These are injected dependency fakes over the real User protocol types. All reservation,
+  // publication, removal and typed durable storage operations below are the actual Overseer.
+  impl.users = {
+    idFromString: value => value,
+    get: () => ({
+      lookupOpenApiDraft: f.context.lookup,
+      resolveOpenApiDraftForRevocation: f.context.resolveForCleanup,
+      reserveOpenApiDraft: f.context.reserve,
+      beginOpenApiActivation: f.context.beginActivation,
+      activateOpenApiDraft: f.context.activate,
+      assertOpenApiAccountReady: f.context.assertAccountReady,
+    }),
+  } as typeof impl.users;
+  let sessionCalls = 0;
+  const facet = vi.spyOn(impl, "getGatekeeperFacet").mockImplementation(id => {
+    expect(impl.storage.gatekeepers.get(id)).toBeDefined();
+    f.facets.add(id);
+    return { describe: f.describe, startSession: async () => { sessionCalls++; throw new Error("TEST_SESSION_REACHED"); } } as ReturnType<ActualOverseer["getGatekeeperFacet"]>;
+  });
+  const sharing = vi.spyOn(impl, "getSharingManager").mockResolvedValue({
+    hasAnyShares: f.isShared,
+  } as Awaited<ReturnType<ActualOverseer["getSharingManager"]>>);
+  return { f, getSessionCalls: () => sessionCalls, restore: () => { facet.mockRestore(); sharing.mockRestore(); } };
+}
+
+describe("actual Overseer durable publication integration", () => {
+  it("publishes exactly one reserved ID through actual addGatekeeper during overlapping Add", async () => {
+    await withActualOverseer(async impl => {
+      const { f, restore } = installActualHostFakes(impl);
+      try {
+        const pause = barrier(); f.pauseActivation(pause.pause);
+        const first = impl.createBoundOpenApiGatekeeper(0, url); await pause.reached;
+        const second = impl.createBoundOpenApiGatekeeper(0, url);
+        await Promise.resolve(); await Promise.resolve();
+        expect(Array.from(impl.storage.openApiBindings.list())).toHaveLength(1);
+        expect(impl.storage.gatekeepers.get(0)).toMatchObject({ id: 0, initializing: true });
+        pause.release();
+        const results = await Promise.all([first, second]);
+        expect(await Promise.all(results.map(result => result.getId()))).toEqual([0, 0]);
+        expect(impl.storage.nextGatekeeperId.get()).toBe(1);
+        expect(Array.from(impl.storage.gatekeepers.list())).toHaveLength(1);
+        expect(impl.storage.gatekeepers.get(0)).toMatchObject({ resourceUrl: url, ownerOnly: true });
+        expect(impl.storage.gatekeepers.get(0)?.initializing).toBeUndefined();
+        expect(impl.storage.openApiBindings.get("draft")).toMatchObject({ state: "active", published: true });
+        expect(f.observed).toEqual([{ ...identity, workspaceId: impl.ctx.id.toString() }]);
+      } finally { restore(); }
+    });
+  });
+  it.each(["sharing", "description-url", "description-error"] as const)("actual publication blocks %s after describe yields", async failure => {
+    await withActualOverseer(async impl => {
+      const { f, restore } = installActualHostFakes(impl);
+      try {
+        const pause = barrier(); f.pauseDescription(pause.pause);
+        const creation = impl.createBoundOpenApiGatekeeper(0, url);
+        const expected = failure === "sharing" ? "owner-only connection cannot be added" : failure === "description-url" ? "BINDING_RESOURCE_URL_MISMATCH" : "DESCRIPTION_REJECTED";
+        const rejected = expect(creation).rejects.toThrow(expected);
+        await pause.reached;
+        if (failure === "sharing") f.share();
+        else if (failure === "description-url") f.setDescriptionUrl(url.replace("/releases/v1/", "/releases/v2/"));
+        else f.rejectDescription();
+        pause.release(); await rejected;
+        expect(impl.storage.gatekeepers.get(0)).toBeUndefined();
+        expect(impl.storage.openApiBindings.get("draft")?.state).toBe("revoked");
+      } finally { restore(); }
+    });
+  });
+  it("actual synchronous removal fences first and retains the facet record until acknowledgement", async () => {
+    await withActualOverseer(async impl => {
+      const { f, restore } = installActualHostFakes(impl);
+      try {
+        const connection = await impl.createBoundOpenApiGatekeeper(0, url);
+        const pause = barrier(); f.pauseRevoke(pause.pause);
+        const removing = connection.remove(); await pause.reached;
+        expect(impl.storage.openApiBindings.get("draft")?.state).toBe("revoking");
+        expect(impl.storage.gatekeepers.get(0)).toBeDefined();
+        expect(() => impl.assertOpenApiBindingActiveNow(0, 1)).toThrow("BINDING_REVOKED");
+        pause.release(); await removing;
+        expect(impl.storage.gatekeepers.get(0)).toBeUndefined();
+        expect(impl.storage.openApiBindings.get("draft")?.state).toBe("revoked");
+        expect(f.events.filter(event => event === "revoke-ack")).toHaveLength(1);
+      } finally { restore(); }
+    });
+  });
+  it("denies sessions and observation authorization while revocation acknowledgement is paused", async () => {
+    await withActualOverseer(async impl => {
+      const { f, getSessionCalls, restore } = installActualHostFakes(impl);
+      const pause = barrier();
+      try {
+        const connection = await impl.createBoundOpenApiGatekeeper(0, url);
+        f.pauseRevoke(pause.pause);
+        const removing = connection.remove(); await pause.reached;
+        const actionCount = Array.from(impl.storage.actions.list()).length;
+        await expect(connection.openSession()).rejects.toThrow("BINDING_REVOKED");
+        await expect(impl.authorizeObservation(0, { text: "must not be recorded" }, { from: "user" })).rejects.toThrow("BINDING_REVOKED");
+        expect(getSessionCalls()).toBe(0);
+        expect(Array.from(impl.storage.actions.list())).toHaveLength(actionCount);
+        expect(impl.storage.gatekeepers.get(0)).toBeDefined();
+        pause.release(); await removing;
+      } finally { pause.release(); restore(); }
+    });
+  });
+  it("fences an in-flight first Add even when the account recipient has no reserved facet", async () => {
+    await withActualOverseer(async impl => {
+      const { f, restore } = installActualHostFakes(impl);
+      try {
+        const lookupPause = barrier(); const revokePause = barrier();
+        const lookup = f.context.lookup;
+        f.context.lookup = async (...args) => { await lookupPause.pause(); return lookup(...args); };
+        f.pauseRevoke(revokePause.pause);
+        const creation = impl.createBoundOpenApiGatekeeper(0, url);
+        const rejected = expect(creation).rejects.toThrow("BINDING_ACCOUNT_REPLACED");
+        await lookupPause.reached;
+        const revoking = impl.revokeOpenApiAccountBindings("owner", 0, "incarnation", [f.userRows.get("draft")!.reference]);
+        await revokePause.reached;
+        expect(impl.storage.openApiBindings.get("draft")).toBeUndefined();
+        expect(impl.storage.openApiAccountFences.get("incarnation")?.drafts[0].revoked).toBe(false);
+        revokePause.release(); await revoking;
+        lookupPause.release(); await rejected;
+        expect(impl.storage.nextGatekeeperId.get()).toBe(0);
+        expect(impl.storage.gatekeepers.get(0)).toBeUndefined();
+        expect(impl.storage.openApiAccountFences.get("incarnation")?.drafts[0].revoked).toBe(true);
+      } finally { restore(); }
+    });
+  });
+  it("retains pending unreserved cleanup on failure and acknowledges only a successful retry", async () => {
+    await withActualOverseer(async impl => {
+      const { f, restore } = installActualHostFakes(impl);
+      try {
+        f.rejectRevoke(true);
+        await expect(impl.revokeOpenApiAccountBindings("owner", 0, "incarnation", [f.userRows.get("draft")!.reference])).rejects.toThrow("REVOKE_REJECTED");
+        expect(impl.storage.openApiAccountFences.get("incarnation")?.drafts[0].revoked).toBe(false);
+        expect(impl.storage.openApiBindings.get("draft")).toBeUndefined();
+        f.rejectRevoke(false);
+        await impl.revokeOpenApiAccountBindings("owner", 0, "incarnation", []);
+        expect(impl.storage.openApiAccountFences.get("incarnation")?.drafts[0].revoked).toBe(true);
+        await expect(impl.createBoundOpenApiGatekeeper(0, url)).rejects.toThrow("BINDING_ACCOUNT_REPLACED");
+      } finally { restore(); }
+    });
+  });
+  it("rejects account-cleanup tuple substitution without fencing the rightful active binding", async () => {
+    await withActualOverseer(async impl => {
+      const { f, restore } = installActualHostFakes(impl);
+      try {
+        await impl.createBoundOpenApiGatekeeper(0, url);
+        await expect(impl.revokeOpenApiAccountBindings("owner", 1, "other-incarnation", [f.userRows.get("draft")!.reference])).rejects.toThrow("BINDING_IDENTITY_MISMATCH");
+        expect(impl.storage.openApiAccountFences.get("other-incarnation")).toBeUndefined();
+        expect(impl.storage.openApiBindings.get("draft")?.state).toBe("active");
+        expect(f.events).not.toContain("revoke:account-disconnected");
+      } finally { restore(); }
+    });
+  });
+  it("rejects unreserved internal IDs before invoking any facet", async () => {
+    await withActualOverseer(async impl => {
+      const facet = vi.spyOn(impl, "getGatekeeperFacet");
+      try {
+        await expect(impl.addGatekeeper({} as Parameters<ActualOverseer["addGatekeeper"]>[0], undefined, 0, () => {})).rejects.toThrow("BINDING_NOT_RESERVED");
+        expect(facet).not.toHaveBeenCalled(); expect(impl.storage.gatekeepers.get(0)).toBeUndefined();
+      } finally { facet.mockRestore(); }
+    });
+  });
+  it("constructor preserves a reserved initialization while discarding legacy provisional records", async () => {
+    const name = `openapi-restart-${crypto.randomUUID()}`;
+    let stub = env.TEST_OVERSEER.getByName(name);
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = instance["impl"];
+      const f = fixture(); f.seed("reserved");
+      impl.storage.openApiBindings.put(f.rows.get("draft")!);
+      impl.storage.gatekeepers.put({ id: 0, class: {} as Parameters<ActualOverseer["addGatekeeper"]>[0], initializing: true });
+      impl.storage.gatekeepers.put({ id: 1, class: {} as Parameters<ActualOverseer["addGatekeeper"]>[0], initializing: true });
+    });
+    await abortAllDurableObjects();
+    stub = env.TEST_OVERSEER.getByName(name);
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = instance["impl"];
+      expect(impl.storage.gatekeepers.get(0)?.initializing).toBe(true);
+      expect(impl.storage.openApiBindings.get("draft")?.state).toBe("reserved");
+      expect(impl.storage.gatekeepers.get(1)).toBeUndefined();
+    });
   });
 });

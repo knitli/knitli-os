@@ -1,5 +1,7 @@
-import { runInDurableObject } from "cloudflare:test";
+import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import type { UserDurableObject } from "../src/user";
+import type { OverseerDurableObject } from "../src/overseer";
+import type { OpenApiAccountTest, OpenApiAccountTestControl } from "./fork-fixtures/openapi-account-worker";
 import { env, RpcTarget } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type {
@@ -11,12 +13,15 @@ import type { GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import {
   createOpenApiUserBinding,
   type OpenApiAccountEpoch,
+  type OpenApiAccountCleanup,
   type OpenApiUserBindingContext,
 } from "../src/fork/openapi-user-binding";
 import type { BindingRow } from "../src/fork/openapi-binding-ledger";
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
     TEST_USER: DurableObjectNamespace<UserDurableObject>;
+    TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
+    TEST_OPENAPI_ACCOUNT_CONTROL: DurableObjectNamespace<OpenApiAccountTestControl>;
   }
 }
 const url = "https://workshop.test/gatekeeper/openapi/apis/api/releases/v1.0/grants/grant";
@@ -27,6 +32,11 @@ function fixture(v1 = true) {
   const rows = new Map<string, BindingRow>();
   const epochs = new Map<number, OpenApiAccountEpoch>();
   const issuers = new Map<string, string>();
+  const cleanup = new Map<string, OpenApiAccountCleanup>();
+  const recipients: { incarnation: string; workspaceId: string; drafts: DraftReference[] }[] = [];
+  const cleanupResolves: DraftReference[] = [];
+  let recipientPause: (workspaceId: string) => Promise<void> = noPause;
+  let scheduled = 0;
   const authorities: HostDraftAuthority[] = [];
   const calls: {
     legacy: unknown[][];
@@ -58,6 +68,10 @@ function fixture(v1 = true) {
       calls.bound.push([p, authority]);
       authorities.push(authority);
       return frame;
+    }
+    async resolveBoundDraftForRevocation(ref: DraftReference) {
+      cleanupResolves.push(ref);
+      return finalizer;
     }
     async resolveBoundDraft(ref: DraftReference) {
       calls.resolve.push(ref);
@@ -96,6 +110,17 @@ function fixture(v1 = true) {
     putDraftIssuer: (id, issuer) => {
       issuers.set(id, issuer);
     },
+    cleanup: {
+      get: id => cleanup.get(id),
+      put: record => { cleanup.set(record.incarnation, record); },
+      delete: id => { cleanup.delete(id); },
+      list: () => [...cleanup.values()],
+    },
+    scheduleCleanup: () => { scheduled++; },
+    revokeRecipient: async (record, workspaceId, drafts) => {
+      recipients.push({ incarnation: record.incarnation, workspaceId, drafts });
+      await recipientPause(workspaceId);
+    },
     getEpoch: (id) => epochs.get(id),
     putEpoch: (epoch) => {
       epochs.set(epoch.id, epoch);
@@ -123,6 +148,11 @@ function fixture(v1 = true) {
   });
   return {
     binding,
+    cleanup,
+    recipients,
+    cleanupResolves,
+    scheduled: () => scheduled,
+    pauseRecipient: (pause: (workspaceId: string) => Promise<void>) => { recipientPause = pause; },
     restart,
     context,
     rows,
@@ -500,4 +530,208 @@ describe("actual User DO lifecycle hooks", () => {
       });
     },
   );
+});
+
+
+describe("account cleanup recipients and historical authority", () => {
+  it("persists every registered workspace before provider await and waits for recipient fences", async () => {
+    const f = fixture();
+    await f.register();
+    await f.binding.start(0, pattern, "unreserved-workspace");
+    const second = {...reference, draftId: "second", grantId: "second-grant"};
+    await f.authorities.at(-1)!.registerDraft(second);
+    const incarnation = f.identity().accountIncarnation;
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    f.pauseRecipient(async workspace => {
+      if (workspace === "unreserved-workspace") { entered(); await barrier; }
+    });
+    let committed = false;
+    const mutation = f.binding.mutateAccount(0, async () => {
+      expect(f.cleanup.get(incarnation)?.recipients).toHaveLength(2);
+      expect(f.epochs.get(0)?.live).toBe(false);
+      expect(f.rows.get("second")?.state).toBe("revoking");
+      expect(f.scheduled()).toBeGreaterThan(0);
+    }, () => { committed = true; });
+    await Promise.race([started, mutation]);
+    expect(committed).toBe(false);
+    expect(f.recipients).toEqual(expect.arrayContaining([
+      {incarnation, workspaceId: "unreserved-workspace", drafts: [second]},
+    ]));
+    release();
+    await mutation;
+    expect(committed).toBe(true);
+    expect(f.cleanup.size).toBe(0);
+    expect(f.rows.get("second")?.state).toBe("revoked");
+  });
+
+  it("keeps an unreachable recipient durable across adapter restart and preserves the successor", async () => {
+    const f = fixture();
+    await f.register();
+    const old = structuredClone(f.rows.get("draft")!);
+    f.pauseRecipient(async () => { throw new Error("recipient unavailable"); });
+    let committed = false;
+    await expect(f.binding.mutateAccount(0, noPause, () => { committed = true; }))
+      .rejects.toThrow("recipient unavailable");
+    expect(committed).toBe(false);
+    expect(f.cleanup.get(old.accountIncarnation)?.recipients).toHaveLength(1);
+    f.binding.replace(0);
+    const successor = {...f.epochs.get(0)!};
+    await expect(f.restart().resolveForRevocation(old)).resolves.toHaveProperty("finalizer");
+    expect(f.cleanupResolves).toEqual([reference]);
+    expect(f.calls.resolve).toEqual([]);
+    await expect(f.restart().lookup(0, url, "workspace")).rejects.toThrow("DRAFT_NOT_FOUND");
+    f.pauseRecipient(noPause);
+    await f.restart().drainCleanup();
+    expect(f.cleanup.size).toBe(0);
+    expect(f.epochs.get(0)).toEqual(successor);
+    expect(f.rows.get("draft")?.state).toBe("revoked");
+  });
+
+  it.each(["ownerId", "providerAccountId", "accountIncarnation", "intendedWorkspaceId", "grantId", "selectionDigest"])(
+    "rejects substituted cleanup %s before resolving any provider capability", async field => {
+      const f = fixture();
+      await f.register();
+      const row = structuredClone(f.rows.get("draft")!);
+      f.binding.fence(0);
+      const changed = field === "grantId" || field === "selectionDigest"
+        ? {...row, reference: {...row.reference, [field]: "forged"}}
+        : {...row, [field]: field === "providerAccountId" ? 99 : "forged"};
+      await expect(f.restart().resolveForRevocation(changed)).rejects.toThrow("BINDING_IDENTITY_MISMATCH");
+      expect(f.cleanupResolves).toEqual([]);
+    },
+  );
+});
+
+describe("actual User legacy resolver guard", () => {
+  it.each([true, false])("v1=%s routes only through the permitted resolver", async v1 => {
+    const stub = env.TEST_USER.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (user: UserDurableObject) => {
+      const accounts = user["storage"].connectedAccounts;
+      type AccountRecord = NonNullable<ReturnType<typeof accounts.get>>;
+      const legacy = vi.fn(async () => { throw new Error("legacy resolver reached"); });
+      const account = new (class extends RpcTarget { getGatekeeperClassFor = legacy; })();
+      const get = vi.spyOn(accounts, "get").mockReturnValue({
+        id: 0, vendorId: "openapi", account: account as unknown as AccountRecord["account"],
+        description: {displayName: "API", avatar: {url: "https://workshop.test/avatar"},
+          ...(v1 ? {hostBindingProtocol: "openapi-v1" as const} : {})},
+      });
+      try {
+        await expect(user.getGatekeeperClassFor(0, url)).rejects.toThrow(
+          v1 ? "WORKSPACE_CONTEXT_REQUIRED" : "legacy resolver reached");
+        expect(legacy).toHaveBeenCalledTimes(v1 ? 0 : 1);
+        if (!v1) expect(legacy).toHaveBeenCalledWith(url);
+      } finally { get.mockRestore(); }
+    });
+  });
+});
+
+
+async function durableCleanupFixture() {
+  const name = crypto.randomUUID();
+  const user = env.TEST_USER.getByName(name);
+  const workspace = env.TEST_OVERSEER.getByName(name);
+  const control = env.TEST_OPENAPI_ACCOUNT_CONTROL.getByName(name);
+  await runInDurableObject(workspace, instance => {
+    instance["impl"].storage.ownerId.put(user.id.toString());
+    instance["impl"].ownerId = user.id.toString();
+  });
+  await runInDurableObject(user, async instance => {
+    const exports = instance["ctx"].exports as Cloudflare.Exports & {
+      OpenApiAccountTest: LoopbackForExport<typeof OpenApiAccountTest>;
+    };
+    const account = exports.OpenApiAccountTest({props: {controlId: control.id.toString(), reference}}) as unknown as Fetcher<GatekeeperUser>;
+    const description = await account.describe();
+    instance["storage"].connectedAccounts.put({id: 0, account, description, vendorId: "openapi"});
+    instance["storage"].nextAccountId.put(1);
+    await instance.startBoundResourceConfigurator(0, pattern, workspace.id.toString());
+  });
+  const inspect = () => runInDurableObject(user, instance => ({
+    pending: Array.from(instance["storage"].openApiAccountCleanup.list()).map(item => ({
+      incarnation: item.incarnation, recipients: item.recipients,
+    })),
+    epoch: instance["storage"].openApiAccountEpochs.get(0),
+    connected: Boolean(instance["storage"].connectedAccounts.get(0)),
+    row: instance["storage"].openApiDrafts.get(reference.draftId),
+  }));
+  return {user, workspace, control, inspect};
+}
+
+describe("actual User durable account cleanup", () => {
+  it("captures unreserved draft recipients before provider await and waits for connector acknowledgement", async () => {
+    const f = await durableCleanupFixture();
+    await f.control.pause("provider");
+    await f.control.pause("cleanup");
+    let completed = false;
+    const disconnect = f.user.disconnectAccount(0).then(() => { completed = true; });
+    try {
+      await f.control.waitEntered("provider");
+      const fenced = await f.inspect();
+      expect(fenced.epoch?.live).toBe(false);
+      expect(fenced.row?.identity).toBeUndefined();
+      expect(fenced.pending[0]?.recipients).toEqual([
+        {workspaceId: f.workspace.id.toString(), drafts: [reference]},
+      ]);
+      expect(completed).toBe(false);
+      await f.control.release("provider");
+      await f.control.waitEntered("cleanup");
+      expect(completed).toBe(false);
+      expect((await f.inspect()).pending).toHaveLength(1);
+      await f.control.release("cleanup");
+      await disconnect;
+      expect(completed).toBe(true);
+      expect(await f.inspect()).toMatchObject({pending: [], connected: false, row: {state: "revoked"}});
+      expect((await f.control.events()).resolved).toEqual([reference]);
+    } finally {
+      await f.control.release("provider");
+      await f.control.release("cleanup");
+    }
+  });
+
+  it("retries failed cleanup after real User eviction using retained account capability", async () => {
+    const f = await durableCleanupFixture();
+    await runInDurableObject(f.user, async instance => {
+      const recipient = vi.spyOn(instance["ctx"].exports.OverseerDurableObject, "get")
+        .mockImplementation(() => { throw new Error("test recipient unavailable"); });
+      try {
+        await expect(instance.disconnectAccount(0)).rejects.toThrow("test recipient unavailable");
+        expect(recipient).toHaveBeenCalledOnce();
+      } finally { recipient.mockRestore(); }
+    });
+    const failed = await f.inspect();
+    expect(failed.pending).toHaveLength(1);
+    expect(failed.epoch?.live).toBe(false);
+    expect(failed.row?.state).toBe("revoking");
+    await evictDurableObject(f.user);
+    expect((await f.inspect()).pending).toEqual(failed.pending);
+    expect(await runDurableObjectAlarm(f.user)).toBe(true);
+    expect(await f.inspect()).toMatchObject({pending: [], epoch: failed.epoch, row: {state: "revoked"}});
+    expect((await f.control.events()).resolved).toEqual([reference]);
+  });
+
+  it("late cleanup from a superseded disconnect never deletes the successor account", async () => {
+    const f = await durableCleanupFixture();
+    await runInDurableObject(f.user, async instance => {
+      const controls = (instance["ctx"].exports as Cloudflare.Exports & {
+        OpenApiAccountTestControl: DurableObjectNamespace<OpenApiAccountTestControl>;
+      }).OpenApiAccountTestControl;
+      const control = controls.get(controls.idFromString(f.control.id.toString()));
+      await control.pause("provider");
+      const first = instance.disconnectAccount(0);
+      const rejected = expect(first).rejects.toThrow("BINDING_ACCOUNT_REPLACED");
+      try {
+        await control.waitEntered("provider");
+        await instance.putConnectedAccount(instance["storage"].connectedAccounts.get(0)!);
+        const successor = instance["storage"].openApiAccountEpochs.get(0)!;
+        expect(successor.live).toBe(true);
+        await control.release("provider");
+        await rejected;
+        expect(instance["storage"].connectedAccounts.get(0)).toBeDefined();
+        expect(instance["storage"].openApiAccountEpochs.get(0)).toEqual(successor);
+        expect(Array.from(instance["storage"].openApiAccountCleanup.list())).toEqual([]);
+      } finally { await control.release("provider"); }
+    });
+  });
 });

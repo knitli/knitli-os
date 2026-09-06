@@ -1,3 +1,5 @@
+import type { DraftReference } from "@gadgets/workshop-shared/fork/openapi-host-binding";
+import { createOpenApiFacetBinding, type OpenApiFacetRow } from "./fork/openapi-facet-binding";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
@@ -973,11 +975,19 @@ type CodeUpdate = {
  * migrateCodeLogToGit() over synthetic legacy workspaces built on mock storage with the real
  * schema.
  */
+type OpenApiAccountFence = {
+  accountIncarnation: string;
+  ownerId: string;
+  providerAccountId: number;
+  drafts: { reference: DraftReference; revoked: boolean }[];
+};
+
 export function makeOverseerStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
     singletons: {
       // Initialized on first startup.
       ownerId: <string | undefined>undefined,
+      openApiWorkspaceClosing: false,
 
       // Version of this DO's storage schema, gating lazy migrations. Used to trigger migrations
       // at construction time.
@@ -1099,6 +1109,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         }
       }),
 
+      openApiBindings: collection<OpenApiFacetRow>()({ primaryKey: row => row.reference.draftId }),
+      openApiAccountFences: collection<OpenApiAccountFence>()({ primaryKey: "accountIncarnation" }),
       gatekeepers: collection<GatekeeperRecord>()({
         primaryKey: "id",
 
@@ -1416,6 +1428,8 @@ export function sanitizeMessageFormatRefs(
 }
 
 class OverseerImpl implements AgentHooks {
+  #openApiBinding?: ReturnType<typeof createOpenApiFacetBinding<GatekeeperClient<any>>>;
+
   public storage: OverseerStorage;
   readonly logger: ReturnType<typeof createWorkshopLogger>;
 
@@ -1745,10 +1759,18 @@ class OverseerImpl implements AgentHooks {
     // git-storage migration below is the asynchronous one, shielded by blockConcurrencyWhile.
     this.#migrateStorage();
     discardInterruptedGatekeeperInitializations(
-      this.storage,
+      { gatekeepers: {
+        list: () => Array.from(this.storage.gatekeepers.list())
+          .filter(record => !this.findOpenApiBinding(record.id)),
+        delete: id => this.storage.gatekeepers.delete(id),
+      } },
       this.ctx.facets,
     );
     this.defaultGadgetId = this.storage.defaultGadgetId.get();
+    if (this.ownerId && (Array.from(this.storage.openApiBindings.list()).some(row => row.state !== "revoked") ||
+        Array.from(this.storage.openApiAccountFences.list()).some(row => row.drafts.some(draft => !draft.revoked)))) {
+      this.ctx.waitUntil(this.resumeOpenApiBindings());
+    }
 
     this.#autoApprovalDrainer = new AutoApprovalDrainer(
         this.storage,
@@ -4316,6 +4338,7 @@ class OverseerImpl implements AgentHooks {
   async applyPendingAction(record: ActionRecord & {type: "action"},
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
     await this.assertGatekeeperObserverReadiness(record.gatekeeperId);
+    this.assertOpenApiBindingActiveNow(record.gatekeeperId);
     let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
     await gatekeeper.applyAction(record.action);
     record.state = "approved";
@@ -4368,17 +4391,163 @@ class OverseerImpl implements AgentHooks {
     return this.#preparingChatMessages.get(chatId);
   }
 
-  async addGatekeeper(cls: GatekeeperClass, creationSpec?: GatekeeperCreationSpec)
-      : Promise<GatekeeperClient<any>> {
-    let id = this.allocateWorkpieceId();
-    let gatekeeperRecord: GatekeeperRecord = {
-      id,
-      class: cls,
-      creationSpec,
-      initializing: true,
-    };
-    this.storage.gatekeepers.put(gatekeeperRecord);
+  findOpenApiBinding(gatekeeperId: number): OpenApiFacetRow | undefined {
+    return Array.from(this.storage.openApiBindings.list())
+      .find(row => row.identity?.gatekeeperId === gatekeeperId);
+  }
 
+  #getOpenApiBinding() {
+    if (this.#openApiBinding) return this.#openApiBinding;
+    if (!this.ownerId) throw new Error("Workspace is not initialized.");
+    const ownerId = this.ownerId;
+    const owner = () => this.users.get(this.users.idFromString(ownerId));
+    this.#openApiBinding = createOpenApiFacetBinding<GatekeeperClient<any>>({
+      ownerId,
+      workspaceId: this.ctx.id.toString(),
+      store: {
+        get: id => this.storage.openApiBindings.get(id),
+        put: (_id, row) => { this.storage.openApiBindings.put(row); },
+        list: () => Array.from(this.storage.openApiBindings.list()),
+      },
+      now: Date.now,
+      assertHostReady: row => {
+        if (this.ownerId !== ownerId) throw new Error("BINDING_IDENTITY_MISMATCH");
+        if (this.storage.openApiWorkspaceClosing.get()) throw new Error("BINDING_WORKSPACE_CLOSING");
+        if (this.storage.openApiAccountFences.get(row.accountIncarnation)) throw new Error("BINDING_ACCOUNT_REPLACED");
+      },
+      allocateWorkpieceId: () => this.allocateWorkpieceId(),
+      lookup: (accountId, url, workspaceId) => owner().lookupOpenApiDraft(accountId, url, workspaceId),
+      resolveForCleanup: row => owner().resolveOpenApiDraftForRevocation(row),
+      reserve: async identity => { await owner().reserveOpenApiDraft(identity); },
+      beginActivation: identity => owner().beginOpenApiActivation(identity),
+      activate: (identity, digest) => owner().activateOpenApiDraft(identity, digest),
+      assertAccountReady: identity => owner().assertOpenApiAccountReady(identity),
+      instantiate: (row, resolved) => {
+        const id = row.identity!.gatekeeperId;
+        if (!this.storage.gatekeepers.get(id)) {
+          this.storage.gatekeepers.put({ id, class: resolved.class, initializing: true,
+            creationSpec: { type: "gatekeeper", vendorId: resolved.vendorId,
+              resourceUrl: row.resourceUrl, typeUrlPattern: resolved.typeUrlPattern } });
+        }
+        this.getGatekeeperFacet(id);
+      },
+      publish: (row, resolved, guard) => this.addGatekeeper(resolved.class, {
+        type: "gatekeeper", vendorId: resolved.vendorId, resourceUrl: row.resourceUrl,
+        typeUrlPattern: resolved.typeUrlPattern,
+      }, row.identity!.gatekeeperId, guard),
+      removeFacet: row => this.deleteGatekeeperFacet(row.identity!.gatekeeperId),
+    });
+    return this.#openApiBinding;
+  }
+
+  createBoundOpenApiGatekeeper(accountId: number, resourceUrl: string): Promise<GatekeeperClient<any>> {
+    return this.#getOpenApiBinding().create(accountId, resourceUrl);
+  }
+
+  resumeOpenApiBinding(draftId: string): Promise<void> {
+    return this.#getOpenApiBinding().resume(draftId);
+  }
+
+  async resumeOpenApiBindings(): Promise<void> {
+    for (const fence of Array.from(this.storage.openApiAccountFences.list())) {
+      if (fence.drafts.every(draft => draft.revoked)) continue;
+      try { await this.revokeOpenApiAccountBindings(fence.ownerId, fence.providerAccountId, fence.accountIncarnation, []); }
+      catch { this.logger.warn("OpenAPI account cleanup remains pending", { event: "openapi.account.cleanup.pending" }); }
+    }
+    for (const row of Array.from(this.storage.openApiBindings.list())) {
+      if (row.state === "revoked") continue;
+      try { await this.resumeOpenApiBinding(row.reference.draftId); }
+      catch {
+        this.logger.warn("OpenAPI binding recovery remains pending", {
+          event: "openapi.binding.recovery.pending",
+        });
+      }
+    }
+  }
+
+  assertOpenApiBindingActiveNow(gatekeeperId: number, generation?: number): void {
+    const row = this.findOpenApiBinding(gatekeeperId);
+    if (!row) return;
+    this.#getOpenApiBinding().assertActiveNow(gatekeeperId, generation ?? row.identity!.generation);
+  }
+
+  async revokeOpenApiAccountBindings(ownerId: string, accountId: number,
+      incarnation: string, drafts: DraftReference[]): Promise<void> {
+    if (ownerId !== this.ownerId) throw new Error("BINDING_IDENTITY_MISMATCH");
+    this.ctx.storage.transactionSync(() => {
+      const prior = this.storage.openApiAccountFences.get(incarnation);
+      if (prior && (prior.ownerId !== ownerId || prior.providerAccountId !== accountId)) {
+        throw new Error("BINDING_IDENTITY_MISMATCH");
+      }
+      const fence: OpenApiAccountFence = prior ?? {
+        ownerId, providerAccountId: accountId, accountIncarnation: incarnation, drafts: [],
+      };
+      const localRows = Array.from(this.storage.openApiBindings.list())
+        .filter(row => row.ownerId === ownerId && row.providerAccountId === accountId && row.accountIncarnation === incarnation);
+      for (const reference of [...drafts, ...localRows.map(row => row.reference)]) {
+        const local = this.storage.openApiBindings.get(reference.draftId);
+        if (local && (local.ownerId !== ownerId || local.providerAccountId !== accountId || local.accountIncarnation !== incarnation ||
+            local.reference.grantId !== reference.grantId || local.reference.selectionDigest !== reference.selectionDigest)) {
+          throw new Error("BINDING_IDENTITY_MISMATCH");
+        }
+        const existing = fence.drafts.find(draft => draft.reference.draftId === reference.draftId);
+        if (existing) {
+          if (existing.reference.grantId !== reference.grantId || existing.reference.selectionDigest !== reference.selectionDigest) {
+            throw new Error("BINDING_IDENTITY_MISMATCH");
+          }
+        } else { fence.drafts.push({ reference: structuredClone(reference), revoked: false }); }
+      }
+      // The account fence exists even if Add has not reached local reservation yet.
+      this.storage.openApiAccountFences.put(fence);
+      for (const row of localRows) this.#getOpenApiBinding().fence(row.reference.draftId, "account-disconnected");
+    });
+    const pending = this.storage.openApiAccountFences.get(incarnation)!;
+    for (const draft of pending.drafts) {
+      if (draft.revoked) continue;
+      const row = this.storage.openApiBindings.get(draft.reference.draftId);
+      if (row) {
+        await this.#getOpenApiBinding().cleanup(row.reference.draftId);
+      } else {
+        // This is a private cleanup lookup, not a fabricated reservation or facet identity.
+        const owner = this.users.get(this.users.idFromString(ownerId));
+        const resolved = await owner.resolveOpenApiDraftForRevocation({
+          reference: draft.reference, ownerId, providerAccountId: accountId,
+          accountIncarnation: incarnation, intendedWorkspaceId: this.ctx.id.toString(),
+          expiresAt: 0, state: "revoking", keyEpoch: 0,
+        });
+        using finalizer = resolved.finalizer;
+        await finalizer.revoke("account-disconnected");
+      }
+      const current = this.storage.openApiAccountFences.get(incarnation)!;
+      const completed = current.drafts.find(entry => entry.reference.draftId === draft.reference.draftId)!;
+      completed.revoked = true;
+      this.storage.openApiAccountFences.put(current);
+    }
+  }
+
+  async finishOpenApiRemoval(gatekeeperId: number): Promise<void> {
+    const row = this.findOpenApiBinding(gatekeeperId);
+    if (row) await this.#getOpenApiBinding().cleanup(row.reference.draftId);
+  }
+
+  async addGatekeeper(cls: GatekeeperClass, creationSpec?: GatekeeperCreationSpec,
+      reservedId?: number, beforePublication?: (descriptionUrl: string) => void)
+      : Promise<GatekeeperClient<any>> {
+    let id = reservedId ?? this.allocateWorkpieceId();
+    let binding = reservedId === undefined ? undefined : this.findOpenApiBinding(id);
+    if (reservedId !== undefined && (!binding?.identity || !beforePublication)) {
+      throw new Error("BINDING_NOT_RESERVED");
+    }
+    if (binding) this.assertOpenApiBindingActiveNow(id, binding.identity!.generation);
+    let gatekeeperRecord: GatekeeperRecord;
+    if (reservedId !== undefined) {
+      const existing = this.storage.gatekeepers.get(id);
+      if (!existing) throw new Error("BINDING_NOT_RESERVED");
+      gatekeeperRecord = existing;
+    } else {
+      gatekeeperRecord = { id, class: cls, creationSpec, initializing: true };
+      this.storage.gatekeepers.put(gatekeeperRecord);
+    }
     let facet = this.getGatekeeperFacet(id);
     try {
       let description = await facet.describe();
@@ -4394,13 +4563,14 @@ class OverseerImpl implements AgentHooks {
         }
         gatekeeperRecord.ownerOnly = true;
       }
+      beforePublication?.(description.url);
       delete gatekeeperRecord.initializing;
       this.storage.gatekeepers.put(gatekeeperRecord);
     } catch (error) {
-      this.removeGatekeeper(id);
+      if (binding) this.#getOpenApiBinding().fence(binding.reference.draftId, "creation-failed");
+      else this.removeGatekeeper(id);
       throw error;
     }
-
     return new GatekeeperClientImpl<any>(this, id, facet);
   }
 
@@ -4408,6 +4578,20 @@ class OverseerImpl implements AgentHooks {
   // no gadget's env retains a dangling entry. (This is distinct from merely unbinding it from one
   // gadget -- GadgetClient.unbind() -- which leaves the gatekeeper alive, possibly orphaned.)
   removeGatekeeper(id: number) {
+    const binding = this.findOpenApiBinding(id);
+    if (binding) {
+      this.#getOpenApiBinding().fence(binding.reference.draftId, "removed");
+      this.ctx.waitUntil(this.finishOpenApiRemoval(id).catch(() => {
+        this.logger.warn("OpenAPI binding removal remains pending", {
+          event: "openapi.binding.removal.pending",
+        });
+      }));
+      return;
+    }
+    this.deleteGatekeeperFacet(id);
+  }
+
+  private deleteGatekeeperFacet(id: number) {
     for (let gadget of Array.from(this.storage.gadgets.list())) {
       let names = Object.entries(gadget.bindings)
           .filter(([, edge]) => edge.target === id)
@@ -4509,6 +4693,7 @@ class OverseerImpl implements AgentHooks {
     }
 
     await this.assertGatekeeperObserverReadiness(gatekeeperId);
+    this.assertOpenApiBindingActiveNow(gatekeeperId);
 
     // Final synchronous confidentiality check after all exclusion/readiness awaits. The policy bit
     // and audit record are then published without another await, so sharing cannot enter between
@@ -4727,6 +4912,7 @@ class OverseerImpl implements AgentHooks {
     }
 
     await this.assertGatekeeperObserverReadiness(gatekeeperId);
+    this.assertOpenApiBindingActiveNow(gatekeeperId);
 
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
@@ -4770,6 +4956,7 @@ class OverseerImpl implements AgentHooks {
         callback: NativeRpcStub<Hook>, description: HookDescription, caller: GatekeeperCaller)
         : Promise<void> {
     await this.assertGatekeeperObserverReadiness(gatekeeperId);
+    this.assertOpenApiBindingActiveNow(gatekeeperId);
     let hookId = this.storage.nextHookId.get();
     this.storage.nextHookId.put(hookId + 1);
 
@@ -7841,6 +8028,7 @@ class OverseerImpl implements AgentHooks {
   //   - "use" collaborators (UI only): only account-requiring gatekeepers bound by some gadget,
   //     since that is all the UI can invoke.
   #readyGatekeeperRecord(gatekeeperId: number): GatekeeperRecord {
+    this.assertOpenApiBindingActiveNow(gatekeeperId);
     let record = this.storage.gatekeepers.get(gatekeeperId);
     if (!record) throw new Error("No such gatekeeper.");
     if (record.initializing) throw new Error("This connection is still initializing.");
@@ -8394,6 +8582,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * - If the DO dies *while* the alarm is running, the system will retry the alarm, thus resuming
    *   the agents yet again.
    */
+  /** Private User-to-Overseer account cleanup; acknowledgement follows every connector barrier. */
+  async revokeOpenApiAccountBindings(ownerId: string, accountId: number,
+      incarnation: string, drafts: DraftReference[]): Promise<void> {
+    await this.impl.revokeOpenApiAccountBindings(ownerId, accountId, incarnation, drafts);
+  }
+
   async alarm() {
     await this.impl.waitForAllAgentsToComplete();
     await this.impl.deliverReadyExternalMessageResponses();
@@ -8853,6 +9047,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     await this.impl.assertGatekeeperObserverReadiness(record.gatekeeperId);
+    this.impl.assertOpenApiBindingActiveNow(record.gatekeeperId);
     record = this.impl.storage.boundHooks.get(hookId);
     if (!record?.enabled) throw new Error("Hook has been deleted or disabled.");
 
@@ -9631,6 +9826,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
+    const account = await this.#clientUser.describeConnectedAccount(accountId);
+    if (account?.hostBindingProtocol === "openapi-v1") {
+      if (this.clientUserId !== this.impl.ownerId) throw new Error("BINDING_OWNER_REQUIRED");
+      const result = await this.impl.createBoundOpenApiGatekeeper(accountId, resourceUrl);
+      const spec = this.impl.storage.gatekeepers.get(await result.getId())?.creationSpec;
+      await this.recordConnectionCreated(result, "gatekeeper", spec?.type === "gatekeeper" ? spec.vendorId : undefined);
+      return result;
+    }
     let {class: cls, vendorId, typeUrlPattern} =
         await this.#clientUser.getGatekeeperClassFor(accountId, resourceUrl);
     let creationSpec: GatekeeperCreationSpec = {
@@ -11446,6 +11649,7 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   async remove(): Promise<void> {
     let record = this.impl.storage.gatekeepers.get(this.id);
     this.impl.removeGatekeeper(this.id);
+    await this.impl.finishOpenApiRemoval(this.id);
     this.impl.recordGadgetAnalytics({
       event_name: "connection_removed",
       gatekeeper_id: this.id,
@@ -11459,6 +11663,7 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   }
 
   #getRecord(): GatekeeperRecord {
+    this.impl.assertOpenApiBindingActiveNow(this.id);
     let record = this.impl.storage.gatekeepers.get(this.id);
     if (!record) throw new Error("No such gatekeeper.");
     if (record.initializing) {
@@ -11486,12 +11691,14 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
 
   async openSession(): Promise<RpcStub<Session>> {
     await this.impl.assertGatekeeperObserverReadiness(this.id);
+    this.impl.assertOpenApiBindingActiveNow(this.id);
     // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
     let session: RpcStub<Session> = await this.facet.startSession(
         new ApprovalQueueImpl(this.impl, this.id, this.caller));
     try {
       // The remote start may yield. Recheck immediately before handing the capability to caller.
       await this.impl.assertGatekeeperObserverReadiness(this.id);
+    this.impl.assertOpenApiBindingActiveNow(this.id);
     } catch (error) {
       // @ts-expect-error Cap'n Web's cyclic generic expands beyond TypeScript's union limit.
       (session as { [Symbol.dispose](): void })[Symbol.dispose]();

@@ -1,4 +1,4 @@
-import { createOpenApiUserBinding, type OpenApiAccountEpoch } from "./fork/openapi-user-binding";
+import { createOpenApiUserBinding, type OpenApiAccountEpoch, type OpenApiAccountCleanup } from "./fork/openapi-user-binding";
 import type { BindingRow } from "./fork/openapi-binding-ledger";
 import type { BoundIdentity } from "@gadgets/workshop-shared/fork/openapi-host-binding";
 import { RpcStub } from "capnweb";
@@ -169,6 +169,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
       openApiDraftIssuers: collection<{ draftId: string; authorityId: string }>()({ primaryKey: "draftId" }),
       openApiDrafts: collection<BindingRow>()({ primaryKey: row => row.reference.draftId }),
       openApiAccountEpochs: collection<OpenApiAccountEpoch>()({ primaryKey: "id" }),
+      openApiAccountCleanup: collection<OpenApiAccountCleanup>()({ primaryKey: "incarnation" }),
       connectedAccounts: collection<ConnectedAccountRecord>()({
         primaryKey: "id"
       }),
@@ -305,6 +306,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.adminSettings = this.ctx.exports.AdminSettings;
 
     this.vendors = buildGatekeeperVendorMap(env);
+    if (Array.from(this.storage.openApiAccountCleanup.list()).length) this.#scheduleOpenApiCleanup();
   }
 
   async authenticate(token: string): Promise<void> {
@@ -1546,6 +1548,19 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return record.account.reconnect();
   }
 
+  #scheduleOpenApiCleanup() {
+    this.ctx.waitUntil(this.ctx.storage.setAlarm(Date.now() + 30_000));
+  }
+
+  async alarm() {
+    try {
+      await this.#openApiBinding().drainCleanup();
+    } catch (error) {
+      logger.warn("OpenAPI account cleanup remains pending", { event: "openapi.account.cleanup.pending", error });
+      this.#scheduleOpenApiCleanup();
+    }
+  }
+
   #openApiBinding() {
     return createOpenApiUserBinding({
       transaction: operation => this.ctx.storage.transactionSync(operation),
@@ -1558,6 +1573,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       getAccount: id => this.storage.connectedAccounts.get(id),
       getDraftIssuer: id => this.storage.openApiDraftIssuers.get(id)?.authorityId,
       putDraftIssuer: (draftId, authorityId) => { this.storage.openApiDraftIssuers.put({ draftId, authorityId }); },
+      cleanup: {
+        get: incarnation => this.storage.openApiAccountCleanup.get(incarnation),
+        put: record => { this.storage.openApiAccountCleanup.put(record); },
+        delete: incarnation => { this.storage.openApiAccountCleanup.delete(incarnation); },
+        list: () => Array.from(this.storage.openApiAccountCleanup.list()),
+      },
+      scheduleCleanup: () => this.#scheduleOpenApiCleanup(),
+      revokeRecipient: (record, workspaceId, drafts) => {
+        const overseers = this.ctx.exports.OverseerDurableObject;
+        return overseers.get(overseers.idFromString(workspaceId))
+          .revokeOpenApiAccountBindings(record.ownerId, record.providerAccountId, record.incarnation, drafts);
+      },
       getEpoch: id => this.storage.openApiAccountEpochs.get(id),
       putEpoch: epoch => { this.storage.openApiAccountEpochs.put(epoch); },
       checkPolicy: async (vendorId, resource) => {
@@ -1583,6 +1610,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** Resolve a registered draft privately, with policy and account fences after awaits. */
   async lookupOpenApiDraft(accountId: number, resourceUrl: string, intendedWorkspaceId: string) {
     return this.#openApiBinding().lookup(accountId, resourceUrl, intendedWorkspaceId);
+  }
+  async resolveOpenApiDraftForRevocation(row: BindingRow) {
+    return this.#openApiBinding().resolveForRevocation(row);
   }
   async reserveOpenApiDraft(identity: BoundIdentity) { return this.#openApiBinding().reserve(identity); }
   async beginOpenApiActivation(identity: BoundIdentity) { this.#openApiBinding().beginActivation(identity); }
@@ -1686,6 +1716,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       this.storage.connectedAccounts.put(record);
       this.#openApiBinding().replace(record.id);
     });
+    await this.#openApiBinding().drainCleanup(record.id);
   }
 
   async markCredentialsExpired(accountId: number) {
@@ -1718,6 +1749,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
                   typeUrlPattern: string}> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
+    if (account.description.hostBindingProtocol === "openapi-v1") {
+      throw new Error("WORKSPACE_CONTEXT_REQUIRED");
+    }
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
 
     // Block whole gatekeepers + disabled resources at this single core-side chokepoint where a

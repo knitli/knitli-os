@@ -14,6 +14,11 @@ export type OpenApiResolvedDraft = Awaited<ReturnType<OpenApiBoundAccount["resol
   vendorId: string;
   typeUrlPattern: string;
 };
+/** Revocation-only resolver result: cleanup never reacquires activation authority. */
+export type OpenApiCleanupDraft = {
+  finalizer: Awaited<ReturnType<OpenApiBoundAccount["resolveBoundDraftForRevocation"]>>;
+};
+
 /** Durable host hooks. Publication must run its final guard in the same synchronous turn as its write. */
 export interface OpenApiFacetBindingContext<Result> {
   ownerId: string;
@@ -24,10 +29,12 @@ export interface OpenApiFacetBindingContext<Result> {
     list(): OpenApiFacetRow[];
   };
   now(): number;
+  /** Synchronous owner/workspace/account fences, repeated after every awaited boundary. */
+  assertHostReady?(row: BindingRow): void;
   allocateWorkpieceId(): number;
   lookup(accountId: number, resourceUrl: string, workspaceId: string): Promise<OpenApiResolvedDraft>;
   /** Historical private resolver for fenced accounts; unavailable until Task 4 integration. */
-  resolveForCleanup?(row: OpenApiFacetRow): Promise<Pick<OpenApiResolvedDraft, "finalizer">>;
+  resolveForCleanup?(row: OpenApiFacetRow): Promise<OpenApiCleanupDraft>;
   reserve(identity: BoundIdentity): Promise<void>;
   beginActivation(identity: BoundIdentity): Promise<void>;
   activate(identity: BoundIdentity, selectionDigest: string): Promise<void>;
@@ -56,6 +63,7 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
     },
   }, context.now);
   const pending = new Map<string, Promise<Result>>();
+  const pendingCleanup = new Map<string, Promise<void>>();
   function read(id: string) { return structuredClone(context.store.get(id) ?? fail("DRAFT_NOT_FOUND")); }
   function current(identity: BoundIdentity, active = false) {
     const row = read(identity.draftId);
@@ -64,6 +72,7 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
     if (row.state === "revoking" || row.state === "revoked") fail("BINDING_REVOKED");
     if (row.state !== "active" && context.now() >= row.expiresAt) fail("DRAFT_EXPIRED");
     if (active && row.state !== "active") fail("BINDING_NOT_ACTIVE");
+    context.assertHostReady?.(row);
     return row;
   }
   async function ready(identity: BoundIdentity, active = false) {
@@ -100,7 +109,14 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
     ledger.beginRevocation(draftId);
     context.store.put(draftId, { ...read(draftId), revocationReason: row.revocationReason ?? reason });
   }
-  async function cleanup(draftId: string, resolved?: Pick<OpenApiResolvedDraft, "finalizer">) {
+  function cleanup(draftId: string, resolved?: OpenApiCleanupDraft): Promise<void> {
+    const existing = pendingCleanup.get(draftId);
+    if (existing) return existing;
+    const operation = runCleanup(draftId, resolved).finally(() => { pendingCleanup.delete(draftId); });
+    pendingCleanup.set(draftId, operation);
+    return operation;
+  }
+  async function runCleanup(draftId: string, resolved?: OpenApiCleanupDraft) {
     let row = read(draftId);
     if (row.state === "revoked") return;
     if (row.state !== "revoking") fail("BINDING_NOT_REVOKING");
@@ -125,6 +141,7 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
       fail("BINDING_IDENTITY_MISMATCH");
     if (row.state === "revoked" || row.state === "revoking") fail("BINDING_REVOKED");
     if (row.state !== "active" && context.now() >= row.expiresAt) fail("DRAFT_EXPIRED");
+    context.assertHostReady?.(row);
     const existing = context.store.get(row.reference.draftId);
     if (existing && (existing.resourceUrl !== resourceUrl || existing.ownerId !== row.ownerId ||
       existing.providerAccountId !== row.providerAccountId || existing.accountIncarnation !== row.accountIncarnation ||

@@ -72,12 +72,15 @@ export interface HostFacetBinding extends RpcTarget {
     keyEpoch: number;
   }): Promise<void>;
 }
-/** Private draft-scoped connector activation and revocation capability. */
-export interface OpenApiFacetFinalizer extends RpcTarget {
-  /** Install the private host capability into this exact draft grant. */
-  activate(binding: RpcStub<HostFacetBinding>): Promise<void>;
+/** Private exact-draft cleanup authority; cannot activate or dispatch. */
+export interface OpenApiRevocationFinalizer extends RpcTarget {
   /** Fence new dispatches and acknowledge only after admitted dispatches drain. */
   revoke(reason: "removed" | "account-disconnected" | "creation-failed"): Promise<void>;
+}
+/** Private draft-scoped connector activation and revocation capability. */
+export interface OpenApiFacetFinalizer extends OpenApiRevocationFinalizer {
+  /** Install the private host capability into this exact draft grant. */
+  activate(binding: RpcStub<HostFacetBinding>): Promise<void>;
 }
 /** Explicit v1 extension used only over authenticated host service RPC. */
 export interface OpenApiBoundAccount extends WorkerEntrypoint {
@@ -86,6 +89,8 @@ export interface OpenApiBoundAccount extends WorkerEntrypoint {
     pattern: string,
     authority: RpcStub<HostDraftAuthority>,
   ): Promise<ResourceConfiguratorFrame>;
+  /** Resolve only exact immutable draft cleanup, including after account revocation or restart. */
+  resolveBoundDraftForRevocation(reference: DraftReference): Promise<RpcStub<OpenApiRevocationFinalizer>>;
   /** Resolve the exact draft into its class, resource and private finalizer. */
   resolveBoundDraft(reference: DraftReference): Promise<{
     /** Class resolved by the authenticated account for this draft. */

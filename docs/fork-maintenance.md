@@ -48,6 +48,8 @@ Upstream has no file there, so nothing in them can ever conflict. Today:
 - `packages/workshop-backend/src/fork/` — authenticated OpenAPI host binding.
 - `packages/workshop-backend/__tests__/knitli-openapi-binding-ledger.test.ts` — authenticated OpenAPI host binding.
 - `packages/workshop-backend/__tests__/knitli-openapi-user-binding.test.ts` — authenticated OpenAPI host binding.
+- `packages/workshop-backend/__tests__/fork-fixtures/` — test-only OpenAPI host account serviceFetcher and cleanup barriers.
+- `packages/workshop-backend/__tests__/knitli-openapi-dispatch-binding.test.ts` — private OpenAPI dispatch registration and attenuated-use authority.
 - `packages/workshop-backend/__tests__/knitli-openapi-facet-binding.test.ts` — authenticated OpenAPI host binding.
 - `packages/workshop-frontend/src/GatekeeperModal.knitli-binding.test.tsx` — authenticated OpenAPI host binding.
 - `packages/integration-tests/fixtures/gatekeeper-test/src/fork/` — authenticated OpenAPI host binding.

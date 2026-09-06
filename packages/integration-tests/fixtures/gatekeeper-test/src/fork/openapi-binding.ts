@@ -1,8 +1,8 @@
 // Test-only connector implementation. Authorities stay in RPC closures, never control responses.
 import { RpcStub, RpcTarget } from "cloudflare:workers";
-import type { BoundIdentity, DraftReference, HostDraftAuthority, HostFacetBinding, OpenApiFacetFinalizer, OpenApiRevocationFinalizer } from "@gadgets/workshop-shared/fork/openapi-host-binding";
-import type { ResourceConfiguratorFrame, SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
-import type { TestControl } from "../test-gatekeeper";
+import type { BoundIdentity, DraftReference, HostDraftAuthority, HostDispatchUseAuthority, HostFacetBinding, OpenApiFacetFinalizer, OpenApiRevocationFinalizer } from "@gadgets/workshop-shared/fork/openapi-host-binding";
+import type { ApprovalQueue, ResourceConfiguratorFrame, SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
+import type { TestControl, TestSession } from "../test-gatekeeper";
 
 export type BindingEvent = Pick<BoundIdentity, "draftId" | "workspaceId" | "gatekeeperId" | "generation"> & { event: string };
 export type ConnectorDraft = DraftReference & {
@@ -103,10 +103,12 @@ class Finalizer extends RpcTarget implements OpenApiFacetFinalizer {
     if (!sameIdentity(identity, await binding.getIdentity())) throw new Error("BINDING_IDENTITY_MISMATCH");
     await binding.confirmActivation(identity.selectionDigest);
     await this.#control.completeOpenApiActivation(this.#label, identity);
+    await this.#control.installOpenApiBinding(this.#label, identity.draftId, binding);
   }
   async revoke(_reason: "removed" | "account-disconnected" | "creation-failed"): Promise<void> {
     const draft = await this.#control.beginOpenApiRevocation(this.#label, this.#reference.draftId);
     if (draft.state === "revoked") return;
+    await this.#control.drainOpenApiDispatches(this.#label, draft.draftId);
     await this.#control.waitAtBarrier(`openapi:revocation:${draft.draftId}`);
     await this.#control.completeOpenApiRevocation(this.#label, draft.draftId);
   }
@@ -118,16 +120,30 @@ export function openApiFinalizer(control: DurableObjectStub<TestControl>, label:
 
 export async function openApiControlRequest(path: string, body: unknown, control: DurableObjectStub<TestControl>): Promise<Response | undefined> {
   const action = path.replace("/control/", "");
-  if (!["pauseBeforeActivation", "releaseActivation", "pauseRevocation", "releaseRevocation", "readBindingEvents", "expireDraft", "cancelDraft"].includes(action)) return undefined;
+  if (!["pauseBeforeActivation", "releaseActivation", "pauseRevocation", "releaseRevocation", "readBindingEvents", "expireDraft", "cancelDraft", "pauseDispatch", "releaseDispatch", "pauseResolution", "releaseResolution", "rotateDispatchKey", "checkDispatchUse", "crossoverBinding"].includes(action)) return undefined;
   const input = body as Record<string, unknown>;
   if (typeof input.draftId !== "string" || !input.draftId) return new Response("draftId is required", { status: 400 });
   const draftId = input.draftId;
   if (action === "readBindingEvents") return Response.json({ events: await control.readBindingEvents(draftId) });
+  if (["rotateDispatchKey", "checkDispatchUse", "crossoverBinding"].includes(action)) {
+    if (typeof input.label !== "string" || !input.label) return new Response("label is required", { status: 400 });
+    if (action === "rotateDispatchKey") await control.rotateOpenApiDispatchKey(input.label, draftId);
+    if (action === "checkDispatchUse") {
+      if (input.which !== "old" && input.which !== "current") return new Response("which must be old or current", { status: 400 });
+      await control.checkOpenApiDispatchUse(input.label, draftId, input.which);
+      return Response.json({ active: true });
+    }
+    if (action === "crossoverBinding") {
+      if (typeof input.otherDraftId !== "string" || !input.otherDraftId) return new Response("otherDraftId is required", { status: 400 });
+      await control.crossoverOpenApiBinding(input.label, draftId, input.otherDraftId);
+    }
+    return new Response(null, { status: 204 });
+  }
   if (action === "expireDraft" || action === "cancelDraft") {
     if (typeof input.label !== "string" || !input.label) return new Response("label is required", { status: 400 });
     await control.invalidateOpenApiDraft(input.label, draftId, action === "expireDraft" ? "expire" : "cancel");
   } else {
-    const key = `openapi:${action.includes("Revocation") ? "revocation" : "activation"}:${draftId}`;
+    const key = `openapi:${action.includes("Revocation") ? "revocation" : action.includes("Dispatch") ? "dispatch" : action.includes("Resolution") ? "resolution" : "activation"}:${draftId}`;
     if (action.startsWith("pause")) await control.armBarrier(key);
     else await control.releaseBarrier(key);
   }
@@ -147,4 +163,92 @@ class RevocationFinalizer extends RpcTarget implements OpenApiRevocationFinalize
 export function openApiRevocationFinalizer(control: DurableObjectStub<TestControl>, label: string,
   reference: DraftReference): RpcStub<OpenApiRevocationFinalizer> {
   return new RpcStub(new RevocationFinalizer(control, label, reference));
+}
+
+// Test-only private coordinator. In-memory capabilities are reacquired by exact activation replay.
+// It simulates host admission/draining only: it performs no provider HTTP or physical-hop checks.
+type DispatchRegistration = { keyId: string; publicKeyDigest: string; keyEpoch: number; use: RpcStub<HostDispatchUseAuthority> };
+type RuntimeBinding = { binding: RpcStub<HostFacetBinding>; current: DispatchRegistration; old?: DispatchRegistration; leases: number; drained: Array<() => void> };
+export class OpenApiRuntime {
+  #bindings = new Map<string, RuntimeBinding>();
+  #finalizers = new Map<string, RpcStub<OpenApiFacetFinalizer>>();
+  /** Test-only capture occurs exclusively in authenticated account resolveBoundDraft. */
+  captureFinalizer(label: string, draftId: string, finalizer: RpcStub<OpenApiFacetFinalizer>): void {
+    const key = this.#key(label, draftId);
+    this.#finalizers.get(key)?.[Symbol.dispose]();
+    this.#finalizers.set(key, finalizer.dup());
+  }
+  #key(label: string, draftId: string): string { return `${label}:${draftId}`; }
+  #get(label: string, draftId: string): RuntimeBinding {
+    const state = this.#bindings.get(this.#key(label, draftId));
+    if (!state) throw new Error("BINDING_RUNTIME_UNAVAILABLE");
+    return state;
+  }
+  /** Test-only installation receives a genuine capability exclusively from private activation. */
+  async install(label: string, draftId: string, binding: RpcStub<HostFacetBinding>): Promise<void> {
+    if (this.#bindings.has(this.#key(label, draftId))) return;
+    const keyId = "fixture-dispatch-key";
+    const publicKeyDigest = "fixture-public-key-digest";
+    const registration = await binding.authorizeDispatchKey({ keyId, publicKeyDigest });
+    this.#bindings.set(this.#key(label, draftId), { binding: binding.dup(), current: { keyId, publicKeyDigest, keyEpoch: registration.keyEpoch, use: registration.use }, leases: 0, drained: [] });
+  }
+  /** Test-only key ABA exercise. Neither current nor retained old authority is returned. */
+  async rotate(label: string, draftId: string): Promise<void> {
+    const state = this.#get(label, draftId);
+    const { keyId, publicKeyDigest, keyEpoch } = state.current;
+    await state.binding.revokeDispatchKey({ keyId, publicKeyDigest, keyEpoch });
+    const registration = await state.binding.authorizeDispatchKey({ keyId, publicKeyDigest });
+    state.old = state.current;
+    state.current = { keyId, publicKeyDigest, keyEpoch: registration.keyEpoch, use: registration.use };
+  }
+  /** Test-only result probe of retained private use capabilities. */
+  async check(label: string, draftId: string, which: "old" | "current"): Promise<void> {
+    const registration = this.#get(label, draftId)[which];
+    if (!registration) throw new Error("DISPATCH_REGISTRATION_NOT_FOUND");
+    await registration.use.assertActive();
+  }
+  /** Test-only crossing of genuine caps; inputs select stored drafts, never assert identities. */
+  async crossover(label: string, draftId: string, otherDraftId: string): Promise<void> {
+    const target = this.#finalizers.get(this.#key(label, draftId));
+    if (!target) throw new Error("DRAFT_FINALIZER_NOT_RESOLVED");
+    await target.activate(this.#get(label, otherDraftId).binding);
+  }
+  /** Test-only admitted lease: the second synchronous check closes the readiness-await race. */
+  async dispatch(label: string, draftId: string, assertActive: () => void, pause: () => Promise<void>, record: (event: string) => void): Promise<number> {
+    const state = this.#get(label, draftId);
+    assertActive();
+    await state.current.use.assertActive();
+    assertActive();
+    state.leases++;
+    record("dispatch-admitted");
+    try { await pause(); record("dispatch-completed"); return 1; }
+    finally { state.leases--; if (!state.leases) for (const resolve of state.drained.splice(0)) resolve(); }
+  }
+  /** Test-only drain after the durable connector fence has closed admission. */
+  async drain(label: string, draftId: string): Promise<void> {
+    const state = this.#bindings.get(this.#key(label, draftId));
+    if (state?.leases) await new Promise<void>(resolve => state.drained.push(resolve));
+  }
+}
+
+/** Test-only session exposes values and audited reads, never host or key capabilities. */
+class OpenApiSession extends RpcTarget implements TestSession {
+  #control: DurableObjectStub<TestControl>;
+  #label: string;
+  #draftId: string;
+  #approval: RpcStub<ApprovalQueue>;
+  constructor(control: DurableObjectStub<TestControl>, label: string, draftId: string, approval: RpcStub<ApprovalQueue>) {
+    super(); this.#control = control; this.#label = label; this.#draftId = draftId; this.#approval = approval.dup();
+  }
+  async readValue(): Promise<number> {
+    await this.#approval.authorizeObservation({ title: "Read OpenAPI fixture", description: "Exercise private host admission without provider I/O." });
+    return this.#control.dispatchOpenApi(this.#label, this.#draftId);
+  }
+  async observe(): Promise<void> { await this.readValue(); }
+  async writeValue(_value: number): Promise<number> { throw new Error("FIXTURE_WRITES_UNSUPPORTED"); }
+  async act(): Promise<void> { throw new Error("FIXTURE_WRITES_UNSUPPORTED"); }
+  async bindHook(): Promise<void> { throw new Error("FIXTURE_HOOKS_UNSUPPORTED"); }
+}
+export function startOpenApiSession(control: DurableObjectStub<TestControl>, label: string, draftId: string, approval: RpcStub<ApprovalQueue>): TestSession {
+  return new OpenApiSession(control, label, draftId, approval);
 }

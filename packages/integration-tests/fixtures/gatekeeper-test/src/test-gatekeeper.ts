@@ -21,8 +21,8 @@
 // user. Tests exercise both narratives by choosing reason text.
 
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
-import type { BoundIdentity, DraftReference, HostDraftAuthority, OpenApiBoundAccount } from "@gadgets/workshop-shared/fork/openapi-host-binding";
-import { assertDraftLive, assertReference, bindingEvent, openApiControlRequest, openApiEnabled, openApiFinalizer, openApiResource, openApiRevocationFinalizer, sameIdentity, startOpenApiConfigurator, type BindingEvent, type ConnectorDraft, type OpenApiTestEnv } from "./fork/openapi-binding";
+import type { BoundIdentity, DraftReference, HostDraftAuthority, HostFacetBinding, OpenApiFacetFinalizer, OpenApiBoundAccount } from "@gadgets/workshop-shared/fork/openapi-host-binding";
+import { assertDraftLive, assertReference, bindingEvent, openApiControlRequest, openApiEnabled, openApiFinalizer, openApiResource, openApiRevocationFinalizer, sameIdentity, startOpenApiConfigurator, type BindingEvent, type ConnectorDraft, type OpenApiTestEnv, OpenApiRuntime, startOpenApiSession } from "./fork/openapi-binding";
 
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
@@ -113,6 +113,55 @@ function outcomeKey(label: string, resourceUrl?: string): string {
 
 @validateRpc()
 export class TestControl extends DurableObject<Cloudflare.Env> {
+  #openApiRuntime = new OpenApiRuntime();
+
+  /** Test-only private activation hook; never reachable through the fixture HTTP controls. */
+  @skipRpcValidation()
+  async installOpenApiBinding(label: string, draftId: string, binding: RpcStub<HostFacetBinding>): Promise<void> {
+    const draft = this.getOpenApiDraft(label, draftId);
+    if (!draft.identity || !sameIdentity(draft.identity, await binding.getIdentity())) throw new Error("BINDING_IDENTITY_MISMATCH");
+    await this.#openApiRuntime.install(label, draftId, binding);
+  }
+
+  /** Test-only finalizer capture called only by the authenticated account resolver. */
+  @skipRpcValidation()
+  captureOpenApiFinalizer(label: string, draftId: string, finalizer: RpcStub<OpenApiFacetFinalizer>): void {
+    this.#openApiRuntime.captureFinalizer(label, draftId, finalizer);
+  }
+
+  /** Test-only ABA exercise using capabilities captured by the authenticated finalizer. */
+  async rotateOpenApiDispatchKey(label: string, draftId: string): Promise<void> {
+    await this.#openApiRuntime.rotate(label, draftId);
+  }
+
+  /** Test-only liveness result; no capability leaves the private coordinator. */
+  async checkOpenApiDispatchUse(label: string, draftId: string, which: "old" | "current"): Promise<void> {
+    await this.#openApiRuntime.check(label, draftId, which);
+  }
+
+  /** Test-only wrong-facet attempt against a real private finalizer and genuine other binding. */
+  async crossoverOpenApiBinding(label: string, draftId: string, otherDraftId: string): Promise<void> {
+    await this.#openApiRuntime.crossover(label, draftId, otherDraftId);
+  }
+
+  /** Test-only simulated dispatch; never performs provider I/O. */
+  async dispatchOpenApi(label: string, draftId: string): Promise<number> {
+    return this.#openApiRuntime.dispatch(label, draftId, () => {
+      this.assertOpenApiAccountActive(label);
+      const draft = this.getOpenApiDraft(label, draftId);
+      if (draft.state !== "active") throw new Error("BINDING_NOT_ACTIVE");
+    }, () => this.waitAtBarrier(`openapi:dispatch:${draftId}`), event => {
+      const identity = this.getOpenApiDraft(label, draftId).identity;
+      if (!identity) throw new Error("BINDING_IDENTITY_MISSING");
+      this.recordBindingEvent(bindingEvent(event, identity));
+    });
+  }
+
+  /** Test-only drain acknowledgement after the durable revoke fence. */
+  async drainOpenApiDispatches(label: string, draftId: string): Promise<void> {
+    await this.#openApiRuntime.drain(label, draftId);
+  }
+
   revokeOpenApiAccount(label: string): void {
     this.ctx.storage.kv.put(`openapi:account-revoked:${label}`, true);
   }
@@ -364,7 +413,8 @@ function resourceName(resourceUrl: string): string {
 // Vendor
 
 type AccountProps = { label: string };
-type BindingProps = AccountProps & { resourceUrl: string; ambient?: true };
+type BindingProps = AccountProps & {
+  openApiDraftId?: string; resourceUrl: string; ambient?: true };
 
 @validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
@@ -528,11 +578,14 @@ export class TestOpenApiAccount extends TestAccount implements OpenApiBoundAccou
     const draft = await ctl.getOpenApiDraft(this.ctx.props.label, reference.draftId);
     assertReference(draft, reference);
     assertDraftLive(draft);
+    const finalizer = openApiFinalizer(ctl, this.ctx.props.label, reference);
+    await ctl.captureOpenApiFinalizer(this.ctx.props.label, draft.draftId, finalizer);
+    await ctl.waitAtBarrier(`openapi:resolution:${draft.draftId}`);
     return {
-      class: this.ctx.exports.TestGatekeeper({ props: { label: this.ctx.props.label, resourceUrl: draft.resourceUrl } }),
+      class: this.ctx.exports.TestGatekeeper({ props: { label: this.ctx.props.label, resourceUrl: draft.resourceUrl, openApiDraftId: draft.draftId } }),
       resource: openApiResource(this.env as OpenApiTestEnv),
       resourceUrl: draft.resourceUrl,
-      finalizer: openApiFinalizer(ctl, this.ctx.props.label, reference),
+      finalizer,
     };
   }
 
@@ -717,6 +770,9 @@ export class TestGatekeeper
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<TestSession> {
+    if (this.ctx.props.openApiDraftId) {
+      return startOpenApiSession(control(this.ctx.exports), this.ctx.props.label, this.ctx.props.openApiDraftId, approvalQueue);
+    }
     const name = resourceName(this.ctx.props.resourceUrl);
     if (name.includes("start-session-barrier")) {
       await control(this.ctx.exports).waitAtBarrier(

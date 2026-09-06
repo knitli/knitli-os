@@ -84,8 +84,8 @@ export interface Worktree {
   /**
    * Diff the worktree content against the given commit (defaults to the current head commit --
    * the last commit() made here, initially the commit the worktree was created from). `commitId`
-   * may be any commit known to the workspace, e.g. the worktree's base commit to see everything
-   * changed since it was created.
+   * must be a full 40-hex SHA-1 for a commit known to the workspace, e.g. the worktree's base
+   * commit to see everything changed since it was created.
    *
    * Returns the diff in a format similar to `git diff`. An empty string means no differences.
    * Paths that cannot be rendered as text (binary/over-limit files, symlinks, submodules)

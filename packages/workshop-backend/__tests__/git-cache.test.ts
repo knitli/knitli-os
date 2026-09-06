@@ -1073,46 +1073,31 @@ describe("worktree read/write helpers", () => {
 });
 
 describe("resolveCommitRef", () => {
-  it("resolves full oids and unambiguous prefixes of local commits", async () => {
+  it("accepts full commit capabilities, including uppercase, while checking decoded type", async () => {
     let t = makeCache();
     let tree = await storeLocal(t.storage, { type: "tree", payload: treePayload([]) });
-    let commit = await storeLocal(t.storage,
-        { type: "commit", payload: commitPayload(tree, [], "local") });
-
+    let commit = await storeLocal(t.storage, { type: "commit", payload: commitPayload(tree, [], "local") });
     expect(t.cache.resolveCommitRef(commit)).toBe(commit);
-    expect(t.cache.resolveCommitRef(commit.slice(0, 8))).toBe(commit);
-    expect(t.cache.resolveCommitRef(commit.slice(0, 8).toUpperCase())).toBe(commit);
-    // The tree shares no 8-hex prefix with the commit (vanishingly unlikely), and a prefix
-    // matching only non-commits resolves to nothing.
-    expect(() => t.cache.resolveCommitRef(tree.slice(0, 8)))
-        .toThrow(/not known to this workspace/);
-    // A locally-present non-commit named in full is rejected by its decoded type.
+    expect(t.cache.resolveCommitRef(commit.toUpperCase())).toBe(commit);
     expect(() => t.cache.resolveCommitRef(tree)).toThrow(`${tree} is a tree, not a commit.`);
+    let advertised = "bbbb1111".padEnd(40, "0");
+    t.storage.gitObjectMetadata.put({ oid: advertised, type: "blob", onRemote: [G1], pullableFrom: [], pendingPush: [] });
+    // Full capabilities retain the reader rule: measured bytes, not an asserted tag,
+    // decide whether the caller can use this as a commit after pulling it.
+    expect(t.cache.resolveCommitRef(advertised)).toBe(advertised);
+    expect(() => t.cache.resolveCommitRef("cccc".padEnd(40, "0")))
+      .toThrow(/not known to this workspace/);
   });
 
-  it("rejects malformed, unknown, and ambiguous refs", async () => {
-    let t = makeCache();
-    // Fabricated metadata rows steer prefix matching without any stored objects.
-    let put = (oid: GitOid, type: "commit" | "blob") => t.storage.gitObjectMetadata.put(
-        { oid, type, onRemote: [G1], pullableFrom: [], pendingPush: [] });
-    put("aaaa1111".padEnd(40, "0"), "commit");
-    put("aaaa2222".padEnd(40, "0"), "commit");
-    put("bbbb1111".padEnd(40, "0"), "blob");
-
-    expect(() => t.cache.resolveCommitRef("xyz")).toThrow(/not a git commit id/);
-    expect(() => t.cache.resolveCommitRef("abc")).toThrow(/not a git commit id/);  // too short
-    expect(() => t.cache.resolveCommitRef("cccc")).toThrow(/not known to this workspace/);
-    expect(() => t.cache.resolveCommitRef("aaaa"))
-        .toThrow(/ambiguous between: aaaa1111.*aaaa2222/);
-    expect(t.cache.resolveCommitRef("aaaa1")).toBe("aaaa1111".padEnd(40, "0"));
-    // An asserted non-commit is filtered from prefix candidates (commit-bias makes the tag
-    // trustworthy for refusal-free filtering)...
-    expect(() => t.cache.resolveCommitRef("bbbb")).toThrow(/not known to this workspace/);
-    // ...but a full oid resolves regardless of its assertion-grade tag (the reader rule: the
-    // caller's pull lets the decoded bytes decide).
-    expect(t.cache.resolveCommitRef("bbbb1111".padEnd(40, "0")))
-        .toBe("bbbb1111".padEnd(40, "0"));
-  });
+  it.each(["aaaa", "aaaa1", "aaaa1111", "aaaa1111".padEnd(39, "0"), "xyz", "abc", "a".repeat(41)])(
+    "rejects incomplete or malformed capabilities without enumerating metadata: %s", ref => {
+      let t = makeCache();
+      for (let oid of ["aaaa1111".padEnd(40, "0"), "aaaa2222".padEnd(40, "0")]) {
+        t.storage.gitObjectMetadata.put({ oid, type: "commit", onRemote: [G2], pullableFrom: [], pendingPush: [] });
+      }
+      expect(() => t.cache.resolveCommitRef(ref)).toThrow(new Error(
+        "A full 40-hex git commit SHA-1 is required. Look it up through an authorized connection first."));
+    });
 });
 
 // A copy-only thin pack needs only the base OID and size, never its contents.

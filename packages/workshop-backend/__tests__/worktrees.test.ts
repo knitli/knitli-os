@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import type { AiChatAuthorInfo, AiChatMessage } from "@gadgets/workshop-shared/api";
@@ -16,7 +16,7 @@ declare module "cloudflare:workers" {
 }
 
 // Exercises the worktree workpiece lifecycle against the real OverseerImpl in workerd: the
-// version-4 record-type migration, createWorktree (local commits, prefix resolution, pull
+// version-4 record-type migration, createWorktree (local commits, full commit capabilities, pull
 // routing), the barrier's creation record + birth pin, lazy worktree content in the chat's
 // change stream (edits seed their base texts on demand; untouched files are never
 // materialized), revert/deletion cleanup, chat-privacy, and the client delivery filtering that
@@ -144,12 +144,12 @@ describe("the version 3 -> 4 workpiece-type migration", () => {
 });
 
 describe("createWorktree", () => {
-  it("creates a chat-private pending record from a local commit, with prefix resolution",
+  it("creates a chat-private pending record from a local commit, with a full commit capability",
       () => withImpl(async impl => {
     addChat(impl, 1);
     let c1 = await commitFiles(impl, { "a.txt": "one\n" });
 
-    let created = await impl.createWorktree("My Repo", 1, c1.slice(0, 12));
+    let created = await impl.createWorktree("My Repo", 1, c1);
     expect(created.baseCommit).toBe(c1);
     let record = impl.storage.gadgets.get(created.id)!;
     expect(record).toMatchObject({
@@ -164,6 +164,28 @@ describe("createWorktree", () => {
     // A second worktree at the same commit is fine: no workspace-level name is claimed.
     let again = await impl.createWorktree("My Repo Again", 1, c1);
     expect(impl.storage.gadgets.get(again.id)!.baseCommit).toBe(c1);
+  }));
+
+  it("rejects another chat's commit prefixes before reading or creating a worktree", () => withImpl(async impl => {
+    addChat(impl, 1);
+    addChat(impl, 2);
+    const hidden = await commitFiles(impl, { "private.txt": "other chat contents" });
+    await impl.createWorktree("Other chat", 2, hidden);
+    const read = vi.spyOn(impl.gitCache, "readLocalObject");
+    try {
+      for (const length of [4, 12, 39]) {
+        await expect(impl.createWorktree("Restricted chat", 1, hidden.slice(0, length)))
+          .rejects.toThrow(new Error(
+            "A full 40-hex git commit SHA-1 is required. Look it up through an authorized connection first."));
+      }
+      expect(read).not.toHaveBeenCalled();
+      // Deliberately supplying the full bearer capability still grants access.
+      const created = await impl.createWorktree("Shared capability", 1, hidden.toUpperCase());
+      expect(created.baseCommit).toBe(hidden);
+      expect(read).toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
   }));
 
   it("rejects unknown refs, and surfaces provenance loss from the initial pull",

@@ -735,62 +735,32 @@ export class WorkspaceGitCache {
   }
 
   /**
-   * Resolves a commit reference -- a full 40-hex oid or an unambiguous prefix of at least 4 hex
-   * digits -- against *local knowledge only*: the object store plus the metadata rows written by
-   * gatekeepers' puts and advertisements. Never a remote lookup (remote truncated-id resolution
-   * is a gatekeeper API, e.g. GitHub's getCommit, which returns and advertises the full oid).
-   * Returns the full oid without pulling anything; the caller decides whether to fetch.
-   *
-   * Errors are agent-readable: malformed refs, an ambiguous prefix (listing the candidates), an
-   * unknown ref ("look it up via the connection first"), and a locally-present non-commit.
-   * Prefix candidates are filtered by locally-decoded types (measured) or the metadata type tag
-   * (assertion-grade -- sound to filter on, because any commit id a gatekeeper handed the agent
-   * was advertised, which forces its tag to "commit" under the reconciliation policy's commit
-   * bias). A *full* oid is the reader-rule exception: an assertion-grade non-commit tag must not
-   * refuse the operation without pulling, so a full oid known only from metadata resolves
-   * regardless of its recorded type and the caller's pull lets the decoded bytes decide.
+   * Resolve a full commit capability against local knowledge without pulling. Never
+   * expand abbreviated IDs: workspace-global objects and metadata may belong to another
+   * chat, so prefix lookup would disclose capabilities the caller was never given.
+   * A full OID known only through metadata retains the reader rule: its assertion-grade
+   * type cannot refuse the operation; the caller pulls and checks the measured bytes.
    */
   resolveCommitRef(ref: string): GitOid {
     let normalized = ref.toLowerCase();
-    if (!/^[0-9a-f]{4,40}$/.test(normalized)) {
+    if (!/^[0-9a-f]{40}$/.test(normalized)) {
       throw new Error(
-          `"${ref}" is not a git commit id: expected a 40-hex SHA-1, or a prefix of at least ` +
-          `4 hex digits.`);
+        "A full 40-hex git commit SHA-1 is required. Look it up through an authorized connection first.");
     }
-    let unknown = () => new Error(
+    let local = this.readLocalObject(normalized);
+    if (local !== undefined) {
+      if (local.type !== "commit") {
+        throw new Error(`${normalized} is a ${local.type}, not a commit.`);
+      }
+      return normalized;
+    }
+    if (this.storage.gitObjectMetadata.get(normalized) === undefined) {
+      throw new Error(
         `Commit ${ref} is not known to this workspace. Look it up through the connection that ` +
         `provides the repository first (e.g. its commit or branch APIs), which makes it ` +
         `available here.`);
-
-    if (normalized.length === 40) {
-      let local = this.readLocalObject(normalized);
-      if (local !== undefined) {
-        if (local.type !== "commit") {
-          throw new Error(`${normalized} is a ${local.type}, not a commit.`);
-        }
-        return normalized;
-      }
-      if (this.storage.gitObjectMetadata.get(normalized) === undefined) throw unknown();
-      return normalized;
     }
-
-    // Prefix: gather candidates from both sources; a locally-decoded type (measured) wins over
-    // the metadata tag for the same oid.
-    let candidates = new Map<GitOid, boolean>();
-    for (let record of this.storage.gitObjects.list({ prefix: normalized })) {
-      candidates.set(record.oid, decodeLooseObject(record.data).type === "commit");
-    }
-    for (let meta of this.storage.gitObjectMetadata.list({ prefix: normalized })) {
-      if (!candidates.has(meta.oid)) candidates.set(meta.oid, meta.type === "commit");
-    }
-    let commits = [...candidates.entries()].filter(([, isCommit]) => isCommit).map(([oid]) => oid);
-    if (commits.length === 1) return commits[0];
-    if (commits.length > 1) {
-      throw new Error(
-          `Commit id prefix ${ref} is ambiguous between: ${commits.toSorted().join(", ")}. ` +
-          `Use a longer prefix.`);
-    }
-    throw unknown();
+    return normalized;
   }
 
   /**

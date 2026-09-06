@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { createTypedStorage } from "@gadgets/typed-storage";
@@ -652,6 +652,27 @@ describe("commit and diff", () => {
         "1111111111111111111111111111111111111111)");
     expect(diff).toContain("+one");   // a.txt added relative to COMMIT_1
     expect(diff).toContain("-# Fixture");  // README.md removed relative to COMMIT_1
+  }));
+
+  it("diff rejects another chat's commit prefixes before reading their files", () => withImpl(async impl => {
+    addChat(impl, 1);
+    addChat(impl, 2);
+    const own = await commitFiles(impl, { "own.txt": "own contents" });
+    const hidden = await commitFiles(impl, { "private.txt": "other chat contents" });
+    await createWorktreeSession(impl, 2, hidden);
+    const { session } = await createWorktreeSession(impl, 1, own);
+    const read = vi.spyOn(impl.gitCache, "readLocalObject");
+    try {
+      for (const length of [4, 12, 39]) {
+        await expect(session.diff(hidden.slice(0, length))).rejects.toThrow(new Error(
+          "A full 40-hex git commit SHA-1 is required. Look it up through an authorized connection first."));
+      }
+      expect(read).not.toHaveBeenCalled();
+      expect(await session.diff(hidden.toUpperCase())).toContain("other chat contents");
+      expect(read).toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
   }));
 
   it("diff() notes only unrenderable content; operational read failures propagate", async () => {

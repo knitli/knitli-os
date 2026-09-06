@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { type Harness, startHarness } from "../src/harness.js";
 import { mockChatCompletion } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
-import { connect, nextUsernames, signUp, waitFor } from "../src/rpc-client.js";
+import { connect, logIn, nextUsernames, signUp, waitFor } from "../src/rpc-client.js";
 
 let harness: Harness | undefined;
 const network = new NetworkInterceptor({ handlers: [mockChatCompletion("Test chat")] });
@@ -34,7 +34,8 @@ function username(): string {
 
 it.concurrent("lists workspace metadata after activity and removes it after deletion", async () => {
   using publicApi = connect(requireHarness().url);
-  using authenticated = await signUp(publicApi, username());
+  const owner = username();
+  using authenticated = await signUp(publicApi, owner);
   using workspace = await authenticated.newGadget();
   const { id } = await workspace.getMetadata();
   expect(await authenticated.listGadgets()).not.toContainEqual(expect.objectContaining({ id }));
@@ -54,9 +55,16 @@ it.concurrent("lists workspace metadata after activity and removes it after dele
   }));
 
   await workspace.deleteSelf();
-  workspace[Symbol.dispose]();
+  // Deletion aborts the workspace and its containing RPC session. Observe that boundary
+  // before checking persistent user metadata through a fresh authenticated connection.
+  const restartError = await waitFor("the deleted workspace to sever its client", () =>
+    workspace.getMetadata().then(() => null, error => String(error)));
+  expect(restartError).toBe(
+    "Error: Peer closed WebSocket: 3000 RPC session was shut down by disposing the main stub");
+  using freshPublic = connect(requireHarness().url);
+  using freshOwner = await logIn(freshPublic, owner);
   await waitFor("the deleted workspace to disappear from the user's list", async () =>
-    (await authenticated.listGadgets()).some(entry => entry.id === id) ? null : true);
+    (await freshOwner.listGadgets()).some(entry => entry.id === id) ? null : true);
 });
 
 it.concurrent("persists an ordered human-only chat without starting an agent", async () => {

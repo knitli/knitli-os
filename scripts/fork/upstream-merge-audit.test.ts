@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -361,3 +361,133 @@ test("OpenAPI host binding files are explicitly fork owned", () => {
   assert.equal(isForkOwned("packages/workshop-backend/src/user.ts"), false);
   assert.equal(isForkOwned("packages/workshop-shared/src/gatekeeper.ts"), false);
 });
+
+/** A real sync whose ours-only resolution silently drops a clean upstream edit. */
+function droppedSyncRepo() {
+  const dir = scratchRepo();
+  const run = (...args: string[]) =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+  const file = join(dir, "example.ts");
+  writeFileSync(file, "const upstream = 0;\n\nconst middle = 0;\n\nconst fork = 0;\n");
+  run("add", "example.ts");
+  run("commit", "-qm", "shared file");
+  run("branch", "-f", "upstream", "HEAD");
+  run("branch", "wrapper-base", "HEAD");
+  run("checkout", "-q", "upstream");
+  writeFileSync(file, "const upstream = 1;\n\nconst middle = 0;\n\nconst fork = 0;\n");
+  run("commit", "-qam", "upstream edit");
+  run("checkout", "-q", "main");
+  writeFileSync(file, "const upstream = 0;\n\nconst middle = 0;\n\nconst fork = 1;\n");
+  run("commit", "-qam", "fork edit");
+  run("merge", "-q", "--no-ff", "-s", "ours", "-m", "sync with dropped upstream hunk", "upstream");
+  return { dir, run, sync: run("rev-parse", "HEAD") };
+}
+
+for (const shape of ["sync tip", "follow-up", "PR wrapper"] as const) {
+  test(`dropped hunks remain audited through ${shape}`, () => {
+    const { dir, run, sync } = droppedSyncRepo();
+    try {
+      if (shape !== "sync tip") run("commit", "-q", "--allow-empty", "-m", "follow-up");
+      if (shape === "PR wrapper") {
+        run("checkout", "-q", "wrapper-base");
+        run("commit", "-q", "--allow-empty", "-m", "base advanced");
+        run("merge", "-q", "--no-ff", "-m", "merge PR", "main");
+      }
+      inRepo(dir, () => {
+        const merge = locateMerge(undefined, "HEAD", "upstream");
+        assert.equal(merge?.classification, "sync");
+        assert.ok(merge?.description.includes(sync.slice(0, 12)), "must select the actual sync");
+      });
+      assert.equal(runAudit(dir, "--upstream", "upstream"), 1,
+        "the CLI must report the dropped hunk, not pass after skipping it");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("an unrelated committed PR merge has no upstream sync", () => {
+  const dir = scratchRepo();
+  try {
+    execFileSync("git", ["-C", dir, "merge", "-q", "--no-ff", "-m", "ordinary PR", "feature"]);
+    inRepo(dir, () => assert.equal(locateMerge(undefined, "HEAD", "upstream"), null));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("incomparable sync branches require an explicit merge", () => {
+  const { dir, run, sync } = droppedSyncRepo();
+  try {
+    run("checkout", "-q", "wrapper-base");
+    run("commit", "-q", "--allow-empty", "-m", "independent fork change");
+    run("merge", "-q", "--no-ff", "-m", "independent sync", "upstream");
+    run("merge", "-q", "--no-ff", "-m", "combine branches", "main");
+    inRepo(dir, () => {
+      assert.throws(() => locateMerge(undefined, "HEAD", "upstream"), /incomparable upstream syncs/);
+      assert.equal(locateMerge(sync, "HEAD", "upstream")?.classification, "sync");
+    });
+    assert.equal(runAudit(dir, "--upstream", "upstream"), 2);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a missing selected head cannot silently skip ancestry discovery", () => {
+  const dir = scratchRepo();
+  try {
+    assert.equal(runAudit(dir, "--ours", "missing-head", "--upstream", "upstream"), 2);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a later sync supersedes its ancestor sync", () => {
+  const { dir, run, sync } = droppedSyncRepo();
+  try {
+    run("checkout", "-q", "upstream");
+    run("commit", "-q", "--allow-empty", "-m", "new upstream work");
+    run("checkout", "-q", "main");
+    run("merge", "-q", "--no-ff", "-m", "next sync", "upstream");
+    const latest = run("rev-parse", "HEAD");
+    run("commit", "-q", "--allow-empty", "-m", "follow-up");
+    inRepo(dir, () => {
+      const merge = locateMerge(undefined, "HEAD", "upstream");
+      assert.ok(merge?.description.includes(latest.slice(0, 12)));
+      assert.ok(!merge?.description.startsWith(`merge commit ${sync.slice(0, 12)}`));
+    });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("upstream's own PR merges are excluded from sync discovery", () => {
+  const dir = scratchRepo();
+  const run = (...args: string[]) =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" });
+  try {
+    run("checkout", "-q", "upstream");
+    run("merge", "-q", "--no-ff", "-m", "upstream PR", "feature");
+    run("checkout", "-q", "main");
+    run("merge", "-q", "--ff-only", "upstream");
+    run("commit", "-q", "--allow-empty", "-m", "fork follow-up");
+    inRepo(dir, () => assert.equal(locateMerge(undefined, "HEAD", "upstream"), null));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+for (const selection of ["automatic", "explicit", "in progress"] as const) {
+  test(`octopus sync with upstream as third parent is rejected: ${selection}`, () => {
+    const dir = scratchRepo();
+    const run = (...args: string[]) =>
+      execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+    try {
+      run("commit", "-q", "--allow-empty", "-m", "fork work");
+      const args = ["merge", "-q", "--no-ff", "-m", "octopus sync"];
+      if (selection === "in progress") args.push("--no-commit");
+      run(...args, "feature", "upstream");
+      if (selection !== "in progress") {
+        const parents = run("rev-list", "--parents", "-n", "1", "HEAD").split(/\s+/).slice(1);
+        assert.equal(parents.length, 3, "the fixture must actually create an octopus merge");
+        assert.equal(parents[1], run("rev-parse", "feature"));
+        assert.equal(parents[2], run("rev-parse", "upstream"));
+      }
+      inRepo(dir, () => assert.throws(
+        () => locateMerge(selection === "explicit" ? "HEAD" : undefined, "HEAD", "upstream"),
+        /Cannot audit.*octopus merge.*more than two parents are unsupported/));
+      const explicit = selection === "explicit" ? ["--merge", "HEAD"] : [];
+      assert.equal(runAudit(dir, "--upstream", "upstream", ...explicit), 2);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+}

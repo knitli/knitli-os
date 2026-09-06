@@ -136,6 +136,13 @@ Then, in order:
 
    It finds the merge on its own, whether one is in progress (resolutions in the index) or already
    committed (resolutions in the merge commit), so it works during the sync and afterwards on the PR.
+   For committed history it searches both parents of PR merges, so follow-up commits and a
+   GitHub merge wrapping a sync branch still audit the latest actual sync. Upstream-owned merge
+   commits are excluded. Incomparable sync branches require `--merge <sync-sha>` rather than an
+   arbitrary choice. Octopus merges (more than two parents), including explicit `--merge`
+   selections and in-progress merges, are unsupported and fail with exit 2.
+   The dropped-hunk check reads that sync commit, not later edits; formatting
+   and removed-path checks still read `--ours` (default `HEAD`).
    It only counts a merge whose second parent is upstream: this repo merges its own PRs with merge
    commits, and an ordinary PR merge is not a sync.
    `--merge <ref>` audits any past merge; `--upstream <ref>` overrides what everything is compared

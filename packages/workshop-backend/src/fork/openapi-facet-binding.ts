@@ -251,6 +251,29 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
     pending.set(draftId, operation);
     return operation;
   }
+  async function replay(draftId: string, assertCurrent: () => void): Promise<void> {
+    const row = read(draftId);
+    if (row.state === "revoked") return;
+    if (row.state === "revoking") { await cleanup(draftId); return; }
+    // Even an interrupted first publication must stay unavailable if this attempt expires.
+    context.store.put(draftId, { ...row, recoveryPending: true });
+    let resolved: OpenApiResolvedDraft | undefined;
+    try {
+      resolved = await context.lookup(row.providerAccountId, row.resourceUrl, context.workspaceId);
+      assertCurrent();
+      validateResolved(row.providerAccountId, row.resourceUrl, resolved);
+    } catch (error) {
+      resolved?.finalizer[Symbol.dispose]();
+      assertCurrent();
+      if (preserveRecovery(draftId, error)) throw error;
+      fence(draftId, "creation-failed");
+      try { await cleanup(draftId); } catch { /* Durable retry required. */ }
+      throw error;
+    }
+    using _finalizer = resolved.finalizer;
+    await start(draftId, resolved, assertCurrent);
+  }
+
   return {
     /** Only call after the authenticated workspace API has checked the caller is its owner. */
     async create(accountId: number, resourceUrl: string): Promise<Result> {
@@ -274,30 +297,36 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
       current(read(row.reference.draftId).identity ?? fail("BINDING_NOT_RESERVED"));
       return await start(row.reference.draftId, resolved);
     },
+    /** Probe exact authenticated authority before admitting a session or retained observation. */
+    ensureReady(gatekeeperId: number): Promise<void> {
+      const row = context.store.list().find(candidate => candidate.identity?.gatekeeperId === gatekeeperId);
+      if (!row) return Promise.resolve();
+      const identity = structuredClone(row.identity!);
+      return recovery.run(identity.draftId, async assertCurrent => {
+        await ready(identity, true, assertCurrent);
+        if (read(identity.draftId).recoveryPending) {
+          await replay(identity.draftId, assertCurrent);
+          return;
+        }
+        const resolved = await context.lookup(row.providerAccountId, row.resourceUrl, context.workspaceId);
+        // Own this stub across every awaited probe; replay obtains its own exact capability.
+        using _finalizer = resolved.finalizer;
+        assertCurrent();
+        current(identity, true);
+        validateResolved(row.providerAccountId, row.resourceUrl, resolved);
+        if (!resolved.row.identity || !equalIdentity(resolved.row.identity, identity)) fail("BINDING_IDENTITY_MISMATCH");
+        // RPC proxies expose even absent methods as callable. Negotiate via plain response data.
+        if (resolved.supportsActivationReplay !== true) return;
+        const probe = resolved.finalizer.needsActivationReplay;
+        if (typeof probe !== "function") fail("BINDING_RECOVERY_PROBE_UNSUPPORTED");
+        const lostCapabilities = await probe();
+        await ready(identity, true, assertCurrent);
+        if (lostCapabilities === true) await replay(identity.draftId, assertCurrent);
+      });
+    },
     /** Reconstruct transient capabilities and replay the exact reserved identity after restart. */
     resume(draftId: string): Promise<void> {
-      return recovery.run(draftId, async assertCurrent => {
-        const row = read(draftId);
-        if (row.state === "revoked") return;
-        if (row.state === "revoking") { await cleanup(draftId); return; }
-        // Even an interrupted first publication must stay unavailable if this attempt expires.
-        context.store.put(draftId, { ...row, recoveryPending: true });
-        let resolved: OpenApiResolvedDraft | undefined;
-        try {
-          resolved = await context.lookup(row.providerAccountId, row.resourceUrl, context.workspaceId);
-          assertCurrent();
-          validateResolved(row.providerAccountId, row.resourceUrl, resolved);
-        } catch (error) {
-          resolved?.finalizer[Symbol.dispose]();
-          assertCurrent();
-          if (preserveRecovery(draftId, error)) throw error;
-          fence(draftId, "creation-failed");
-          try { await cleanup(draftId); } catch { /* Durable retry required. */ }
-          throw error;
-        }
-        using _finalizer = resolved.finalizer;
-        await start(draftId, resolved, assertCurrent);
-      });
+      return recovery.run(draftId, assertCurrent => replay(draftId, assertCurrent));
     },
     /** Synchronous host fence; Task 4 wires removal/account/workspace cleanup to this seam. */
     fence,

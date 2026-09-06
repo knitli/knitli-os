@@ -4429,6 +4429,11 @@ class OverseerImpl implements AgentHooks {
       .find(row => row.identity?.gatekeeperId === gatekeeperId);
   }
 
+  ensureOpenApiBindingReady(gatekeeperId: number): Promise<void> {
+    if (!this.findOpenApiBinding(gatekeeperId)) return Promise.resolve();
+    return this.#getOpenApiBinding().ensureReady(gatekeeperId);
+  }
+
   #getOpenApiBinding() {
     if (this.#openApiBinding) return this.#openApiBinding;
     if (!this.ownerId) throw new Error("Workspace is not initialized.");
@@ -4750,6 +4755,7 @@ class OverseerImpl implements AgentHooks {
 
   async authorizeObservation(gatekeeperId: number, description: ObservationDescription,
                              caller: GatekeeperCaller): Promise<void> {
+    await this.ensureOpenApiBindingReady(gatekeeperId);
     let gatekeeper = this.#readyGatekeeperRecord(gatekeeperId);
     let prohibitWorkspaceSharing = gatekeeper.ownerOnly === true ||
         description.prohibitWorkspaceSharing === true;
@@ -11837,6 +11843,7 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   }
 
   async openSession(): Promise<RpcStub<Session>> {
+    await this.impl.ensureOpenApiBindingReady(this.id);
     await this.impl.assertGatekeeperObserverReadiness(this.id);
     this.impl.assertOpenApiBindingActiveNow(this.id);
     // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues

@@ -79,6 +79,8 @@ export interface OpenApiRevocationFinalizer extends RpcTarget {
 }
 /** Private draft-scoped connector activation and revocation capability. */
 export interface OpenApiFacetFinalizer extends OpenApiRevocationFinalizer {
+  /** Exact active grant has lost its transient host capabilities; errors never request replay. */
+  needsActivationReplay?(): Promise<boolean>;
   /** Install the private host capability into this exact draft grant. */
   activate(binding: RpcStub<HostFacetBinding>): Promise<void>;
 }
@@ -99,6 +101,8 @@ export interface OpenApiBoundAccount extends WorkerEntrypoint {
     resource: SupportedResource;
     /** Canonical URL derived from the immutable stored draft, never caller input. */
     resourceUrl: string;
+    /** Explicit support for probing lost transient activation capabilities. */
+    supportsActivationReplay?: boolean;
     /** Private draft-scoped capability retained only by the host. */
     finalizer: RpcStub<OpenApiFacetFinalizer>;
   }>;

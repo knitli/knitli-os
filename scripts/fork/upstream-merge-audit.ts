@@ -21,7 +21,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -38,6 +38,22 @@ export interface FormatChurnFile {
   /** Lines added+removed between upstream's version and ours. */
   rawChurn: number;
 }
+
+/** One reviewed comment-only divergence; changing either blob requires a fresh review. */
+export interface FormatException {
+  path: string;
+  upstreamBlob: string;
+  forkBlob: string;
+  reason: string;
+}
+
+/** Exact content pairs exempt only from the formatting check, never from merge auditing. */
+export const FORMAT_EXCEPTIONS: readonly FormatException[] = [{
+  path: "packages/workshop-backend/src/worktree-binding.d.ts",
+  upstreamBlob: "ff54d738edfe0880bf56120e091818c891a7bfb1",
+  forkBlob: "e7046837ca08f49c6dc657142e9402b2029fceb1",
+  reason: "Document the enforced full 40-hex commit capability boundary for Worktree.diff().",
+}];
 
 /** The merge being audited: who merged what, and where to read the resolved content from. */
 export interface MergeUnderAudit {
@@ -238,40 +254,61 @@ function resolves(ref: string): boolean {
 }
 
 /**
- * Finds the merge to audit: an explicit ref, else a merge in progress, else `HEAD` when `HEAD` is
- * itself a merge commit. Returns `null` when there is no merge to look at, which is the ordinary
- * case on a feature branch and not an error.
+ * Finds an explicit merge, an upstream merge in progress, or the latest upstream sync in the
+ * selected head's ancestry, including syncs carried by a PR's second-parent branch. Upstream's
+ * own merges are excluded. Incomparable sync tips are ambiguous and require an explicit --merge.
  */
 export function locateMerge(
   mergeRef?: string, headRef = "HEAD", upstreamHint?: string,
 ): MergeUnderAudit | null {
-  // An explicit --merge is a claim that `mergeRef` *is* the merge to audit. Being wrong about that
-  // is worth an error, and the claim deliberately bypasses the upstream check below.
   if (mergeRef) return { ...fromMergeCommit(mergeRef), classification: "sync" };
 
-  const candidate = inProgressMerge() ?? committedMerge(headRef);
-  if (!candidate) return null;
-
-  // One gate for every path that *found* a merge rather than being handed one. A merge of
-  // something outside upstream's history is an ordinary branch or PR merge, not a sync, and
-  // auditing it casts one of our own branches as upstream. Kept here, once, because this check has
-  // been missed twice by being attached to individual paths instead.
-  //
-  // Only a definitive "no" skips the merge. With no upstream ref, or when git cannot answer, the
-  // merge is audited anyway and marked unverified -- erring towards a noisy audit rather than a
-  // quiet skip, because a skipped sync is exactly the failure this tool exists to catch.
-  if (!upstreamHint) return { ...candidate, classification: "unverified" };
-  switch (ancestry(candidate.upstreamRef, upstreamHint)) {
-    case "no": return null;
-    case "yes": return { ...candidate, classification: "sync" };
-    default: return { ...candidate, classification: "unverified" };
+  const pending = inProgressMerge();
+  // Without a usable upstream reference preserve the conservative, unverified fallback. The
+  // CLI refuses to call this trustworthy; inventing a baseline from local history is circular.
+  if (!upstreamHint || !resolves(upstreamHint)) {
+    const candidate = pending ?? committedMerge(headRef);
+    return candidate ? { ...candidate, classification: "unverified" } : null;
   }
+  if (pending) {
+    const relation = ancestry(pending.upstreamRef, upstreamHint);
+    if (relation !== "no") {
+      return { ...pending, classification: relation === "yes" ? "sync" : "unverified" };
+    }
+  }
+
+  // Traverse all parents, not just first-parent: GitHub's PR merge wraps the sync branch in its
+  // second parent. Strict git errors propagate instead of turning missing history into a pass.
+  const refs = git(["rev-list", "--topo-order", "--merges", headRef, "--not", upstreamHint])
+    .trim().split(/\s+/).filter(Boolean);
+  let selected: { ref: string; merge: MergeUnderAudit } | undefined;
+  for (const ref of refs) {
+    const parents = parentsOf(ref);
+    // A later parent can be upstream even when the second is an ordinary fork branch.
+    // This audit models exactly two sides; never silently discard additional parents.
+    if (parents.length > 2) {
+      throw new UsageError(`Cannot audit octopus merge ${ref}: more than two parents are unsupported.`);
+    }
+    const relation = ancestry(parents[1]!, upstreamHint);
+    if (relation === "no") continue;
+    const merge = fromMergeCommit(ref);
+    if (relation === "unknown") return { ...merge, classification: "unverified" };
+    if (!selected) {
+      selected = { ref, merge: { ...merge, classification: "sync" } };
+    } else if (ancestry(ref, selected.ref) !== "yes") {
+      throw new UsageError("Multiple incomparable upstream syncs are reachable; select --merge explicitly.");
+    }
+  }
+  return selected?.merge ?? null;
 }
 
 /** The merge git is part-way through, if any. Its resolutions live in the index. */
 function inProgressMerge(): MergeUnderAudit | null {
   const mergeHeadPath = gitOrNull(["rev-parse", "--git-path", "MERGE_HEAD"])?.trim();
   if (!mergeHeadPath || !existsSync(mergeHeadPath)) return null;
+  if (readFileSync(mergeHeadPath, "utf8").trim().split(/\s+/).length > 1) {
+    throw new UsageError("Cannot audit an in-progress octopus merge: more than two parents are unsupported.");
+  }
   const upstreamRef = git(["rev-parse", "MERGE_HEAD"]).trim();
   return {
     baseRef: git(["merge-base", "HEAD", upstreamRef]).trim(),
@@ -293,6 +330,9 @@ function fromMergeCommit(ref: string): MergeUnderAudit {
   if (parents.length < 2) {
     // Only reachable from an explicit --merge; committedMerge() checks the parent count first.
     throw new UsageError(`${ref} is not a merge commit, so there is no merge to audit.`);
+  }
+  if (parents.length > 2) {
+    throw new UsageError(`Cannot audit octopus merge ${ref}: more than two parents are unsupported.`);
   }
   const [oursRef, upstreamRef] = parents as [string, string];
   const resolved = git(["rev-parse", ref]).trim();
@@ -363,7 +403,11 @@ function recomputeMerge(
  * reflow, which buys nothing and conflicts forever. Needs no merge: this is our standing divergence
  * from `upstreamRef`, so it catches reflow arriving through an ordinary PR.
  */
-export function auditFormatDrift(opts: { oursRef: string; upstreamRef: string }): FormatChurnFile[] {
+export function auditFormatDrift(opts: {
+  oursRef: string;
+  upstreamRef: string;
+  onException?: (exception: FormatException) => void;
+}): FormatChurnFile[] {
   const { oursRef, upstreamRef } = opts;
   const churn: FormatChurnFile[] = [];
   for (const path of [...changedFiles(upstreamRef, oursRef)].toSorted()) {
@@ -373,6 +417,14 @@ export function auditFormatDrift(opts: { oursRef: string; upstreamRef: string })
     // A file upstream does not have cannot have been reformatted away from it.
     if (theirs === null || ours === null || ours === theirs) continue;
     if (normalizeForFormatComparison(ours) !== normalizeForFormatComparison(theirs)) continue;
+
+    const exception = FORMAT_EXCEPTIONS.find(entry => entry.path === path &&
+      entry.upstreamBlob === git(["rev-parse", `${upstreamRef}:${path}`]).trim() &&
+      entry.forkBlob === git(["rev-parse", `${oursRef}:${path}`]).trim());
+    if (exception) {
+      opts.onException?.(exception);
+      continue;
+    }
 
     const stat = gitOrNull(["diff", "--numstat", upstreamRef, oursRef, "--", path])?.trim() ?? "";
     const [added = "0", removed = "0"] = stat.split(/\s+/);
@@ -441,7 +493,11 @@ function main(argv: string[]): number {
   const upstreamRef = authoritative ?? merge?.upstreamRef ?? null;
 
   const dropped = merge ? auditDroppedHunks(merge) : [];
-  const formatChurn = upstreamRef ? auditFormatDrift({ oursRef, upstreamRef }) : [];
+  const formatChurn = upstreamRef ? auditFormatDrift({
+    oursRef, upstreamRef,
+    onException: exception => console.log(
+      `Reviewed comment-only exception: ${exception.path}\n  ${exception.reason}`),
+  }) : [];
   const restored = auditRemovedPaths(oursRef);
 
   const shallow = isShallowRepository();
@@ -451,7 +507,7 @@ function main(argv: string[]): number {
     ? `Merge audited: ${merge.description}` +
       (merge.classification === "unverified" ? "  [UNVERIFIED: not confirmed to be an upstream sync]" : "")
     : `No upstream sync to audit (${oursRef === "HEAD" ? "HEAD" : oursRef.slice(0, 12)} is not a ` +
-      "merge of upstream; an ordinary PR merge is not a sync).");
+      "carrying an upstream sync in its ancestry).");
   console.log(upstreamRef
     ? `Formatting checked against: ${shortRef(upstreamRef)}${authoritative ? "" : " (UNVERIFIED)"}`
     : "Formatting NOT checked: no upstream ref. Pass --upstream, or fetch the foundation remote.");

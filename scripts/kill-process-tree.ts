@@ -13,6 +13,7 @@
 // signalled.
 
 import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 
 // The pids a child-lister prints for one parent. Resolves empty when the parent has no children or
 // the lister reports failure -- `pgrep` exits 1 for "no matches", which is not an error here.
@@ -63,10 +64,20 @@ function signalPid(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
-// Whether `pid` still exists. Signal 0 delivers nothing and only checks for the process.
+// Signal 0 also succeeds for zombies, which cannot run or respond to another signal.
 function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
+    if (process.platform === "linux") {
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        // The comm field can contain spaces and parentheses; state follows its final ')'.
+        const commEnd = stat.lastIndexOf(")");
+        if (commEnd !== -1 && /^\s+Z\s/.test(stat.slice(commEnd + 1))) return false;
+      } catch {
+        // Missing/inaccessible procfs is not proof of death. Keep the signal-0 result.
+      }
+    }
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
@@ -99,11 +110,18 @@ export async function killProcessTree(
 }
 
 /**
- * Sends SIGTERM to `pid` and every descendant, then SIGKILLs whatever is still alive after
- * `graceMs`. Resolves once the tree is gone or the escalation has been delivered.
+ * Sends `initialSignal` (SIGTERM by default) to `pid` and every descendant, then SIGKILLs whatever
+ * is still alive after `graceMs`. Resolves once the tree is gone or the escalation has been
+ * delivered.
  *
- * For callers that cannot afford to wait on a descendant which ignores SIGTERM -- one holding an
- * inherited stdout pipe keeps the parent's `close` event from ever firing.
+ * For callers that cannot afford to wait on a descendant which ignores the first signal -- one
+ * holding an inherited stdout pipe keeps the parent's `close` event from ever firing.
+ *
+ * `initialSignal` is for the caller relaying a signal it received itself (`relay-termination.ts`):
+ * in the Ctrl-C case the child already got SIGINT from the tty's process group, and sending it a
+ * SIGTERM instead would cut its own handling of that interrupt short. Named `initialSignal` rather
+ * than `signal` to keep it distinct from the `forceSignal` `AbortSignal` beside it. win32 ignores
+ * it, since `taskkill /T /F` is an unconditional tree kill with nothing to escalate from.
  *
  * An aborted `forceSignal` gives up the rest of the grace period and escalates now. It exists for
  * the caller who is about to exit and needs the SIGKILL delivered first: this call holds the only
@@ -112,7 +130,8 @@ export async function killProcessTree(
  */
 export async function killProcessTreeEscalating(
   pid: number,
-  { graceMs = 5_000, forceSignal }: { graceMs?: number; forceSignal?: AbortSignal } = {},
+  { graceMs = 5_000, forceSignal, initialSignal = "SIGTERM" }:
+      { graceMs?: number; forceSignal?: AbortSignal; initialSignal?: NodeJS.Signals } = {},
 ): Promise<void> {
   if (!Number.isInteger(pid) || pid <= 0) throw new Error("pid must be a positive integer");
 
@@ -120,16 +139,16 @@ export async function killProcessTreeEscalating(
   if (process.platform === "win32") return killProcessTree(pid, "SIGKILL");
 
   // Collected once, for the reason killProcessTree documents above -- and here the single walk is
-  // what makes escalation possible at all. Re-walking after the SIGTERM would find nothing: the
+  // what makes escalation possible at all. Re-walking after the first signal would find nothing: the
   // wrapper dies first and reparents the very survivors we are escalating against, so the SIGKILL
   // has to go to this captured list rather than to a fresh tree.
   const tree = await collectTree(pid);
-  for (const treePid of tree) signalPid(treePid, "SIGTERM");
+  for (const treePid of tree) signalPid(treePid, initialSignal);
 
-  // Polled rather than a flat sleep so the ordinary case -- everything dies to the SIGTERM -- does
-  // not pay the grace period. A pid could in principle be recycled onto an unrelated process inside
-  // the window and be signalled below; the existing walk has the same exposure, and a window this
-  // short against pids that were this process's own descendants makes it not worth guarding.
+  // Polled rather than a flat sleep so the ordinary case -- everything dies to the first signal --
+  // does not pay the grace period. A pid could in principle be recycled onto an unrelated process
+  // inside the window and be signalled below; the existing walk has the same exposure, and a window
+  // this short against pids that were this process's own descendants makes it not worth guarding.
   const deadline = Date.now() + graceMs;
   let survivors = tree.filter(isAlive);
   while (survivors.length > 0 && Date.now() < deadline) {

@@ -30,6 +30,10 @@ type TestHooks = HookInitiator<ScheduleHookTarget> & {
   }>;
   release(): Promise<void>;
   reset(): Promise<void>;
+  waitForDisposals(
+    target: { approvalQueues: number; callbacks: number },
+    budgetMs: number,
+  ): Promise<void>;
   waitUntilBlocked(): Promise<void>;
 };
 
@@ -318,12 +322,7 @@ describe("ScheduleDriver", () => {
     expect(
       (await testEnv.TEST_HOOKS.read()).events.filter((event) => event.startsWith("callback:")),
     ).toHaveLength(2);
-    await vi.waitFor(async () => {
-      expect(await testEnv.TEST_HOOKS.read()).toMatchObject({
-        disposedApprovalQueues: 2,
-        disposedCallbacks: 2,
-      });
-    }, { timeout: 5_000 });
+    await testEnv.TEST_HOOKS.waitForDisposals({ approvalQueues: 2, callbacks: 2 }, 2_000);
 
     await driver.disable("workspace-a", "schedule-a");
     const keys = await runInDurableObject(driver, (_instance, state) =>
@@ -540,12 +539,7 @@ describe("ScheduleDriver", () => {
       "authorize",
       `callback:${runId}`,
     ]);
-    await vi.waitFor(async () => {
-      expect(await testEnv.TEST_HOOKS.read()).toMatchObject({
-        disposedApprovalQueues: 2,
-        disposedCallbacks: 2,
-      });
-    }, { timeout: 5_000 });
+    await testEnv.TEST_HOOKS.waitForDisposals({ approvalQueues: 2, callbacks: 2 }, 2_000);
     expect(reportIssue).not.toHaveBeenCalled();
   });
 
@@ -725,7 +719,18 @@ describe("ScheduleDriver", () => {
       });
     });
 
-    await runDurableObjectAlarm(driver);
+    // Hold callbacks until all four delivery slots are occupied. A short callback delay
+    // cannot guarantee saturation when RPC admission is slower on a contended runner.
+    await testEnv.TEST_HOOKS.blockAt("callback");
+    const alarm = runDurableObjectAlarm(driver);
+    try {
+      await vi.waitFor(async () => {
+        expect((await testEnv.TEST_HOOKS.read()).maxActiveCallbacks).toBe(4);
+      });
+    } finally {
+      await testEnv.TEST_HOOKS.release();
+      await alarm;
+    }
     await vi.waitFor(async () => {
       const events = (await testEnv.TEST_HOOKS.read()).events;
       expect(events.filter((event) => event.startsWith("callback:"))).toHaveLength(21);

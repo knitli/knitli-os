@@ -232,6 +232,7 @@ describe("authenticated OpenAPI host binding", () => {
     const bobAccount = await provision(bobApi);
     expect(account.id).toBe(0);
     using intended = await aliceApi.newGadget();
+    const intendedId = (await intended.getMetadata()).id;
     using wrong = await aliceApi.newGadget();
     using bobs = await bobApi.newGadget();
     const { ui, selection } = await select(intended, account);
@@ -240,12 +241,26 @@ describe("authenticated OpenAPI host binding", () => {
     await expect(attemptAdd(wrong, account.id, selection.resourceUrl)).rejects.toThrow("DRAFT_NOT_FOUND");
     await noActivation(selection.reference.draftId);
     expect(await intended.addCollaborator(bob, "build")).not.toBeNull();
-    using shared = await bobApi.openGadget((await intended.getMetadata()).id);
+    using shared = await bobApi.openGadget(intendedId);
     await expect(shared.startBoundResourceConfigurator(bobAccount.id, bobAccount.pattern)).rejects.toThrow("BINDING_OWNER_REQUIRED");
     await expect(attemptAdd(shared, bobAccount.id, selection.resourceUrl)).rejects.toThrow("BINDING_OWNER_REQUIRED");
     using connection = await intended.newGatekeeper(account.id, selection.resourceUrl);
     expect(connection).not.toBeNull();
-    expect(await connection!.getId()).toBe(0);
+    // Publishing widens the active build collaborator's scope. Observe the old
+    // workspace capability die before disposing its clients: an unobserved delayed
+    // abort with no client can crash the local runtime (see settleRestart in harness.ts).
+    const restartError = await waitFor("scope expansion to restart the old workspace", () =>
+      intended.getMetadata().then(() => null, error => String(error)));
+    expect(restartError).toBe(
+      "Error: Peer closed WebSocket: 3000 RPC session was shut down by disposing the main stub");
+    using freshPublic = connect(harness.url);
+    using freshOwner = await logIn(freshPublic, alice);
+    using reopened = await freshOwner.openGadget(intendedId);
+    expect((await reopened.getMetadata()).id).toBe(intendedId);
+    // Publication's old connection is on the severed session. Verify the committed
+    // gatekeeper through the reopened workspace instead of racing the restart.
+    using published = await reopened.getGatekeeperById(0);
+    expect(await published.getId()).toBe(0);
     expect((await events(selection.reference.draftId)).filter(e => e.event === "activated")).toHaveLength(1);
   }));
 

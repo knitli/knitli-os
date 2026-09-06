@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { type Harness, startHarness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
-import { connect, nextUsernames, signUp, waitFor } from "../src/rpc-client.js";
+import { connect, logIn, nextUsernames, signUp, waitFor } from "../src/rpc-client.js";
 
 let harness: Harness | undefined;
 const network = new NetworkInterceptor();
@@ -33,7 +33,8 @@ function username(prefix: string): string {
 
 it.concurrent("publishes, instantiates, and deletes an owned blueprint", async () => {
   using publicApi = connect(requireHarness().url);
-  using authenticated = await signUp(publicApi, username("blueprint"));
+  const owner = username("blueprint");
+  using authenticated = await signUp(publicApi, owner);
   const formats = await waitFor("bundled output formats to install", async () => {
     const offers = await authenticated.listOutputFormats();
     return offers.length > 0 ? offers : null;
@@ -65,7 +66,11 @@ it.concurrent("publishes, instantiates, and deletes an owned blueprint", async (
       workspaceTitle: sourceMetadata.title,
     },
   }));
-  using installedWorkspace = await authenticated.newGadgetFromBlueprint(blueprint.id, {});
+  // A workspace deletion closes its client WebSocket. Keep the installed workspace on its
+  // own connection so its deletion cannot interrupt operations on the source workspace.
+  using installedPublicApi = connect(requireHarness().url);
+  using installedAuthenticated = await logIn(installedPublicApi, owner);
+  using installedWorkspace = await installedAuthenticated.newGadgetFromBlueprint(blueprint.id, {});
   const installedMetadata = await installedWorkspace.getMetadata();
   const installedGadgetId = installedMetadata.defaultGadgetId;
   if (installedGadgetId === undefined) throw new Error("Installed workspace has no default Gadget");
@@ -78,7 +83,11 @@ it.concurrent("publishes, instantiates, and deletes an owned blueprint", async (
       ? null
       : true);
   await installedWorkspace.deleteSelf();
+  await waitFor("the installed workspace deletion to sever its client", () =>
+    installedWorkspace.getMetadata().then(() => null, () => true));
   await sourceWorkspace.deleteSelf();
+  await waitFor("the source workspace deletion to sever its client", () =>
+    sourceWorkspace.getMetadata().then(() => null, () => true));
 });
 
 it.concurrent("creates and removes an indexed standard output", async () => {
@@ -118,4 +127,6 @@ it.concurrent("creates and removes an indexed standard output", async () => {
       ? null
       : true);
   await workspace.deleteSelf();
+  await waitFor("the output workspace deletion to sever its client", () =>
+    workspace.getMetadata().then(() => null, () => true));
 });

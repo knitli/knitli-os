@@ -7,6 +7,9 @@ import {
 import type {
   ActionDescription,
   GatekeeperUser,
+  GitCache,
+  GitObjectType,
+  GitOid,
   ObservationDescription,
   ResourceDescription,
   SupportedResource,
@@ -98,6 +101,28 @@ type QueueState = {
 
 type GatekeeperRpc = Fetcher<AiExecutorGatekeeperImpl>;
 
+// The executor does not use Git; every cache method throws if that changes.
+class TestGitCache extends RpcTarget implements GitCache {
+  async get(_id: GitOid): Promise<{type: GitObjectType, content: Uint8Array} | null> {
+    throw new Error("not implemented");
+  }
+  async has(_id: GitOid): Promise<boolean> { throw new Error("not implemented"); }
+  async stat(_id: GitOid): Promise<{type: GitObjectType, size: number} | null> {
+    throw new Error("not implemented");
+  }
+  async put(_type: GitObjectType, _content: Uint8Array): Promise<GitOid> {
+    throw new Error("not implemented");
+  }
+  async advertiseCommit(_commitId: GitOid): Promise<void> { throw new Error("not implemented"); }
+  async buildPack(): Promise<ReadableStream<Uint8Array>> { throw new Error("not implemented"); }
+  async consumePack(_pack: ReadableStream<Uint8Array>): Promise<GitOid[]> {
+    throw new Error("not implemented");
+  }
+  async isAncestor(_ancestor: GitOid, _descendant: GitOid): Promise<boolean> {
+    throw new Error("not implemented");
+  }
+}
+
 class TestApprovalQueue extends RpcTarget {
   readonly state: QueueState = {
     actions: [],
@@ -118,7 +143,8 @@ class TestApprovalQueue extends RpcTarget {
       throw new Error("Test queue is locked against subsequent actions.");
     }
     this.state.actions.push({ id, description });
-    await this.gatekeeper.applyAction(id);
+    using cache = new RpcStub(new TestGitCache());
+    await this.gatekeeper.applyAction(id, cache);
   }
 
   async authorizeObservation(description: ObservationDescription): Promise<void> {

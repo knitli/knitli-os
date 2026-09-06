@@ -292,6 +292,7 @@ class OpenApiSession extends RpcTarget implements TestSession {
   }
   async observe(): Promise<void> { await this.readValue(); }
   async writeValue(_value: number): Promise<number> { throw new Error("FIXTURE_WRITES_UNSUPPORTED"); }
+  async writeValues(_values: number[]): Promise<number[]> { throw new Error("FIXTURE_WRITES_UNSUPPORTED"); }
   async act(): Promise<void> { throw new Error("FIXTURE_WRITES_UNSUPPORTED"); }
   async bindHook(): Promise<void> { throw new Error("FIXTURE_HOOKS_UNSUPPORTED"); }
 }

@@ -2,6 +2,7 @@ import { DurableObject, type RpcStub } from "cloudflare:workers";
 import type {
   ApprovalQueue,
   Gatekeeper,
+  GitCache,
   GatekeeperUserVerifier,
   ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
@@ -84,7 +85,7 @@ export class AiExecutorGatekeeperImpl extends DurableObject<
     return new AiExecutorSession(this.#store, approvalQueue.dup());
   }
 
-  async applyAction(runId: number): Promise<void> {
+  async applyAction(runId: number, _cache: RpcStub<GitCache>): Promise<void> {
     await this.#controller.applyAction(runId);
   }
 

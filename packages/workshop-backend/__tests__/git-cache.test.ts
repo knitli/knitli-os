@@ -789,7 +789,7 @@ describe("buildPack", () => {
     expect(await decodePackBytes(pack, { maxObjectSize: 1 })).toStrictEqual([]);
   });
 
-  it("fails the apply with the source's error on provenance loss", async () => {
+  it("fails the apply with a sanitized source failure on provenance loss", async () => {
     let t = await setupCrossRemote({ materializeTree: false });
     t.cache.markPushClosure(G2, ACTION, [t.child]);
     t.sources.delete(G1);  // the source connection is gone

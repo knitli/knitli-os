@@ -41,8 +41,10 @@ export interface HostBindingLedger {
 }
 /** Stable, non-sensitive protocol error. */
 export class BindingError extends Error {
-  constructor(public readonly code: string) {
+  public readonly code: string;
+  constructor(code: string) {
     super(code);
+    this.code = code;
   }
 }
 const fail = (code: string): never => {

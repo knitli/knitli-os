@@ -1597,6 +1597,13 @@ function BlueprintGatekeeperBindingField({
     onReadyChangeRef.current(false)
     replaceFrameState(null)
 
+    // A private draft needs a real workspace before configuration can begin.
+    if (selectedAccount.description.hostBindingProtocol === "openapi-v1") {
+      setFrameError("Create a workspace, then add this connection from the Connections panel.")
+      setFrameLoading(false)
+      return
+    }
+
     authenticatedApi.startResourceConfigurator(selectedAccount.id, resource.urlPattern)
       .then(frame => {
         if (cancelled) {
@@ -1616,7 +1623,7 @@ function BlueprintGatekeeperBindingField({
     return () => {
       cancelled = true
     }
-  }, [authenticatedApi, selectedAccount?.id, resource?.urlPattern, replaceFrameState])
+  }, [authenticatedApi, selectedAccount?.id, selectedAccount?.description.hostBindingProtocol, resource?.urlPattern, replaceFrameState])
 
   // Bail out if the gatekeeper isn't installed locally or the required resource type isn't
   // offered by the vendor. The binding can't be satisfied in either case.

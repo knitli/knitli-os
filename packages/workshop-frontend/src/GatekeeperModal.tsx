@@ -531,6 +531,9 @@ export default function GatekeeperModal({
     setSelectedAccountId(firstValidAccount?.id ?? null)
   }, [selectedConnection, matchingAccounts, selectedAccountId])
 
+  const getOverseerRef = useRef(getOverseer)
+  getOverseerRef.current = getOverseer
+
   useEffect(() => {
     const resourceUrlPattern = selectedConnection?.resourceUrlPattern ?? null
     if (!open || !resourceUrlPattern || !selectedAccount || hasMissingResourceGrants) {
@@ -547,8 +550,14 @@ export default function GatekeeperModal({
     setConfiguratorError(null)
     setConfiguratorSelectionReady(null)
 
-    authenticatedApi.startResourceConfigurator(selectedAccount.id, resourceUrlPattern)
+    const startup = selectedAccount.description.hostBindingProtocol === "openapi-v1"
+      ? Promise.resolve().then(() => getOverseerRef.current()).then(overseer => cancelled
+        ? undefined
+        : overseer.startBoundResourceConfigurator(selectedAccount.id, resourceUrlPattern))
+      : authenticatedApi.startResourceConfigurator(selectedAccount.id, resourceUrlPattern)
+    startup
       .then(frame => {
+        if (!frame) return
         if (cancelled) {
           disposeConfiguratorFrame(frame)
           return
@@ -576,7 +585,7 @@ export default function GatekeeperModal({
     return () => {
       cancelled = true
     }
-  }, [open, authenticatedApi, selectedConnection?.id, selectedConnection?.resourceUrlPattern, selectedAccount?.id, hasMissingResourceGrants])
+  }, [open, authenticatedApi, selectedAccount?.description.hostBindingProtocol, selectedConnection?.id, selectedConnection?.resourceUrlPattern, selectedAccount?.id, hasMissingResourceGrants])
 
   const handleSelectConnection = (connection: ConnectionType) => {
     setSelectedConnectionId(connection.id)

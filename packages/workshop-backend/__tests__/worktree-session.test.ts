@@ -688,7 +688,9 @@ describe("commit and diff", () => {
     ]));
     let ghostTarget = await cache.putFromGatekeeper(
         7, "commit", commitPayload(ghostTree, [], "ghost target"));
-    await expect(session.diff(ghostTarget)).rejects.toThrow(/simulated pull outage/);
+    await expect(session.diff(ghostTarget)).rejects.toThrow(new Error(
+      `Could not pull git object ${ghostOid.slice(0, 8)}: ` +
+      "every connection that could provide it failed (git.pull.source.failed)."));
     // The blob read's pull hint names its containing tree, not the commit: blobs are
     // referenced by trees (the referencedBy hint contract).
     expect(pulls).toEqual(

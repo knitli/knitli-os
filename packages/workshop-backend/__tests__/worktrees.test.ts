@@ -177,7 +177,9 @@ describe("createWorktree", () => {
     let oid = "abcd".repeat(10);
     impl.storage.gitObjectMetadata.put(
         { oid, type: "commit", onRemote: [99], pullableFrom: [], pendingPush: [] });
-    await expect(impl.createWorktree("W", 1, oid)).rejects.toThrow(/[Rr]econnect/);
+    await expect(impl.createWorktree("W", 1, oid)).rejects.toThrow(new Error(
+        `Could not pull git object ${oid.slice(0, 8)}: ` +
+        "every connection that could provide it failed (git.pull.source.failed)."));
   }));
 
   it("records the first recorded source as sourceGatekeeperId", () => withImpl(async impl => {

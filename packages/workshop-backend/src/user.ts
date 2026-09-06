@@ -1,3 +1,6 @@
+import { createOpenApiUserBinding, type OpenApiAccountEpoch } from "./fork/openapi-user-binding";
+import type { BindingRow } from "./fork/openapi-binding-ledger";
+import type { BoundIdentity } from "@gadgets/workshop-shared/fork/openapi-host-binding";
 import { RpcStub } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
@@ -163,6 +166,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
       gadgets: collection<GadgetRecord>()({
         primaryKey: "id"
       }),
+      openApiDraftIssuers: collection<{ draftId: string; authorityId: string }>()({ primaryKey: "draftId" }),
+      openApiDrafts: collection<BindingRow>()({ primaryKey: row => row.reference.draftId }),
+      openApiAccountEpochs: collection<OpenApiAccountEpoch>()({ primaryKey: "id" }),
       connectedAccounts: collection<ConnectedAccountRecord>()({
         primaryKey: "id"
       }),
@@ -1500,40 +1506,36 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async disconnectAccount(accountId: number): Promise<void> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (account) {
+      const binding = this.#openApiBinding();
       if (account.autoProvisioned) {
-        // A forced ("enabled") ambient account can't be removed by the user — the admin controls it.
+        const expected = binding.snapshot(accountId);
         if (shouldAutoProvisionAccount(await readAdminConfig(this.env), account.vendorId)) {
           throw new Error("This account is provided automatically and can't be disconnected.");
         }
-        // An opt-in ("optional") ambient account: the user added it, so let them remove it. revoke()
-        // gives the gatekeeper a chance to delete its own per-user storage (e.g. the account's
-        // private collections DO) — it's its cleanup hook, not just OAuth revocation. Best-effort:
-        // a gatekeeper that throws (or has nothing to revoke) must not block the user's disconnect.
-        try {
-          await account.account.revoke();
-        } catch (err) {
-          logger.error("revoke() failed during disconnect", {
-            event: "account.revoke.failed",
-            vendorId: account.vendorId, accountId, error: err,
-          });
-        }
-        this.storage.connectedAccounts.delete(accountId);
+        binding.assertUnchanged(accountId, expected);
+        // Optional ambient accounts retain best-effort provider cleanup, but a later account
+        // lifecycle operation must win over this suspended disconnect.
+        await binding.mutateAccount(accountId, async () => {
+          try {
+            await account.account.revoke();
+          } catch (err) {
+            logger.error("revoke() failed during disconnect", {
+              event: "account.revoke.failed", vendorId: account.vendorId, accountId, error: err,
+            });
+          }
+        }, () => { this.storage.connectedAccounts.delete(accountId); });
         logger.info("account disconnected", {
-          event: "account.disconnected",
-          vendorId: account.vendorId, accountId, autoProvisioned: true,
+          event: "account.disconnected", vendorId: account.vendorId, accountId, autoProvisioned: true,
         });
         return;
       }
-      await account.account.revoke();
-      this.storage.connectedAccounts.delete(accountId);
-      // Disconnecting the Cloudflare account also clears the AI Gateway billing state (selected
-      // account + cached balance), which is meaningless without the underlying grant.
-      if (account.vendorId === CLOUDFLARE_VENDOR_ID) {
-        this.storage.cloudflareBilling.put(null);
-      }
+      await binding.mutateAccount(accountId, () => account.account.revoke(), () => {
+        this.storage.connectedAccounts.delete(accountId);
+      });
+      // Disconnecting a Cloudflare account also clears its selected billing account and balance.
+      if (account.vendorId === CLOUDFLARE_VENDOR_ID) this.storage.cloudflareBilling.put(null);
       logger.info("account disconnected", {
-        event: "account.disconnected",
-        vendorId: account.vendorId, accountId, autoProvisioned: false,
+        event: "account.disconnected", vendorId: account.vendorId, accountId, autoProvisioned: false,
       });
     }
   }
@@ -1544,13 +1546,48 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return record.account.reconnect();
   }
 
-  async startResourceConfigurator(
-      accountId: number,
-      resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
-    let record = this.storage.connectedAccounts.get(accountId);
-    if (!record) throw new Error("No such account.");
-    return record.account.startResourceConfigurator(resourceUrlPattern);
+  #openApiBinding() {
+    return createOpenApiUserBinding({
+      transaction: operation => this.ctx.storage.transactionSync(operation),
+      ownerId: this.ctx.id.toString(), publicBaseUrl: this.env.PUBLIC_BASE_URL,
+      store: {
+        get: id => this.storage.openApiDrafts.get(id),
+        put: (_id, row) => { this.storage.openApiDrafts.put(row); },
+        list: () => Array.from(this.storage.openApiDrafts.list()),
+      },
+      getAccount: id => this.storage.connectedAccounts.get(id),
+      getDraftIssuer: id => this.storage.openApiDraftIssuers.get(id)?.authorityId,
+      putDraftIssuer: (draftId, authorityId) => { this.storage.openApiDraftIssuers.put({ draftId, authorityId }); },
+      getEpoch: id => this.storage.openApiAccountEpochs.get(id),
+      putEpoch: epoch => { this.storage.openApiAccountEpochs.put(epoch); },
+      checkPolicy: async (vendorId, resource) => {
+        const config = await readAdminConfig(this.env);
+        if (config.disabledGatekeepers.includes(vendorId.toLowerCase()))
+          throw new Error(`The "${vendorId}" gatekeeper is disabled on this deployment by an administrator.`);
+        if (isResourceDisabled(config, vendorId.toLowerCase(), resource.urlPattern))
+          throw new Error(`The "${resource.title}" resource is disabled on this deployment by an administrator.`);
+      },
+      now: () => Date.now(),
+    });
   }
+
+  async startResourceConfigurator(accountId: number, resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    return this.#openApiBinding().start(accountId, resourceUrlPattern);
+  }
+
+  /** Internal User DO delegate; the authenticated Overseer supplies its own workspace ID. */
+  async startBoundResourceConfigurator(accountId: number, resourceUrlPattern: string, intendedWorkspaceId: string): Promise<ResourceConfiguratorFrame> {
+    return this.#openApiBinding().start(accountId, resourceUrlPattern, intendedWorkspaceId);
+  }
+
+  /** Resolve a registered draft privately, with policy and account fences after awaits. */
+  async lookupOpenApiDraft(accountId: number, resourceUrl: string, intendedWorkspaceId: string) {
+    return this.#openApiBinding().lookup(accountId, resourceUrl, intendedWorkspaceId);
+  }
+  async reserveOpenApiDraft(identity: BoundIdentity) { return this.#openApiBinding().reserve(identity); }
+  async beginOpenApiActivation(identity: BoundIdentity) { this.#openApiBinding().beginActivation(identity); }
+  async activateOpenApiDraft(identity: BoundIdentity, selectionDigest: string) { this.#openApiBinding().activate(identity, selectionDigest); }
+  async assertOpenApiAccountReady(identity: BoundIdentity) { this.#openApiBinding().assertReady(identity); }
 
   /**
    * Persist a connected gatekeeper account that was established during sign-in (rather than via the
@@ -1574,19 +1611,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (existing) {
         // Drop the now-stale grant (a separate gatekeeper-side object from the fresh one), then point
         // the existing record — keeping its id, so UI references stay stable — at the fresh grant.
-        try {
-          await existing.account.revoke();
-        } catch (err) {
-          logger.error("failed to revoke stale grant; replacing anyway", {
-            event: "account.stale.grant.revoke.failed",
-            accountId: existing.id, vendorId, error: err,
-          });
-        }
-        existing.account = account;
-        existing.description = description;
-        existing.credentialExpiresAt = expiresAt;
-        existing.credentialsExpired = false;
-        this.storage.connectedAccounts.put(existing);
+        const binding = this.#openApiBinding();
+        await binding.mutateAccount(existing.id, async () => {
+          try {
+            await existing.account.revoke();
+          } catch (err) {
+            logger.error("failed to revoke stale grant; replacing anyway", {
+              event: "account.stale.grant.revoke.failed",
+              accountId: existing.id, vendorId, error: err,
+            });
+          }
+        }, () => {
+          existing.account = account;
+          existing.description = description;
+          existing.credentialExpiresAt = expiresAt;
+          existing.credentialsExpired = false;
+          this.storage.connectedAccounts.put(existing);
+          binding.replace(existing.id);
+        });
         return;
       }
     }
@@ -1639,7 +1681,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       return;
     }
 
-    this.storage.connectedAccounts.put(record);
+    this.ctx.storage.transactionSync(() => {
+      this.#openApiBinding().fence(record.id);
+      this.storage.connectedAccounts.put(record);
+      this.#openApiBinding().replace(record.id);
+    });
   }
 
   async markCredentialsExpired(accountId: number) {
@@ -1657,7 +1703,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!record) throw new Error("No such account.");
 
     // Re-fetch description since the user may have re-authed with different info.
-    record.description = await record.account.describe();
+    const binding = this.#openApiBinding();
+    const expected = binding.snapshot(accountId);
+    const description = await record.account.describe();
+    binding.assertUnchanged(accountId, expected);
+    record.description = description;
     record.credentialsExpired = false;
     record.credentialExpiresAt = expiresAt;
     this.storage.connectedAccounts.put(record);

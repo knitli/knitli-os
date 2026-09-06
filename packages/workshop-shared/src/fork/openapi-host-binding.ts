@@ -92,6 +92,8 @@ export interface OpenApiBoundAccount extends WorkerEntrypoint {
     class: DurableObjectClass<Gatekeeper<any>>;
     /** Resource description subject to existing host policy. */
     resource: SupportedResource;
+    /** Canonical URL derived from the immutable stored draft, never caller input. */
+    resourceUrl: string;
     /** Private draft-scoped capability retained only by the host. */
     finalizer: RpcStub<OpenApiFacetFinalizer>;
   }>;

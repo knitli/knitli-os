@@ -9303,6 +9303,11 @@ function joinSessionPresence(
 
 @validateRpc()
 class OverseerClientInterface extends RpcTarget implements Overseer {
+  async startBoundResourceConfigurator(accountId: number, resourceUrlPattern: string) {
+    if (this.clientUserId !== this.impl.ownerId) throw new Error("BINDING_OWNER_REQUIRED");
+    return this.#clientUser.startBoundResourceConfigurator(accountId, resourceUrlPattern, this.impl.ctx.id.toString());
+  }
+
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
 
   constructor(private impl: OverseerImpl,
@@ -10845,6 +10850,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 // whether "use" callers may invoke it.
 @validateRpc()
 class UseOverseerInterface extends RpcTarget implements Overseer {
+  async startBoundResourceConfigurator(_accountId: number, _resourceUrlPattern: string): Promise<import("@gadgets/workshop-shared/gatekeeper").ResourceConfiguratorFrame> { return this.#deny(); }
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,
               private clientUserId: string,

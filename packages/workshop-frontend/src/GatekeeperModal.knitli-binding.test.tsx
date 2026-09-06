@@ -241,7 +241,8 @@ describe("authenticated OpenAPI configurator startup", () => {
     getOverseer = vi
       .fn<() => Promise<RpcStub<Overseer>>>()
       .mockResolvedValue({} as RpcStub<Overseer>),
-  ) {
+    props: Partial<ComponentProps<typeof GatekeeperModal>> = {},
+) {
     currentApi = api;
     container = document.createElement("div");
     document.body.append(container);
@@ -253,6 +254,7 @@ describe("authenticated OpenAPI configurator startup", () => {
           onClose={() => {}}
           getOverseer={getOverseer}
           onCreated={async () => {}}
+        {...props}
         />,
       );
       await Promise.resolve();
@@ -390,6 +392,24 @@ describe("authenticated OpenAPI configurator startup", () => {
     expect(rendered.getOverseer.mock.calls).toHaveLength(workspaceCallsBefore);
   });
 
+  it('prefers the saved account but permits a replacement during resumed setup', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: true, initialAccount: false, bound: true });
+    const startBoundResourceConfigurator = vi.fn<(accountId: number, resourceUrlPattern: string) => Promise<{ iframeHtml: string; ui: { [Symbol.dispose](): void } }>>().mockResolvedValue({ iframeHtml: '<html></html>', ui: { [Symbol.dispose]() {} } });
+    const getOverseer = vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({ startBoundResourceConfigurator } as unknown as RpcStub<Overseer>);
+    const rendered = await render(testApi.api, getOverseer, {
+      initialVendorId: 'ai-executor', initialResourceUrlPattern: PROFILE_URL, initialAccountId: 77, lockResourceType: true,
+    });
+    await act(async () => {
+      for (const id of [42, 77]) testApi.subscriber()!.add(id, { displayName: `Account ${id}`, avatar: { url: 'https://example.test/avatar.png' }, hostBindingProtocol: 'openapi-v1' }, vendor(true), [RESOURCE], true, 'ai-executor');
+    });
+    expect(startBoundResourceConfigurator.mock.calls).toEqual([[77, PROFILE_URL]]);
+    expect(rendered.container.textContent).not.toContain('All connection types');
+    const replacement = [...rendered.container.querySelectorAll('button')].find(button => button.textContent?.includes('Account 42'))!;
+    await act(async () => replacement.click());
+    expect(startBoundResourceConfigurator.mock.calls).toEqual([[77, PROFILE_URL], [42, PROFILE_URL]]);
+    expect(testApi.startResourceConfigurator).not.toHaveBeenCalled();
+  });
+
   it.each([true, false])(
     "blueprint preworkspace configuration honors v1 opt-in %s",
     async (bound) => {
@@ -431,7 +451,7 @@ describe("authenticated OpenAPI configurator startup", () => {
       expect(configure).toBeDefined();
       await act(async () => configure!.click());
       expect(document.body.textContent).toContain(bound
-        ? "Create a workspace, then add this connection from the Connections panel."
+        ? "Set up after creating workspace"
         : "Profile URL ready")
       expect(testApi.startResourceConfigurator.mock.calls).toEqual(bound ? [] : [[42, PROFILE_URL]])
     },

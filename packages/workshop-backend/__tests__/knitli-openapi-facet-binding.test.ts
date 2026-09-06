@@ -589,6 +589,11 @@ function installActualHostFakes(impl: ActualOverseer) {
     }),
   } as typeof impl.users;
   let sessionCalls = 0;
+  let sessionPause = async () => {};
+  let sessionDisposals = 0;
+  class TestSession extends WebRpcTarget {
+    [Symbol.dispose]() { sessionDisposals++; }
+  }
   let allowSession = false;
   let queue: Parameters<ReturnType<ActualOverseer["getGatekeeperFacet"]>["startSession"]>[0] | undefined;
   const facet = vi.spyOn(impl, "getGatekeeperFacet").mockImplementation(id => {
@@ -597,16 +602,53 @@ function installActualHostFakes(impl: ActualOverseer) {
     return { describe: f.describe, startSession: async captured => {
       sessionCalls++; queue = captured;
       if (!allowSession) throw new Error("TEST_SESSION_REACHED");
-      return new WebRpcTarget();
+      await sessionPause();
+      return new TestSession();
     } } as ReturnType<ActualOverseer["getGatekeeperFacet"]>;
   });
   const sharing = vi.spyOn(impl, "getSharingManager").mockResolvedValue({
     hasAnyShares: f.isShared,
   } as Awaited<ReturnType<ActualOverseer["getSharingManager"]>>);
-  return { f, getSessionCalls: () => sessionCalls, allowSession: () => { allowSession = true; }, getQueue: () => queue!, restore: () => { facet.mockRestore(); sharing.mockRestore(); } };
+  return { f, pauseSession: (pause: () => Promise<void>) => { sessionPause = pause; }, getSessionDisposals: () => sessionDisposals, getSessionCalls: () => sessionCalls, allowSession: () => { allowSession = true; }, getQueue: () => queue!, restore: () => { facet.mockRestore(); sharing.mockRestore(); } };
 }
 
 describe("actual Overseer durable publication integration", () => {
+  it.each(["readiness", "startSession"] as const)("rejects scope quarantine while %s is paused", async phase => {
+    await withActualOverseer(async impl => {
+      const host = installActualHostFakes(impl);
+      const pause = barrier();
+      const restart = vi.spyOn(impl, "scheduleAccessRestart").mockResolvedValue();
+      let leaveSession: (() => void) | undefined;
+      let result: Promise<unknown> | undefined;
+      try {
+        const connection = await impl.createBoundOpenApiGatekeeper(0, url);
+        host.allowSession();
+        impl.storage.gadgets.put({ type: "gadget", id: 100, title: "G", created: new Date(0), bindingName: "G", bindings: {} });
+        leaveSession = impl.joinSession("use");
+        if (phase === "readiness") host.f.pauseAccount(pause.pause);
+        else host.pauseSession(pause.pause);
+        result = connection.openSession().then(() => "UNEXPECTED_SESSION", error => error);
+        await pause.reached;
+        // Use the real scope-widening path. Only restart delivery is faked: aborting the DO
+        // would end the test before it could observe the quarantined in-flight operation.
+        impl.bindWorkpiece(100, "API", 0);
+        expect(restart).toHaveBeenCalledOnce();
+        expect(() => impl.assertGatekeeperUsable(0)).toThrow(/restarting/);
+        pause.release();
+        const error = await result;
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toMatch(/restarting/);
+        expect(host.getSessionCalls()).toBe(phase === "readiness" ? 0 : 1);
+        expect(host.getSessionDisposals()).toBe(phase === "readiness" ? 0 : 1);
+      } finally {
+        pause.release();
+        await result;
+        leaveSession?.();
+        restart.mockRestore();
+        host.restore();
+      }
+    });
+  });
   it.each(["session", "retained-observation"] as const)("recovers lost connector authority before admitting a %s", async entry => {
     await withActualOverseer(async impl => {
       const host = installActualHostFakes(impl);
@@ -1083,7 +1125,7 @@ describe("actual Overseer durable publication integration", () => {
     await withActualOverseer(async impl => {
       const facet = vi.spyOn(impl, "getGatekeeperFacet");
       try {
-        await expect(impl.addGatekeeper({} as Parameters<ActualOverseer["addGatekeeper"]>[0], undefined, 0, () => {})).rejects.toThrow("BINDING_NOT_RESERVED");
+        await expect(impl.addGatekeeper({} as Parameters<ActualOverseer["addGatekeeper"]>[0], undefined, undefined, 0, () => {})).rejects.toThrow("BINDING_NOT_RESERVED");
         expect(facet).not.toHaveBeenCalled(); expect(impl.storage.gatekeepers.get(0)).toBeUndefined();
       } finally { facet.mockRestore(); }
     });

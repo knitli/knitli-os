@@ -14,10 +14,14 @@ declare namespace Cloudflare {
   }
 
   interface Env {
-    EXTERNAL_MESSAGE_GATEWAY: Fetcher<
-      import("cloudflare:workers").WorkerEntrypoint &
-        import("@gadgets/workshop-shared/external-message-gateway").ExternalMessageGateway
-    >;
+    // The Workshop's external-message gateway entrypoint (see wrangler.jsonc). The contract
+    // interface is not entrypoint-branded (the shipping class implements it), so brand it here to
+    // satisfy Fetcher's constraint.
+    WORKSHOP_EXTERNAL_MESSAGES: Fetcher<
+        import("@gadgets/workshop-shared/external-message-gateway").ExternalMessageGateway &
+        Rpc.WorkerEntrypointBranded>;
+    // The Workshop's Overseer DO namespace (see wrangler.jsonc); used only to derive ids.
+    WORKSHOP_OVERSEER: DurableObjectNamespace;
   }
 }
 

@@ -25,7 +25,6 @@ import type { BoundIdentity, DraftReference, HostDraftAuthority, HostFacetBindin
 import { assertDraftLive, assertReference, bindingEvent, openApiControlRequest, openApiEnabled, openApiFinalizer, openApiResource, openApiRevocationFinalizer, sameIdentity, startOpenApiConfigurator, type BindingEvent, type ConnectorDraft, type OpenApiTestEnv, OpenApiRuntime, startOpenApiSession } from "./fork/openapi-binding";
 
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
-import type { ChatGatewayRpcTarget } from "@gadgets/workshop-shared/external-message-gateway";
 import type {
   AccountDescription,
   ActionKind,
@@ -42,6 +41,9 @@ import type {
   SupportedResource,
   VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import type {
+  ChatGatewayRpcTarget, GadgetResponse,
+} from "@gadgets/workshop-shared/external-message-gateway";
 
 // Nothing but classes and the default handler may be exported from a Worker entry module: workerd
 // treats every named export as an entrypoint and rejects anything that isn't one.
@@ -63,6 +65,7 @@ interface TestThing {
   observe(): Promise<void>;
   act(): Promise<void>;
   bindHook(): Promise<void>;
+  writeValues(values: number[]): Promise<number[]>;
 }
 `;
 
@@ -665,6 +668,7 @@ export interface TestSession {
   observe(): Promise<void>;
   act(): Promise<void>;
   bindHook(): Promise<void>;
+  writeValues(values: number[]): Promise<number[]>;
 }
 
 @validateRpc()
@@ -737,6 +741,10 @@ class TestSessionTarget extends RpcTarget implements TestSession {
       title: "Test hook",
       description: "Records a fixture hook.",
     });
+  }
+
+  async writeValues(values: number[]): Promise<number[]> {
+    return Promise.all(values.map(value => this.writeValue(value)));
   }
 
   [Symbol.dispose](): void {
@@ -896,16 +904,17 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-class TestChatGatewayTarget extends RpcTarget implements ChatGatewayRpcTarget {
-  async onGadgetResponse(_response: { text: string }): Promise<void> {}
+/**
+ * Discards Gadget responses. The control endpoint below only asserts on the submission result,
+ * and the rejection paths under test return before any response is produced.
+ */
+@validateRpc()
+class DevNullChatGateway extends RpcTarget implements ChatGatewayRpcTarget {
+  async onGadgetResponse(_response: GadgetResponse): Promise<void> {}
 }
 
 export default {
-  async fetch(
-    req: Request,
-    env: Cloudflare.Env,
-    ctx: ExecutionContext,
-  ): Promise<Response> {
+  async fetch(req: Request, env: Cloudflare.Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
     let body: unknown;
@@ -1055,9 +1064,9 @@ export default {
       if (!isNonEmptyString(gadgetTitle)) {
         return badRequest("`gadgetTitle` must be a non-empty string");
       }
-      const responseTarget = new RpcStub(new TestChatGatewayTarget());
+      const responseTarget = new RpcStub(new DevNullChatGateway());
       try {
-        const result = await env.EXTERNAL_MESSAGE_GATEWAY.submitExternalMessage(
+        const result = await env.WORKSHOP_EXTERNAL_MESSAGES.submitExternalMessage(
           {
             callerEmail,
             gadgetKey,
@@ -1083,6 +1092,38 @@ export default {
         value: state.value,
         applyCount: state.applyCount,
       });
+    }
+
+    // Submit an external chat message through the Workshop's ExternalMessageGateway entrypoint,
+    // the way a chat-integration worker would, so tests can drive receiveExternalMessage().
+    // Body: {"callerEmail", "gadgetKey", "chatKey", "messageKey", "gadgetTitle", "prompt"}
+    // -> SubmitExternalMessageResult
+    if (url.pathname === "/control/submit-external-message" && req.method === "POST") {
+      const fields =
+          ["callerEmail", "gadgetKey", "chatKey", "messageKey", "gadgetTitle", "prompt"] as const;
+      const input = {} as Record<(typeof fields)[number], string>;
+      for (const field of fields) {
+        const value = (body as Record<string, unknown>)[field];
+        if (!isNonEmptyString(value)) return badRequest(`\`${field}\` must be a non-empty string`);
+        input[field] = value;
+      }
+      // The instance becomes a stub when it crosses the RPC boundary; the parameter type can only
+      // name the stub side of that.
+      const chatGatewayRpcTarget =
+          new DevNullChatGateway() as unknown as RpcStub<ChatGatewayRpcTarget>;
+      return Response.json(await env.WORKSHOP_EXTERNAL_MESSAGES.submitExternalMessage(
+          { ...input, chatGatewayRpcTarget }));
+    }
+
+    // Map an external gadgetKey to the Overseer id the gateway targets -- the DO named
+    // "<source>:<gadgetKey>", where "test" is the `source` prop on WORKSHOP_EXTERNAL_MESSAGES --
+    // so a test can open the same workspace over the web API, which addresses by DO id string.
+    // Body: {"gadgetKey": "..."} -> {"gadgetId": "..."}
+    if (url.pathname === "/control/external-gadget-id" && req.method === "POST") {
+      const { gadgetKey } = body as Record<string, unknown>;
+      if (!isNonEmptyString(gadgetKey)) return badRequest("`gadgetKey` must be a non-empty string");
+      return Response.json(
+          { gadgetId: env.WORKSHOP_OVERSEER.idFromName(`test:${gadgetKey}`).toString() });
     }
 
     // Make this Worker issue a subrequest, so a test can prove that Worker-originated fetches really

@@ -18,6 +18,7 @@
     "capnweb-validate": "catalog:"
   },
   "devDependencies": {
+    "@gadgets/scripts": "workspace:*",
     "@cloudflare/vitest-pool-workers": "catalog:",
     "@cloudflare/workers-types": "^5.20260808.1",
     "miniflare": "5.20260801.0-alpha",

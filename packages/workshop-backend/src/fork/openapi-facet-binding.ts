@@ -318,7 +318,7 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
         // RPC proxies expose even absent methods as callable. Negotiate via plain response data.
         if (resolved.supportsActivationReplay !== true) return;
         const probe = resolved.finalizer.needsActivationReplay;
-        if (typeof probe !== "function") fail("BINDING_RECOVERY_PROBE_UNSUPPORTED");
+        if (typeof probe !== "function") return fail("BINDING_RECOVERY_PROBE_UNSUPPORTED");
         const lostCapabilities = await probe();
         await ready(identity, true, assertCurrent);
         if (lostCapabilities === true) await replay(identity.draftId, assertCurrent);

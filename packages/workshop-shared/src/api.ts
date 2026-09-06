@@ -1334,11 +1334,6 @@ export type AiModelConfig = {
  */
 export const WORKERS_AI_OUTPUT_LIMIT = 32768;
 
-/**
- * Models offered in the picker. `contextWindow` is the maximum tokens one request may total.
- * `outputLimit`, when present, is both the requested response cap and the space reserved for it,
- * leaving the remainder as the prompt budget context compaction sizes against.
- */
 const SUGGESTED_MODEL_CATALOG = {
   "cloudflare": {
     "@cf/moonshotai/kimi-k2.7-code": {
@@ -1379,6 +1374,11 @@ const SUGGESTED_MODEL_CATALOG = {
   Record<string, {name: string, contextWindow: number, outputLimit?: number}>
 >;
 
+/**
+ * Models offered in the picker. `contextWindow` is the maximum tokens one request may total.
+ * `outputLimit`, when present, is both the requested response cap and the space reserved for it,
+ * leaving the remainder as the prompt budget context compaction sizes against.
+ */
 export const SUGGESTED_MODELS: Record<
   AiModelProvider,
   Record<string, {name: string, contextWindow: number, outputLimit?: number}>

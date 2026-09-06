@@ -37,17 +37,22 @@ export function createOpenApiDispatchBinding(context: OpenApiDispatchBindingCont
     async authorizeDispatchKey(
       identity: BoundIdentity,
       request: Parameters<HostFacetBinding["authorizeDispatchKey"]>[0],
+      assertAttempt?: () => void,
     ): ReturnType<HostFacetBinding["authorizeDispatchKey"]> {
       const captured = structuredClone(identity);
       const { keyId, publicKeyDigest } = request;
+      assertAttempt?.();
       context.assertActiveNow(captured);
       await context.assertAccountReady(captured);
+      assertAttempt?.();
       context.assertActiveNow(captured);
       const keyEpoch = context.ledger.authorizeKey(captured, keyId, publicKeyDigest);
       const use = new OpenApiHostDispatchUseAuthority(async () => {
         const assertUseActiveNow = context.assertUseActiveNow ?? context.assertActiveNow;
+        assertAttempt?.();
         assertUseActiveNow(captured);
         await context.assertAccountReady(captured);
+        assertAttempt?.();
         const row = assertUseActiveNow(captured);
         context.ledger.assertActive(captured, keyEpoch);
         if (row.key?.keyId !== keyId || row.key.publicKeyDigest !== publicKeyDigest) {

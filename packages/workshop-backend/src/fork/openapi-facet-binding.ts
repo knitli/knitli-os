@@ -1,3 +1,4 @@
+import { createOpenApiRecoveryRunner } from "./openapi-recovery";
 import { createOpenApiDispatchBinding } from "./openapi-dispatch-binding";
 import { RpcTarget, RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
@@ -97,6 +98,7 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
   });
   const pending = new Map<string, Promise<Result>>();
   const pendingCleanup = new Map<string, Promise<void>>();
+  const recovery = createOpenApiRecoveryRunner();
   function read(id: string) { return structuredClone(context.store.get(id) ?? fail("DRAFT_NOT_FOUND")); }
   function current(identity: BoundIdentity, active = false) {
     const row = read(identity.draftId);
@@ -122,27 +124,36 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
     context.store.put(draftId, { ...row, recoveryPending: true });
     return true;
   }
-  async function ready(identity: BoundIdentity, active = false) {
+  async function ready(identity: BoundIdentity, active = false, assertCurrent?: () => void) {
+    assertCurrent?.();
     current(identity, active);
     await context.assertAccountReady(identity);
+    assertCurrent?.();
     current(identity, active);
   }
-  function authority(identity: BoundIdentity): RpcStub<HostFacetBinding> {
+  function authority(identity: BoundIdentity, assertCurrent?: () => void): RpcStub<HostFacetBinding> {
     const captured = structuredClone(identity);
     return new RpcStub(new OpenApiHostFacetBinding({
       async getIdentity() {
-        await ready(captured);
+        await ready(captured, false, assertCurrent);
+        assertCurrent?.();
         return structuredClone(captured);
       },
       async confirmActivation(selectionDigest: string) {
         if (selectionDigest !== captured.selectionDigest) fail("BINDING_IDENTITY_MISMATCH");
-        await ready(captured);
+        await ready(captured, false, assertCurrent);
+        assertCurrent?.();
         await context.activate(captured, selectionDigest);
+        assertCurrent?.();
         current(captured);
         ledger.activate(captured, selectionDigest);
       },
       async authorizeDispatchKey(request: Parameters<HostFacetBinding["authorizeDispatchKey"]>[0]): ReturnType<HostFacetBinding["authorizeDispatchKey"]> {
-        return dispatch.authorizeDispatchKey(captured, request);
+        assertCurrent?.();
+        const registration = await dispatch.authorizeDispatchKey(captured, request, assertCurrent);
+        try { assertCurrent?.(); }
+        catch (error) { registration.use[Symbol.dispose](); throw error; }
+        return registration;
       },
       async revokeDispatchKey(registration: Parameters<HostFacetBinding["revokeDispatchKey"]>[0]): Promise<void> {
         await dispatch.revokeDispatchKey(captured, registration);
@@ -196,29 +207,34 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
     if (existing?.identity && row.identity && !equalIdentity(existing.identity, row.identity)) fail("BINDING_IDENTITY_MISMATCH");
     return existing;
   }
-  async function run(draftId: string, resolved: OpenApiResolvedDraft): Promise<Result> {
+  async function run(draftId: string, resolved: OpenApiResolvedDraft, assertCurrent?: () => void): Promise<Result> {
     const identity = read(draftId).identity ?? fail("BINDING_NOT_RESERVED");
+    const guard = (active = false) => { assertCurrent?.(); current(identity, active); };
     try {
-      current(identity);
+      guard();
       await context.reserve(identity);
-      current(identity);
-      await ready(identity);
+      guard();
+      await ready(identity, false, assertCurrent);
+      guard();
       context.instantiate(read(draftId), resolved);
       ledger.beginActivation(identity);
       await context.beginActivation(identity);
-      current(identity);
-      using binding = authority(identity);
+      guard();
+      using binding = authority(identity, assertCurrent);
       await resolved.finalizer.activate(binding);
-      current(identity, true);
-      await ready(identity, true);
+      guard(true);
+      await ready(identity, true, assertCurrent);
+      guard(true);
       const result = await context.publish(read(draftId), resolved, descriptionUrl => {
-        current(identity, true);
+        guard(true);
         if (descriptionUrl !== read(draftId).resourceUrl) fail("BINDING_RESOURCE_URL_MISMATCH");
       });
-      current(identity, true);
+      guard(true);
       context.store.put(draftId, { ...read(draftId), published: true, recoveryPending: false });
       return result;
     } catch (error) {
+      // Expiration is not evidence that an existing reservation or published grant is invalid.
+      assertCurrent?.();
       if (preserveRecovery(draftId, error)) throw error;
       fence(draftId, "creation-failed");
       // Failed cleanup remains a durable revoking row. Preserve the original creation error.
@@ -226,10 +242,12 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
       throw error;
     }
   }
-  function start(draftId: string, resolved: OpenApiResolvedDraft) {
+  function start(draftId: string, resolved: OpenApiResolvedDraft, assertCurrent?: () => void) {
     const existing = pending.get(draftId);
+    // A recovery wait may join an independently authorized user Add. Its deadline does
+    // not cancel that user's operation; only runs started by this attempt capture its guard.
     if (existing) return existing;
-    const operation = run(draftId, resolved).finally(() => { pending.delete(draftId); });
+    const operation = run(draftId, resolved, assertCurrent).finally(() => { pending.delete(draftId); });
     pending.set(draftId, operation);
     return operation;
   }
@@ -257,26 +275,29 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
       return await start(row.reference.draftId, resolved);
     },
     /** Reconstruct transient capabilities and replay the exact reserved identity after restart. */
-    async resume(draftId: string): Promise<void> {
-      const row = read(draftId);
-      if (row.state === "revoked") return;
-      if (row.state === "revoking") { await cleanup(draftId); return; }
-      if (row.state === "active" && row.published) {
+    resume(draftId: string): Promise<void> {
+      return recovery.run(draftId, async assertCurrent => {
+        const row = read(draftId);
+        if (row.state === "revoked") return;
+        if (row.state === "revoking") { await cleanup(draftId); return; }
+        // Even an interrupted first publication must stay unavailable if this attempt expires.
         context.store.put(draftId, { ...row, recoveryPending: true });
-      }
-      let resolved: OpenApiResolvedDraft | undefined;
-      try {
-        resolved = await context.lookup(row.providerAccountId, row.resourceUrl, context.workspaceId);
-        validateResolved(row.providerAccountId, row.resourceUrl, resolved);
-      } catch (error) {
-        resolved?.finalizer[Symbol.dispose]();
-        if (preserveRecovery(draftId, error)) throw error;
-        fence(draftId, "creation-failed");
-        try { await cleanup(draftId); } catch { /* Durable retry required. */ }
-        throw error;
-      }
-      using _finalizer = resolved.finalizer;
-      await start(draftId, resolved);
+        let resolved: OpenApiResolvedDraft | undefined;
+        try {
+          resolved = await context.lookup(row.providerAccountId, row.resourceUrl, context.workspaceId);
+          assertCurrent();
+          validateResolved(row.providerAccountId, row.resourceUrl, resolved);
+        } catch (error) {
+          resolved?.finalizer[Symbol.dispose]();
+          assertCurrent();
+          if (preserveRecovery(draftId, error)) throw error;
+          fence(draftId, "creation-failed");
+          try { await cleanup(draftId); } catch { /* Durable retry required. */ }
+          throw error;
+        }
+        using _finalizer = resolved.finalizer;
+        await start(draftId, resolved, assertCurrent);
+      });
     },
     /** Synchronous host fence; Task 4 wires removal/account/workspace cleanup to this seam. */
     fence,

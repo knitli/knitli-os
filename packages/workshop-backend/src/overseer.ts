@@ -1,3 +1,4 @@
+import { createOpenApiRecoveryRunner } from "./fork/openapi-recovery";
 import type { BlueprintBindingAssignment, PendingBlueprintSetup } from "@gadgets/workshop-shared/api";
 import { createBlueprintSetup, pendingBlueprintSetup, runBlueprintSetup, type BlueprintSetupState } from "./fork/blueprint-setup";
 import type { DraftReference } from "@gadgets/workshop-shared/fork/openapi-host-binding";
@@ -4414,6 +4415,8 @@ class OverseerImpl implements AgentHooks {
     return this.#preparingChatMessages.get(chatId);
   }
 
+  #openApiAccountCleanup = createOpenApiRecoveryRunner();
+
   #blueprintSetupQueue = Promise.resolve();
   runBlueprintSetupTask(task: () => Promise<void>): Promise<void> {
     const operation = this.#blueprintSetupQueue.then(task);
@@ -4480,23 +4483,27 @@ class OverseerImpl implements AgentHooks {
   }
 
   async resumeOpenApiBindings(pendingOnly = false): Promise<void> {
+    // Arm the durable retry before external work. One unavailable connector must not hold
+    // unrelated rows behind it or prevent the next alarm from being scheduled.
+    this.#refreshOpenApiRecoveryAlarm(true);
+    const work: Promise<void>[] = [];
     for (const fence of Array.from(this.storage.openApiAccountFences.list())) {
       if (fence.drafts.every(draft => draft.revoked)) continue;
-      try { await this.revokeOpenApiAccountBindings(fence.ownerId, fence.providerAccountId, fence.accountIncarnation, []); }
-      catch (error) { this.logger.warn("OpenAPI account cleanup remains pending", { event: "openapi.account.cleanup.pending", error }); }
+      // This method installs every local fence synchronously before its first await.
+      work.push(this.revokeOpenApiAccountBindings(fence.ownerId, fence.providerAccountId, fence.accountIncarnation, [])
+        .catch(error => { this.logger.warn("OpenAPI account cleanup remains pending", { event: "openapi.account.cleanup.pending", error }); }));
     }
     for (const row of Array.from(this.storage.openApiBindings.list())) {
-      // Published bindings need replay after restart, but unrelated alarm retries must leave them alone.
+      // Published bindings need replay after restart; ordinary retries select only pending rows.
       if (row.state === "revoked" || (pendingOnly && row.state === "active" && row.published && !row.recoveryPending)) continue;
-      try { await this.resumeOpenApiBinding(row.reference.draftId); }
-      catch (error) {
+      work.push(this.resumeOpenApiBinding(row.reference.draftId).catch(error => {
         this.logger.warn("OpenAPI binding recovery remains pending", {
-          event: "openapi.binding.recovery.pending",
-          error,
+          event: "openapi.binding.recovery.pending", error,
         });
-      }
+      }));
     }
-    this.#refreshOpenApiRecoveryAlarm(true);
+    try { await Promise.allSettled(work); }
+    finally { this.#refreshOpenApiRecoveryAlarm(true); }
   }
 
   checkOpenApiAccountReadiness(gatekeeperId: number, generation: number): Promise<void> {
@@ -4563,28 +4570,31 @@ class OverseerImpl implements AgentHooks {
       for (const row of localRows) this.#getOpenApiBinding().fence(row.reference.draftId, "account-disconnected");
     });
     const pending = this.storage.openApiAccountFences.get(incarnation)!;
-    for (const draft of pending.drafts) {
-      if (draft.revoked) continue;
-      const row = this.storage.openApiBindings.get(draft.reference.draftId);
-      if (row) {
-        await this.#getOpenApiBinding().cleanup(row.reference.draftId);
-      } else {
-        // This is a private cleanup lookup, not a fabricated reservation or facet identity.
-        const owner = this.users.get(this.users.idFromString(ownerId));
-        const resolved = await owner.resolveOpenApiDraftForRevocation({
-          reference: draft.reference, ownerId, providerAccountId: accountId,
-          accountIncarnation: incarnation, intendedWorkspaceId: this.ctx.id.toString(),
-          expiresAt: 0, state: "revoking", keyEpoch: 0,
-        });
-        using finalizer = resolved.finalizer;
-        await finalizer.revoke("account-disconnected");
-      }
-      const current = this.storage.openApiAccountFences.get(incarnation)!;
-      const completed = current.drafts.find(entry => entry.reference.draftId === draft.reference.draftId)!;
-      completed.revoked = true;
-      this.storage.openApiAccountFences.put(current);
-      this.#refreshOpenApiRecoveryAlarm();
-    }
+    const operations = pending.drafts.filter(draft => !draft.revoked).map(draft =>
+      this.#openApiAccountCleanup.run(`${incarnation}:${draft.reference.draftId}`, async () => {
+        const row = this.storage.openApiBindings.get(draft.reference.draftId);
+        if (row) {
+          await this.#getOpenApiBinding().cleanup(row.reference.draftId);
+        } else {
+          // This is a private cleanup lookup, not a fabricated reservation or facet identity.
+          const owner = this.users.get(this.users.idFromString(ownerId));
+          const resolved = await owner.resolveOpenApiDraftForRevocation({
+            reference: draft.reference, ownerId, providerAccountId: accountId,
+            accountIncarnation: incarnation, intendedWorkspaceId: this.ctx.id.toString(),
+            expiresAt: 0, state: "revoking", keyEpoch: 0,
+          });
+          using finalizer = resolved.finalizer;
+          await finalizer.revoke("account-disconnected");
+        }
+        const current = this.storage.openApiAccountFences.get(incarnation)!;
+        const completed = current.drafts.find(entry => entry.reference.draftId === draft.reference.draftId)!;
+        completed.revoked = true;
+        this.storage.openApiAccountFences.put(current);
+        this.#refreshOpenApiRecoveryAlarm();
+      }));
+    const results = await Promise.allSettled(operations);
+    const failed = results.find(result => result.status === "rejected");
+    if (failed?.status === "rejected") throw failed.reason;
   }
 
   async finishOpenApiRemoval(gatekeeperId: number): Promise<void> {
@@ -4644,9 +4654,10 @@ class OverseerImpl implements AgentHooks {
     const binding = this.findOpenApiBinding(id);
     if (binding) {
       this.#getOpenApiBinding().fence(binding.reference.draftId, "removed");
-      this.ctx.waitUntil(this.finishOpenApiRemoval(id).catch(() => {
+      this.ctx.waitUntil(this.finishOpenApiRemoval(id).catch((error) => {
         this.logger.warn("OpenAPI binding removal remains pending", {
           event: "openapi.binding.removal.pending",
+          error,
         });
       }));
       return;

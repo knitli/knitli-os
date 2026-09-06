@@ -8,6 +8,8 @@ import type { BoundIdentity, HostFacetBinding, OpenApiFacetFinalizer } from "@ga
 import { createHostBindingLedger, type BindingRow } from "../src/fork/openapi-binding-ledger";
 import { createOpenApiFacetBinding, type OpenApiFacetBindingContext, type OpenApiFacetRow, type OpenApiResolvedDraft } from "../src/fork/openapi-facet-binding";
 
+import { createOpenApiRecoveryRunner, OPENAPI_RECOVERY_TIMEOUT_MS } from "../src/fork/openapi-recovery";
+
 const url = "https://workshop.test/gatekeeper/openapi/apis/api/releases/v1/grants/grant";
 const identity: BoundIdentity = { draftId: "draft", grantId: "grant", selectionDigest: "digest", ownerId: "owner", providerAccountId: 0, accountIncarnation: "incarnation", workspaceId: "workspace", gatekeeperId: 0, facetName: "gatekeeper0", generation: 1 };
 function barrier() {
@@ -17,6 +19,27 @@ function barrier() {
   const wait = new Promise<void>(resolve => { release = resolve; });
   return { reached, release, pause: async () => { entered(); await wait; } };
 }
+// Observe the real deadline registration, then invoke its actual callback explicitly. Workerd's
+// frozen Date.now cannot establish elapsed time; no wall-clock timing assertion is made here.
+function captureRecoveryDeadlines() {
+  const original = globalThis.setTimeout;
+  const handles: ReturnType<typeof setTimeout>[] = [];
+  const callbacks: (() => void)[] = [];
+  const scheduled = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => {
+    const handle = original(callback, delay, ...args);
+    if (delay === OPENAPI_RECOVERY_TIMEOUT_MS) {
+      handles.push(handle);
+      callbacks.push(() => { clearTimeout(handle); (callback as (...values: unknown[]) => void)(...args); });
+    }
+    return handle;
+  });
+  return {
+    scheduled, callbacks,
+    fire() { expect(callbacks.length).toBeGreaterThan(0); for (const callback of callbacks.splice(0)) callback(); },
+    restore() { scheduled.mockRestore(); for (const handle of handles) clearTimeout(handle); },
+  };
+}
+
 const noPause = async () => {};
 function fixture(workspaceId = "workspace", initialClock = 1_000) {
   let now = initialClock;
@@ -120,6 +143,43 @@ function fixture(workspaceId = "workspace", initialClock = 1_000) {
     pauseAccount: (pause: () => Promise<void>) => { accountPause = pause; },
     pauseRevoke: (pause: () => Promise<void>) => { revokePause = pause; } };
 }
+
+describe("bounded OpenAPI recovery attempts", () => {
+  it("holds one in-flight slot after timeout and invalidates late continuation before accepting a new attempt", async () => {
+    const timers = captureRecoveryDeadlines();
+    const runner = createOpenApiRecoveryRunner();
+    const cleared = vi.spyOn(globalThis, "clearTimeout");
+    const pause = barrier();
+    let starts = 0; let committed = false;
+    try {
+      const operation = async (assertCurrent: () => void) => {
+        starts++; await pause.pause(); assertCurrent(); committed = true;
+      };
+      const first = runner.run("draft", operation).then(value => value, error => String(error));
+      await pause.reached;
+      const duplicate = runner.run("draft", operation).then(value => value, error => String(error));
+      expect(starts).toBe(1);
+      expect(timers.scheduled).toHaveBeenCalledWith(expect.any(Function), OPENAPI_RECOVERY_TIMEOUT_MS);
+      expect(OPENAPI_RECOVERY_TIMEOUT_MS).toBe(10_000);
+      expect(timers.callbacks).toHaveLength(1);
+      timers.fire();
+      expect(await first).toContain("OPENAPI_RECOVERY_TIMEOUT");
+      expect(await duplicate).toContain("OPENAPI_RECOVERY_TIMEOUT");
+      const afterTimeout = runner.run("draft", operation).then(() => "UNEXPECTED_SUCCESS", error => String(error));
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      expect(starts).toBe(1);
+      expect(await afterTimeout).toContain("OPENAPI_RECOVERY_TIMEOUT");
+      pause.release();
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      expect(committed).toBe(false);
+      cleared.mockClear();
+      await expect(runner.run("draft", operation)).resolves.toBeUndefined();
+      expect(cleared).toHaveBeenCalledOnce();
+      expect(starts).toBe(2);
+      expect(committed).toBe(true);
+    } finally { pause.release(); timers.restore(); cleared.mockRestore(); }
+  });
+});
 
 describe("durable OpenAPI facet reservation and activation", () => {
   it.each([
@@ -313,24 +373,87 @@ describe("durable OpenAPI facet reservation and activation", () => {
     expect(f.rows.get("draft")).toMatchObject({ state: "active", published: true, recoveryPending: false });
     expect(f.events.filter(event => event === "allocate")).toHaveLength(1);
   });
-  it("keeps a published binding retryable when a concurrent recovery lookup fails late", async () => {
+  it.each(["lookup", "activation", "description"])("keeps timed-out %s recovery fenced against late publication and overlapping retry", async stage => {
+    const f = fixture(); await f.binding.create(0, url);
+    const pause = barrier(); let starts = 0;
+    const paused = async () => { starts++; await pause.pause(); };
+    if (stage === "lookup") {
+      const lookup = f.context.lookup;
+      f.context.lookup = async (...args) => { await paused(); return lookup(...args); };
+    } else if (stage === "activation") f.pauseActivation(paused);
+    else f.pauseDescription(paused);
+    const restarted = f.restart();
+    const timers = captureRecoveryDeadlines();
+    const recovery = restarted.resume("draft").then(() => "UNEXPECTED_SUCCESS", error => String(error));
+    try {
+      await pause.reached;
+      expect(timers.callbacks).toHaveLength(1);
+      expect(f.rows.get("draft")?.recoveryPending).toBe(true);
+      timers.fire();
+      expect(await recovery).toContain("OPENAPI_RECOVERY_TIMEOUT");
+      const afterTimeout = restarted.resume("draft").then(() => "UNEXPECTED_SUCCESS", error => String(error));
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      expect(starts).toBe(1);
+      expect(await afterTimeout).toContain("OPENAPI_RECOVERY_TIMEOUT");
+      pause.release();
+      // Yield an event turn so the released native RPC continuation has returned to its host.
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      expect(f.rows.get("draft")).toMatchObject({ state: "active", published: true, recoveryPending: true });
+      expect(() => restarted.assertActiveNow(0, 1)).toThrow("BINDING_RECOVERY_PENDING");
+      expect(f.events).not.toContain("revoke:creation-failed");
+      await restarted.resume("draft");
+      expect(starts).toBe(2);
+      expect(f.rows.get("draft")?.recoveryPending).toBe(false);
+      expect(() => restarted.assertActiveNow(0, 1)).not.toThrow();
+    } finally { pause.release(); await recovery; timers.restore(); }
+  });
+
+  it("rejects an expired attempt's retained dispatch authority after later recovery succeeds", async () => {
+    const f = fixture(); await f.binding.create(0, url);
+    const restarted = f.restart(); const pause = barrier(); f.pauseActivation(pause.pause);
+    const timers = captureRecoveryDeadlines();
+    const recovery = restarted.resume("draft").then(() => "UNEXPECTED_SUCCESS", error => String(error));
+    try {
+      await pause.reached;
+      using retained = f.authorities.at(-1)!.dup();
+      using use = (await retained.authorizeDispatchKey({ keyId: "expired-attempt", publicKeyDigest: "digest" })).use;
+      await expect(Promise.resolve(use.assertActive())).rejects.toThrow("BINDING_RECOVERY_PENDING");
+      timers.fire(); expect(await recovery).toContain("OPENAPI_RECOVERY_TIMEOUT");
+      pause.release(); await new Promise<void>(resolve => setTimeout(resolve, 0));
+      await restarted.resume("draft");
+      expect(f.rows.get("draft")?.recoveryPending).toBe(false);
+      expect(() => restarted.assertActiveNow(0, 1)).not.toThrow();
+      await expect(Promise.resolve(use.assertActive())).rejects.toThrow("OPENAPI_RECOVERY_TIMEOUT");
+      await expect(Promise.resolve(retained.authorizeDispatchKey({ keyId: "late-key", publicKeyDigest: "digest" })))
+        .rejects.toThrow("OPENAPI_RECOVERY_TIMEOUT");
+    } finally { pause.release(); await recovery; timers.restore(); }
+  });
+
+  it("shares a pending recovery lookup and retries only after that lookup has settled", async () => {
     const f = fixture(); await f.binding.create(0, url);
     const pause = barrier(); const lookup = f.context.lookup; let calls = 0;
     f.context.lookup = async (...args) => {
       if (++calls === 1) { await pause.pause(); throw new Error("LOOKUP_UNAVAILABLE"); }
       return lookup(...args);
     };
-    const restarted = f.restart(); const lateFailure = restarted.resume("draft");
-    const rejected = expect(lateFailure).rejects.toThrow("LOOKUP_UNAVAILABLE");
+    const restarted = f.restart();
+    const first = restarted.resume("draft");
+    const firstResult = first.then(() => "UNEXPECTED_SUCCESS", error => String(error));
     try {
-      await pause.reached; await restarted.resume("draft");
-      expect(f.rows.get("draft")?.recoveryPending).toBe(false);
-      pause.release(); await rejected;
+      await pause.reached;
+      const second = restarted.resume("draft");
+      const secondResult = second.then(() => "UNEXPECTED_SUCCESS", error => String(error));
+      await Promise.resolve();
+      expect(calls).toBe(1);
+      pause.release();
+      expect(await firstResult).toContain("LOOKUP_UNAVAILABLE");
+      expect(await secondResult).toContain("LOOKUP_UNAVAILABLE");
       expect(f.rows.get("draft")).toMatchObject({ state: "active", published: true, recoveryPending: true });
       expect(f.events).not.toContain("revoke:creation-failed");
       await restarted.resume("draft");
+      expect(calls).toBe(2);
       expect(() => restarted.assertActiveNow(0, 1)).not.toThrow();
-    } finally { pause.release(); }
+    } finally { pause.release(); await firstResult; }
   });
   it("revokes published recovery after a locally verified identity mismatch", async () => {
     const f = fixture(); await f.binding.create(0, url); f.setResolvedUrl(`${url}/substituted`);
@@ -661,6 +784,59 @@ describe("actual Overseer durable publication integration", () => {
       } finally { pause.release(); host.restore(); }
     });
   });
+  it("lets healthy historical cleanup and binding recovery progress while one account draft hangs", async () => {
+    const stub = env.TEST_OVERSEER.getByName(`recovery-starvation-${crypto.randomUUID()}`);
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = instance["impl"]; const host = installActualHostFakes(impl);
+      const pause = barrier(); const timers = captureRecoveryDeadlines();
+      const responses = vi.spyOn(impl, "deliverReadyExternalMessageResponses");
+      const agents = vi.spyOn(impl, "waitForAllAgentsToComplete");
+      let blockedLookups = 0; let alarm: Promise<void> | undefined;
+      try {
+        await impl.createBoundOpenApiGatekeeper(0, url);
+        impl.storage.openApiBindings.put({ ...impl.storage.openApiBindings.get("draft")!, recoveryPending: true });
+        const blocked = { draftId: "blocked-history", grantId: "blocked-grant", selectionDigest: "digest" };
+        const healthy = { draftId: "healthy-history", grantId: "healthy-grant", selectionDigest: "digest" };
+        impl.storage.openApiAccountFences.put({ ownerId: "owner", providerAccountId: 88,
+          accountIncarnation: "historical-account", drafts: [
+            { reference: blocked, revoked: false }, { reference: healthy, revoked: false },
+          ] });
+        const cleanup = host.f.context.resolveForCleanup!;
+        host.f.context.resolveForCleanup = async row => {
+          if (row.reference.draftId === blocked.draftId) { blockedLookups++; await pause.pause(); }
+          return cleanup(row);
+        };
+        impl.storage.openApiRecoveryAt.put(Date.now() - 1);
+        let finished = false;
+        alarm = instance.alarm().then(() => { finished = true; });
+        await pause.reached;
+        expect(impl.storage.openApiRecoveryAt.get()).toBeGreaterThan(Date.now());
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        expect(impl.storage.openApiBindings.get("draft")?.recoveryPending).toBe(false);
+        expect(impl.storage.openApiAccountFences.get("historical-account")?.drafts).toMatchObject([
+          { reference: blocked, revoked: false }, { reference: healthy, revoked: true },
+        ]);
+        expect(finished).toBe(false);
+        expect(impl.storage.openApiRecoveryAt.get()).toBeGreaterThan(Date.now());
+        expect(await impl.ctx.storage.getAlarm()).toBe(impl.storage.openApiRecoveryAt.get());
+        timers.fire(); await alarm;
+        expect(agents).toHaveBeenCalledOnce(); expect(responses).toHaveBeenCalledOnce();
+        expect(finished).toBe(true);
+        await impl.resumeOpenApiBindings(true);
+        expect(blockedLookups).toBe(1);
+        expect(impl.storage.openApiRecoveryAt.get()).toBeGreaterThan(Date.now());
+        pause.release(); await new Promise<void>(resolve => setTimeout(resolve, 0));
+        await impl.resumeOpenApiBindings(true);
+        expect(impl.storage.openApiAccountFences.get("historical-account")?.drafts.every(draft => draft.revoked)).toBe(true);
+        expect(impl.storage.openApiRecoveryAt.get()).toBeUndefined();
+        expect(await impl.ctx.storage.getAlarm()).toBeNull();
+      } finally {
+        pause.release(); await alarm;
+        timers.restore(); responses.mockRestore(); agents.mockRestore(); host.restore();
+      }
+    });
+  });
+
   it.each(["unset", "future", "due"] as const)("shared alarm only recovers OpenAPI when its deadline is due: %s", async deadline => {
     const stub = env.TEST_OVERSEER.getByName(`openapi-alarm-${crypto.randomUUID()}`);
     await runInDurableObject(stub, async (instance: OverseerDurableObject) => {

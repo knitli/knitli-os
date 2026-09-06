@@ -1602,13 +1602,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       },
       getEpoch: id => this.storage.openApiAccountEpochs.get(id),
       putEpoch: epoch => { this.storage.openApiAccountEpochs.put(epoch); },
-      checkPolicy: async (vendorId, resource) => {
-        const config = await readAdminConfig(this.env);
-        if (config.disabledGatekeepers.includes(vendorId.toLowerCase()))
-          throw new Error(`The "${vendorId}" gatekeeper is disabled on this deployment by an administrator.`);
-        if (isResourceDisabled(config, vendorId.toLowerCase(), resource.urlPattern))
-          throw new Error(`The "${resource.title}" resource is disabled on this deployment by an administrator.`);
-      },
+      checkPolicy: (vendorId, resource) => this.#enforceGatekeeperResourcePolicy(vendorId, resource),
       now: () => Date.now(),
     });
   }
@@ -1762,6 +1756,21 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.connectedAccounts.put(record);
   }
 
+  // Shared capability-minting policy boundary for legacy and bound OpenAPI resources.
+  // Read deployment policy after provider resolution on every call; never cache it here.
+  async #enforceGatekeeperResourcePolicy(accountVendorId: string, resource: SupportedResource) {
+    const config = await readAdminConfig(this.env);
+    const vendorId = accountVendorId.toLowerCase();
+    if (config.disabledGatekeepers.includes(vendorId)) {
+      throw new Error(
+        `The "${accountVendorId}" gatekeeper is disabled on this deployment by an administrator.`);
+    }
+    if (isResourceDisabled(config, vendorId, resource.urlPattern)) {
+      throw new Error(
+        `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
+    }
+  }
+
   async getGatekeeperClassFor(accountId: number, url: string)
       : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string,
                   typeUrlPattern: string}> {
@@ -1772,23 +1781,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
 
-    // Block whole gatekeepers + disabled resources at this single core-side chokepoint where a
-    // resourceUrl becomes a capability (reached only via the user/UI-facing Overseer.newGatekeeper
-    // and blueprint instantiation — never from gadget or agent code).
-    let config = await readAdminConfig(this.env);
-    let vendorId = account.vendorId.toLowerCase();
-    if (config.disabledGatekeepers.includes(vendorId)) {
-      throw new Error(
-          `The "${account.vendorId}" gatekeeper is disabled on this deployment by an administrator.`);
-    }
-
-    // Blocking here prevents minting a new capability to a disabled resource even if the request
-    // bypasses the (separately filtered) picker/agent listings.
-    if (isResourceDisabled(config, vendorId, resource.urlPattern)) {
-      throw new Error(
-          `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
-    }
-
+    await this.#enforceGatekeeperResourcePolicy(account.vendorId, resource);
     return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
   }
 

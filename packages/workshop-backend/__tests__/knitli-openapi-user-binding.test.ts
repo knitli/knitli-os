@@ -632,6 +632,62 @@ describe("account cleanup recipients and historical authority", () => {
   );
 });
 
+describe("actual User shared resource policy", () => {
+  it.each(["legacy", "openapi"] as const)("%s enforces fresh vendor and resource policy after resolution", async route => {
+    const stub = env.TEST_USER.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (user: UserDurableObject) => {
+      const accounts = user["storage"].connectedAccounts;
+      type AccountRecord = NonNullable<ReturnType<typeof accounts.get>>;
+      const resourceUrl = url;
+      const resource = {title: "API", description: "API", urlPattern: resourceUrl};
+      let policy = {};
+      const events: string[] = [];
+      const finalizer = new (class extends RpcTarget { [Symbol.dispose]() {} })();
+      const resolve = vi.fn(async () => {
+        events.push("provider");
+        return {class: {}, resource, resourceUrl, finalizer};
+      });
+      const account = new (class extends RpcTarget {
+        getGatekeeperClassFor = resolve;
+        resolveBoundDraft = resolve;
+        async startBoundResourceConfigurator(_pattern: string, authority: HostDraftAuthority) {
+          await authority.registerDraft(reference);
+          return {iframeHtml: "<p>Configured</p>"};
+        }
+      })();
+      const get = vi.spyOn(accounts, "get").mockReturnValue({
+        id: 0, vendorId: "OpenAPI", account: account as unknown as AccountRecord["account"],
+        description: {displayName: "API", avatar: {url: "https://workshop.test/avatar"},
+          ...(route === "openapi" ? {hostBindingProtocol: "openapi-v1" as const} : {})},
+      });
+      const readPolicy = vi.fn(async (key: string) => {
+        expect(key).toBe(".adminConfig");
+        events.push("policy");
+        return JSON.stringify(policy);
+      });
+      const originalEnv = user["env"];
+      user["env"] = {...originalEnv, PUBLIC_BASE_URL: "https://workshop.test/",
+        BLUEPRINTS: {get: readPolicy} as unknown as KVNamespace};
+      const lookup = () => route === "legacy"
+        ? user.getGatekeeperClassFor(0, resourceUrl)
+        : user.lookupOpenApiDraft(0, resourceUrl, "workspace");
+      try {
+        if (route === "openapi") await user.startBoundResourceConfigurator(0, resourceUrl, "workspace");
+        await expect(lookup()).resolves.toHaveProperty("typeUrlPattern", resourceUrl);
+        policy = {disabledGatekeepers: ["openapi"]};
+        await expect(lookup()).rejects.toThrow('The "OpenAPI" gatekeeper is disabled on this deployment by an administrator.');
+        policy = {disabledResources: {openapi: [resourceUrl]}};
+        await expect(lookup()).rejects.toThrow('The "API" resource is disabled on this deployment by an administrator.');
+        policy = {};
+        await expect(lookup()).resolves.toHaveProperty("typeUrlPattern", resourceUrl);
+        expect(resolve).toHaveBeenCalledTimes(4);
+        expect(readPolicy).toHaveBeenCalledTimes(4);
+        expect(events).toEqual(Array.from({length: 4}, () => ["provider", "policy"]).flat());
+      } finally { get.mockRestore(); user["env"] = originalEnv; }
+    });
+  });
+});
+
 describe("actual User legacy resolver guard", () => {
   it.each([true, false])("v1=%s routes only through the permitted resolver", async v1 => {
     const stub = env.TEST_USER.getByName(crypto.randomUUID());

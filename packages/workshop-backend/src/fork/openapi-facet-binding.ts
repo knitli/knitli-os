@@ -1,3 +1,4 @@
+import { createOpenApiDispatchBinding } from "./openapi-dispatch-binding";
 import { RpcTarget, RpcStub } from "cloudflare:workers";
 import type { BoundIdentity, HostFacetBinding, OpenApiBoundAccount } from "@gadgets/workshop-shared/fork/openapi-host-binding";
 import { BindingError, createHostBindingLedger, type BindingRow } from "./openapi-binding-ledger";
@@ -62,6 +63,10 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
       context.store.put(id, { ...old, ...row });
     },
   }, context.now);
+  const dispatch = createOpenApiDispatchBinding({ ledger,
+    assertActiveNow: identity => current(identity, true),
+    assertAccountReady: identity => context.assertAccountReady(identity),
+  });
   const pending = new Map<string, Promise<Result>>();
   const pendingCleanup = new Map<string, Promise<void>>();
   function read(id: string) { return structuredClone(context.store.get(id) ?? fail("DRAFT_NOT_FOUND")); }
@@ -94,12 +99,11 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
         current(captured);
         ledger.activate(captured, selectionDigest);
       }
-      async authorizeDispatchKey(): ReturnType<HostFacetBinding["authorizeDispatchKey"]> {
-        await ready(captured, true);
-        return fail("OPENAPI_DISPATCH_NOT_IMPLEMENTED");
+      async authorizeDispatchKey(request: Parameters<HostFacetBinding["authorizeDispatchKey"]>[0]): ReturnType<HostFacetBinding["authorizeDispatchKey"]> {
+        return dispatch.authorizeDispatchKey(captured, request);
       }
-      async revokeDispatchKey(): Promise<void> {
-        return fail("OPENAPI_DISPATCH_NOT_IMPLEMENTED");
+      async revokeDispatchKey(registration: Parameters<HostFacetBinding["revokeDispatchKey"]>[0]): Promise<void> {
+        await dispatch.revokeDispatchKey(captured, registration);
       }
     }());
   }
@@ -228,7 +232,13 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
     fence,
     /** Retry a previously fenced binding; deletion follows the connector acknowledgement. */
     cleanup,
-    /** Local synchronous captured-generation guard for the later approval integration. */
+    /** Account readiness is awaited separately from the final synchronous insertion guard. */
+    async checkAccountReadiness(gatekeeperId: number, generation: number): Promise<void> {
+      const row = context.store.list().find(candidate => candidate.identity?.gatekeeperId === gatekeeperId);
+      if (!row?.identity || row.identity.generation !== generation) return fail("BINDING_IDENTITY_MISMATCH");
+      await ready(structuredClone(row.identity), true);
+    },
+    /** Local synchronous captured-generation guard for the approval integration. */
     assertActiveNow(gatekeeperId: number, generation: number) {
       const row = context.store.list().find(candidate => candidate.identity?.gatekeeperId === gatekeeperId);
       if (!row?.identity || row.identity.generation !== generation) return fail("BINDING_IDENTITY_MISMATCH");

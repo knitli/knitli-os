@@ -1,4 +1,4 @@
-import { RpcTarget, type RpcStub } from "cloudflare:workers";
+import { RpcTarget, RpcStub } from "cloudflare:workers";
 import type { AccountDescription, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import { matchesResourceUrlPattern } from "@gadgets/workshop-shared/gatekeeper";
 import type {
@@ -6,6 +6,7 @@ import type {
   DraftReference,
   HostDraftAuthority,
   OpenApiBoundAccount,
+  OpenApiRevocationFinalizer,
 } from "@gadgets/workshop-shared/fork/openapi-host-binding";
 import {
   BindingError,
@@ -23,6 +24,15 @@ export type OpenApiAccountCleanup = {
   providerAccountId: number;
   account: Fetcher<GatekeeperUser>;
   recipients: { workspaceId: string; drafts: DraftReference[] }[];
+};
+/** Durable proof that the connector acknowledged cleanup for this exact immutable scope. */
+export type OpenApiDraftCleanupReceipt = Pick<BindingRow,
+  "ownerId" | "providerAccountId" | "accountIncarnation" | "intendedWorkspaceId" | "reference">;
+/** Permanent issuance fence plus the exact registered drafts captured before workspace deletion. */
+export type OpenApiWorkspaceRetirement = {
+  workspaceId: string;
+  ownerId: string;
+  drafts: OpenApiDraftCleanupReceipt[];
 };
 /** Narrow adapter over User-owned synchronous durable storage and account policy. */
 export interface OpenApiUserBindingContext {
@@ -43,6 +53,15 @@ export interface OpenApiUserBindingContext {
     delete(incarnation: string): void;
     list(): OpenApiAccountCleanup[];
   };
+  receipts: {
+    get(draftId: string): OpenApiDraftCleanupReceipt | undefined;
+    put(receipt: OpenApiDraftCleanupReceipt): void;
+  };
+  retirements: {
+    get(workspaceId: string): OpenApiWorkspaceRetirement | undefined;
+    put(retirement: OpenApiWorkspaceRetirement): void;
+    list(): OpenApiWorkspaceRetirement[];
+  };
   scheduleCleanup(): void;
   revokeRecipient(record: OpenApiAccountCleanup, workspaceId: string, drafts: DraftReference[]): Promise<void>;
   getEpoch(id: number): OpenApiAccountEpoch | undefined;
@@ -57,9 +76,36 @@ const fail = (code: string): never => {
   throw new BindingError(code);
 };
 
+function sameScope(a: OpenApiDraftCleanupReceipt, b: OpenApiDraftCleanupReceipt) {
+  return a.ownerId === b.ownerId && a.providerAccountId === b.providerAccountId &&
+    a.accountIncarnation === b.accountIncarnation &&
+    a.intendedWorkspaceId === b.intendedWorkspaceId &&
+    a.reference.draftId === b.reference.draftId && a.reference.grantId === b.reference.grantId &&
+    a.reference.selectionDigest === b.reference.selectionDigest;
+}
+
+function cleanupScope(row: BindingRow): OpenApiDraftCleanupReceipt {
+  return {ownerId: row.ownerId, providerAccountId: row.providerAccountId,
+    accountIncarnation: row.accountIncarnation, intendedWorkspaceId: row.intendedWorkspaceId,
+    reference: structuredClone(row.reference)};
+}
+
 /** Private account capabilities and draft lifecycle, bound to one authenticated User DO. */
 export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
   const ledger = createHostBindingLedger(context.store, context.now);
+  function assertWorkspaceOpen(workspaceId: string) {
+    if (context.retirements.get(workspaceId)) fail("BINDING_WORKSPACE_CLOSED");
+  }
+  function acknowledged(scope: OpenApiDraftCleanupReceipt) {
+    const receipt = context.receipts.get(scope.reference.draftId);
+    return Boolean(receipt && sameScope(receipt, scope));
+  }
+  function recordAcknowledgement(scope: OpenApiDraftCleanupReceipt) {
+    const row = context.store.get(scope.reference.draftId) ?? fail("DRAFT_NOT_FOUND");
+    if (!sameScope(scope, row)) fail("BINDING_IDENTITY_MISMATCH");
+    ledger.finishRevocation(scope.reference.draftId);
+    context.receipts.put(structuredClone(scope));
+  }
   function current(accountId: number, expected?: string) {
     const account = context.getAccount(accountId);
     if (!account || account.description.hostBindingProtocol !== "openapi-v1")
@@ -73,7 +119,7 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
       return fail("BINDING_ACCOUNT_REPLACED");
     return { account, epoch };
   }
-  function scope(
+  function checkScope(
     row: BindingRow,
     accountId: number,
     incarnation: string,
@@ -81,6 +127,7 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
     requireLive = true,
   ) {
     current(accountId, incarnation);
+    assertWorkspaceOpen(workspaceId);
     if (
       row.ownerId !== context.ownerId ||
       row.providerAccountId !== accountId ||
@@ -134,7 +181,7 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
   }
   function checked(identity: BoundIdentity) {
     const row = context.store.get(identity.draftId) ?? fail("DRAFT_NOT_FOUND");
-    scope(row, identity.providerAccountId, identity.accountIncarnation, identity.workspaceId);
+    checkScope(row, identity.providerAccountId, identity.accountIncarnation, identity.workspaceId);
     if (identity.ownerId !== context.ownerId) fail("BINDING_IDENTITY_MISMATCH");
     return row;
   }
@@ -158,7 +205,7 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
       if (epoch.live && record) {
         const rows = context.store.list().filter(row =>
           row.ownerId === context.ownerId && row.providerAccountId === accountId &&
-          row.accountIncarnation === epoch!.incarnation);
+          row.accountIncarnation === epoch!.incarnation && !acknowledged(row));
         if (rows.length) {
           const recipients = new Map<string, DraftReference[]>();
           for (const row of rows) {
@@ -185,13 +232,19 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
       accountId === undefined || record.providerAccountId === accountId);
     const results = await Promise.allSettled(pending.flatMap(record =>
       record.recipients.map(async recipient => {
-        await context.revokeRecipient(record, recipient.workspaceId, recipient.drafts);
+        const scope = (reference: DraftReference): OpenApiDraftCleanupReceipt => ({
+          ownerId: record.ownerId, providerAccountId: record.providerAccountId,
+          accountIncarnation: record.incarnation, intendedWorkspaceId: recipient.workspaceId, reference,
+        });
+        const pendingDrafts = recipient.drafts.filter(reference => !acknowledged(scope(reference)));
+        if (pendingDrafts.length)
+          await context.revokeRecipient(record, recipient.workspaceId, pendingDrafts);
         context.transaction(() => {
           const fresh = context.cleanup.get(record.incarnation);
           if (!fresh) return;
-          const acknowledged = fresh.recipients.find(item => item.workspaceId === recipient.workspaceId);
-          if (!acknowledged) return;
-          for (const reference of acknowledged.drafts) ledger.finishRevocation(reference.draftId);
+          const recipientRecord = fresh.recipients.find(item => item.workspaceId === recipient.workspaceId);
+          if (!recipientRecord) return;
+          for (const reference of recipientRecord.drafts) recordAcknowledgement(scope(reference));
           fresh.recipients = fresh.recipients.filter(item => item.workspaceId !== recipient.workspaceId);
           if (fresh.recipients.length) context.cleanup.put(fresh);
           else context.cleanup.delete(record.incarnation);
@@ -203,8 +256,92 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
       throw failure.reason;
     }
   }
+  async function resolveForRevocation(requested: OpenApiDraftCleanupReceipt) {
+    const row = context.store.get(requested.reference.draftId) ?? fail("DRAFT_NOT_FOUND");
+    if (row.ownerId !== context.ownerId || requested.ownerId !== row.ownerId ||
+        requested.providerAccountId !== row.providerAccountId ||
+        requested.accountIncarnation !== row.accountIncarnation ||
+        requested.intendedWorkspaceId !== row.intendedWorkspaceId ||
+        requested.reference.grantId !== row.reference.grantId ||
+        requested.reference.selectionDigest !== row.reference.selectionDigest)
+      fail("BINDING_IDENTITY_MISMATCH");
+    if (acknowledged(row)) {
+      const receipt = cleanupScope(row);
+      // Exact durable connector acknowledgement can outlive both the account capability and
+      // the workspace. This proof-only revoker cannot activate, resolve a class, or dispatch.
+      return {finalizer: new RpcStub(new (class extends RpcTarget implements OpenApiRevocationFinalizer {
+        async revoke() {
+          if (!acknowledged(receipt)) fail("BINDING_CLEANUP_NOT_ACKNOWLEDGED");
+        }
+      })())};
+    }
+    const retired = context.cleanup.get(row.accountIncarnation);
+    let account: Fetcher<GatekeeperUser>;
+    if (retired) {
+      if (retired.ownerId !== row.ownerId || retired.providerAccountId !== row.providerAccountId ||
+          !retired.recipients.some(recipient => recipient.workspaceId === row.intendedWorkspaceId &&
+            recipient.drafts.some(ref => ref.draftId === row.reference.draftId &&
+              ref.grantId === row.reference.grantId && ref.selectionDigest === row.reference.selectionDigest)))
+        return fail("BINDING_IDENTITY_MISMATCH");
+      account = retired.account;
+    } else {
+      account = current(row.providerAccountId, row.accountIncarnation).account.account;
+    }
+    const finalizer = await (account as Fetcher<GatekeeperUser & OpenApiBoundAccount>)
+      .resolveBoundDraftForRevocation(structuredClone(row.reference));
+    return { finalizer };
+  }
+  function hasPendingRetirements() {
+    return context.retirements.list().some(retirement => retirement.drafts.some(scope => !acknowledged(scope)));
+  }
+  async function drainWorkspaceRetirement(workspaceId: string) {
+    const retirement = context.retirements.get(workspaceId) ?? fail("BINDING_WORKSPACE_NOT_CLOSED");
+    if (retirement.ownerId !== context.ownerId || retirement.workspaceId !== workspaceId)
+      fail("BINDING_IDENTITY_MISMATCH");
+    const results = await Promise.allSettled(retirement.drafts.map(async scope => {
+      if (scope.ownerId !== context.ownerId || scope.intendedWorkspaceId !== workspaceId)
+        fail("BINDING_IDENTITY_MISMATCH");
+      if (acknowledged(scope)) return;
+      try {
+        using finalizer = (await resolveForRevocation(scope)).finalizer;
+        await finalizer.revoke("removed");
+        context.transaction(() => recordAcknowledgement(scope));
+      } catch (error) {
+        // Concurrent account fanout may have already recorded the exact acknowledgement and
+        // released its historical account capability while this cleanup resolver was suspended.
+        if (!acknowledged(scope)) throw error;
+      }
+    }));
+    const failure = results.find(result => result.status === "rejected");
+    if (failure?.status === "rejected") {
+      context.scheduleCleanup();
+      throw failure.reason;
+    }
+  }
+  async function drainWorkspaceRetirements() {
+    const results = await Promise.allSettled(context.retirements.list()
+      .filter(retirement => retirement.drafts.some(scope => !acknowledged(scope)))
+      .map(retirement => drainWorkspaceRetirement(retirement.workspaceId)));
+    const failure = results.find(result => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  }
   return {
     ledger,
+    resolveForRevocation,
+    hasPendingRetirements,
+    drainWorkspaceRetirements,
+    /** Permanently stop issuance before awaiting the exact connector cleanup acknowledgements. */
+    async retireWorkspace(workspaceId: string) {
+      context.transaction(() => {
+        if (context.retirements.get(workspaceId)) return;
+        const rows = context.store.list().filter(row =>
+          row.ownerId === context.ownerId && row.intendedWorkspaceId === workspaceId);
+        context.retirements.put({workspaceId, ownerId: context.ownerId, drafts: rows.map(cleanupScope)});
+        for (const row of rows) ledger.beginRevocation(row.reference.draftId);
+        if (rows.some(row => !acknowledged(row))) context.scheduleCleanup();
+      });
+      await drainWorkspaceRetirement(workspaceId);
+    },
     drainCleanup,
     snapshot,
     assertUnchanged,
@@ -230,11 +367,13 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
       if (record.description.hostBindingProtocol !== "openapi-v1")
         return record.account.startResourceConfigurator(pattern);
       if (!workspaceId) return fail("WORKSPACE_CONTEXT_REQUIRED");
+      assertWorkspaceOpen(workspaceId);
       const { epoch } = current(accountId);
       const authorityId = crypto.randomUUID();
       const authority = new (class extends RpcTarget implements HostDraftAuthority {
         async registerDraft(reference: DraftReference) {
           return context.transaction(() => {
+            assertWorkspaceOpen(workspaceId);
             current(accountId, epoch.incarnation);
             const issuer = context.getDraftIssuer(reference.draftId);
             if (
@@ -270,7 +409,7 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
         async cancelDraft(draftId: string) {
           if (context.getDraftIssuer(draftId) !== authorityId) fail("DRAFT_NOT_FOUND");
           const row = context.store.get(draftId) ?? fail("DRAFT_NOT_FOUND");
-          scope(row, accountId, epoch.incarnation, workspaceId, false);
+          checkScope(row, accountId, epoch.incarnation, workspaceId, false);
           ledger.cancel(draftId);
         }
       })();
@@ -281,6 +420,7 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
       );
       try {
         current(accountId, epoch.incarnation);
+        assertWorkspaceOpen(workspaceId);
       } catch (error) {
         frame.ui?.[Symbol.dispose]();
         throw error;
@@ -288,6 +428,7 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
       return frame;
     },
     async lookup(accountId: number, url: string, workspaceId: string) {
+      assertWorkspaceOpen(workspaceId);
       const grantId = canonical(url);
       const { account, epoch } = current(accountId);
       const matches = context.store
@@ -302,12 +443,12 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
         );
       if (matches.length !== 1) return fail("DRAFT_NOT_FOUND");
       const row = matches[0];
-      scope(row, accountId, epoch.incarnation, workspaceId);
+      checkScope(row, accountId, epoch.incarnation, workspaceId);
       const resolved = await (
         account.account as Fetcher<GatekeeperUser & OpenApiBoundAccount>
       ).resolveBoundDraft(structuredClone(row.reference));
       try {
-        scope(
+        checkScope(
           context.store.get(row.reference.draftId) ?? fail("DRAFT_NOT_FOUND"),
           accountId,
           epoch.incarnation,
@@ -320,7 +461,7 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
           fail("BINDING_RESOURCE_URL_MISMATCH");
         await context.checkPolicy(account.vendorId, resolved.resource);
         const fresh = context.store.get(row.reference.draftId) ?? fail("DRAFT_NOT_FOUND");
-        scope(fresh, accountId, epoch.incarnation, workspaceId);
+        checkScope(fresh, accountId, epoch.incarnation, workspaceId);
         return {
           ...resolved,
           row: fresh,
@@ -331,32 +472,6 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
         resolved.finalizer[Symbol.dispose]();
         throw error;
       }
-    },
-    /** Resolve only the stored immutable draft through its exact current or retired account. */
-    async resolveForRevocation(requested: BindingRow) {
-      const row = context.store.get(requested.reference.draftId) ?? fail("DRAFT_NOT_FOUND");
-      if (row.ownerId !== context.ownerId || requested.ownerId !== row.ownerId ||
-          requested.providerAccountId !== row.providerAccountId ||
-          requested.accountIncarnation !== row.accountIncarnation ||
-          requested.intendedWorkspaceId !== row.intendedWorkspaceId ||
-          requested.reference.grantId !== row.reference.grantId ||
-          requested.reference.selectionDigest !== row.reference.selectionDigest)
-        fail("BINDING_IDENTITY_MISMATCH");
-      const retired = context.cleanup.get(row.accountIncarnation);
-      let account: Fetcher<GatekeeperUser>;
-      if (retired) {
-        if (retired.ownerId !== row.ownerId || retired.providerAccountId !== row.providerAccountId ||
-            !retired.recipients.some(recipient => recipient.workspaceId === row.intendedWorkspaceId &&
-              recipient.drafts.some(ref => ref.draftId === row.reference.draftId &&
-                ref.grantId === row.reference.grantId && ref.selectionDigest === row.reference.selectionDigest)))
-          return fail("BINDING_IDENTITY_MISMATCH");
-        account = retired.account;
-      } else {
-        account = current(row.providerAccountId, row.accountIncarnation).account.account;
-      }
-      const finalizer = await (account as Fetcher<GatekeeperUser & OpenApiBoundAccount>)
-        .resolveBoundDraftForRevocation(structuredClone(row.reference));
-      return { finalizer };
     },
     reserve(identity: BoundIdentity) {
       checked(identity);

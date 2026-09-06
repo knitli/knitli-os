@@ -988,6 +988,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Initialized on first startup.
       ownerId: <string | undefined>undefined,
       openApiWorkspaceClosing: false,
+      openApiRecoveryAt: <number | undefined>undefined,
 
       // Version of this DO's storage schema, gating lazy migrations. Used to trigger migrations
       // at construction time.
@@ -1637,7 +1638,7 @@ class OverseerImpl implements AgentHooks {
     this.#runningAgents.add(chatId);
     if (wasEmpty) {
       // Zero -> one running agents: schedule the keep-alive alarm.
-      this.ctx.storage.setAlarm(Date.now() + OverseerImpl.#AGENT_KEEPALIVE_ALARM_MS);
+      this.#updateExternalMessageResponseDeliveryAlarm();
     }
   }
 
@@ -1660,27 +1661,30 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  #refreshOpenApiRecoveryAlarm(retry = false): void {
+    const pending = Array.from(this.storage.openApiBindings.list())
+      .some(row => row.state !== "revoked" && (row.state !== "active" || !row.published)) ||
+      Array.from(this.storage.openApiAccountFences.list()).some(row => row.drafts.some(draft => !draft.revoked));
+    if (!pending) this.storage.openApiRecoveryAt.put(undefined);
+    else if (retry || this.storage.openApiRecoveryAt.get() === undefined) {
+      this.storage.openApiRecoveryAt.put(Date.now() + 30_000);
+    }
+    this.#updateExternalMessageResponseDeliveryAlarm();
+  }
+
   #updateExternalMessageResponseDeliveryAlarm(): void {
-    if (this.#runningAgents.size > 0) return;
-
-    // This DO has one alarm shared by agent keep-alive, response-target retry, and delivered-record sweep.
-    // Recompute from storage whenever the alarm may have been overwritten by another concern.
+    // This DO has one alarm. Preserve the earliest agent, response, sweep or OpenAPI deadline.
+    const deadlines: number[] = [];
+    if (this.#runningAgents.size > 0) deadlines.push(Date.now() + OverseerImpl.#AGENT_KEEPALIVE_ALARM_MS);
     this.#sweepDeliveredExternalMessageResponses();
-
-    let hasReadyExternalMessageResponse = [...this.storage.gadgetResponseDeliveries.readyByIdempotencyKey.list({ limit: 1 })]
-      .length > 0;
-    if (hasReadyExternalMessageResponse) {
-      this.ctx.storage.setAlarm(Date.now());
-      return;
-    }
-
-    let nextDeliveredRecord = [...this.storage.gadgetResponseDeliveries.deliveredByDeliveredAt.list({ limit: 1 })][0];
-    if (nextDeliveredRecord?.status === "delivered") {
-      this.ctx.storage.setAlarm(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
-      return;
-    }
-
-    this.ctx.storage.deleteAlarm();
+    const hasReadyResponse = Array.from(this.storage.gadgetResponseDeliveries.readyByIdempotencyKey.list({ limit: 1 })).length > 0;
+    if (hasReadyResponse) deadlines.push(Date.now());
+    const nextDelivered = Array.from(this.storage.gadgetResponseDeliveries.deliveredByDeliveredAt.list({ limit: 1 }))[0];
+    if (nextDelivered?.status === "delivered") deadlines.push(nextDelivered.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
+    const openApiAt = this.storage.openApiRecoveryAt.get();
+    if (openApiAt !== undefined) deadlines.push(openApiAt);
+    if (deadlines.length) this.ctx.storage.setAlarm(Math.min(...deadlines));
+    else this.ctx.storage.deleteAlarm();
   }
 
   #deleteExternalMessageResponseDeliveryRecord(record: ExternalMessageRecord): void {
@@ -4406,7 +4410,7 @@ class OverseerImpl implements AgentHooks {
       workspaceId: this.ctx.id.toString(),
       store: {
         get: id => this.storage.openApiBindings.get(id),
-        put: (_id, row) => { this.storage.openApiBindings.put(row); },
+        put: (_id, row) => { this.storage.openApiBindings.put(row); this.#refreshOpenApiRecoveryAlarm(); },
         list: () => Array.from(this.storage.openApiBindings.list()),
       },
       now: Date.now,
@@ -4441,6 +4445,7 @@ class OverseerImpl implements AgentHooks {
   }
 
   createBoundOpenApiGatekeeper(accountId: number, resourceUrl: string): Promise<GatekeeperClient<any>> {
+    if (this.storage.openApiWorkspaceClosing.get()) throw new Error("BINDING_WORKSPACE_CLOSING");
     return this.#getOpenApiBinding().create(accountId, resourceUrl);
   }
 
@@ -4462,6 +4467,33 @@ class OverseerImpl implements AgentHooks {
           event: "openapi.binding.recovery.pending",
         });
       }
+    }
+    this.#refreshOpenApiRecoveryAlarm(true);
+  }
+
+  checkOpenApiAccountReadiness(gatekeeperId: number, generation: number): Promise<void> {
+    return this.#getOpenApiBinding().checkAccountReadiness(gatekeeperId, generation);
+  }
+
+  async closeOpenApiBindings(): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      this.storage.openApiWorkspaceClosing.put(true);
+      for (const row of Array.from(this.storage.openApiBindings.list())) {
+        if (row.state !== "revoked") this.#getOpenApiBinding().fence(row.reference.draftId, "removed");
+      }
+    });
+    if (!this.ownerId) throw new Error("Workspace is not initialized.");
+    const owner = this.users.get(this.users.idFromString(this.ownerId));
+    // Fence User-side issuance before waiting for any connector drain. A retained iframe must
+    // not register a new intended-workspace draft while deletion is paused at a revoke barrier.
+    await owner.retireOpenApiWorkspace(this.ctx.id.toString());
+    for (const fence of Array.from(this.storage.openApiAccountFences.list())) {
+      if (fence.drafts.some(draft => !draft.revoked)) {
+        await this.revokeOpenApiAccountBindings(fence.ownerId, fence.providerAccountId, fence.accountIncarnation, []);
+      }
+    }
+    for (const row of Array.from(this.storage.openApiBindings.list())) {
+      if (row.state === "revoking") await this.#getOpenApiBinding().cleanup(row.reference.draftId);
     }
   }
 
@@ -4499,6 +4531,7 @@ class OverseerImpl implements AgentHooks {
       }
       // The account fence exists even if Add has not reached local reservation yet.
       this.storage.openApiAccountFences.put(fence);
+      this.#refreshOpenApiRecoveryAlarm();
       for (const row of localRows) this.#getOpenApiBinding().fence(row.reference.draftId, "account-disconnected");
     });
     const pending = this.storage.openApiAccountFences.get(incarnation)!;
@@ -4522,6 +4555,7 @@ class OverseerImpl implements AgentHooks {
       const completed = current.drafts.find(entry => entry.reference.draftId === draft.reference.draftId)!;
       completed.revoked = true;
       this.storage.openApiAccountFences.put(current);
+      this.#refreshOpenApiRecoveryAlarm();
     }
   }
 
@@ -4903,7 +4937,7 @@ class OverseerImpl implements AgentHooks {
   }
 
   async submitAction(gatekeeperId: number, action: number,
-                     description: ActionDescription, caller: GatekeeperCaller)
+                     description: ActionDescription, caller: GatekeeperCaller, openApiGeneration?: number)
       : Promise<void> {
     if (this.storage.prohibitAllSharing.get()) {
       throw new Error(
@@ -4911,28 +4945,33 @@ class OverseerImpl implements AgentHooks {
           "from performing actions.");
     }
 
+    if (openApiGeneration !== undefined) await this.checkOpenApiAccountReadiness(gatekeeperId, openApiGeneration);
     await this.assertGatekeeperObserverReadiness(gatekeeperId);
-    this.assertOpenApiBindingActiveNow(gatekeeperId);
+    const persist = () => {
+      this.assertOpenApiBindingActiveNow(gatekeeperId, openApiGeneration);
 
-    let actionId = this.storage.nextActionId.get();
-    this.storage.nextActionId.put(actionId + 1);
+      let actionId = this.storage.nextActionId.get();
+      this.storage.nextActionId.put(actionId + 1);
 
-    let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
+      let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
 
-    let record: ActionRecord = {
-      id: actionId,
-      gatekeeperId,
-      caller,
-      resourceTitle: gatekeeper?.resourceTitle,
-      resourceUrl: gatekeeper?.resourceUrl,
-      action,
-      createdAt: new Date(),
-      state: "pending",
-      type: "action",
-      description
+      let record: ActionRecord = {
+        id: actionId,
+        gatekeeperId,
+        caller,
+        resourceTitle: gatekeeper?.resourceTitle,
+        resourceUrl: gatekeeper?.resourceUrl,
+        action,
+        createdAt: new Date(),
+        state: "pending",
+        type: "action",
+        description
+      };
+
+      this.storage.actions.put(record);
+      return actionId;
     };
-
-    this.storage.actions.put(record);
+    const actionId = openApiGeneration === undefined ? persist() : this.ctx.storage.transactionSync(persist);
     this.#associateAction(caller, actionId);
 
     // Same auto-approval gate as before, named because awaitDecision uses it too. The drain is
@@ -8589,6 +8628,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async alarm() {
+    await this.impl.resumeOpenApiBindings();
     await this.impl.waitForAllAgentsToComplete();
     await this.impl.deliverReadyExternalMessageResponses();
   }
@@ -9500,6 +9540,7 @@ function joinSessionPresence(
 class OverseerClientInterface extends RpcTarget implements Overseer {
   async startBoundResourceConfigurator(accountId: number, resourceUrlPattern: string) {
     if (this.clientUserId !== this.impl.ownerId) throw new Error("BINDING_OWNER_REQUIRED");
+    if (this.impl.storage.openApiWorkspaceClosing.get()) throw new Error("BINDING_WORKSPACE_CLOSING");
     return this.#clientUser.startBoundResourceConfigurator(accountId, resourceUrlPattern, this.impl.ctx.id.toString());
   }
 
@@ -9749,6 +9790,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       event_name: "gadget_deleted",
       user_id: this.#clientUser.id.toString(),
     });
+
+    await this.impl.closeOpenApiBindings();
 
     this.impl.destroyAllLiveChats();
     // TODO: Revoke user sessions.
@@ -11732,9 +11775,11 @@ class SlashCommandAuthorizerImpl extends NativeRpcTarget implements ObservationA
 
 @validateRpc()
 class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
+  #openApiGeneration?: number;
   constructor(private impl: OverseerImpl, private gatekeeperId: number,
               private caller: GatekeeperCaller) {
     super();
+    this.#openApiGeneration = impl.findOpenApiBinding(gatekeeperId)?.identity?.generation;
   }
 
   authorizeObservation(description: ObservationDescription): Promise<void> {
@@ -11742,7 +11787,7 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   }
 
   submitAction(action: number, description: ActionDescription): Promise<void> {
-    return this.impl.submitAction(this.gatekeeperId, action, description, this.caller);
+    return this.impl.submitAction(this.gatekeeperId, action, description, this.caller, this.#openApiGeneration);
   }
 
   bindHook<Hook extends RpcTarget>(

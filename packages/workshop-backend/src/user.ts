@@ -1,4 +1,4 @@
-import { createOpenApiUserBinding, type OpenApiAccountEpoch, type OpenApiAccountCleanup } from "./fork/openapi-user-binding";
+import { createOpenApiUserBinding, type OpenApiAccountEpoch, type OpenApiAccountCleanup, type OpenApiDraftCleanupReceipt, type OpenApiWorkspaceRetirement } from "./fork/openapi-user-binding";
 import type { BindingRow } from "./fork/openapi-binding-ledger";
 import type { BoundIdentity } from "@gadgets/workshop-shared/fork/openapi-host-binding";
 import { RpcStub } from "capnweb";
@@ -170,6 +170,8 @@ function makeUserStorage(storage: DurableObjectStorage) {
       openApiDrafts: collection<BindingRow>()({ primaryKey: row => row.reference.draftId }),
       openApiAccountEpochs: collection<OpenApiAccountEpoch>()({ primaryKey: "id" }),
       openApiAccountCleanup: collection<OpenApiAccountCleanup>()({ primaryKey: "incarnation" }),
+      openApiDraftCleanupReceipts: collection<OpenApiDraftCleanupReceipt>()({ primaryKey: row => row.reference.draftId }),
+      openApiWorkspaceRetirements: collection<OpenApiWorkspaceRetirement>()({ primaryKey: "workspaceId" }),
       connectedAccounts: collection<ConnectedAccountRecord>()({
         primaryKey: "id"
       }),
@@ -306,7 +308,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.adminSettings = this.ctx.exports.AdminSettings;
 
     this.vendors = buildGatekeeperVendorMap(env);
-    if (Array.from(this.storage.openApiAccountCleanup.list()).length) this.#scheduleOpenApiCleanup();
+    if (Array.from(this.storage.openApiAccountCleanup.list()).length || this.#openApiBinding().hasPendingRetirements())
+      this.#scheduleOpenApiCleanup();
   }
 
   async authenticate(token: string): Promise<void> {
@@ -1554,7 +1557,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async alarm() {
     try {
-      await this.#openApiBinding().drainCleanup();
+      const binding = this.#openApiBinding();
+      const results = await Promise.allSettled([binding.drainWorkspaceRetirements(), binding.drainCleanup()]);
+      const failed = results.find(result => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
     } catch (error) {
       logger.warn("OpenAPI account cleanup remains pending", { event: "openapi.account.cleanup.pending", error });
       this.#scheduleOpenApiCleanup();
@@ -1578,6 +1584,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         put: record => { this.storage.openApiAccountCleanup.put(record); },
         delete: incarnation => { this.storage.openApiAccountCleanup.delete(incarnation); },
         list: () => Array.from(this.storage.openApiAccountCleanup.list()),
+      },
+      receipts: {
+        get: draftId => this.storage.openApiDraftCleanupReceipts.get(draftId),
+        put: receipt => { this.storage.openApiDraftCleanupReceipts.put(receipt); },
+      },
+      retirements: {
+        get: workspaceId => this.storage.openApiWorkspaceRetirements.get(workspaceId),
+        put: retirement => { this.storage.openApiWorkspaceRetirements.put(retirement); },
+        list: () => Array.from(this.storage.openApiWorkspaceRetirements.list()),
       },
       scheduleCleanup: () => this.#scheduleOpenApiCleanup(),
       revokeRecipient: (record, workspaceId, drafts) => {
@@ -1610,6 +1625,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** Resolve a registered draft privately, with policy and account fences after awaits. */
   async lookupOpenApiDraft(accountId: number, resourceUrl: string, intendedWorkspaceId: string) {
     return this.#openApiBinding().lookup(accountId, resourceUrl, intendedWorkspaceId);
+  }
+  async retireOpenApiWorkspace(workspaceId: string) {
+    return this.#openApiBinding().retireWorkspace(workspaceId);
   }
   async resolveOpenApiDraftForRevocation(row: BindingRow) {
     return this.#openApiBinding().resolveForRevocation(row);

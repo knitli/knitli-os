@@ -14,6 +14,8 @@ import {
   createOpenApiUserBinding,
   type OpenApiAccountEpoch,
   type OpenApiAccountCleanup,
+  type OpenApiDraftCleanupReceipt,
+  type OpenApiWorkspaceRetirement,
   type OpenApiUserBindingContext,
 } from "../src/fork/openapi-user-binding";
 import type { BindingRow } from "../src/fork/openapi-binding-ledger";
@@ -33,6 +35,8 @@ function fixture(v1 = true) {
   const epochs = new Map<number, OpenApiAccountEpoch>();
   const issuers = new Map<string, string>();
   const cleanup = new Map<string, OpenApiAccountCleanup>();
+  const receipts = new Map<string, OpenApiDraftCleanupReceipt>();
+  const retirements = new Map<string, OpenApiWorkspaceRetirement>();
   const recipients: { incarnation: string; workspaceId: string; drafts: DraftReference[] }[] = [];
   const cleanupResolves: DraftReference[] = [];
   let recipientPause: (workspaceId: string) => Promise<void> = noPause;
@@ -47,13 +51,14 @@ function fixture(v1 = true) {
   } = { legacy: [], bound: [], resolve: [], activate: 0, disposed: 0 };
   let clock = 1000;
   let resolvePause = noPause;
+  let revokePause = noPause;
   let policyPause = noPause;
   const ui = new (class extends RpcTarget {})();
   const finalizer = new (class extends RpcTarget {
     async activate() {
       calls.activate++;
     }
-    async revoke() {}
+    async revoke() { await revokePause(); }
     [Symbol.dispose]() {
       calls.disposed++;
     }
@@ -116,6 +121,15 @@ function fixture(v1 = true) {
       delete: id => { cleanup.delete(id); },
       list: () => [...cleanup.values()],
     },
+    receipts: {
+      get: id => receipts.get(id),
+      put: receipt => { receipts.set(receipt.reference.draftId, receipt); },
+    },
+    retirements: {
+      get: id => retirements.get(id),
+      put: retirement => { retirements.set(retirement.workspaceId, retirement); },
+      list: () => [...retirements.values()],
+    },
     scheduleCleanup: () => { scheduled++; },
     revokeRecipient: async (record, workspaceId, drafts) => {
       recipients.push({ incarnation: record.incarnation, workspaceId, drafts });
@@ -149,9 +163,12 @@ function fixture(v1 = true) {
   return {
     binding,
     cleanup,
+    receipts,
+    retirements,
     recipients,
     cleanupResolves,
     scheduled: () => scheduled,
+    pauseRevoke: (pause: () => Promise<void>) => { revokePause = pause; },
     pauseRecipient: (pause: (workspaceId: string) => Promise<void>) => { recipientPause = pause; },
     restart,
     context,
@@ -733,5 +750,208 @@ describe("actual User durable account cleanup", () => {
         expect(Array.from(instance["storage"].openApiAccountCleanup.list())).toEqual([]);
       } finally { await control.release("provider"); }
     });
+  });
+});
+
+
+describe("durable workspace retirement", () => {
+  it("fences issuance and reservation before revoke, preserving another workspace", async () => {
+    const f = fixture();
+    await f.register();
+    await f.binding.start(0, pattern, "workspace");
+    let release!: () => void;
+    let entered!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    f.pauseRevoke(async () => { entered(); await barrier; });
+    const retirement = f.binding.retireWorkspace("workspace");
+    try {
+      await Promise.race([started, retirement]);
+      const late = {...reference, draftId: "late", grantId: "late-grant"};
+      await expect(f.authorities[1].registerDraft(late)).rejects.toThrow("BINDING_WORKSPACE_CLOSED");
+      expect(f.rows.size).toBe(1);
+      expect(f.retirements.get("workspace")?.drafts).toHaveLength(1);
+      await expect(f.binding.start(0, pattern, "workspace")).rejects.toThrow("BINDING_WORKSPACE_CLOSED");
+      await expect(f.binding.lookup(0, url, "workspace")).rejects.toThrow("BINDING_WORKSPACE_CLOSED");
+      expect(() => f.binding.reserve(f.identity())).toThrow("BINDING_WORKSPACE_CLOSED");
+      expect(f.receipts.size).toBe(0);
+      const other = {...reference, draftId: "other", grantId: "other-grant"};
+      await f.binding.start(0, pattern, "other-workspace");
+      await f.authorities.at(-1)!.registerDraft(other);
+      expect(f.binding.reserve({...f.identity(), ...other, workspaceId: "other-workspace"}).state).toBe("reserved");
+      expect(f.epochs.get(0)?.live).toBe(true);
+    } finally { release(); }
+    await retirement;
+    expect(f.receipts.get("draft")).toMatchObject({intendedWorkspaceId: "workspace", reference});
+    await f.binding.mutateAccount(0, noPause, () => {});
+    expect(f.recipients.map(recipient => recipient.workspaceId)).toEqual(["other-workspace"]);
+  });
+
+  it("keeps failed revoker cleanup pending across restart and later skips only its exact receipt", async () => {
+    const f = fixture();
+    await f.register();
+    f.pauseRevoke(async () => { throw new Error("retirement revoke unavailable"); });
+    await expect(f.binding.retireWorkspace("workspace")).rejects.toThrow("retirement revoke unavailable");
+    expect(f.receipts.size).toBe(0);
+    expect(f.restart().hasPendingRetirements()).toBe(true);
+    await expect(f.restart().start(0, pattern, "workspace")).rejects.toThrow("BINDING_WORKSPACE_CLOSED");
+    f.pauseRevoke(noPause);
+    await f.restart().drainWorkspaceRetirements();
+    expect(f.restart().hasPendingRetirements()).toBe(false);
+    expect(f.receipts.get("draft")?.reference).toEqual(reference);
+    await f.restart().mutateAccount(0, noPause, () => {});
+    expect(f.recipients).toEqual([]);
+    using proof = (await f.restart().resolveForRevocation(f.rows.get("draft")!)).finalizer;
+    await proof.revoke("removed");
+    expect(f.cleanupResolves).toEqual([reference, reference]);
+  });
+
+  it("retires with an archived account and discharges already-pending fanout without deleting a successor", async () => {
+    const f = fixture();
+    await f.register();
+    f.pauseRecipient(async () => { throw new Error("workspace unavailable"); });
+    await expect(f.binding.mutateAccount(0, noPause, () => {})).rejects.toThrow("workspace unavailable");
+    f.binding.replace(0);
+    const successor = {...f.epochs.get(0)!};
+    await f.restart().retireWorkspace("workspace");
+    expect(f.cleanupResolves).toEqual([reference]);
+    await expect(f.restart().drainCleanup()).resolves.toBeUndefined();
+    expect(f.cleanup.size).toBe(0);
+    expect(f.recipients).toHaveLength(1);
+    expect(f.epochs.get(0)).toEqual(successor);
+  });
+
+  it("retains an empty workspace issuance fence and accepts prior exact account acknowledgements", async () => {
+    const empty = fixture();
+    await empty.binding.start(0, pattern, "workspace");
+    await empty.binding.retireWorkspace("workspace");
+    await expect(empty.authorities[0].registerDraft(reference)).rejects.toThrow("BINDING_WORKSPACE_CLOSED");
+    expect(empty.retirements.get("workspace")?.drafts).toEqual([]);
+    const f = fixture();
+    await f.register();
+    await f.binding.mutateAccount(0, noPause, () => {});
+    expect(f.cleanup.size).toBe(0);
+    await f.restart().retireWorkspace("workspace");
+    expect(f.cleanupResolves).toEqual([]);
+    expect(f.restart().hasPendingRetirements()).toBe(false);
+  });
+
+  it.each(["ownerId", "providerAccountId", "accountIncarnation", "intendedWorkspaceId", "draftId", "grantId", "selectionDigest"])(
+    "does not skip account fanout for a receipt with substituted %s", async field => {
+      const f = fixture();
+      await f.register();
+      const row = structuredClone(f.rows.get("draft")!);
+      const changed = field === "draftId" || field === "grantId" || field === "selectionDigest"
+        ? {...row, reference: {...row.reference, [field]: "forged"}}
+        : {...row, [field]: field === "providerAccountId" ? 99 : "forged"};
+      f.receipts.set("draft", changed);
+      await f.binding.mutateAccount(0, noPause, () => {});
+      expect(f.recipients).toHaveLength(1);
+      expect(f.recipients[0].drafts).toEqual([reference]);
+      expect(f.receipts.get("draft")).toMatchObject({ownerId: row.ownerId,
+        providerAccountId: row.providerAccountId, accountIncarnation: row.accountIncarnation,
+        intendedWorkspaceId: row.intendedWorkspaceId, reference});
+    },
+  );
+});
+
+describe("actual User workspace retirement", () => {
+  it("rejects retained real User draft authority after its issuance fence while cleanup is paused", async () => {
+    const stub = env.TEST_USER.getByName(crypto.randomUUID());
+    await runInDurableObject(stub, async (user: UserDurableObject) => {
+      const accounts = user["storage"].connectedAccounts;
+      type AccountRecord = NonNullable<ReturnType<typeof accounts.get>>;
+      const authorities: HostDraftAuthority[] = [];
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const barrier = new Promise<void>(resolve => { release = resolve; });
+      const finalizer = new (class extends RpcTarget {
+        async revoke() { entered(); await barrier; }
+        [Symbol.dispose]() {}
+      })();
+      const account = new (class extends RpcTarget {
+        async startBoundResourceConfigurator(_pattern: string, authority: HostDraftAuthority) {
+          authorities.push(authority);
+          return {iframeHtml: "<p>test configuration</p>"};
+        }
+        async resolveBoundDraftForRevocation() { return finalizer; }
+      })();
+      const get = vi.spyOn(accounts, "get").mockReturnValue({
+        id: 0, vendorId: "openapi", account: account as unknown as AccountRecord["account"],
+        description: {displayName: "API", avatar: {url: "https://workshop.test/avatar"}, hostBindingProtocol: "openapi-v1"},
+      });
+      try {
+        await user.startBoundResourceConfigurator(0, pattern, "workspace");
+        await authorities[0].registerDraft(reference);
+        await user.startBoundResourceConfigurator(0, pattern, "workspace");
+        expect(authorities[1]).toBeInstanceOf(RpcTarget);
+        const retirement = user.retireOpenApiWorkspace("workspace");
+        try {
+          await Promise.race([started, retirement]);
+          await expect(authorities[1].registerDraft({...reference, draftId: "late", grantId: "late-grant"}))
+            .rejects.toThrow("BINDING_WORKSPACE_CLOSED");
+          expect(Array.from(user["storage"].openApiDrafts.list())).toHaveLength(1);
+          expect(user["storage"].openApiWorkspaceRetirements.get("workspace")?.drafts).toHaveLength(1);
+          expect(user["storage"].openApiDraftCleanupReceipts.get("draft")).toBeUndefined();
+          expect(get).toHaveBeenCalled();
+        } finally { release(); }
+        await retirement;
+        expect(user["storage"].openApiDraftCleanupReceipts.get("draft")?.reference).toEqual(reference);
+      } finally { release(); get.mockRestore(); }
+    });
+  });
+
+
+  it("retries failed workspace revocation after real User eviction", async () => {
+    const f = await durableCleanupFixture();
+    await runInDurableObject(f.user, async instance => {
+      const accounts = instance["storage"].connectedAccounts;
+      const record = accounts.get(0)!;
+      const finalizer = new (class extends RpcTarget {
+        async revoke() { throw new Error("workspace revoker unavailable"); }
+        [Symbol.dispose]() {}
+      })();
+      const account = new (class extends RpcTarget {
+        async resolveBoundDraftForRevocation() { return finalizer; }
+      })();
+      const get = vi.spyOn(accounts, "get").mockReturnValue({...record,
+        account: account as unknown as typeof record.account});
+      try {
+        await expect(instance.retireOpenApiWorkspace(f.workspace.id.toString()))
+          .rejects.toThrow("workspace revoker unavailable");
+        expect(get).toHaveBeenCalled();
+        expect(instance["storage"].openApiWorkspaceRetirements.get(f.workspace.id.toString())?.drafts).toHaveLength(1);
+        expect(instance["storage"].openApiDraftCleanupReceipts.get(reference.draftId)).toBeUndefined();
+      } finally { get.mockRestore(); }
+    });
+    await evictDurableObject(f.user);
+    expect(await runDurableObjectAlarm(f.user)).toBe(true);
+    await runInDurableObject(f.user, instance => {
+      expect(instance["storage"].openApiDraftCleanupReceipts.get(reference.draftId)?.reference).toEqual(reference);
+      expect(instance["storage"].openApiAccountEpochs.get(0)?.live).toBe(true);
+    });
+    expect((await f.control.events()).cleanup).toBe(1);
+  });
+  it("persists retirement acknowledgement through eviction and never fans disconnect out to the retired workspace", async () => {
+    const f = await durableCleanupFixture();
+    await f.user.retireOpenApiWorkspace(f.workspace.id.toString());
+    const before = await runInDurableObject(f.user, instance =>
+      instance["storage"].openApiDraftCleanupReceipts.get(reference.draftId));
+    expect(before).toMatchObject({ownerId: f.user.id.toString(), providerAccountId: 0,
+      intendedWorkspaceId: f.workspace.id.toString(), reference});
+    await evictDurableObject(f.user);
+    await runInDurableObject(f.user, async instance => {
+      expect(instance["storage"].openApiDraftCleanupReceipts.get(reference.draftId)).toEqual(before);
+      const recipient = vi.spyOn(instance["ctx"].exports.OverseerDurableObject, "get")
+        .mockImplementation(() => { throw new Error("retired workspace no longer exists"); });
+      try {
+        await instance.disconnectAccount(0);
+        expect(recipient).not.toHaveBeenCalled();
+        expect(instance["storage"].connectedAccounts.get(0)).toBeUndefined();
+        expect(instance["storage"].openApiDraftCleanupReceipts.get(reference.draftId)).toEqual(before);
+      } finally { recipient.mockRestore(); }
+    });
+    expect((await f.control.events()).cleanup).toBe(1);
   });
 });

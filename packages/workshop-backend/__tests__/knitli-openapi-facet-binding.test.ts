@@ -1,3 +1,5 @@
+import { openFakeOverseer } from "./fixtures.js";
+import { RpcTarget as WebRpcTarget } from "capnweb";
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import type { OverseerDurableObject } from "../src/overseer";
 import { env, RpcTarget, RpcStub } from "cloudflare:workers";
@@ -126,7 +128,11 @@ describe("durable OpenAPI facet reservation and activation", () => {
     expect(f.events.indexOf("describe")).toBeLessThan(f.events.indexOf("publish"));
     const persisted = JSON.stringify([...f.rows.values()]);
     expect(persisted).not.toContain("finalizer"); expect(persisted).not.toContain("authorizeDispatchKey");
-    await expect((async () => await f.authorities[0].authorizeDispatchKey({ keyId: "key", publicKeyDigest: "digest" }))()).rejects.toThrow("OPENAPI_DISPATCH_NOT_IMPLEMENTED");
+    using registration = await f.authorities[0].authorizeDispatchKey({ keyId: "key", publicKeyDigest: "digest" });
+    expect(registration.keyEpoch).toBe(1);
+    await registration.use.assertActive();
+    f.binding.fence("draft", "removed");
+    await expect(Promise.resolve(registration.use.assertActive())).rejects.toThrow("BINDING_REVOKED");
   });
   it("coalesces genuinely overlapping Add calls while the first User reservation is blocked", async () => {
     const f = fixture(); const pause = barrier(); f.pauseReserve(pause.pause);
@@ -286,6 +292,7 @@ function installActualHostFakes(impl: ActualOverseer) {
     get: () => ({
       lookupOpenApiDraft: f.context.lookup,
       resolveOpenApiDraftForRevocation: f.context.resolveForCleanup,
+      retireOpenApiWorkspace: async () => {},
       reserveOpenApiDraft: f.context.reserve,
       beginOpenApiActivation: f.context.beginActivation,
       activateOpenApiDraft: f.context.activate,
@@ -293,15 +300,21 @@ function installActualHostFakes(impl: ActualOverseer) {
     }),
   } as typeof impl.users;
   let sessionCalls = 0;
+  let allowSession = false;
+  let queue: Parameters<ReturnType<ActualOverseer["getGatekeeperFacet"]>["startSession"]>[0] | undefined;
   const facet = vi.spyOn(impl, "getGatekeeperFacet").mockImplementation(id => {
     expect(impl.storage.gatekeepers.get(id)).toBeDefined();
     f.facets.add(id);
-    return { describe: f.describe, startSession: async () => { sessionCalls++; throw new Error("TEST_SESSION_REACHED"); } } as ReturnType<ActualOverseer["getGatekeeperFacet"]>;
+    return { describe: f.describe, startSession: async captured => {
+      sessionCalls++; queue = captured;
+      if (!allowSession) throw new Error("TEST_SESSION_REACHED");
+      return new WebRpcTarget();
+    } } as ReturnType<ActualOverseer["getGatekeeperFacet"]>;
   });
   const sharing = vi.spyOn(impl, "getSharingManager").mockResolvedValue({
     hasAnyShares: f.isShared,
   } as Awaited<ReturnType<ActualOverseer["getSharingManager"]>>);
-  return { f, getSessionCalls: () => sessionCalls, restore: () => { facet.mockRestore(); sharing.mockRestore(); } };
+  return { f, getSessionCalls: () => sessionCalls, allowSession: () => { allowSession = true; }, getQueue: () => queue!, restore: () => { facet.mockRestore(); sharing.mockRestore(); } };
 }
 
 describe("actual Overseer durable publication integration", () => {
@@ -430,6 +443,118 @@ describe("actual Overseer durable publication integration", () => {
       } finally { restore(); }
     });
   });
+  it("captures queue generation and rejects a changed generation before inserting an action", async () => {
+    await withActualOverseer(async impl => {
+      const host = installActualHostFakes(impl);
+      try {
+        host.allowSession();
+        const connection = await impl.createBoundOpenApiGatekeeper(0, url); await connection.openSession();
+        const row = impl.storage.openApiBindings.get("draft")!;
+        impl.storage.openApiBindings.put({ ...row, identity: { ...row.identity!, generation: 2 } });
+        await expect(Promise.resolve(host.getQueue().submitAction(7, { title: "stale generation", description: "Test action", implementsRevert: false }))).rejects.toThrow("BINDING_IDENTITY_MISMATCH");
+        expect(Array.from(impl.storage.actions.list())).toHaveLength(0);
+        expect(impl.storage.nextActionId.get()).toBe(0);
+      } finally { host.restore(); }
+    });
+  });
+  it("checks account readiness separately before queue insertion", async () => {
+    await withActualOverseer(async impl => {
+      const host = installActualHostFakes(impl);
+      try {
+        host.allowSession();
+        const connection = await impl.createBoundOpenApiGatekeeper(0, url); await connection.openSession();
+        host.f.disconnect();
+        await expect(Promise.resolve(host.getQueue().submitAction(7, { title: "disconnected account", description: "Test action", implementsRevert: false }))).rejects.toThrow("BINDING_ACCOUNT_REPLACED");
+        expect(impl.storage.openApiBindings.get("draft")?.state).toBe("active");
+        expect(Array.from(impl.storage.actions.list())).toHaveLength(0);
+      } finally { host.restore(); }
+    });
+  });
+  it("rechecks captured queue authority in the insertion transaction after readiness has completed", async () => {
+    await withActualOverseer(async impl => {
+      const host = installActualHostFakes(impl); const pause = barrier();
+      let readiness: ReturnType<typeof vi.spyOn> | undefined;
+      try {
+        host.allowSession();
+        const connection = await impl.createBoundOpenApiGatekeeper(0, url); await connection.openSession();
+        const original = impl.assertGatekeeperObserverReadiness.bind(impl);
+        readiness = vi.spyOn(impl, "assertGatekeeperObserverReadiness").mockImplementation(async id => { await original(id); await pause.pause(); });
+        const submit = Promise.resolve(host.getQueue().submitAction(8, { title: "must not insert", description: "Test action", implementsRevert: false }));
+        const rejected = expect(submit).rejects.toThrow("BINDING_REVOKED");
+        await pause.reached; impl.removeGatekeeper(0); pause.release(); await rejected;
+        expect(Array.from(impl.storage.actions.list())).toHaveLength(0);
+        expect(impl.storage.nextActionId.get()).toBe(0);
+        await impl.finishOpenApiRemoval(0);
+      } finally { pause.release(); readiness?.mockRestore(); host.restore(); }
+    });
+  });
+  it("inserts a valid captured queue action in the same transaction as its final guard", async () => {
+    await withActualOverseer(async impl => {
+      const host = installActualHostFakes(impl);
+      try {
+        host.allowSession();
+        const connection = await impl.createBoundOpenApiGatekeeper(0, url); await connection.openSession();
+        const original = impl.ctx.storage.transactionSync.bind(impl.ctx.storage);
+        let inside = false; let guarded = false; let inserted = false;
+        const transaction = vi.spyOn(impl.ctx.storage, "transactionSync").mockImplementation(callback => original(() => { inside = true; try { return callback(); } finally { inside = false; } }));
+        const check = impl.assertOpenApiBindingActiveNow.bind(impl);
+        const guard = vi.spyOn(impl, "assertOpenApiBindingActiveNow").mockImplementation((id, generation) => { check(id, generation); if (generation === 1 && inside) guarded = true; });
+        const put = impl.storage.actions.put.bind(impl.storage.actions);
+        const insertion = vi.spyOn(impl.storage.actions, "put").mockImplementation(record => { if (inside) inserted = true; return put(record); });
+        try { await host.getQueue().submitAction(9, { title: "valid action", description: "Test action", implementsRevert: false }); }
+        finally { transaction.mockRestore(); guard.mockRestore(); insertion.mockRestore(); }
+        expect(guarded).toBe(true); expect(inserted).toBe(true);
+        expect(Array.from(impl.storage.actions.list())).toMatchObject([{ gatekeeperId: 0, action: 9, state: "pending" }]);
+      } finally { host.restore(); }
+    });
+  });
+  it("closes workspace creation before awaiting revocation and retains facets until acknowledgement", async () => {
+    await withActualOverseer(async impl => {
+      const host = installActualHostFakes(impl); const pause = barrier();
+      try {
+        await impl.createBoundOpenApiGatekeeper(0, url); host.f.pauseRevoke(pause.pause);
+        const closing = impl.closeOpenApiBindings(); await pause.reached;
+        expect(impl.storage.openApiWorkspaceClosing.get()).toBe(true);
+        expect(impl.storage.gatekeepers.get(0)).toBeDefined();
+        expect(() => impl.createBoundOpenApiGatekeeper(0, url)).toThrow("BINDING_WORKSPACE_CLOSING");
+        pause.release(); await closing;
+        expect(impl.storage.gatekeepers.get(0)).toBeUndefined();
+        expect(impl.storage.openApiBindings.get("draft")?.state).toBe("revoked");
+      } finally { pause.release(); host.restore(); }
+    });
+  });
+  it("rejects an in-flight first Add after the workspace close snapshot", async () => {
+    await withActualOverseer(async impl => {
+      const host = installActualHostFakes(impl); const pause = barrier();
+      try {
+        const lookup = host.f.context.lookup;
+        host.f.context.lookup = async (...args) => { await pause.pause(); return lookup(...args); };
+        const creation = impl.createBoundOpenApiGatekeeper(0, url); const rejected = expect(creation).rejects.toThrow("BINDING_WORKSPACE_CLOSING");
+        await pause.reached; await impl.closeOpenApiBindings(); pause.release(); await rejected;
+        expect(impl.storage.nextGatekeeperId.get()).toBe(0);
+        expect(Array.from(impl.storage.openApiBindings.list())).toHaveLength(0);
+      } finally { pause.release(); host.restore(); }
+    });
+  });
+  it.each([10_000, 60_000])("keeps the earliest response/OpenAPI alarm and preserves response deadline %s", async offset => {
+    await withActualOverseer(async impl => {
+      const host = installActualHostFakes(impl);
+      try {
+        const responseAt = Date.now() + offset;
+        impl.storage.gadgetResponseDeliveries.put({ idempotencyKey: "delivered-response", chatId: 0, promptSequence: 0, createdAt: 0, status: "delivered", deliveredAt: responseAt - 24 * 60 * 60 * 1000 });
+        host.f.rejectDescription(); host.f.rejectRevoke(true);
+        await expect(impl.createBoundOpenApiGatekeeper(0, url)).rejects.toThrow("DESCRIPTION_REJECTED");
+        const retryAt = impl.storage.openApiRecoveryAt.get()!;
+        expect(await impl.ctx.storage.getAlarm()).toBe(Math.min(responseAt, retryAt));
+        host.f.rejectRevoke(false); await impl.finishOpenApiRemoval(0);
+        expect(impl.storage.openApiRecoveryAt.get()).toBeUndefined();
+        expect(await impl.ctx.storage.getAlarm()).toBe(responseAt);
+        impl.storage.gadgetResponseDeliveries.delete("delivered-response");
+        await impl.deliverReadyExternalMessageResponses();
+        expect(await impl.ctx.storage.getAlarm()).toBeNull();
+      } finally { host.restore(); }
+    });
+  });
   it("rejects unreserved internal IDs before invoking any facet", async () => {
     await withActualOverseer(async impl => {
       const facet = vi.spyOn(impl, "getGatekeeperFacet");
@@ -458,4 +583,26 @@ describe("actual Overseer durable publication integration", () => {
       expect(impl.storage.gatekeepers.get(1)).toBeUndefined();
     });
   });
+});
+
+
+it("public deleteSelf awaits OpenAPI retirement before destructive work", async () => {
+  const pause = barrier();
+  const events: string[] = [];
+  const client = await openFakeOverseer({}, { implOverrides: {
+    recordGadgetAnalytics: () => {},
+    closeOpenApiBindings: async () => {
+      events.push("retire");
+      await pause.pause();
+      throw new Error("RETIREMENT_ACK_UNAVAILABLE");
+    },
+    destroyAllLiveChats: () => { events.push("destroy-chats"); },
+  } });
+  const deleting = Promise.resolve(client.deleteSelf()).then(
+    () => ({ error: undefined }), error => ({ error }));
+  await Promise.race([pause.reached, deleting]);
+  expect(events).toEqual(["retire"]);
+  pause.release();
+  expect((await deleting).error).toMatchObject({ message: "RETIREMENT_ACK_UNAVAILABLE" });
+  expect(events).toEqual(["retire"]);
 });

@@ -72,7 +72,7 @@ export function putAction(
  */
 export async function openFakeOverseer(
     storage: object,
-    opts: { role?: "build" | "use", exports?: object } = {}): Promise<Overseer> {
+    opts: { role?: "build" | "use", exports?: object, implOverrides?: object } = {}): Promise<Overseer> {
   let role = opts.role ?? "build";
   let ownerId = "owner-id";
   let userId = role === "build" ? ownerId : "viewer-id";
@@ -97,6 +97,7 @@ export async function openFakeOverseer(
       users: {
         idFromString: (id: string) => id,
         get: () => ({
+          id: { toString: () => userId },
           whoami: async () => ({ id: "profile-id", name: "Test User" }),
           recordSharedGadgetOpen: async () => {},
         }),
@@ -107,5 +108,6 @@ export async function openFakeOverseer(
       }),
     },
   } satisfies Pick<OverseerDurableObject, "open"> & { impl: object };
+  Object.assign(overseer.impl, opts.implOverrides);
   return overseer.open(userId, `${userId}-profile`, new NativeRpcStub<() => void>(() => {}));
 }

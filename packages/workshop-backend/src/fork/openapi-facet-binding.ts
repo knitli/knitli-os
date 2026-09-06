@@ -1,5 +1,6 @@
 import { createOpenApiDispatchBinding } from "./openapi-dispatch-binding";
 import { RpcTarget, RpcStub } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
 import type { BoundIdentity, HostFacetBinding, OpenApiBoundAccount } from "@gadgets/workshop-shared/fork/openapi-host-binding";
 import { BindingError, createHostBindingLedger, type BindingRow } from "./openapi-binding-ledger";
 
@@ -54,6 +55,30 @@ const equalIdentity = (a: BoundIdentity, b: BoundIdentity) =>
   a.accountIncarnation === b.accountIncarnation && a.workspaceId === b.workspaceId &&
   a.gatekeeperId === b.gatekeeperId && a.facetName === b.facetName && a.generation === b.generation;
 
+/** The cross-Worker surface validates inputs before invoking private lifecycle callbacks. */
+@validateRpc()
+class OpenApiHostFacetBinding extends RpcTarget implements HostFacetBinding {
+  #callbacks: Pick<HostFacetBinding, "getIdentity" | "confirmActivation" | "authorizeDispatchKey" | "revokeDispatchKey">;
+
+  constructor(callbacks: Pick<HostFacetBinding, "getIdentity" | "confirmActivation" | "authorizeDispatchKey" | "revokeDispatchKey">) {
+    super();
+    this.#callbacks = callbacks;
+  }
+
+  async getIdentity(): ReturnType<HostFacetBinding["getIdentity"]> {
+    return await this.#callbacks.getIdentity();
+  }
+  async confirmActivation(selectionDigest: Parameters<HostFacetBinding["confirmActivation"]>[0]): ReturnType<HostFacetBinding["confirmActivation"]> {
+    return await this.#callbacks.confirmActivation(selectionDigest);
+  }
+  async authorizeDispatchKey(request: Parameters<HostFacetBinding["authorizeDispatchKey"]>[0]): ReturnType<HostFacetBinding["authorizeDispatchKey"]> {
+    return await this.#callbacks.authorizeDispatchKey(request);
+  }
+  async revokeDispatchKey(registration: Parameters<HostFacetBinding["revokeDispatchKey"]>[0]): ReturnType<HostFacetBinding["revokeDispatchKey"]> {
+    return await this.#callbacks.revokeDispatchKey(registration);
+  }
+}
+
 /** Reserve one durable tuple, activate its actual facet and publish through existing host guards. */
 export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingContext<Result>) {
   const ledger = createHostBindingLedger({
@@ -87,25 +112,25 @@ export function createOpenApiFacetBinding<Result>(context: OpenApiFacetBindingCo
   }
   function authority(identity: BoundIdentity): RpcStub<HostFacetBinding> {
     const captured = structuredClone(identity);
-    return new RpcStub(new class extends RpcTarget implements HostFacetBinding {
+    return new RpcStub(new OpenApiHostFacetBinding({
       async getIdentity() {
         await ready(captured);
         return structuredClone(captured);
-      }
+      },
       async confirmActivation(selectionDigest: string) {
         if (selectionDigest !== captured.selectionDigest) fail("BINDING_IDENTITY_MISMATCH");
         await ready(captured);
         await context.activate(captured, selectionDigest);
         current(captured);
         ledger.activate(captured, selectionDigest);
-      }
+      },
       async authorizeDispatchKey(request: Parameters<HostFacetBinding["authorizeDispatchKey"]>[0]): ReturnType<HostFacetBinding["authorizeDispatchKey"]> {
         return dispatch.authorizeDispatchKey(captured, request);
-      }
+      },
       async revokeDispatchKey(registration: Parameters<HostFacetBinding["revokeDispatchKey"]>[0]): Promise<void> {
         await dispatch.revokeDispatchKey(captured, registration);
-      }
-    }());
+      },
+    }));
   }
   function fence(draftId: string, reason: NonNullable<OpenApiFacetRow["revocationReason"]>) {
     const row = read(draftId);

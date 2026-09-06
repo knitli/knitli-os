@@ -61,6 +61,8 @@ export interface MergeUnderAudit {
  * `docs/fork-maintenance.md`.
  */
 export const FORK_OWNED_PREFIXES = [
+  "patches/capnweb-validate@0.3.0.patch",
+  "scripts/fork/capnweb-native-validation.test.ts",
   "packages/workshop-shared/src/fork/",
   "packages/workshop-backend/src/fork/",
   "packages/workshop-backend/__tests__/knitli-openapi-binding-ledger.test.ts",

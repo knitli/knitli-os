@@ -119,6 +119,34 @@ function fixture(workspaceId = "workspace", initialClock = 1_000) {
 }
 
 describe("durable OpenAPI facet reservation and activation", () => {
+  it.each([
+    ["authorizeDispatchKey", null],
+    ["authorizeDispatchKey", {}],
+    ["authorizeDispatchKey", { keyId: 1, publicKeyDigest: "digest" }],
+    ["authorizeDispatchKey", { keyId: "key", publicKeyDigest: false }],
+    ["revokeDispatchKey", null],
+    ["revokeDispatchKey", { keyId: "key", publicKeyDigest: "digest", keyEpoch: "1" }],
+    ["confirmActivation", 42],
+  ] as const)("validates %s RPC input %j before lifecycle callbacks", async (method, malformed) => {
+    const f = fixture();
+    await f.binding.create(0, url);
+    const readiness = vi.fn(async () => {});
+    const hostReadiness = vi.fn();
+    const read = vi.fn(f.context.store.get);
+    const write = vi.fn(f.context.store.put);
+    f.context.assertAccountReady = readiness;
+    f.context.assertHostReady = hostReadiness;
+    f.context.store.get = read;
+    f.context.store.put = write;
+    using authority = f.authorities[0];
+    await expect(Promise.resolve((authority[method] as (input: unknown) => Promise<void>)(malformed)))
+      .rejects.toMatchObject({ name: "TypeError", message: expect.stringContaining(`capnweb-validate: at OpenApiHostFacetBinding.${method}`) });
+    expect(readiness).not.toHaveBeenCalled();
+    expect(hostReadiness).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
   it("reserves account zero/facet zero and commits both authorities before publication", async () => {
     const f = fixture(); expect(await f.binding.create(0, url)).toBe(0);
     expect(f.observed).toEqual([identity]);

@@ -150,7 +150,6 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
 
 
   /** Test-only private activation hook; never reachable through the fixture HTTP controls. */
-  @skipRpcValidation()
   async installOpenApiBinding(label: string, draftId: string, binding: RpcStub<HostFacetBinding>): Promise<void> {
     const draft = this.getOpenApiDraft(label, draftId);
     if (!draft.identity || !sameIdentity(draft.identity, await binding.getIdentity())) throw new Error("BINDING_IDENTITY_MISMATCH");
@@ -158,7 +157,6 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
   }
 
   /** Test-only finalizer capture called only by the authenticated account resolver. */
-  @skipRpcValidation()
   captureOpenApiFinalizer(label: string, draftId: string, finalizer: RpcStub<OpenApiFacetFinalizer>): void {
     this.#openApiRuntime.captureFinalizer(label, draftId, finalizer);
   }
@@ -599,7 +597,6 @@ export class TestOpenApiAccount extends TestAccount implements OpenApiBoundAccou
     return [openApiResource(this.env as OpenApiTestEnv)];
   }
 
-  @skipRpcValidation()
   async startBoundResourceConfigurator(pattern: string, authority: RpcStub<HostDraftAuthority>): Promise<ResourceConfiguratorFrame> {
     await control(this.ctx.exports).assertOpenApiAccountActive(this.ctx.props.label);
     const resource = openApiResource(this.env as OpenApiTestEnv);
@@ -607,7 +604,6 @@ export class TestOpenApiAccount extends TestAccount implements OpenApiBoundAccou
     return startOpenApiConfigurator(control(this.ctx.exports), this.ctx.props.label, authority, resource);
   }
 
-  @skipRpcValidation()
   async resolveBoundDraft(reference: DraftReference) {
     const ctl = control(this.ctx.exports);
     await ctl.assertOpenApiAccountActive(this.ctx.props.label);
@@ -630,7 +626,6 @@ export class TestOpenApiAccount extends TestAccount implements OpenApiBoundAccou
     await control(this.ctx.exports).recordFixtureObservation(this.ctx.props.label, { method: "revoke", arity: arguments.length });
   }
 
-  @skipRpcValidation()
   async resolveBoundDraftForRevocation(reference: DraftReference) {
     const ctl = control(this.ctx.exports);
     const draft = await ctl.getOpenApiDraft(this.ctx.props.label, reference.draftId);

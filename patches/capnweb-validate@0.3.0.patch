@@ -1,0 +1,66 @@
+diff --git a/dist/transform-module-Zgpw_4Fc.mjs b/dist/transform-module-Zgpw_4Fc.mjs
+index ebbaaed7236d2dd563a88ece9d32c77ed5ecad0c..a0d44c40663f51febfdf6797c1ae08967749da53 100644
+--- a/dist/transform-module-Zgpw_4Fc.mjs
++++ b/dist/transform-module-Zgpw_4Fc.mjs
+@@ -898,6 +898,13 @@ function getStubServiceType(ctx, type) {
+ 	let { TypeFlags } = ctx.tsm;
+ 	if (flags & TypeFlags.Conditional) return getProperty(ctx, type, "__RPC_STUB_BRAND") !== void 0 || hasRpcCapabilityBrand(ctx, type) ? {} : null;
+ 	if (!(flags & TypeFlags.Object) && !(flags & TypeFlags.Intersection)) return null;
++	// Native Workers capabilities must retain their runtime identity for transport.
++	// Their owning decorated endpoint validates arguments; a JS Proxy cannot be
++	// serialized as the original native capability. Capnweb brands remain wrapped.
++	for (let name of ["__RPC_STUB_BRAND", ...RPC_CAPABILITY_BRAND_NAMES]) {
++		let brand = getProperty(ctx, type, name);
++		if (brand?.declarations?.some(isWorkersBrandDeclaration)) return {};
++	}
+ 	let fetcherServiceType = getFetcherServiceType(ctx, type);
+ 	if (fetcherServiceType !== null) return fetcherServiceType ? { type: fetcherServiceType } : {};
+ 	let sym = type.getSymbol();
+@@ -913,6 +920,14 @@ function getStubServiceType(ctx, type) {
+ 	if (extendsRpcReferenceTarget(checker, type)) return { type };
+ 	return null;
+ }
++function isWorkersBrandDeclaration(decl) {
++	if (/[\\/]@cloudflare[\\/]workers-types[\\/]/.test(decl.getSourceFile().fileName)) return true;
++	for (let node = decl.parent; node; node = node.parent) {
++		let name = node.name?.text ?? node.name?.escapedText;
++		if (name === "cloudflare:workers" || name === "CloudflareWorkersModule") return true;
++	}
++	return false;
++}
+ function getFetcherServiceType(ctx, type) {
+ 	if (!isFetcherLikeType(ctx, type)) return null;
+ 	let serviceType = (type.aliasTypeArguments ?? [])[0];
+diff --git a/dist/transform-module-w5ITXjhk.cjs b/dist/transform-module-w5ITXjhk.cjs
+index 0ebdf71b4cef324d0bb04a1b5cf1cdd5a11cc114..319603949f96d162ef889ef8078c8a0254740a83 100644
+--- a/dist/transform-module-w5ITXjhk.cjs
++++ b/dist/transform-module-w5ITXjhk.cjs
+@@ -900,6 +900,13 @@ function getStubServiceType(ctx, type) {
+ 	let { TypeFlags } = ctx.tsm;
+ 	if (flags & TypeFlags.Conditional) return getProperty(ctx, type, "__RPC_STUB_BRAND") !== void 0 || hasRpcCapabilityBrand(ctx, type) ? {} : null;
+ 	if (!(flags & TypeFlags.Object) && !(flags & TypeFlags.Intersection)) return null;
++	// Native Workers capabilities must retain their runtime identity for transport.
++	// Their owning decorated endpoint validates arguments; a JS Proxy cannot be
++	// serialized as the original native capability. Capnweb brands remain wrapped.
++	for (let name of ["__RPC_STUB_BRAND", ...RPC_CAPABILITY_BRAND_NAMES]) {
++		let brand = getProperty(ctx, type, name);
++		if (brand?.declarations?.some(isWorkersBrandDeclaration)) return {};
++	}
+ 	let fetcherServiceType = getFetcherServiceType(ctx, type);
+ 	if (fetcherServiceType !== null) return fetcherServiceType ? { type: fetcherServiceType } : {};
+ 	let sym = type.getSymbol();
+@@ -915,6 +922,14 @@ function getStubServiceType(ctx, type) {
+ 	if (extendsRpcReferenceTarget(checker, type)) return { type };
+ 	return null;
+ }
++function isWorkersBrandDeclaration(decl) {
++	if (/[\\/]@cloudflare[\\/]workers-types[\\/]/.test(decl.getSourceFile().fileName)) return true;
++	for (let node = decl.parent; node; node = node.parent) {
++		let name = node.name?.text ?? node.name?.escapedText;
++		if (name === "cloudflare:workers" || name === "CloudflareWorkersModule") return true;
++	}
++	return false;
++}
+ function getFetcherServiceType(ctx, type) {
+ 	if (!isFetcherLikeType(ctx, type)) return null;
+ 	let serviceType = (type.aliasTypeArguments ?? [])[0];

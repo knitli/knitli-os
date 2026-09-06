@@ -49,3 +49,8 @@ allowBuilds:
   protobufjs: true
   sharp: true
   workerd: true
+
+# Keep native Workers RPC capabilities pass-through; decorated endpoints validate arguments.
+# Remove with a capnweb-validate release that preserves native transport (covered by fork tests).
+patchedDependencies:
+  capnweb-validate@0.3.0: patches/capnweb-validate@0.3.0.patch

@@ -1,4 +1,5 @@
 import { RpcTarget, RpcStub } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
 import type { AccountDescription, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import { matchesResourceUrlPattern } from "@gadgets/workshop-shared/gatekeeper";
 import type {
@@ -14,6 +15,42 @@ import {
   type BindingRow,
   type BindingStore,
 } from "./openapi-binding-ledger";
+
+/** The RPC surface contains only the two authenticated draft operations. */
+@validateRpc()
+class HostDraftAuthorityTarget extends RpcTarget implements HostDraftAuthority {
+  #register: (reference: DraftReference) => { expiresAt: number };
+  #cancel: (draftId: string) => void;
+
+  constructor(register: (reference: DraftReference) => { expiresAt: number }, cancel: (draftId: string) => void) {
+    super();
+    this.#register = register;
+    this.#cancel = cancel;
+  }
+
+  async registerDraft(reference: DraftReference): Promise<{ expiresAt: number }> {
+    return this.#register(reference);
+  }
+
+  async cancelDraft(draftId: string): Promise<void> {
+    this.#cancel(draftId);
+  }
+}
+
+/** An acknowledged receipt grants cleanup proof only, never activation authority. */
+@validateRpc()
+class AcknowledgedRevocationFinalizer extends RpcTarget implements OpenApiRevocationFinalizer {
+  #assertAcknowledged: () => void;
+
+  constructor(assertAcknowledged: () => void) {
+    super();
+    this.#assertAcknowledged = assertAcknowledged;
+  }
+
+  async revoke(_reason: "removed" | "account-disconnected" | "creation-failed"): Promise<void> {
+    this.#assertAcknowledged();
+  }
+}
 
 /** Durable account incarnation; a fenced incarnation is never revived. */
 export type OpenApiAccountEpoch = { id: number; incarnation: string; live: boolean };
@@ -269,11 +306,9 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
       const receipt = cleanupScope(row);
       // Exact durable connector acknowledgement can outlive both the account capability and
       // the workspace. This proof-only revoker cannot activate, resolve a class, or dispatch.
-      return {finalizer: new RpcStub(new (class extends RpcTarget implements OpenApiRevocationFinalizer {
-        async revoke() {
-          if (!acknowledged(receipt)) fail("BINDING_CLEANUP_NOT_ACKNOWLEDGED");
-        }
-      })())};
+      return {finalizer: new RpcStub(new AcknowledgedRevocationFinalizer(() => {
+        if (!acknowledged(receipt)) fail("BINDING_CLEANUP_NOT_ACKNOWLEDGED");
+      }))};
     }
     const retired = context.cleanup.get(row.accountIncarnation);
     let account: Fetcher<GatekeeperUser>;
@@ -375,8 +410,8 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
       assertWorkspaceOpen(workspaceId);
       const { epoch } = current(accountId);
       const authorityId = crypto.randomUUID();
-      const authority = new (class extends RpcTarget implements HostDraftAuthority {
-        async registerDraft(reference: DraftReference) {
+      const authority = new HostDraftAuthorityTarget(
+        (reference) => {
           return context.transaction(() => {
             assertWorkspaceOpen(workspaceId);
             current(accountId, epoch.incarnation);
@@ -410,19 +445,17 @@ export function createOpenApiUserBinding(context: OpenApiUserBindingContext) {
             context.putDraftIssuer(row.reference.draftId, authorityId);
             return { expiresAt: row.expiresAt };
           });
-        }
-        async cancelDraft(draftId: string) {
+        },
+        (draftId) => {
           if (context.getDraftIssuer(draftId) !== authorityId) fail("DRAFT_NOT_FOUND");
           const row = context.store.get(draftId) ?? fail("DRAFT_NOT_FOUND");
           checkScope(row, accountId, epoch.incarnation, workspaceId, false);
           ledger.cancel(draftId);
-        }
-      })();
-      const account = record.account as Fetcher<GatekeeperUser & OpenApiBoundAccount>;
-      const frame = await account.startBoundResourceConfigurator(
-        pattern,
-        authority as RpcStub<HostDraftAuthority>,
+        },
       );
+      const account = record.account as Fetcher<GatekeeperUser & OpenApiBoundAccount>;
+      using authorityStub = new RpcStub(authority);
+      const frame = await account.startBoundResourceConfigurator(pattern, authorityStub);
       try {
         current(accountId, epoch.incarnation);
         assertWorkspaceOpen(workspaceId);

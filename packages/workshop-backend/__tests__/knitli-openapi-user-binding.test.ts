@@ -2,7 +2,7 @@ import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "c
 import type { UserDurableObject } from "../src/user";
 import type { OverseerDurableObject } from "../src/overseer";
 import type { OpenApiAccountTest, OpenApiAccountTestControl } from "./fork-fixtures/openapi-account-worker";
-import { env, RpcTarget } from "cloudflare:workers";
+import { env, RpcStub, RpcTarget } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type {
   BoundIdentity,
@@ -41,7 +41,7 @@ function fixture(v1 = true) {
   const cleanupResolves: DraftReference[] = [];
   let recipientPause: (workspaceId: string) => Promise<void> = noPause;
   let scheduled = 0;
-  const authorities: HostDraftAuthority[] = [];
+  const authorities: RpcStub<HostDraftAuthority>[] = [];
   const calls: {
     legacy: unknown[][];
     bound: unknown[][];
@@ -69,9 +69,10 @@ function fixture(v1 = true) {
       calls.legacy.push(args);
       return frame;
     }
-    async startBoundResourceConfigurator(p: string, authority: HostDraftAuthority) {
-      calls.bound.push([p, authority]);
-      authorities.push(authority);
+    async startBoundResourceConfigurator(p: string, authority: RpcStub<HostDraftAuthority>) {
+      const retained = authority.dup();
+      calls.bound.push([p, retained]);
+      authorities.push(retained);
       return frame;
     }
     async resolveBoundDraftForRevocation(ref: DraftReference) {
@@ -191,6 +192,50 @@ function fixture(v1 = true) {
   };
 }
 describe("private authenticated User draft authority", () => {
+  it("validates draft registration over RPC before writing or assigning an issuer", async () => {
+    const f = fixture();
+    await f.binding.start(0, pattern, "workspace");
+    using authority = f.authorities[0].dup();
+    const put = vi.spyOn(f.context.store, "put");
+    const issue = vi.spyOn(f.context, "putDraftIssuer");
+    await expect(Promise.resolve(authority.registerDraft({ ...reference, selectionDigest: 12 as never })))
+      .rejects.toThrow(TypeError);
+    await expect(Promise.resolve(authority.registerDraft({ ...reference, selectionDigest: 12 as never })))
+      .rejects.toThrow(/selectionDigest/);
+    expect(put).not.toHaveBeenCalled();
+    expect(issue).not.toHaveBeenCalled();
+    expect(f.rows.size).toBe(0);
+    await expect(authority.registerDraft(reference)).resolves.toEqual({ expiresAt: 901000 });
+    expect(issue).toHaveBeenCalledOnce();
+  });
+
+  it("validates draft cancellation over RPC before entering lifecycle code", async () => {
+    const f = fixture();
+    await f.register();
+    using authority = f.authorities[0].dup();
+    const issuer = vi.spyOn(f.context, "getDraftIssuer");
+    await expect(Promise.resolve(authority.cancelDraft(12 as never))).rejects.toThrow(TypeError);
+    await expect(Promise.resolve(authority.cancelDraft(12 as never))).rejects.toThrow(/cancelDraft\[0\]/);
+    expect(issuer).not.toHaveBeenCalled();
+    expect(f.rows.get("draft")?.state).toBe("draft");
+    await authority.cancelDraft("draft");
+    expect(issuer).toHaveBeenCalledOnce();
+    expect(f.rows.get("draft")?.state).toBe("revoked");
+  });
+
+  it("validates proof-only revocation reasons over RPC before reading acknowledgement", async () => {
+    const f = fixture();
+    await f.register();
+    await f.binding.retireWorkspace("workspace");
+    using proof = (await f.binding.resolveForRevocation(f.rows.get("draft")!)).finalizer;
+    const receipt = vi.spyOn(f.context.receipts, "get");
+    await expect(Promise.resolve(proof.revoke("invalid" as never))).rejects.toThrow(TypeError);
+    await expect(Promise.resolve(proof.revoke("invalid" as never))).rejects.toThrow(/revoke\[0\]/);
+    expect(receipt).not.toHaveBeenCalled();
+    await proof.revoke("removed");
+    expect(receipt).toHaveBeenCalledOnce();
+  });
+
   it("preserves legacy RPC arity and never materializes private authority", async () => {
     const f = fixture(false);
     expect(await f.binding.start(0, pattern)).toBe(f.frame);
@@ -204,7 +249,7 @@ describe("private authenticated User draft authority", () => {
     await f.register();
     expect(f.calls.legacy).toEqual([]);
     expect(f.calls.bound).toEqual([[pattern, f.authorities[0]]]);
-    expect(f.authorities[0]).toBeInstanceOf(RpcTarget);
+    expect(f.authorities[0]).toBeInstanceOf(RpcStub);
     expect(Reflect.ownKeys(f.frame)).toEqual(["iframeHtml", "ui"]);
     expect("registerDraft" in f.frame.ui).toBe(false);
     expect(f.rows.get("draft")!.intendedWorkspaceId).toBe("workspace");
@@ -216,21 +261,21 @@ describe("private authenticated User draft authority", () => {
     expect(await f.authorities[0].registerDraft(reference)).toEqual({
       expiresAt: original.expiresAt,
     });
-    await expect(
+    await expect(Promise.resolve(
       f.authorities[0].registerDraft({ ...reference, selectionDigest: "other" }),
-    ).rejects.toThrow("DRAFT_CONFLICT");
-    await expect(
+    )).rejects.toThrow("DRAFT_CONFLICT");
+    await expect(Promise.resolve(
       f.authorities[0].registerDraft({ ...reference, draftId: "other" }),
-    ).rejects.toThrow("DRAFT_CONFLICT");
+    )).rejects.toThrow("DRAFT_CONFLICT");
     expect(f.rows.size).toBe(1);
   });
   it("limits cancellation to references registered by this authority", async () => {
     const f = fixture();
     await f.register();
     await f.binding.start(0, pattern, "workspace");
-    await expect(f.authorities[1].cancelDraft("draft")).rejects.toThrow("DRAFT_NOT_FOUND");
-    await expect(f.authorities[1].registerDraft(reference)).rejects.toThrow("DRAFT_CONFLICT");
-    await expect(f.authorities[1].cancelDraft("draft")).rejects.toThrow("DRAFT_NOT_FOUND");
+    await expect(Promise.resolve(f.authorities[1].cancelDraft("draft"))).rejects.toThrow("DRAFT_NOT_FOUND");
+    await expect(Promise.resolve(f.authorities[1].registerDraft(reference))).rejects.toThrow("DRAFT_CONFLICT");
+    await expect(Promise.resolve(f.authorities[1].cancelDraft("draft"))).rejects.toThrow("DRAFT_NOT_FOUND");
     expect(f.rows.get("draft")!.state).toBe("draft");
     await f.authorities[0].cancelDraft("draft");
     await f.authorities[0].cancelDraft("draft");
@@ -343,7 +388,7 @@ describe("private authenticated User draft authority", () => {
     const old = f.identity();
     f.binding.fence(0);
     f.binding.replace(0);
-    await expect(f.authorities[0].registerDraft(reference)).rejects.toThrow(
+    await expect(Promise.resolve(f.authorities[0].registerDraft(reference))).rejects.toThrow(
       "BINDING_ACCOUNT_REPLACED",
     );
     expect(() => f.restart().reserve(old)).toThrow("BINDING_ACCOUNT_REPLACED");
@@ -368,7 +413,7 @@ describe("private authenticated User draft authority", () => {
           if (operation === "replacement") f.binding.replace(0);
         },
       );
-      await expect(f.authorities[0].registerDraft(reference)).rejects.toThrow(
+      await expect(Promise.resolve(f.authorities[0].registerDraft(reference))).rejects.toThrow(
         "BINDING_ACCOUNT_REPLACED",
       );
       // A later disconnect stays fenced; a later replacement remains the current incarnation.
@@ -650,7 +695,7 @@ describe("actual User shared resource policy", () => {
       const account = new (class extends RpcTarget {
         getGatekeeperClassFor = resolve;
         resolveBoundDraft = resolve;
-        async startBoundResourceConfigurator(_pattern: string, authority: HostDraftAuthority) {
+        async startBoundResourceConfigurator(_pattern: string, authority: RpcStub<HostDraftAuthority>) {
           await authority.registerDraft(reference);
           return {iframeHtml: "<p>Configured</p>"};
         }
@@ -848,7 +893,7 @@ describe("durable workspace retirement", () => {
     try {
       await Promise.race([started, retirement]);
       const late = {...reference, draftId: "late", grantId: "late-grant"};
-      await expect(f.authorities[1].registerDraft(late)).rejects.toThrow("BINDING_WORKSPACE_CLOSED");
+      await expect(Promise.resolve(f.authorities[1].registerDraft(late))).rejects.toThrow("BINDING_WORKSPACE_CLOSED");
       expect(f.rows.size).toBe(1);
       expect(f.retirements.get("workspace")?.drafts).toHaveLength(1);
       await expect(f.binding.start(0, pattern, "workspace")).rejects.toThrow("BINDING_WORKSPACE_CLOSED");
@@ -905,7 +950,7 @@ describe("durable workspace retirement", () => {
     const empty = fixture();
     await empty.binding.start(0, pattern, "workspace");
     await empty.binding.retireWorkspace("workspace");
-    await expect(empty.authorities[0].registerDraft(reference)).rejects.toThrow("BINDING_WORKSPACE_CLOSED");
+    await expect(Promise.resolve(empty.authorities[0].registerDraft(reference))).rejects.toThrow("BINDING_WORKSPACE_CLOSED");
     expect(empty.retirements.get("workspace")?.drafts).toEqual([]);
     const f = fixture();
     await f.register();
@@ -941,7 +986,7 @@ describe("actual User workspace retirement", () => {
     await runInDurableObject(stub, async (user: UserDurableObject) => {
       const accounts = user["storage"].connectedAccounts;
       type AccountRecord = NonNullable<ReturnType<typeof accounts.get>>;
-      const authorities: HostDraftAuthority[] = [];
+      const authorities: RpcStub<HostDraftAuthority>[] = [];
       let entered!: () => void;
       let release!: () => void;
       const started = new Promise<void>(resolve => { entered = resolve; });
@@ -951,8 +996,8 @@ describe("actual User workspace retirement", () => {
         [Symbol.dispose]() {}
       })();
       const account = new (class extends RpcTarget {
-        async startBoundResourceConfigurator(_pattern: string, authority: HostDraftAuthority) {
-          authorities.push(authority);
+        async startBoundResourceConfigurator(_pattern: string, authority: RpcStub<HostDraftAuthority>) {
+          authorities.push(authority.dup());
           return {iframeHtml: "<p>test configuration</p>"};
         }
         async resolveBoundDraftForRevocation() { return finalizer; }
@@ -965,11 +1010,11 @@ describe("actual User workspace retirement", () => {
         await user.startBoundResourceConfigurator(0, pattern, "workspace");
         await authorities[0].registerDraft(reference);
         await user.startBoundResourceConfigurator(0, pattern, "workspace");
-        expect(authorities[1]).toBeInstanceOf(RpcTarget);
+        expect(authorities[1]).toBeInstanceOf(RpcStub);
         const retirement = user.retireOpenApiWorkspace("workspace");
         try {
           await Promise.race([started, retirement]);
-          await expect(authorities[1].registerDraft({...reference, draftId: "late", grantId: "late-grant"}))
+          await expect(Promise.resolve(authorities[1].registerDraft({...reference, draftId: "late", grantId: "late-grant"})))
             .rejects.toThrow("BINDING_WORKSPACE_CLOSED");
           expect(Array.from(user["storage"].openApiDrafts.list())).toHaveLength(1);
           expect(user["storage"].openApiWorkspaceRetirements.get("workspace")?.drafts).toHaveLength(1);

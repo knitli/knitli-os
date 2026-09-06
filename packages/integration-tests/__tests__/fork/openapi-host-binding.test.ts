@@ -119,6 +119,32 @@ async function noActivation(draftId: string) {
 }
 
 describe("authenticated OpenAPI host binding", () => {
+  it("rejects malformed fixture RPC arguments without changing the draft or dispatch lifecycle", async () => withSession(async publicApi => {
+    using api = await signUp(publicApi, nextUsernames("bindingvalidation")[0]);
+    const account = await provision(api);
+    using workspace = await api.newGadget();
+    const frame = await workspace.startBoundResourceConfigurator(account.id, account.pattern);
+    using ui = frame.ui as unknown as RpcStub<SelectionUi>;
+    // The string would pass Selection's manual property checks and create a draft without validation.
+    const malformedOptions = "unexpected" as unknown as Parameters<SelectionUi["select"]>[0];
+    await expect(Promise.resolve(ui.select(malformedOptions))).rejects.toMatchObject({ name: "TypeError", message: expect.stringContaining("capnweb-validate:") });
+    const selection = await ui.select({ apiId: "validated-api" });
+    expect(selection.resourceUrl).toContain("/apis/validated-api/");
+    const before = await events(selection.reference.draftId);
+    // Reusing a selected UI bypasses its implementation checks; validation must still run.
+    await expect(Promise.resolve(ui.select({ selectionDigest: 123 } as unknown as Parameters<SelectionUi["select"]>[0])))
+      .rejects.toMatchObject({ name: "TypeError", message: expect.stringContaining("capnweb-validate:") });
+    expect(await events(selection.reference.draftId)).toEqual(before);
+    expect(await ui.select()).toEqual(selection);
+    using connection = await workspace.newGatekeeper(account.id, selection.resourceUrl);
+    expect(connection).not.toBeNull();
+    using session = await connection!.openSession() as RpcStub<ReadSession & { writeValue(value: number): Promise<number> }>;
+    const activeEvents = await events(selection.reference.draftId);
+    await expect(Promise.resolve(session.writeValue("unexpected" as unknown as number))).rejects.toMatchObject({ name: "TypeError", message: expect.stringContaining("capnweb-validate:") });
+    expect(await events(selection.reference.draftId)).toEqual(activeEvents);
+    await expect(session.readValue()).resolves.toBe(1);
+  }));
+
   it("rejects another owner and a wrong intended workspace before the first claim", async () => withSession(async publicApi => {
     const [alice, bob] = nextUsernames("bindingalice", "bindingbob");
     using _signup = await signUp(publicApi, alice);

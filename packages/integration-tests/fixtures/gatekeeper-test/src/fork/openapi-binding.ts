@@ -1,5 +1,6 @@
 // Test-only connector implementation. Authorities stay in RPC closures, never control responses.
 import { RpcStub, RpcTarget } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
 import type { BoundIdentity, DraftReference, HostDraftAuthority, HostDispatchUseAuthority, HostFacetBinding, OpenApiFacetFinalizer, OpenApiRevocationFinalizer } from "@gadgets/workshop-shared/fork/openapi-host-binding";
 import type { ApprovalQueue, ResourceConfiguratorFrame, SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import type { TestControl, TestSession } from "../test-gatekeeper";
@@ -40,6 +41,7 @@ export function assertDraftLive(draft: ConnectorDraft): void {
   if (draft.state === "revoking" || draft.state === "revoked") throw new Error("BINDING_REVOKED");
 }
 
+@validateRpc()
 class Selection extends RpcTarget {
   #draft?: ConnectorDraft;
   #control: DurableObjectStub<TestControl>;
@@ -83,6 +85,7 @@ export function startOpenApiConfigurator(control: DurableObjectStub<TestControl>
     ui: new RpcStub(new Selection(control, label, authority, new URL(resource.urlPattern).origin)) };
 }
 
+@validateRpc()
 class Finalizer extends RpcTarget implements OpenApiFacetFinalizer {
   #control: DurableObjectStub<TestControl>;
   #label: string;
@@ -174,6 +177,7 @@ export async function openApiControlRequest(path: string, body: unknown, control
   return new Response(null, { status: 204 });
 }
 
+@validateRpc()
 class RevocationFinalizer extends RpcTarget implements OpenApiRevocationFinalizer {
   #finalizer: Finalizer;
   constructor(control: DurableObjectStub<TestControl>, label: string, reference: DraftReference) {
@@ -272,6 +276,7 @@ export class OpenApiRuntime {
 }
 
 /** Test-only session exposes values and audited reads, never host or key capabilities. */
+@validateRpc()
 class OpenApiSession extends RpcTarget implements TestSession {
   #control: DurableObjectStub<TestControl>;
   #label: string;

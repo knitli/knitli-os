@@ -1,4 +1,5 @@
 import { RpcStub, RpcTarget } from "cloudflare:workers";
+import { validateRpc } from "capnweb-validate";
 import type {
   BoundIdentity,
   HostDispatchUseAuthority,
@@ -11,6 +12,21 @@ export interface OpenApiDispatchBindingContext {
   ledger: HostBindingLedger;
   assertActiveNow(identity: BoundIdentity): BindingRow;
   assertAccountReady(identity: BoundIdentity): Promise<void>;
+}
+
+/** Only the validated zero-argument liveness method crosses the Worker boundary. */
+@validateRpc()
+class OpenApiHostDispatchUseAuthority extends RpcTarget implements HostDispatchUseAuthority {
+  #assertActive: HostDispatchUseAuthority["assertActive"];
+
+  constructor(assertActive: HostDispatchUseAuthority["assertActive"]) {
+    super();
+    this.#assertActive = assertActive;
+  }
+
+  async assertActive(): ReturnType<HostDispatchUseAuthority["assertActive"]> {
+    return await this.#assertActive();
+  }
 }
 
 /** Private lifecycle adapter; only its attenuated per-registration capability leaves the host. */
@@ -26,19 +42,17 @@ export function createOpenApiDispatchBinding(context: OpenApiDispatchBindingCont
       await context.assertAccountReady(captured);
       context.assertActiveNow(captured);
       const keyEpoch = context.ledger.authorizeKey(captured, keyId, publicKeyDigest);
-      const use = new (class extends RpcTarget implements HostDispatchUseAuthority {
-        async assertActive(): Promise<void> {
-          context.assertActiveNow(captured);
-          await context.assertAccountReady(captured);
-          const row = context.assertActiveNow(captured);
-          context.ledger.assertActive(captured, keyEpoch);
-          if (row.key?.keyId !== keyId || row.key.publicKeyDigest !== publicKeyDigest) {
-            throw new BindingError("DISPATCH_KEY_CONFLICT");
-          }
-          // Liveness is not network-hop authorization: the connector must also hold its
-          // dispatch lease and recheck profile/action fences after preparation/credential awaits.
+      const use = new OpenApiHostDispatchUseAuthority(async () => {
+        context.assertActiveNow(captured);
+        await context.assertAccountReady(captured);
+        const row = context.assertActiveNow(captured);
+        context.ledger.assertActive(captured, keyEpoch);
+        if (row.key?.keyId !== keyId || row.key.publicKeyDigest !== publicKeyDigest) {
+          throw new BindingError("DISPATCH_KEY_CONFLICT");
         }
-      })();
+        // Liveness is not network-hop authorization: the connector must also hold its
+        // dispatch lease and recheck profile/action fences after preparation/credential awaits.
+      });
       return { identity: structuredClone(captured), keyEpoch, use: new RpcStub(use) };
     },
     async revokeDispatchKey(

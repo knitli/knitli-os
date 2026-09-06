@@ -638,6 +638,97 @@ describe("actual Overseer durable publication integration", () => {
       } finally { host.restore(); }
     });
   });
+  it.each(["openapi", "response"])("keeps a running agent deadline stable when %s scheduling changes", async source => {
+    await withActualOverseer(async impl => {
+      const pause = barrier();
+      const base = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(base);
+      const reconcile = vi.spyOn(impl, "reconcilePendingGadgets")
+        .mockImplementationOnce(async () => { await pause.pause(); throw new Error("TEST_AGENT_STOP"); })
+        .mockResolvedValue();
+      const report = vi.spyOn(impl, "postAgentErrorMessage").mockImplementation(() => {});
+      try {
+        impl.startAgent(91, { profile: { id: "test-model" } } as Parameters<ActualOverseer["startAgent"]>[1],
+          { id: "test-model" } as Parameters<ActualOverseer["startAgent"]>[2], "owner");
+        await pause.reached;
+        expect(reconcile).toHaveBeenCalledWith(91);
+        expect(clock).toHaveBeenCalled();
+        const keepaliveAt = await impl.ctx.storage.getAlarm();
+        expect(keepaliveAt).toBe(base + 60_000);
+        // Explicit timestamps model unrelated work arriving later; workerd's wall clock is frozen.
+        for (const now of [base + 10_000, base + 30_000, base + 59_000]) {
+          clock.mockReturnValue(now);
+          if (source === "openapi") {
+            impl.storage.openApiRecoveryAt.put(base + 120_000);
+            expect(impl.storage.openApiRecoveryAt.get()).toBe(base + 120_000);
+            await impl.resumeOpenApiBindings(true);
+            expect(impl.storage.openApiRecoveryAt.get()).toBeUndefined();
+          } else {
+            impl.storage.gadgetResponseDeliveries.put({ idempotencyKey: "agent-response", chatId: 0,
+              promptSequence: 0, createdAt: 0, status: "delivered", deliveredAt: base + 120_000 - 24 * 60 * 60 * 1000 });
+            await impl.deliverReadyExternalMessageResponses();
+          }
+          expect(await impl.ctx.storage.getAlarm()).toBe(keepaliveAt);
+        }
+        // A competing earlier deadline still wins; removing it restores the original deadline.
+        impl.storage.openApiRecoveryAt.put(base + 59_500);
+        await impl.deliverReadyExternalMessageResponses();
+        expect(await impl.ctx.storage.getAlarm()).toBe(base + 59_500);
+        impl.storage.openApiRecoveryAt.put(undefined);
+        await impl.deliverReadyExternalMessageResponses();
+        expect(await impl.ctx.storage.getAlarm()).toBe(keepaliveAt);
+      } finally {
+        pause.release();
+        await impl.waitForAllAgentsToComplete();
+        clock.mockRestore(); reconcile.mockRestore(); report.mockRestore();
+      }
+    });
+  });
+
+  it("keeps an agent alarm stable while its handler waits, then clears it and preserves the response deadline", async () => {
+    const stub = env.TEST_OVERSEER.getByName(`agent-alarm-${crypto.randomUUID()}`);
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = instance["impl"];
+      const pause = barrier();
+      const base = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(base);
+      const reconcile = vi.spyOn(impl, "reconcilePendingGadgets")
+        .mockImplementationOnce(async () => { await pause.pause(); throw new Error("TEST_AGENT_STOP"); })
+        .mockResolvedValue();
+      const report = vi.spyOn(impl, "postAgentErrorMessage").mockImplementation(() => {});
+      let alarm: Promise<void> | undefined;
+      try {
+        impl.startAgent(92, { profile: { id: "test-model" } } as Parameters<ActualOverseer["startAgent"]>[1],
+          { id: "test-model" } as Parameters<ActualOverseer["startAgent"]>[2], "owner");
+        await pause.reached;
+        expect(await impl.ctx.storage.getAlarm()).toBe(base + 60_000);
+        impl.storage.gadgetResponseDeliveries.put({ idempotencyKey: "agent-response", chatId: 0,
+          promptSequence: 0, createdAt: 0, status: "delivered", deliveredAt: base + 120_000 - 24 * 60 * 60 * 1000 });
+        clock.mockReturnValue(base + 60_000);
+        let finished = false;
+        alarm = instance.alarm().then(() => { finished = true; });
+        await Promise.resolve();
+        expect(finished).toBe(false);
+        expect(await impl.ctx.storage.getAlarm()).toBe(base + 60_000);
+        await impl.deliverReadyExternalMessageResponses();
+        expect(await impl.ctx.storage.getAlarm()).toBe(base + 60_000);
+        pause.release();
+        await alarm;
+        expect(finished).toBe(true);
+        expect(impl.storage.activeAgents.get(92)).toBeUndefined();
+        expect(await impl.ctx.storage.getAlarm()).toBe(base + 120_000);
+        impl.storage.gadgetResponseDeliveries.delete("agent-response");
+        await impl.deliverReadyExternalMessageResponses();
+        expect(await impl.ctx.storage.getAlarm()).toBeNull();
+      } finally {
+        pause.release();
+        await impl.waitForAllAgentsToComplete();
+        await alarm;
+        clock.mockRestore(); reconcile.mockRestore(); report.mockRestore();
+      }
+    });
+  });
+
   it.each([10_000, 60_000])("keeps the earliest response/OpenAPI alarm and preserves response deadline %s", async offset => {
     await withActualOverseer(async impl => {
       const host = installActualHostFakes(impl);

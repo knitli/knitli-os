@@ -1480,6 +1480,10 @@ class OverseerImpl implements AgentHooks {
   // while any agent runs) and to let `alarm()` wait for all agents to finish.
   #runningAgents = new Set<number>();
 
+  // Fixed until the last running agent completes, so shared-alarm updates cannot postpone
+  // takeover. Only one alarm handler runs at a time; completion clears even a due deadline.
+  #agentKeepaliveAlarmAt: number | undefined;
+
   // If `alarm()` is currently waiting for all agents to finish, this resolves its wait. Invoked
   // when the running-agent count drops to zero.
   #allAgentsIdleWaiters: (() => void)[] = [];
@@ -1637,6 +1641,7 @@ class OverseerImpl implements AgentHooks {
     let wasEmpty = this.#runningAgents.size === 0;
     this.#runningAgents.add(chatId);
     if (wasEmpty) {
+      this.#agentKeepaliveAlarmAt = Date.now() + OverseerImpl.#AGENT_KEEPALIVE_ALARM_MS;
       // Zero -> one running agents: schedule the keep-alive alarm.
       this.#updateExternalMessageResponseDeliveryAlarm();
     }
@@ -1651,6 +1656,7 @@ class OverseerImpl implements AgentHooks {
     this.#runningAgents.delete(chatId);
     this.storage.activeAgents.delete(chatId);
     if (this.#runningAgents.size === 0) {
+      this.#agentKeepaliveAlarmAt = undefined;
       // One -> zero running agents: replace the keep-alive alarm with any response-target retry/sweep
       // alarm that is now due, and wake any `alarm()` waiter.
       this.#updateExternalMessageResponseDeliveryAlarm();
@@ -1675,7 +1681,7 @@ class OverseerImpl implements AgentHooks {
   #updateExternalMessageResponseDeliveryAlarm(): void {
     // This DO has one alarm. Preserve the earliest agent, response, sweep or OpenAPI deadline.
     const deadlines: number[] = [];
-    if (this.#runningAgents.size > 0) deadlines.push(Date.now() + OverseerImpl.#AGENT_KEEPALIVE_ALARM_MS);
+    if (this.#agentKeepaliveAlarmAt !== undefined) deadlines.push(this.#agentKeepaliveAlarmAt);
     this.#sweepDeliveredExternalMessageResponses();
     const hasReadyResponse = Array.from(this.storage.gadgetResponseDeliveries.readyByIdempotencyKey.list({ limit: 1 })).length > 0;
     if (hasReadyResponse) deadlines.push(Date.now());

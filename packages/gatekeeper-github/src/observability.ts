@@ -1,7 +1,7 @@
 import { createObservabilityContext } from "@gadgets/backend-utils/observability-context";
 
 /** Observability fields emitted by the GitHub gatekeeper. */
-export type GitHubObservabilityFields = { vendorId: string; oidPrefix: string };
+export type GitHubObservabilityFields = { vendorId: string; oidPrefix: string; statusCode: number };
 
 /** Ambient observability fields for one GitHub gatekeeper operation. */
 export const obsContext = createObservabilityContext<GitHubObservabilityFields>();

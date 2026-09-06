@@ -4180,8 +4180,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     try {
       return await this.#getMergeBaseCached(baseSha, headSha);
     } catch (error) {
+      // Provider error messages copy response bodies; never persist those or their stacks.
       logger.warn("failed to determine a pull request's merge base", {
-        event: "pull.request.merge.base.failed", error,
+        event: "pull.request.merge.base.failed", oidPrefix: headSha.slice(0, 8),
+        statusCode: error instanceof GitHubApiError ? error.status : undefined,
       });
       return undefined;
     }

@@ -655,6 +655,39 @@ describe("pull request merge base without queued pushes", () => {
     expect(diff.revision).toEqual({ baseSha: BASE, headSha: OLD, mergeBaseSha: MERGE_BASE });
   });
 
+  it.each([404, 422])("redacts provider diagnostics while degrading a failed merge-base compare (%s)", async status => {
+    realPullScenario();
+    const originalFetch = fetch;
+    let failedCompares = 0;
+    const providerMessage = `private provider response: deleted repository for ${BASE}...${OLD}`;
+    vi.stubGlobal("fetch", async (...args: Parameters<typeof fetch>) => {
+      const url = new URL(args[0] instanceof Request ? args[0].url : args[0].toString());
+      if (url.pathname === `/repos/${OWNER}/${REPO}/compare/${BASE}...${OLD}`) {
+        failedCompares++;
+        return Response.json({ message: providerMessage }, { status });
+      }
+      return originalFetch(...args);
+    });
+    const gk = await repoGatekeeper();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const diff = await gk.pullDiffAll("8");
+      expect(diff.revision).toEqual({ baseSha: BASE, headSha: OLD });
+      expect(failedCompares).toBe(1);
+      const matching = warning.mock.calls.filter(call =>
+        JSON.stringify(call).includes("pull.request.merge.base.failed"));
+      expect(matching).toHaveLength(1);
+      const diagnostics = JSON.stringify(warning.mock.calls);
+      expect(diagnostics).not.toContain(providerMessage);
+      expect(diagnostics).not.toContain(BASE);
+      expect(diagnostics).not.toContain(OLD);
+      expect(diagnostics).not.toContain("errorStack");
+      expect(matching[0][0]).toMatchObject({ statusCode: status, oidPrefix: OLD.slice(0, 8) });
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
   it("fails rather than approximating when GitHub omits the merge base", async () => {
     // The base tip is not the merge base; a compare response without `merge_base_commit`
     // (documented as always present) must not be answered from `base_commit`.

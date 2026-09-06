@@ -3312,7 +3312,7 @@ export type AiToolCall = {
     bindingName: string;
 
     /**
-     * The git commit to root the worktree at: a full 40-hex oid or an unambiguous prefix,
+     * The git commit to root the worktree at: a full 40-hex OID,
      * resolved against the workspace's local git store and its gatekeeper-provided metadata
      * (never a remote lookup -- remote refs resolve through gatekeeper APIs first).
      */

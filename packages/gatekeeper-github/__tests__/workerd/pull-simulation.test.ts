@@ -739,3 +739,54 @@ describe("repo commit listing on a provisional branch", () => {
     expect(page?.map(commit => commit.id)).toEqual([BASE]);
   });
 });
+
+describe.each(["unavailable", "root", "malformed"])("queued-push simulation diagnostic privacy: %s", failure => {
+  it.each([
+    ["existing details", "pull.request.simulated.head.overlay.failed"],
+    ["provisional details", "pull.request.provisional.comparison.compute.failed"],
+    ["merge base", "pull.request.simulated.comparison.failed"],
+    ["commit listing", "commits.list.simulated.failed"],
+  ])("redacts pending commit diagnostics in %s", async (operation, event) => {
+    const github = scenarioGitHub();
+    github.branches.set("topic", BASE);
+    github.pulls.set(7, pullResponse(7, { ref: "topic", sha: BASE }, { ref: "main", sha: BASE }));
+    github.compares.set(`${BASE}...${BASE}`, {
+      base_commit: { sha: BASE }, merge_base_commit: { sha: BASE },
+      commits: [], total_commits: 0, files: [],
+    });
+    const gk = await repoGatekeeper();
+    const cache = scenarioCache();
+    const branch = operation === "provisional details" || operation === "commit listing"
+      ? "feature" : "topic";
+    await queuePush(gk, cache, branch, HEAD1);
+    const provisional = operation === "provisional details"
+      ? await queuePullRequest(gk, { title: "pending", head: branch, base: "main" }) : undefined;
+    // Queue a valid push first, then make its commit unreadable to simulation. This
+    // reaches the real pending-chain walk/parser rather than failing setup.
+    if (failure === "unavailable") cache.objects.delete(HEAD1);
+    else if (failure === "root") cache.withObject(HEAD1, "commit", commitPayload(TREE_1, [], "root"));
+    else cache.withObject(HEAD1, "commit", encoder.encode("malformed pending commit"));
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      if (operation === "existing details") {
+        expect((await gk.openPullRequest("7", cache)).head.sha).toBe(BASE);
+      } else if (operation === "provisional details") {
+        expect((await gk.openPullRequest(provisional!.provisionalId, cache)).head.sha).toBe("");
+      } else if (operation === "merge base") {
+        expect(await gk.pullMergeBase("7", cache)).toBe(BASE);
+      } else {
+        await expect(gk.listCommitsFirstPage({ ref: branch }, cache))
+          .rejects.toThrow(/commits queued to create it could not be read/);
+      }
+      const matching = warning.mock.calls.filter(call => JSON.stringify(call).includes(event));
+      expect(matching).toHaveLength(1);
+      const diagnostics = JSON.stringify(warning.mock.calls);
+      expect(diagnostics).not.toContain(HEAD1);
+      expect(diagnostics).not.toContain("errorStack");
+      expect(diagnostics).not.toContain("not available from the workspace git cache");
+      expect(diagnostics).toContain(HEAD1.slice(0, 8));
+    } finally {
+      warning.mockRestore();
+    }
+  });
+});

@@ -2534,9 +2534,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         changedFiles: simulated.files.length,
         mergeable: undefined,
       };
-    } catch (error) {
+    } catch {
       logger.warn("failed to overlay queued pushes onto pull request details", {
-        event: "pull.request.simulated.head.overlay.failed", error,
+        event: "pull.request.simulated.head.overlay.failed",
+        oidPrefix: this.#pendingPushActions(details.head.ref).at(-1)?.newSha.slice(0, 8),
       });
       return details;
     }
@@ -2675,9 +2676,10 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
         deletions = (comparison.files ?? []).reduce((sum, file) => sum + file.deletions, 0);
         changedFiles = comparison.files?.length ?? 0;
       }
-    } catch (error) {
+    } catch {
       logger.warn("failed to compute provisional pull request comparison", {
-        event: "pull.request.provisional.comparison.compute.failed", error,
+        event: "pull.request.provisional.comparison.compute.failed",
+        oidPrefix: this.#pendingPushActions(action.options.head).at(-1)?.newSha.slice(0, 8),
       });
     }
 
@@ -4377,9 +4379,12 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   ): Promise<SimulatedPullComparison | null> {
     try {
       return await this.#simulatedPullComparison(gitCache, baseRef, headBranch);
-    } catch (error) {
+    } catch {
+      // Pending-chain/parser messages and stacks contain capability OIDs. Keep
+      // simulation diagnostics categorical, with only a short pending-head prefix.
       logger.warn("failed to simulate a pull request comparison over queued pushes", {
-        event: "pull.request.simulated.comparison.failed", error,
+        event: "pull.request.simulated.comparison.failed",
+        oidPrefix: this.#pendingPushActions(headBranch).at(-1)?.newSha.slice(0, 8),
       });
       return null;
     }
@@ -4752,15 +4757,14 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
             const chain = await this.#collectPendingChain(gitCache, simulatedHead);
             injected = await this.#filterPendingCommitsForListing(gitCache, chain, filter);
             startRef = chain.anchor;
-          } catch (error) {
+          } catch {
             logger.warn("failed to simulate a commit listing over queued pushes", {
-              event: "commits.list.simulated.failed", error,
+              event: "commits.list.simulated.failed", oidPrefix: simulatedHead.slice(0, 8),
             });
             if (realHead === null) {
               throw new Error(
                 `Branch "${ref}" does not exist on GitHub yet and the commits queued to ` +
-                `create it could not be read. Retry, or list commits from an existing ref.`,
-                { cause: error });
+                `create it could not be read. Retry, or list commits from an existing ref.`);
             }
           }
         }

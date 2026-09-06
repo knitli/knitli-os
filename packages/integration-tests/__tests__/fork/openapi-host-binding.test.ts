@@ -50,6 +50,25 @@ afterAll(async () => {
   interceptor.reset();
   expect(unmocked).toEqual([]);
 });
+function assertScopeExpansionRestart(error: string): void {
+  // An in-flight RPC can deliver the DO's abort reason before the enclosing WebSocket
+  // delivers its close frame. Both identify this restart; unrelated failures must fail.
+  expect([
+    "Error: Gadget restarted because a new connection was added.",
+    "Error: Peer closed WebSocket: 3000 RPC session was shut down by disposing the main stub",
+  ]).toContain(error);
+}
+
+it.each([
+  ["Error: Gadget restarted because a new connection was added.", true],
+  ["Error: Peer closed WebSocket: 3000 RPC session was shut down by disposing the main stub", true],
+  ["Error: Peer closed WebSocket: 1006 connection lost", false],
+  ["Error: BINDING_OWNER_REQUIRED", false],
+])("scope expansion restart observation accepts only its exact outcomes: %s", (error, accepted) => {
+  if (accepted) expect(() => assertScopeExpansionRestart(error)).not.toThrow();
+  else expect(() => assertScopeExpansionRestart(error)).toThrow();
+});
+
 async function withSession(body: (api: RpcStub<PublicApi>) => Promise<void>) {
   using api = connect(harness.url);
   await body(api);
@@ -251,8 +270,7 @@ describe("authenticated OpenAPI host binding", () => {
     // abort with no client can crash the local runtime (see settleRestart in harness.ts).
     const restartError = await waitFor("scope expansion to restart the old workspace", () =>
       intended.getMetadata().then(() => null, error => String(error)));
-    expect(restartError).toBe(
-      "Error: Peer closed WebSocket: 3000 RPC session was shut down by disposing the main stub");
+    assertScopeExpansionRestart(restartError);
     using freshPublic = connect(harness.url);
     using freshOwner = await logIn(freshPublic, alice);
     using reopened = await freshOwner.openGadget(intendedId);

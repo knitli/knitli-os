@@ -32,6 +32,26 @@ function username(): string {
   return value;
 }
 
+function assertDeletionRestart(error: string): void {
+  // deleteSelf uses the revocation restart. Its in-flight RPC abort can arrive before
+  // the containing WebSocket close; accept only those two observations of this boundary.
+  expect([
+    "Error: Gadget restarted to revoke access for a removed collaborator.",
+    "Error: Peer closed WebSocket: 3000 RPC session was shut down by disposing the main stub",
+  ]).toContain(error);
+}
+
+it.each([
+  ["Error: Gadget restarted to revoke access for a removed collaborator.", true],
+  ["Error: Peer closed WebSocket: 3000 RPC session was shut down by disposing the main stub", true],
+  ["Error: Peer closed WebSocket: 1006 connection lost", false],
+  ["Error: BINDING_OWNER_REQUIRED", false],
+  ["Error: Gadget restarted because a new connection was added.", false],
+])("deletion restart observation accepts only its exact outcomes: %s", (error, accepted) => {
+  if (accepted) expect(() => assertDeletionRestart(error)).not.toThrow();
+  else expect(() => assertDeletionRestart(error)).toThrow();
+});
+
 it.concurrent("lists workspace metadata after activity and removes it after deletion", async () => {
   using publicApi = connect(requireHarness().url);
   const owner = username();
@@ -59,8 +79,7 @@ it.concurrent("lists workspace metadata after activity and removes it after dele
   // before checking persistent user metadata through a fresh authenticated connection.
   const restartError = await waitFor("the deleted workspace to sever its client", () =>
     workspace.getMetadata().then(() => null, error => String(error)));
-  expect(restartError).toBe(
-    "Error: Peer closed WebSocket: 3000 RPC session was shut down by disposing the main stub");
+  assertDeletionRestart(restartError);
   using freshPublic = connect(requireHarness().url);
   using freshOwner = await logIn(freshPublic, owner);
   await waitFor("the deleted workspace to disappear from the user's list", async () =>

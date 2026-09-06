@@ -350,6 +350,8 @@ test("OpenAPI host binding files are explicitly fork owned", () => {
     "packages/workshop-backend/__tests__/knitli-openapi-facet-binding.test.ts",
     "packages/workshop-frontend/src/GatekeeperModal.knitli-binding.test.tsx",
     "packages/integration-tests/fixtures/gatekeeper-test/src/fork/",
+  "packages/integration-tests/fixtures/fork/",
+  "packages/integration-tests/src/fork/",
   ]) {
     assert.ok(
       FORK_OWNED_PREFIXES.some((prefix) => path.startsWith(prefix)),

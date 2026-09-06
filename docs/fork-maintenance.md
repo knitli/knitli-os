@@ -44,6 +44,8 @@ Upstream has no file there, so nothing in them can ever conflict. Today:
 
 - `packages/gatekeeper-ai-executor/` — the AI Executor gatekeeper, ~19k lines, zero conflict surface.
 - `packages/integration-tests/__tests__/fork/` — fork integration tests.
+- `packages/integration-tests/fixtures/fork/` — test-only Worker generation probes.
+- `packages/integration-tests/src/fork/` — bounded generation-aware reload readiness.
 - `packages/workshop-shared/src/fork/` — authenticated OpenAPI host binding.
 - `packages/workshop-backend/src/fork/` — authenticated OpenAPI host binding.
 - `packages/workshop-backend/__tests__/knitli-openapi-binding-ledger.test.ts` — authenticated OpenAPI host binding.
@@ -301,3 +303,24 @@ Intentional, reviewed differences from upstream. Keep this current.
   sessions on revocation via `RpcStub.revocable()`"), which needs a patched workerd. If that lands on
   `foundation/main`, the gate, `runRevocationCleanup()` and this whole divergence entry should be
   able to go.
+
+### OpenAPI host test reload readiness
+
+- **Where:** `packages/integration-tests/src/fork/reload-harness.ts`, the two
+  `fixtures/fork/*-reload-probe.js` wrappers, and the fork host-binding tests.
+- **What:** After a Worker reload, wait for a fresh generation marker from the
+  public primary and each fixture Worker before reconnecting application RPC.
+  Only health requests repeat; an explicit deadline also bounds transports that
+  ignore cancellation. The wrappers delegate application requests and preserve
+  the validated named exports.
+- **Why:** Wrangler can resolve an update before asynchronous proxy switching has
+  finished. A reload test must establish current-generation readiness before it
+  tests recovered host capabilities.
+- **Upstream splice:** `packages/integration-tests/tsconfig.json` excludes only
+  `fixtures/fork/workshop-reload-probe.js` and
+  `fixtures/fork/gatekeeper-reload-probe.js`. These runtime wrappers import the
+  generated validation bundle, which is bundled and exercised by the real Worker
+  tests rather than checked again as TypeScript source. Preserve these exclusions
+  during a sync; the tsconfig remains upstream-owned and subject to the audit.
+- **Check:** Run the reload-helper tests and complete authenticated OpenAPI host
+  test file after fresh Worker builds, plus the fork audit tests.

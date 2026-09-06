@@ -14,5 +14,6 @@
     }
   },
   "include": ["src", "__tests__", "fixtures"],
-  "exclude": ["node_modules"]
+  // Runtime wrappers import generated validation output, which is bundled rather than type-checked.
+  "exclude": ["node_modules", "fixtures/fork/workshop-reload-probe.js", "fixtures/fork/gatekeeper-reload-probe.js"]
 }

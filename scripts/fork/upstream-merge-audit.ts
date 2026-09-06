@@ -76,6 +76,8 @@ export const FORK_OWNED_PREFIXES = [
   "packages/workshop-frontend/src/fork/DeferredBlueprintSetup.test.tsx",
   "packages/workshop-frontend/src/fork/Connections.blueprint-owner.test.tsx",
   "packages/integration-tests/fixtures/gatekeeper-test/src/fork/",
+  "packages/integration-tests/fixtures/fork/",
+  "packages/integration-tests/src/fork/",
 
   "packages/gatekeeper-ai-executor/",
   "packages/integration-tests/__tests__/fork/",

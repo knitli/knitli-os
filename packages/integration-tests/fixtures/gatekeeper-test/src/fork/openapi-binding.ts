@@ -121,7 +121,7 @@ class Finalizer extends RpcTarget implements OpenApiFacetFinalizer {
   }
 }
 export function openApiFinalizer(control: DurableObjectStub<TestControl>, label: string,
-  reference: DraftReference): RpcStub<OpenApiFacetFinalizer> {
+  reference: DraftReference): RpcStub<Finalizer> {
   return new RpcStub(new Finalizer(control, label, reference));
 }
 

@@ -5,7 +5,7 @@ import { OverseerDurableObject } from "../src/overseer";
 import { env, RpcTarget, RpcStub } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { BoundIdentity, HostFacetBinding, OpenApiFacetFinalizer } from "@gadgets/workshop-shared/fork/openapi-host-binding";
-import { createHostBindingLedger, type BindingRow } from "../src/fork/openapi-binding-ledger";
+import { BindingError, createHostBindingLedger, type BindingRow } from "../src/fork/openapi-binding-ledger";
 import { createOpenApiFacetBinding, type OpenApiFacetBindingContext, type OpenApiFacetRow, type OpenApiResolvedDraft } from "../src/fork/openapi-facet-binding";
 
 import { createOpenApiRecoveryRunner, OPENAPI_RECOVERY_TIMEOUT_MS } from "../src/fork/openapi-recovery";
@@ -53,6 +53,10 @@ function fixture(workspaceId = "workspace", initialClock = 1_000) {
   let activationError: Error | undefined;
   let revokeError: Error | undefined;
   let digest = identity.selectionDigest;
+  let supportsActivationReplay = false;
+  let lostCapabilities = false;
+  let probeError: Error | undefined;
+  let probePause = noPause;
   let reservePause = noPause;
   let activationPause = noPause;
   let descriptionPause = noPause;
@@ -68,6 +72,12 @@ function fixture(workspaceId = "workspace", initialClock = 1_000) {
   const observed: BoundIdentity[] = [];
   const events: string[] = [];
   const finalizer = new class extends RpcTarget implements OpenApiFacetFinalizer {
+    async needsActivationReplay() {
+      events.push("probe");
+      await probePause();
+      if (probeError) throw probeError;
+      return lostCapabilities;
+    }
     async activate(binding: RpcStub<HostFacetBinding>) {
       events.push("activate"); authorities.push(binding.dup());
       expect(facets.has(0)).toBe(true);
@@ -76,6 +86,7 @@ function fixture(workspaceId = "workspace", initialClock = 1_000) {
       await activationPause();
       if (activationError) throw activationError;
       await binding.confirmActivation(digest);
+      lostCapabilities = false;
       events.push("connector-active");
     }
     async revoke(reason: string) {
@@ -94,7 +105,7 @@ function fixture(workspaceId = "workspace", initialClock = 1_000) {
       if (!accountLive) throw new Error("BINDING_ACCOUNT_REPLACED");
       if (accountId !== 0 || workspaceId !== draft.intendedWorkspaceId) throw new Error("BINDING_IDENTITY_MISMATCH");
       if (!requestedUrl.includes("/grants/grant")) throw new Error("DRAFT_NOT_FOUND");
-      return { row: structuredClone(userRows.get("draft")!), resourceUrl: resolvedUrl,
+      return { supportsActivationReplay, row: structuredClone(userRows.get("draft")!), resourceUrl: resolvedUrl,
         class: {} as OpenApiResolvedDraft["class"],
         resource: { title: "API", description: "API", urlPattern: "https://workshop.test/gatekeeper/openapi/apis/*" },
         vendorId: "openapi", typeUrlPattern: "https://workshop.test/gatekeeper/openapi/apis/*", finalizer: new RpcStub(finalizer) };
@@ -129,6 +140,10 @@ function fixture(workspaceId = "workspace", initialClock = 1_000) {
     if (published) { connections.add(0); facets.add(0); }
   }
   return { binding, restart, context, rows, userRows, facets, connections, authorities, observed, events, seed,
+    enableReplayProbe: () => { supportsActivationReplay = true; },
+    loseCapabilities: () => { lostCapabilities = true; },
+    pauseProbe: (pause: () => Promise<void>) => { probePause = pause; },
+    rejectProbe: () => { probeError = new Error("PROBE_UNAVAILABLE"); },
     isShared: () => shared, describe: async () => { await descriptionPause(); if (descriptionError) throw descriptionError; return { url: descriptionUrl, title: "API", observerPolicy: "owner-only" as const }; },
     expire: () => { now += 900_001; }, disconnect: () => { accountLive = false; }, share: () => { shared = true; },
     setDescriptionUrl: (value: string) => { descriptionUrl = value; }, setResolvedUrl: (value: string) => { resolvedUrl = value; },
@@ -143,6 +158,75 @@ function fixture(workspaceId = "workspace", initialClock = 1_000) {
     pauseAccount: (pause: () => Promise<void>) => { accountPause = pause; },
     pauseRevoke: (pause: () => Promise<void>) => { revokePause = pause; } };
 }
+
+describe("request-driven independent connector recovery", () => {
+  it("probes healthy bindings without reactivation and skips unadvertised extensions", async () => {
+    const f = fixture(); await f.binding.create(0, url); f.events.length = 0;
+    await f.binding.ensureReady(0);
+    expect(f.events).toEqual(["lookup"]);
+    f.enableReplayProbe();
+    await f.binding.ensureReady(0);
+    expect(f.events).toEqual(["lookup", "lookup", "probe"]);
+    expect(f.rows.get("draft")?.recoveryPending).toBe(false);
+  });
+  it("deduplicates concurrent probes and replays the same immutable identity once", async () => {
+    const f = fixture(); await f.binding.create(0, url); f.enableReplayProbe(); f.loseCapabilities();
+    const before = structuredClone(f.rows.get("draft")); f.events.length = 0;
+    const pause = barrier(); f.pauseProbe(pause.pause);
+    const first = f.binding.ensureReady(0);
+    try {
+      await pause.reached;
+      const second = f.binding.ensureReady(0);
+      expect(first).toBe(second);
+      expect(f.events.filter(event => event === "probe")).toHaveLength(1);
+      pause.release(); await Promise.all([first, second]);
+      expect(f.events.filter(event => event === "activate")).toHaveLength(1);
+      expect(f.observed).toEqual([identity, identity]);
+      expect(f.rows.get("draft")).toEqual(before);
+      expect(f.events).not.toContain("allocate");
+      f.events.length = 0; await f.binding.ensureReady(0);
+      expect(f.events).toEqual(["lookup", "probe"]);
+    } finally { pause.release(); }
+  });
+  it("propagates probe errors without replaying or retiring the binding", async () => {
+    const f = fixture(); await f.binding.create(0, url); f.enableReplayProbe(); f.rejectProbe(); f.events.length = 0;
+    await expect(f.binding.ensureReady(0)).rejects.toThrow("PROBE_UNAVAILABLE");
+    expect(f.events).toEqual(["lookup", "probe"]);
+    expect(f.rows.get("draft")).toMatchObject({ state: "active", recoveryPending: false });
+  });
+  it.each(["revocation", "account", "workspace"] as const)("fences %s while the probe awaits", async fence => {
+    const f = fixture(); await f.binding.create(0, url); f.enableReplayProbe(); f.loseCapabilities(); f.events.length = 0;
+    const pause = barrier(); f.pauseProbe(pause.pause);
+    const attempt = f.binding.ensureReady(0);
+    const rejected = expect(attempt).rejects.toThrow(fence === "revocation" ? "BINDING_REVOKED" : fence === "account" ? "BINDING_ACCOUNT_REPLACED" : "BINDING_WORKSPACE_CLOSING");
+    try {
+      await pause.reached;
+      if (fence === "revocation") f.binding.fence("draft", "removed");
+      else if (fence === "account") f.disconnect();
+      else f.context.assertHostReady = () => { throw new BindingError("BINDING_WORKSPACE_CLOSING"); };
+      pause.release(); await rejected;
+      expect(f.events).not.toContain("activate");
+      expect(f.events).not.toContain("instantiate");
+    } finally { pause.release(); }
+  });
+  it.each(["probe", "replay"] as const)("bounds a paused %s and denies late activation/publication", async stage => {
+    const f = fixture(); await f.binding.create(0, url); f.enableReplayProbe(); f.loseCapabilities(); f.events.length = 0;
+    const timers = captureRecoveryDeadlines(); const pause = barrier();
+    if (stage === "probe") f.pauseProbe(pause.pause); else f.pauseActivation(pause.pause);
+    const first = f.binding.ensureReady(0).then(() => "SUCCESS", error => String(error));
+    try {
+      await pause.reached; timers.fire();
+      expect(await first).toContain("OPENAPI_RECOVERY_TIMEOUT");
+      await expect(f.binding.ensureReady(0)).rejects.toThrow("OPENAPI_RECOVERY_TIMEOUT");
+      pause.release(); await new Promise<void>(resolve => setTimeout(resolve, 0));
+      expect(f.events).not.toContain("describe");
+      expect(f.events).not.toContain("connector-active");
+      if (stage === "probe") expect(f.events).not.toContain("activate");
+      await f.binding.ensureReady(0);
+      expect(f.events.filter(event => event === "connector-active")).toHaveLength(1);
+    } finally { pause.release(); timers.restore(); }
+  });
+});
 
 describe("bounded OpenAPI recovery attempts", () => {
   it("holds one in-flight slot after timeout and invalidates late continuation before accepting a new attempt", async () => {
@@ -523,6 +607,23 @@ function installActualHostFakes(impl: ActualOverseer) {
 }
 
 describe("actual Overseer durable publication integration", () => {
+  it.each(["session", "retained-observation"] as const)("recovers lost connector authority before admitting a %s", async entry => {
+    await withActualOverseer(async impl => {
+      const host = installActualHostFakes(impl);
+      try {
+        const connection = await impl.createBoundOpenApiGatekeeper(0, url);
+        host.allowSession(); host.f.enableReplayProbe();
+        await connection.openSession();
+        host.f.loseCapabilities(); host.f.events.length = 0;
+        if (entry === "session") { await connection.openSession(); }
+        else await host.getQueue().authorizeObservation({ title: "Recovered read", description: "Recovered exact connector authority." });
+        expect(host.f.events.filter(event => event === "activate")).toHaveLength(1);
+        expect(host.f.events.filter(event => event === "probe")).toHaveLength(1);
+        expect(impl.storage.openApiBindings.get("draft")).toMatchObject({ state: "active", recoveryPending: false });
+      } finally { host.restore(); }
+    });
+  });
+
   it("publishes exactly one reserved ID through actual addGatekeeper during overlapping Add", async () => {
     await withActualOverseer(async impl => {
       const { f, restore } = installActualHostFakes(impl);

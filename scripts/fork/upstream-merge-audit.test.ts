@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   ancestry,
+  auditFormatDrift,
   auditRemovedPaths,
   authoritativeUpstreamRef,
   FORK_OWNED_PREFIXES,
+  FORMAT_EXCEPTIONS,
   isForkOwned,
   isShallowRepository,
   isSourceFile,
@@ -176,6 +178,55 @@ function inRepo<T>(dir: string, body: () => T): T {
   } finally {
     process.chdir(previous);
   }
+}
+
+for (const variation of ["exact pair", "changed fork", "changed upstream", "unrelated path"] as const) {
+  test(`comment-only formatting exception: ${variation}`, () => {
+    const exception = FORMAT_EXCEPTIONS[0]!;
+    // Ordinary test jobs have shallow history. Reconstruct the reviewed comment-only
+    // delta from checked-in content, verifying both blob IDs before exercising Git trees.
+    const fork = readFileSync(new URL(`../../${exception.path}`, import.meta.url), "utf8");
+    const upstream = fork.replace(
+      "   * must be a full 40-hex SHA-1 for a commit known to the workspace, e.g. the worktree's base\n" +
+      "   * commit to see everything changed since it was created.",
+      "   * may be any commit known to the workspace, e.g. the worktree's base commit to see everything\n" +
+      "   * changed since it was created.");
+    for (const [content, expected] of [[upstream, exception.upstreamBlob], [fork, exception.forkBlob]]) {
+      assert.equal(execFileSync("git", ["hash-object", "--stdin"], {
+        input: content, encoding: "utf8",
+      }).trim(), expected);
+    }
+    const dir = scratchRepo();
+    const run = (...args: string[]) =>
+      execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+    const path = variation === "unrelated path" ? "src/unrelated.ts" : exception.path;
+    const file = join(dir, path);
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, upstream + (variation === "changed upstream" ? "\n// added upstream\n" : ""));
+      run("add", path);
+      run("commit", "-q", "-m", "upstream content");
+      const upstreamRef = run("rev-parse", "HEAD");
+      writeFileSync(file, fork + (variation === "changed fork" ? "\n// added fork\n" : ""));
+      run("add", path);
+      run("commit", "-q", "-m", "fork content");
+      inRepo(dir, () => {
+        const applied: typeof exception[] = [];
+        const findings = auditFormatDrift({
+          upstreamRef, oursRef: "HEAD", onException: entry => applied.push(entry),
+        });
+        if (variation === "exact pair") {
+          assert.deepEqual(findings, []);
+          assert.deepEqual(applied, [exception]);
+          assert.ok(exception.reason.length > 0);
+          assert.equal(isForkOwned(path), false);
+        } else {
+          assert.deepEqual(findings.map(finding => finding.path), [path]);
+          assert.deepEqual(applied, []);
+        }
+      });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 }
 
 test("an in-progress merge of a non-upstream branch is not a sync", () => {

@@ -39,6 +39,22 @@ export interface FormatChurnFile {
   rawChurn: number;
 }
 
+/** One reviewed comment-only divergence; changing either blob requires a fresh review. */
+export interface FormatException {
+  path: string;
+  upstreamBlob: string;
+  forkBlob: string;
+  reason: string;
+}
+
+/** Exact content pairs exempt only from the formatting check, never from merge auditing. */
+export const FORMAT_EXCEPTIONS: readonly FormatException[] = [{
+  path: "packages/workshop-backend/src/worktree-binding.d.ts",
+  upstreamBlob: "ff54d738edfe0880bf56120e091818c891a7bfb1",
+  forkBlob: "e7046837ca08f49c6dc657142e9402b2029fceb1",
+  reason: "Document the enforced full 40-hex commit capability boundary for Worktree.diff().",
+}];
+
 /** The merge being audited: who merged what, and where to read the resolved content from. */
 export interface MergeUnderAudit {
   baseRef: string;
@@ -387,7 +403,11 @@ function recomputeMerge(
  * reflow, which buys nothing and conflicts forever. Needs no merge: this is our standing divergence
  * from `upstreamRef`, so it catches reflow arriving through an ordinary PR.
  */
-export function auditFormatDrift(opts: { oursRef: string; upstreamRef: string }): FormatChurnFile[] {
+export function auditFormatDrift(opts: {
+  oursRef: string;
+  upstreamRef: string;
+  onException?: (exception: FormatException) => void;
+}): FormatChurnFile[] {
   const { oursRef, upstreamRef } = opts;
   const churn: FormatChurnFile[] = [];
   for (const path of [...changedFiles(upstreamRef, oursRef)].toSorted()) {
@@ -397,6 +417,14 @@ export function auditFormatDrift(opts: { oursRef: string; upstreamRef: string })
     // A file upstream does not have cannot have been reformatted away from it.
     if (theirs === null || ours === null || ours === theirs) continue;
     if (normalizeForFormatComparison(ours) !== normalizeForFormatComparison(theirs)) continue;
+
+    const exception = FORMAT_EXCEPTIONS.find(entry => entry.path === path &&
+      entry.upstreamBlob === git(["rev-parse", `${upstreamRef}:${path}`]).trim() &&
+      entry.forkBlob === git(["rev-parse", `${oursRef}:${path}`]).trim());
+    if (exception) {
+      opts.onException?.(exception);
+      continue;
+    }
 
     const stat = gitOrNull(["diff", "--numstat", upstreamRef, oursRef, "--", path])?.trim() ?? "";
     const [added = "0", removed = "0"] = stat.split(/\s+/);
@@ -465,7 +493,11 @@ function main(argv: string[]): number {
   const upstreamRef = authoritative ?? merge?.upstreamRef ?? null;
 
   const dropped = merge ? auditDroppedHunks(merge) : [];
-  const formatChurn = upstreamRef ? auditFormatDrift({ oursRef, upstreamRef }) : [];
+  const formatChurn = upstreamRef ? auditFormatDrift({
+    oursRef, upstreamRef,
+    onException: exception => console.log(
+      `Reviewed comment-only exception: ${exception.path}\n  ${exception.reason}`),
+  }) : [];
   const restored = auditRemovedPaths(oursRef);
 
   const shallow = isShallowRepository();

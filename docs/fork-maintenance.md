@@ -71,6 +71,12 @@ Turn off format-on-save for this repo, or scope it to the fork-owned trees. A di
 upstream file should contain only lines whose *meaning* you changed. `pnpm fork:audit` fails on any
 upstream file whose entire diff normalises away to nothing.
 
+An intentional comment-only contract correction can be recorded in `FORMAT_EXCEPTIONS` in
+`scripts/fork/upstream-merge-audit.ts`, with its exact path, upstream and fork Git blob IDs, and
+review reason. Only that content pair is exempt from the formatting check; changing either blob
+requires review again. The audit prints the reason when it applies. This does not change file
+ownership or exempt the file from dropped-hunk checking.
+
 If we ever want a consistent formatter, the way to get one is a single `vp fmt` sweep proposed
 upstream, not a fork-local drift.
 

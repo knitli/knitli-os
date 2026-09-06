@@ -1818,6 +1818,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return account ? account.description : null;
   }
 
+  /** Read an account's eligible blueprint resource types without resolving a resource URL. */
+  async describeBlueprintAccount(accountId: number) {
+    const account = this.storage.connectedAccounts.get(accountId);
+    if (!account) return null;
+    const config = await readAdminConfig(this.env);
+    const supportedResources = account.description.hostBindingProtocol === "openapi-v1"
+      ? filterEnabledResources(config, account.vendorId, await account.account.getSupportedResources()) : [];
+    return { description: account.description, vendorId: account.vendorId, supportedResources };
+  }
+
 }
 
 type GatekeeperConnectCallbackProps = {

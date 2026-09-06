@@ -1,3 +1,5 @@
+import type { BlueprintBindingAssignment, PendingBlueprintSetup } from "@gadgets/workshop-shared/api";
+import { createBlueprintSetup, pendingBlueprintSetup, runBlueprintSetup, type BlueprintSetupState } from "./fork/blueprint-setup";
 import type { DraftReference } from "@gadgets/workshop-shared/fork/openapi-host-binding";
 import { createOpenApiFacetBinding, type OpenApiFacetRow } from "./fork/openapi-facet-binding";
 import { BindingError } from "./fork/openapi-binding-ledger";
@@ -1016,6 +1018,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
       // The workspace title. (Each chat, gatekeeper, and gadget has its own title, elsewhere.)
       title: "Untitled Workspace",
+
+      // Immutable blueprint setup snapshot plus resolved IDs, retained for idempotent completion.
+      blueprintSetup: <BlueprintSetupState | undefined>undefined,
 
       // If present, this gadget was migrated from version zero, when a workspace had only one
       // gadget. Many stored records that normally contain a `gadgetId` might be missing it; they
@@ -4407,6 +4412,13 @@ class OverseerImpl implements AgentHooks {
 
   waitForChatMessagePreparation(chatId: number): Promise<void> | undefined {
     return this.#preparingChatMessages.get(chatId);
+  }
+
+  #blueprintSetupQueue = Promise.resolve();
+  runBlueprintSetupTask(task: () => Promise<void>): Promise<void> {
+    const operation = this.#blueprintSetupQueue.then(task);
+    this.#blueprintSetupQueue = operation.catch(() => {});
+    return operation;
   }
 
   findOpenApiBinding(gatekeeperId: number): OpenApiFacetRow | undefined {
@@ -9021,7 +9033,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * Initialize this workspace's default gadget from a blueprint's code snapshot. Called by
    * AuthenticatedApi.newGadgetFromBlueprint() after creating (and opening) the DO.
    */
-  async initializeFromBlueprint(code: Uint8Array, title: string, output?: BlueprintOutput)
+  async initializeFromBlueprint(code: Uint8Array, title: string, output?: BlueprintOutput,
+      setup?: { bindings: Record<string, BlueprintBinding>; assignments: Record<string, BlueprintBindingAssignment> })
       : Promise<void> {
     // Set the title. The default gadget (created below) inherits it.
     this.impl.storage.title.put(title);
@@ -9063,6 +9076,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // Blueprint instantiation still creates a fresh workspace containing one auto-created gadget,
     // recorded as the default gadget (see ensureDefaultGadget).
     this.impl.ensureDefaultGadget(commitId);
+    if (setup) {
+      this.impl.storage.blueprintSetup.put(createBlueprintSetup(setup.bindings, setup.assignments,
+        this.impl.resolveGadgetId(undefined)));
+    }
 
     // The gadget inherits the blueprint's declared format, so it is named and drawn as a Document
     // (or whatever it produces) rather than a generic app.
@@ -9562,6 +9579,59 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (this.clientUserId !== this.impl.ownerId) throw new Error("BINDING_OWNER_REQUIRED");
     if (this.impl.storage.openApiWorkspaceClosing.get()) throw new Error("BINDING_WORKSPACE_CLOSING");
     return this.#clientUser.startBoundResourceConfigurator(accountId, resourceUrlPattern, this.impl.ctx.id.toString());
+  }
+
+  async getPendingBlueprintSetup(): Promise<PendingBlueprintSetup | null> {
+    if (this.clientUserId !== this.impl.ownerId) throw new Error("BINDING_OWNER_REQUIRED");
+    return pendingBlueprintSetup(this.impl.storage.blueprintSetup.get(), id => this.#blueprintTargetMissing(id));
+  }
+
+  #blueprintTargetMissing(id: WorkpieceId): boolean {
+    if (!this.impl.storage.gatekeepers.get(id)) return true;
+    const binding = this.impl.findOpenApiBinding(id);
+    return binding?.state === "revoked" || binding?.state === "revoking";
+  }
+
+  async completeBlueprintBinding(bindingName?: string, gatekeeperId?: WorkpieceId): Promise<void> {
+    if ((bindingName === undefined) !== (gatekeeperId === undefined)) throw new Error("Provide both the blueprint binding name and connection ID.");
+    const assertOwner = () => {
+      if (this.clientUserId !== this.impl.ownerId) throw new Error("BINDING_OWNER_REQUIRED");
+      if (this.impl.storage.openApiWorkspaceClosing.get()) throw new Error("BINDING_WORKSPACE_CLOSING");
+    };
+    assertOwner();
+    return this.impl.runBlueprintSetupTask(() => runBlueprintSetup({
+      get: () => this.impl.storage.blueprintSetup.get(),
+      put: state => this.impl.storage.blueprintSetup.put(state),
+      api: this,
+      assertOwner,
+      validateGatekeeper: async (name, id) => {
+        const requirement = this.impl.storage.blueprintSetup.get()?.bindings[name];
+        const record = this.impl.storage.gatekeepers.get(id);
+        const binding = this.impl.findOpenApiBinding(id);
+        const spec = record?.creationSpec;
+        if (requirement?.type !== "gatekeeper" || spec?.type !== "gatekeeper" ||
+            spec.vendorId !== requirement.gatekeeperName || spec.typeUrlPattern !== requirement.typeUrlPattern ||
+            !binding?.identity || binding.identity.ownerId !== this.clientUserId || record?.initializing) {
+          throw new Error("Connection does not match the deferred blueprint requirement.");
+        }
+        await this.impl.checkOpenApiAccountReadiness(id, binding.identity.generation);
+        assertOwner();
+        this.impl.assertOpenApiBindingActiveNow(id, binding.identity.generation);
+      },
+      isMissing: id => this.#blueprintTargetMissing(id),
+      bind: (gadgetId, name, id, replacing) => {
+        assertOwner();
+        this.impl.assertOpenApiBindingActiveNow(id);
+        const existing = this.impl.getGadgetRecord(gadgetId).bindings[name];
+        if (existing) {
+          if (existing.pending || (existing.target !== id && existing.target !== replacing)) throw new Error(`Binding "${name}" already exists.`);
+          if (existing.target === id) return;
+          // Replace only the setup's original edge; preserve the old workpiece and other edges.
+          this.impl.unbindWorkpiece(gadgetId, name);
+        }
+        this.impl.bindWorkpiece(gadgetId, name, id);
+      },
+    }, bindingName === undefined ? undefined : { bindingName, gatekeeperId: gatekeeperId! }));
   }
 
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
@@ -11234,6 +11304,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
   async deleteSelf(): Promise<void> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async getPendingBlueprintSetup(): Promise<PendingBlueprintSetup | null> { this.#deny(); }
+  async completeBlueprintBinding(_bindingName?: string, _gatekeeperId?: WorkpieceId): Promise<void> { this.#deny(); }
+
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)
       : Promise<{generation: number, revision: number}> {
     this.#deny();

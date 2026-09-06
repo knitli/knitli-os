@@ -71,6 +71,10 @@ export const FORK_OWNED_PREFIXES = [
   "packages/workshop-backend/__tests__/knitli-openapi-dispatch-binding.test.ts",
   "packages/workshop-backend/__tests__/knitli-openapi-facet-binding.test.ts",
   "packages/workshop-frontend/src/GatekeeperModal.knitli-binding.test.tsx",
+  "packages/workshop-backend/__tests__/knitli-blueprint-setup.test.ts",
+  "packages/workshop-frontend/src/fork/DeferredBlueprintSetup.tsx",
+  "packages/workshop-frontend/src/fork/DeferredBlueprintSetup.test.tsx",
+  "packages/workshop-frontend/src/fork/Connections.blueprint-owner.test.tsx",
   "packages/integration-tests/fixtures/gatekeeper-test/src/fork/",
 
   "packages/gatekeeper-ai-executor/",

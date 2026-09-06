@@ -119,6 +119,85 @@ async function noActivation(draftId: string) {
 }
 
 describe("authenticated OpenAPI host binding", () => {
+  async function publishBoundBlueprint(api: RpcStub<AuthenticatedApi>, account: Account) {
+    const formats = await waitFor("bundled blueprint format", async () => {
+      const offers = await api.listOutputFormats();
+      return offers.length ? offers : null;
+    });
+    const document = formats.find(format => format.output.id === "document")!;
+    using source = await api.newGadgetFromBlueprint(document.blueprintId, {});
+    const sourceMetadata = await source.getMetadata();
+    using gadget = await source.getGadget(sourceMetadata.defaultGadgetId!);
+    const { ui, selection } = await select(source, account);
+    using _selection = ui;
+    using connection = await source.newGatekeeper(account.id, selection.resourceUrl);
+    await gadget.bind("SOURCE_API", await connection!.getId());
+    await gadget.setBlueprintAnnotation("SOURCE_API", {
+      title: "Source API", description: "Choose a fresh API selection", suggestValue: true,
+    });
+    const blueprint = await gadget.createBlueprint("Bound API starter", "Deferred binding regression");
+    return { blueprintId: blueprint.id, oldUrl: selection.resourceUrl };
+  }
+
+  it("rejects a concrete OpenAPI blueprint URL before allocating a workspace", async () => withSession(async publicApi => {
+    using api = await signUp(publicApi, nextUsernames("blueprintoldurl")[0]);
+    const account = await provision(api);
+    const { blueprintId, oldUrl } = await publishBoundBlueprint(api, account);
+    const before = (await api.listGadgets()).map(gadget => gadget.id).toSorted();
+    const result = await api.newGadgetFromBlueprint(blueprintId, {
+      SOURCE_API: { type: "gatekeeper", accountId: account.id, resourceUrl: oldUrl },
+    }).then(async unexpected => { unexpected[Symbol.dispose](); return "UNEXPECTED_WORKSPACE"; }, error => String(error));
+    expect({ result, workspaceIds: (await api.listGadgets()).map(gadget => gadget.id).toSorted() }).toEqual({
+      result: expect.stringContaining("WORKSPACE_CONTEXT_REQUIRED"), workspaceIds: before,
+    });
+  }));
+
+  it("persists deferred blueprint setup across restart and binds a fresh workspace selection under the original name", async () => {
+    const username = nextUsernames("blueprintdeferred")[0];
+    let workspaceId!: string;
+    let accountId!: number;
+    let oldUrl!: string;
+    await withSession(async publicApi => {
+      using api = await signUp(publicApi, username);
+      const account = await provision(api);
+      accountId = account.id;
+      const published = await publishBoundBlueprint(api, account);
+      oldUrl = published.oldUrl;
+      using workspace = await api.newGadgetFromBlueprint(published.blueprintId, {
+        SOURCE_API: { type: "deferredGatekeeper", accountId },
+      });
+      const metadata = await workspace.getMetadata();
+      workspaceId = metadata.id;
+      const pending = await workspace.getPendingBlueprintSetup();
+      expect(pending).toMatchObject({ gadgetId: metadata.defaultGadgetId, bindings: {
+        SOURCE_API: { accountId, binding: { type: "gatekeeper" } },
+      } });
+      expect(pending!.bindings.SOURCE_API.binding.resourceUrl).toBeUndefined();
+      using gadget = await workspace.getGadget(metadata.defaultGadgetId!);
+      expect(await gadget.getBinding("SOURCE_API")).toBeNull();
+      await reloadWorkers();
+    });
+    await withSession(async publicApi => {
+      using api = await logIn(publicApi, username);
+      using workspace = await api.openGadget(workspaceId);
+      const pending = await workspace.getPendingBlueprintSetup();
+      expect(Object.keys(pending!.bindings)).toEqual(["SOURCE_API"]);
+      const account = (await listConnectedAccounts(api)).find(account => account.id === accountId)!;
+      const { ui, selection } = await select(workspace, { ...account, pattern: PATTERN });
+      using _selection = ui;
+      expect(selection.resourceUrl).not.toBe(oldUrl);
+      using fresh = await workspace.newGatekeeper(accountId, selection.resourceUrl);
+      const freshId = await fresh!.getId();
+      await workspace.completeBlueprintBinding("SOURCE_API", freshId);
+      expect(await workspace.getPendingBlueprintSetup()).toBeNull();
+      using gadget = await workspace.getGadget(pending!.gadgetId);
+      using bound = await gadget.getBinding("SOURCE_API");
+      expect(await bound!.getId()).toBe(freshId);
+      using session = await bound!.openSession() as RpcStub<ReadSession>;
+      await expect(session.readValue()).resolves.toBe(1);
+    });
+  });
+
   it("rejects malformed fixture RPC arguments without changing the draft or dispatch lifecycle", async () => withSession(async publicApi => {
     using api = await signUp(publicApi, nextUsernames("bindingvalidation")[0]);
     const account = await provision(api);

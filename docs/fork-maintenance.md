@@ -52,6 +52,10 @@ Upstream has no file there, so nothing in them can ever conflict. Today:
 - `packages/workshop-backend/__tests__/knitli-openapi-dispatch-binding.test.ts` — private OpenAPI dispatch registration and attenuated-use authority.
 - `packages/workshop-backend/__tests__/knitli-openapi-facet-binding.test.ts` — authenticated OpenAPI host binding.
 - `packages/workshop-frontend/src/GatekeeperModal.knitli-binding.test.tsx` — authenticated OpenAPI host binding.
+- `packages/workshop-backend/__tests__/knitli-blueprint-setup.test.ts` — durable deferred blueprint setup regressions.
+- `packages/workshop-frontend/src/fork/DeferredBlueprintSetup.tsx` — workspace-bound completion of deferred blueprint connections.
+- `packages/workshop-frontend/src/fork/DeferredBlueprintSetup.test.tsx` — deferred setup UI regressions.
+- `packages/workshop-frontend/src/fork/Connections.blueprint-owner.test.tsx` — owner-only blueprint setup visibility regressions.
 - `packages/integration-tests/fixtures/gatekeeper-test/src/fork/` — authenticated OpenAPI host binding.
 - `scripts/fork/` — fork tooling.
 - `docs/fork-maintenance.md` — this file.

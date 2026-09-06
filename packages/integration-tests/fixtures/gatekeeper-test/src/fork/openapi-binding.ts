@@ -7,6 +7,7 @@ import type { TestControl, TestSession } from "../test-gatekeeper";
 export type BindingEvent = Pick<BoundIdentity, "draftId" | "workspaceId" | "gatekeeperId" | "generation"> & { event: string };
 export type ConnectorDraft = DraftReference & {
   resourceUrl: string;
+  failure?: "confirm-selection" | "activation" | "describe";
   expiresAt: number;
   cancelled: boolean;
   expired: boolean;
@@ -49,9 +50,10 @@ class Selection extends RpcTarget {
     super();
     this.#control = control;
     this.#label = label;
-    this.#authority = authority;
+    this.#authority = authority.dup();
     this.#origin = origin;
   }
+  [Symbol.dispose](): void { this.#authority[Symbol.dispose](); }
   async select(options: { apiId?: string; releaseId?: string; selectionDigest?: string } = {}) {
     if (!this.#draft) {
       const apiId = options.apiId ?? "test-api";
@@ -96,12 +98,13 @@ class Finalizer extends RpcTarget implements OpenApiFacetFinalizer {
     assertReference(draft, this.#reference);
     assertReference(draft, identity);
     assertDraftLive(draft);
+    if (draft.failure === "activation") throw new Error("FIXTURE_ACTIVATION_FAILED");
     await this.#control.prepareOpenApiActivation(this.#label, identity);
     await this.#control.waitAtBarrier(`openapi:activation:${identity.draftId}`);
     // Re-read after the pause: a concurrent revoke must defeat activation.
     assertDraftLive(await this.#control.getOpenApiDraft(this.#label, identity.draftId));
     if (!sameIdentity(identity, await binding.getIdentity())) throw new Error("BINDING_IDENTITY_MISMATCH");
-    await binding.confirmActivation(identity.selectionDigest);
+    await binding.confirmActivation(draft.failure === "confirm-selection" ? `${identity.selectionDigest}-mismatch` : identity.selectionDigest);
     await this.#control.completeOpenApiActivation(this.#label, identity);
     await this.#control.installOpenApiBinding(this.#label, identity.draftId, binding);
   }
@@ -120,13 +123,22 @@ export function openApiFinalizer(control: DurableObjectStub<TestControl>, label:
 
 export async function openApiControlRequest(path: string, body: unknown, control: DurableObjectStub<TestControl>): Promise<Response | undefined> {
   const action = path.replace("/control/", "");
-  if (!["pauseBeforeActivation", "releaseActivation", "pauseRevocation", "releaseRevocation", "readBindingEvents", "expireDraft", "cancelDraft", "pauseDispatch", "releaseDispatch", "pauseResolution", "releaseResolution", "rotateDispatchKey", "checkDispatchUse", "crossoverBinding"].includes(action)) return undefined;
+  if (!["pauseBeforeActivation", "releaseActivation", "pauseRevocation", "releaseRevocation", "readBindingEvents", "expireDraft", "cancelDraft", "pauseDispatch", "releaseDispatch", "pauseResolution", "releaseResolution", "rotateDispatchKey", "checkDispatchUse", "crossoverBinding", "setDraftFailure", "readFixtureObservations", "dropRuntimeCaps"].includes(action)) return undefined;
   const input = body as Record<string, unknown>;
+  if (action === "readFixtureObservations") {
+    if (typeof input.label !== "string" || !input.label) return new Response("label is required", { status: 400 });
+    return Response.json({ calls: await control.readFixtureObservations(input.label) });
+  }
   if (typeof input.draftId !== "string" || !input.draftId) return new Response("draftId is required", { status: 400 });
   const draftId = input.draftId;
   if (action === "readBindingEvents") return Response.json({ events: await control.readBindingEvents(draftId) });
-  if (["rotateDispatchKey", "checkDispatchUse", "crossoverBinding"].includes(action)) {
+  if (["rotateDispatchKey", "checkDispatchUse", "crossoverBinding", "setDraftFailure", "readFixtureObservations", "dropRuntimeCaps"].includes(action)) {
     if (typeof input.label !== "string" || !input.label) return new Response("label is required", { status: 400 });
+    if (action === "setDraftFailure") {
+      if (input.failure !== "confirm-selection" && input.failure !== "activation" && input.failure !== "describe") return new Response("failure must be confirm-selection, activation or describe", { status: 400 });
+      await control.setOpenApiDraftFailure(input.label, draftId, input.failure);
+    }
+    if (action === "dropRuntimeCaps") await control.dropOpenApiRuntimeCaps(input.label, draftId);
     if (action === "rotateDispatchKey") await control.rotateOpenApiDispatchKey(input.label, draftId);
     if (action === "checkDispatchUse") {
       if (input.which !== "old" && input.which !== "current") return new Response("which must be old or current", { status: 400 });
@@ -190,7 +202,9 @@ export class OpenApiRuntime {
     const keyId = "fixture-dispatch-key";
     const publicKeyDigest = "fixture-public-key-digest";
     const registration = await binding.authorizeDispatchKey({ keyId, publicKeyDigest });
-    this.#bindings.set(this.#key(label, draftId), { binding: binding.dup(), current: { keyId, publicKeyDigest, keyEpoch: registration.keyEpoch, use: registration.use }, leases: 0, drained: [] });
+    const use = registration.use.dup();
+    registration.use[Symbol.dispose]();
+    this.#bindings.set(this.#key(label, draftId), { binding: binding.dup(), current: { keyId, publicKeyDigest, keyEpoch: registration.keyEpoch, use }, leases: 0, drained: [] });
   }
   /** Test-only key ABA exercise. Neither current nor retained old authority is returned. */
   async rotate(label: string, draftId: string): Promise<void> {
@@ -198,8 +212,10 @@ export class OpenApiRuntime {
     const { keyId, publicKeyDigest, keyEpoch } = state.current;
     await state.binding.revokeDispatchKey({ keyId, publicKeyDigest, keyEpoch });
     const registration = await state.binding.authorizeDispatchKey({ keyId, publicKeyDigest });
+    state.old?.use[Symbol.dispose]();
     state.old = state.current;
-    state.current = { keyId, publicKeyDigest, keyEpoch: registration.keyEpoch, use: registration.use };
+    state.current = { keyId, publicKeyDigest, keyEpoch: registration.keyEpoch, use: registration.use.dup() };
+    registration.use[Symbol.dispose]();
   }
   /** Test-only result probe of retained private use capabilities. */
   async check(label: string, draftId: string, which: "old" | "current"): Promise<void> {
@@ -224,6 +240,18 @@ export class OpenApiRuntime {
     try { await pause(); record("dispatch-completed"); return 1; }
     finally { state.leases--; if (!state.leases) for (const resolve of state.drained.splice(0)) resolve(); }
   }
+  /** Test-only lost-capability simulation, not an actual Durable Object restart. */
+  drop(label: string, draftId: string): void {
+    const key = this.#key(label, draftId);
+    const state = this.#bindings.get(key);
+    if (state?.leases) throw new Error("FIXTURE_DISPATCH_STILL_ADMITTED");
+    state?.binding[Symbol.dispose]();
+    state?.current.use[Symbol.dispose]();
+    state?.old?.use[Symbol.dispose]();
+    this.#bindings.delete(key);
+    this.#finalizers.get(key)?.[Symbol.dispose]();
+    this.#finalizers.delete(key);
+  }
   /** Test-only drain after the durable connector fence has closed admission. */
   async drain(label: string, draftId: string): Promise<void> {
     const state = this.#bindings.get(this.#key(label, draftId));
@@ -240,6 +268,7 @@ class OpenApiSession extends RpcTarget implements TestSession {
   constructor(control: DurableObjectStub<TestControl>, label: string, draftId: string, approval: RpcStub<ApprovalQueue>) {
     super(); this.#control = control; this.#label = label; this.#draftId = draftId; this.#approval = approval.dup();
   }
+  [Symbol.dispose](): void { this.#approval[Symbol.dispose](); }
   async readValue(): Promise<number> {
     await this.#approval.authorizeObservation({ title: "Read OpenAPI fixture", description: "Exercise private host admission without provider I/O." });
     return this.#control.dispatchOpenApi(this.#label, this.#draftId);

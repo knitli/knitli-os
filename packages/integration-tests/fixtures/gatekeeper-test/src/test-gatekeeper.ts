@@ -78,6 +78,8 @@ const AVATAR = {
 // shows the user -- so a test that read a label off `description.uniqueName` can aim an outcome at it
 // without having to learn any internal id.
 
+type FixtureObservation = { method: string; arity: number; propertyNames?: string[] };
+
 type VerifyOutcome = { allow: true } | { allow: false; reason: string };
 
 /**
@@ -114,6 +116,31 @@ function outcomeKey(label: string, resourceUrl?: string): string {
 @validateRpc()
 export class TestControl extends DurableObject<Cloudflare.Env> {
   #openApiRuntime = new OpenApiRuntime();
+
+  /** Test-only failure configuration contains no authority or caller-supplied identity. */
+  setOpenApiDraftFailure(label: string, draftId: string, failure: "confirm-selection" | "activation" | "describe"): void {
+    const draft = this.getOpenApiDraft(label, draftId);
+    draft.failure = failure;
+    this.ctx.storage.kv.put(`openapi:draft:${label}:${draftId}`, draft);
+  }
+
+  /** Test-only lost-capability simulation; durable account/draft tombstones remain intact. */
+  dropOpenApiRuntimeCaps(label: string, draftId: string): void {
+    this.#openApiRuntime.drop(label, draftId);
+  }
+
+  /** Test-only protocol footprint, containing argument counts and property names only. */
+  recordFixtureObservation(label: string, observation: FixtureObservation): void {
+    const calls = this.readFixtureObservations(label);
+    calls.push(observation);
+    this.ctx.storage.kv.put(`fixture:observations:${label}`, calls);
+  }
+
+  /** Test-only protocol footprint never returns property values or capabilities. */
+  readFixtureObservations(label: string): FixtureObservation[] {
+    return this.ctx.storage.kv.get<FixtureObservation[]>(`fixture:observations:${label}`) ?? [];
+  }
+
 
   /** Test-only private activation hook; never reachable through the fixture HTTP controls. */
   @skipRpcValidation()
@@ -505,6 +532,7 @@ export class TestAccount
     class: DurableObjectClass<Gatekeeper<TestSession>>;
     resource: SupportedResource;
   }> {
+    await control(this.ctx.exports).recordFixtureObservation(this.ctx.props.label, { method: "getGatekeeperClassFor", arity: arguments.length });
     const parsed = new URL(url);
     if (
       parsed.host !== VENDOR_HOST ||
@@ -538,9 +566,10 @@ export class TestAccount
 
   async revoke(): Promise<void> {}
 
-  startResourceConfigurator(
+  async startResourceConfigurator(
     _resourceUrlPattern: string,
   ): Promise<ResourceConfiguratorFrame> {
+    await control(this.ctx.exports).recordFixtureObservation(this.ctx.props.label, { method: "startResourceConfigurator", arity: arguments.length });
     throw new Error(
       "The test gatekeeper has no resource configurator; bind a URL directly.",
     );
@@ -591,6 +620,7 @@ export class TestOpenApiAccount extends TestAccount implements OpenApiBoundAccou
 
   override async revoke(): Promise<void> {
     await control(this.ctx.exports).revokeOpenApiAccount(this.ctx.props.label);
+    await control(this.ctx.exports).recordFixtureObservation(this.ctx.props.label, { method: "revoke", arity: arguments.length });
   }
 
   @skipRpcValidation()
@@ -733,6 +763,11 @@ export class TestGatekeeper
   implements Gatekeeper<TestSession>
 {
   async describe(): Promise<ResourceDescription> {
+    await control(this.ctx.exports).recordFixtureObservation(this.ctx.props.label, { method: "describe", arity: arguments.length, propertyNames: Object.keys(this.ctx.props).toSorted() });
+    if (this.ctx.props.openApiDraftId) {
+      const draft = await control(this.ctx.exports).getOpenApiDraft(this.ctx.props.label, this.ctx.props.openApiDraftId);
+      if (draft.failure === "describe") throw new Error("FIXTURE_DESCRIPTION_FAILED");
+    }
     if (this.ctx.props.ambient) {
       return {
         url: this.ctx.props.resourceUrl,
@@ -886,7 +921,7 @@ export default {
     // Set what addObserver() should do for one account, either everywhere or (when `resourceUrl`
     // is given) at one binding only.
     // Body: {"label": "...", "allow": false, "reason": "...", "resourceUrl": "..."}
-    if (req.method === "POST" && openApiEnabled(env as OpenApiTestEnv)) {
+    if (req.method === "POST" && (openApiEnabled(env as OpenApiTestEnv) || url.pathname === "/control/readFixtureObservations")) {
       const response = await openApiControlRequest(url.pathname, body, control(ctx.exports));
       if (response) return response;
     }

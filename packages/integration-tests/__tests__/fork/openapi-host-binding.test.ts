@@ -5,6 +5,7 @@ import type { DraftReference } from "@gadgets/workshop-shared/fork/openapi-host-
 import type { RpcStub } from "capnweb";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type Harness, startHarness, TEST_GATEKEEPER_BINDING, TEST_GATEKEEPER_DIR, TEST_GATEKEEPER_WORKER, TEST_VENDOR_ID } from "../../src/harness.js";
+import { GATEKEEPER_RELOAD_MAIN, WORKSHOP_RELOAD_MAIN, reloadHarnessWorkers } from "../../src/fork/reload-harness.js";
 import { NetworkInterceptor } from "../../src/network-interceptor.js";
 import { accountLabel, type ConnectedAccount, RpcTarget, connect, listConnectedAccounts, logIn, nextUsernames, signUp, stubFor, waitFor } from "../../src/rpc-client.js";
 
@@ -25,18 +26,21 @@ beforeAll(async () => {
   interceptor.install();
   harness = await startHarness({
     gatekeepers: [{ binding: TEST_GATEKEEPER_BINDING, dir: TEST_GATEKEEPER_DIR, patch(config) {
+      config.main = GATEKEEPER_RELOAD_MAIN;
       config.vars = { ...config.vars, OPENAPI_HOST_BINDING_TEST: "1", OPENAPI_TEST_ORIGIN: ORIGIN };
     } }, {
       binding: "OTHER", dir: TEST_GATEKEEPER_DIR, patch(config) {
+        config.main = GATEKEEPER_RELOAD_MAIN;
         config.name = "gatekeeper-test-other";
         config.vars = { ...config.vars, OPENAPI_HOST_BINDING_TEST: "1", OPENAPI_TEST_ORIGIN: ORIGIN };
       },
     }, {
       binding: "LEGACY", dir: TEST_GATEKEEPER_DIR, patch(config) {
+        config.main = GATEKEEPER_RELOAD_MAIN;
         config.name = "gatekeeper-test-legacy";
       },
     }],
-    patchWorkshop(config) { config.vars = { ...config.vars, PUBLIC_BASE_URL: ORIGIN }; },
+    patchWorkshop(config) { config.main = WORKSHOP_RELOAD_MAIN; config.vars = { ...config.vars, PUBLIC_BASE_URL: ORIGIN }; },
   });
 });
 afterAll(async () => {
@@ -106,13 +110,8 @@ async function arrived(kind: string, draftId: string) {
     return ((await response.json()) as { arrivals: number }).arrivals > 0 ? true : null;
   });
 }
-let reloadRevision = 0;
 async function reloadWorkers() {
-  const revision = String(++reloadRevision);
-  await harness.server.update(options => ({ ...options, workers: options.workers.map(worker => {
-    if (!("config" in worker)) throw new Error("Expected inline local Worker config");
-    return { config: { ...worker.config, vars: { ...worker.config.vars, OPENAPI_ACCEPTANCE_RELOAD: revision } } };
-  }) }));
+  await reloadHarnessWorkers(harness, [TEST_GATEKEEPER_WORKER, "gatekeeper-test-other", "gatekeeper-test-legacy"]);
 }
 async function noActivation(draftId: string) {
   expect((await events(draftId)).filter(e => e.event === "activated" || e.event === "dispatch-admitted")).toEqual([]);

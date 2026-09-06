@@ -69,6 +69,10 @@ export interface GatekeeperModalProps {
   initialVendorId?: string
   initialResourceUrl?: string
   initialResourceUrlPattern?: string
+  /** Prefer this account when it is still available; users may select a replacement. */
+  initialAccountId?: number
+  /** Keep a resumed blueprint setup on its required vendor and resource type. */
+  lockResourceType?: boolean
 }
 
 type ConnectionTypeId =
@@ -188,7 +192,7 @@ function disposeConfiguratorFrame(frame: ResourceConfiguratorFrame | null) {
 
 export default function GatekeeperModal({
   open, onClose, getOverseer, onCreated, spawnerEnvCandidates,
-  initialVendorId, initialResourceUrl, initialResourceUrlPattern,
+  initialVendorId, initialResourceUrl, initialResourceUrlPattern, initialAccountId, lockResourceType,
 }: GatekeeperModalProps) {
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
@@ -252,7 +256,9 @@ export default function GatekeeperModal({
     ...platformConnectionTypes(siteName),
     ...vendors.flatMap(vendor => vendor.supportedResources
       .map(resource => connectionForResource(vendor, resource))),
-  ], [siteName, vendors])
+  ].filter(connection => !lockResourceType || (
+    connection.vendorId === initialVendorId && connection.resourceUrlPattern === initialResourceUrlPattern
+  )), [siteName, vendors, lockResourceType, initialVendorId, initialResourceUrlPattern])
 
   const selectedConnection = useMemo(
     () => allConnections.find(connection => connection.id === selectedConnectionId) ?? null,
@@ -527,9 +533,13 @@ export default function GatekeeperModal({
     const currentIsValid = selectedAccountId !== null
       && matchingAccounts.some(account => account.id === selectedAccountId && account.credentialsValid)
     if (currentIsValid) return
-    const firstValidAccount = matchingAccounts.find(account => account.credentialsValid)
+    const firstValidAccount = matchingAccounts.find(account => account.id === initialAccountId && account.credentialsValid)
+      ?? matchingAccounts.find(account => account.credentialsValid)
     setSelectedAccountId(firstValidAccount?.id ?? null)
-  }, [selectedConnection, matchingAccounts, selectedAccountId])
+  }, [selectedConnection, matchingAccounts, selectedAccountId, initialAccountId])
+
+  const getOverseerRef = useRef(getOverseer)
+  getOverseerRef.current = getOverseer
 
   useEffect(() => {
     const resourceUrlPattern = selectedConnection?.resourceUrlPattern ?? null
@@ -547,8 +557,14 @@ export default function GatekeeperModal({
     setConfiguratorError(null)
     setConfiguratorSelectionReady(null)
 
-    authenticatedApi.startResourceConfigurator(selectedAccount.id, resourceUrlPattern)
+    const startup = selectedAccount.description.hostBindingProtocol === "openapi-v1"
+      ? Promise.resolve().then(() => getOverseerRef.current()).then(overseer => cancelled
+        ? undefined
+        : overseer.startBoundResourceConfigurator(selectedAccount.id, resourceUrlPattern))
+      : authenticatedApi.startResourceConfigurator(selectedAccount.id, resourceUrlPattern)
+    startup
       .then(frame => {
+        if (!frame) return
         if (cancelled) {
           disposeConfiguratorFrame(frame)
           return
@@ -576,7 +592,7 @@ export default function GatekeeperModal({
     return () => {
       cancelled = true
     }
-  }, [open, authenticatedApi, selectedConnection?.id, selectedConnection?.resourceUrlPattern, selectedAccount?.id, hasMissingResourceGrants])
+  }, [open, authenticatedApi, selectedAccount?.description.hostBindingProtocol, selectedConnection?.id, selectedConnection?.resourceUrlPattern, selectedAccount?.id, hasMissingResourceGrants])
 
   const handleSelectConnection = (connection: ConnectionType) => {
     setSelectedConnectionId(connection.id)
@@ -820,14 +836,14 @@ export default function GatekeeperModal({
         {selectedConnection ? (
           <div ref={scrollRef} className="new-gatekeeper-scroll min-h-0 flex-1 overflow-y-auto px-5 py-4">
             <div ref={scrollContentRef}>
-              <button
+              {!lockResourceType && <button
                 type="button"
                 onClick={() => setSelectedConnectionId(null)}
                 className="mb-4 inline-flex cursor-pointer items-center gap-1.5 text-[12px] leading-4 font-medium tracking-[-0.2px] text-kumo-subtle transition-colors hover:text-kumo-default"
               >
                 <CaretLeft size={13} />
                 All connection types
-              </button>
+              </button>}
 
               <div className="space-y-4">
                 {needsAccount && (

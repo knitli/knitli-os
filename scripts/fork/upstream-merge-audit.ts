@@ -61,6 +61,22 @@ export interface MergeUnderAudit {
  * `docs/fork-maintenance.md`.
  */
 export const FORK_OWNED_PREFIXES = [
+  "patches/capnweb-validate@0.3.0.patch",
+  "scripts/fork/capnweb-native-validation.test.ts",
+  "packages/workshop-shared/src/fork/",
+  "packages/workshop-backend/src/fork/",
+  "packages/workshop-backend/__tests__/knitli-openapi-binding-ledger.test.ts",
+  "packages/workshop-backend/__tests__/knitli-openapi-user-binding.test.ts",
+  "packages/workshop-backend/__tests__/fork-fixtures/",
+  "packages/workshop-backend/__tests__/knitli-openapi-dispatch-binding.test.ts",
+  "packages/workshop-backend/__tests__/knitli-openapi-facet-binding.test.ts",
+  "packages/workshop-frontend/src/GatekeeperModal.knitli-binding.test.tsx",
+  "packages/workshop-backend/__tests__/knitli-blueprint-setup.test.ts",
+  "packages/workshop-frontend/src/fork/DeferredBlueprintSetup.tsx",
+  "packages/workshop-frontend/src/fork/DeferredBlueprintSetup.test.tsx",
+  "packages/workshop-frontend/src/fork/Connections.blueprint-owner.test.tsx",
+  "packages/integration-tests/fixtures/gatekeeper-test/src/fork/",
+
   "packages/gatekeeper-ai-executor/",
   "packages/integration-tests/__tests__/fork/",
   "scripts/fork/",

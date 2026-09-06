@@ -338,3 +338,24 @@ test("exit codes distinguish clean, findings, and could-not-check", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("OpenAPI host binding files are explicitly fork owned", () => {
+  for (const path of [
+    "packages/workshop-shared/src/fork/",
+    "packages/workshop-backend/src/fork/",
+    "packages/workshop-backend/__tests__/knitli-openapi-binding-ledger.test.ts",
+    "packages/workshop-backend/__tests__/knitli-openapi-user-binding.test.ts",
+  "packages/workshop-backend/__tests__/fork-fixtures/",
+  "packages/workshop-backend/__tests__/knitli-openapi-dispatch-binding.test.ts",
+    "packages/workshop-backend/__tests__/knitli-openapi-facet-binding.test.ts",
+    "packages/workshop-frontend/src/GatekeeperModal.knitli-binding.test.tsx",
+    "packages/integration-tests/fixtures/gatekeeper-test/src/fork/",
+  ]) {
+    assert.ok(
+      FORK_OWNED_PREFIXES.some((prefix) => path.startsWith(prefix)),
+      path,
+    );
+  }
+  assert.equal(isForkOwned("packages/workshop-backend/src/user.ts"), false);
+  assert.equal(isForkOwned("packages/workshop-shared/src/gatekeeper.ts"), false);
+});

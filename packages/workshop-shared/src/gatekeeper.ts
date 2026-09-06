@@ -146,6 +146,8 @@ export function boundAgentCatalog(entries: AgentCatalogEntry[]): AgentCatalog {
 
 /** Describes a connected user account on an external service, for display purposes. */
 export type AccountDescription = {
+  /** Explicit private host-binding protocol; declared v1 accounts must implement its extension. */
+  hostBindingProtocol?: "openapi-v1";
   /** User's display name, e.g. "John Doe". This is a non-unique name that is human-readable. */
   displayName?: string;
 

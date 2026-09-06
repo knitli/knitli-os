@@ -1,7 +1,7 @@
 import { openFakeOverseer } from "./fixtures.js";
 import { RpcTarget as WebRpcTarget } from "capnweb";
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
-import type { OverseerDurableObject } from "../src/overseer";
+import { OverseerDurableObject } from "../src/overseer";
 import { env, RpcTarget, RpcStub } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type { BoundIdentity, HostFacetBinding, OpenApiFacetFinalizer } from "@gadgets/workshop-shared/fork/openapi-host-binding";
@@ -579,6 +579,37 @@ describe("actual Overseer durable publication integration", () => {
       } finally { pause.release(); host.restore(); }
     });
   });
+  it.each(["unset", "future", "due"] as const)("shared alarm only recovers OpenAPI when its deadline is due: %s", async deadline => {
+    const stub = env.TEST_OVERSEER.getByName(`openapi-alarm-${crypto.randomUUID()}`);
+    await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      const impl = instance["impl"];
+      const host = installActualHostFakes(impl);
+      try {
+        await impl.createBoundOpenApiGatekeeper(0, url);
+        // A transient provider failure must not retire a healthy published grant
+        // merely because another subsystem woke the shared Durable Object alarm.
+        host.f.disconnect();
+        const healthy = impl.storage.openApiBindings.get("draft")!;
+        impl.storage.openApiBindings.put({ ...healthy,
+          reference: { ...healthy.reference, draftId: "pending" },
+          identity: { ...healthy.identity!, draftId: "pending", gatekeeperId: 1, facetName: "gatekeeper1" },
+          state: "revoking", revocationReason: "removed", published: false });
+        impl.storage.openApiRecoveryAt.put(deadline === "unset" ? undefined : Date.now() + (deadline === "future" ? 60_000 : -1));
+        const recover = vi.spyOn(impl, "resumeOpenApiBindings");
+        const agents = vi.spyOn(impl, "waitForAllAgentsToComplete").mockResolvedValue();
+        const responses = vi.spyOn(impl, "deliverReadyExternalMessageResponses");
+        try {
+          await instance.alarm();
+          expect(recover).toHaveBeenCalledTimes(deadline === "due" ? 1 : 0);
+          expect(agents).toHaveBeenCalledOnce();
+          expect(responses).toHaveBeenCalledOnce();
+          expect(impl.storage.openApiBindings.get("draft")?.state).toBe("active");
+          expect(impl.storage.openApiBindings.get("pending")?.state).toBe(deadline === "due" ? "revoked" : "revoking");
+          expect(impl.storage.gatekeepers.get(0)).toBeDefined();
+        } finally { recover.mockRestore(); agents.mockRestore(); responses.mockRestore(); }
+      } finally { host.restore(); }
+    });
+  });
   it.each([10_000, 60_000])("keeps the earliest response/OpenAPI alarm and preserves response deadline %s", async offset => {
     await withActualOverseer(async impl => {
       const host = installActualHostFakes(impl);
@@ -605,6 +636,22 @@ describe("actual Overseer durable publication integration", () => {
         await expect(impl.addGatekeeper({} as Parameters<ActualOverseer["addGatekeeper"]>[0], undefined, 0, () => {})).rejects.toThrow("BINDING_NOT_RESERVED");
         expect(facet).not.toHaveBeenCalled(); expect(impl.storage.gatekeepers.get(0)).toBeUndefined();
       } finally { facet.mockRestore(); }
+    });
+  });
+  it("constructor recovers persisted bindings even without an alarm deadline", async () => {
+    await withActualOverseer(async impl => {
+      const f = fixture(); f.seed("active", true);
+      impl.storage.ownerId.put("owner");
+      impl.storage.openApiBindings.put(f.rows.get("draft")!);
+      impl.storage.openApiRecoveryAt.put(undefined);
+      // Observe the production constructor's recovery dispatch, not a fake clock.
+      const prototype = Object.getPrototypeOf(impl) as ActualOverseer;
+      const recover = vi.spyOn(prototype, "resumeOpenApiBindings").mockResolvedValue();
+      try {
+        const restarted = new OverseerDurableObject(impl.ctx, impl.env);
+        expect(restarted["impl"].storage.openApiRecoveryAt.get()).toBeUndefined();
+        expect(recover).toHaveBeenCalledOnce();
+      } finally { recover.mockRestore(); }
     });
   });
   it("constructor preserves a reserved initialization while discarding legacy provisional records", async () => {

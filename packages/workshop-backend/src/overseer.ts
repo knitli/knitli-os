@@ -4453,14 +4453,15 @@ class OverseerImpl implements AgentHooks {
     return this.#getOpenApiBinding().resume(draftId);
   }
 
-  async resumeOpenApiBindings(): Promise<void> {
+  async resumeOpenApiBindings(pendingOnly = false): Promise<void> {
     for (const fence of Array.from(this.storage.openApiAccountFences.list())) {
       if (fence.drafts.every(draft => draft.revoked)) continue;
       try { await this.revokeOpenApiAccountBindings(fence.ownerId, fence.providerAccountId, fence.accountIncarnation, []); }
       catch { this.logger.warn("OpenAPI account cleanup remains pending", { event: "openapi.account.cleanup.pending" }); }
     }
     for (const row of Array.from(this.storage.openApiBindings.list())) {
-      if (row.state === "revoked") continue;
+      // Published bindings need replay after restart, but unrelated alarm retries must leave them alone.
+      if (row.state === "revoked" || (pendingOnly && row.state === "active" && row.published)) continue;
       try { await this.resumeOpenApiBinding(row.reference.draftId); }
       catch {
         this.logger.warn("OpenAPI binding recovery remains pending", {
@@ -8628,7 +8629,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async alarm() {
-    await this.impl.resumeOpenApiBindings();
+    const openApiRecoveryAt = this.impl.storage.openApiRecoveryAt.get();
+    if (openApiRecoveryAt !== undefined && openApiRecoveryAt <= Date.now()) {
+      await this.impl.resumeOpenApiBindings(true);
+    }
     await this.impl.waitForAllAgentsToComplete();
     await this.impl.deliverReadyExternalMessageResponses();
   }

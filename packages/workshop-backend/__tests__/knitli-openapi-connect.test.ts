@@ -249,6 +249,57 @@ describe("authenticated OpenAPI canonical connect", () => {
     await retry.notifications.credentialsExpired();
   });
 
+  it.each([
+    ["unavailable Account", "internal error; reference = test-removed-provider", true],
+    ["unrelated metadata failure", "SQLITE_CORRUPT: test storage failure", false],
+  ] as const)("uses only metadata for cleanup with an %s", async (_label, message, allowBegin) => {
+    const f = await fixture();
+    const attemptId = (await f.authority.getIdentity()).connectAttemptId;
+    const receipt = detachReceipt(await f.authority.complete(f.request));
+    const key = JSON.stringify(["openapi", f.request.profileId, f.request.principalId]);
+    await f.configure("healthy-vendor");
+    await runInDurableObject(f.user, instance => {
+      if (allowBegin) {
+        const accounts = instance["storage"].connectedAccounts;
+        const get = accounts.get.bind(accounts);
+        vi.spyOn(accounts, "get").mockImplementation(id => {
+          if (id === receipt.providerAccountId) throw new Error(message);
+          return get(id);
+        });
+      } else {
+        vi.spyOn(instance["storage"].openApiCanonicalConnections, "get").mockImplementation(() => { throw new Error(message); });
+      }
+    });
+    try {
+      // Retained authority still loads the Account and fails closed while unavailable.
+      await expect(Promise.resolve(f.authority.assertActive())).rejects.toThrow(message);
+      if (allowBegin) {
+        await runInDurableObject(f.user, instance => { vi.mocked(instance["storage"].connectedAccounts.get).mockClear(); });
+        await f.user.connectAccount("healthy-vendor");
+        await runInDurableObject(f.user, instance => { expect(instance["storage"].connectedAccounts.get).not.toHaveBeenCalled(); });
+        const healthy = await f.control.authority();
+        const result = detachReceipt(await healthy.complete(f.request));
+        expect(result.providerAccountId).not.toBe(receipt.providerAccountId);
+        await healthy.assertActive();
+        await expect(Promise.resolve(f.authority.assertActive())).rejects.toThrow(message);
+      } else {
+        await expect(Promise.resolve(f.user.connectAccount("healthy-vendor"))).rejects.toThrow(message);
+        await runInDurableObject(f.user, instance => { expect(instance["storage"].openApiCanonicalConnections.get).toHaveBeenCalledWith(key); });
+      }
+      await runInDurableObject(f.user, instance => { expect(instance["storage"].openApiConnectAttempts.get(attemptId)?.committed).toBeDefined(); });
+    } finally {
+      await runInDurableObject(f.user, instance => {
+        if (allowBegin) vi.mocked(instance["storage"].connectedAccounts.get).mockRestore();
+        else vi.mocked(instance["storage"].openApiCanonicalConnections.get).mockRestore();
+      });
+    }
+    // Restoring the Account keeps the original committed receipt authoritative.
+    await f.authority.assertActive();
+    const retry = detachReceipt(await f.authority.complete(f.request));
+    expect(retry.providerAccountId).toBe(receipt.providerAccountId);
+    expect(retry.accountIncarnation).toBe(receipt.accountIncarnation);
+  });
+
   it("rechecks shared vendor policy for retained admission and preserves connect errors", async () => {
     const f = await fixture();
     await runInDurableObject(f.user, async instance => {

@@ -44,17 +44,16 @@ const same = (a: OpenApiCanonicalConnection, b: OpenApiCanonicalConnection) =>
 
 /** Private connect lifecycle for one authenticated User DO. */
 export function createOpenApiConnect(context: OpenApiConnectContext) {
-  function isCurrent(row: OpenApiCanonicalConnection) {
+  function hasCurrentReceipt(row: OpenApiCanonicalConnection) {
     const canonical = context.canonical.get(row.key);
     const epoch = context.epochs.get(row.accountId);
-    const account = context.accounts.get(row.accountId);
-    if (!canonical || !same(canonical, row) || !epoch?.live || epoch.incarnation !== row.incarnation ||
-        account?.vendorId !== row.vendorId || account.description.hostBindingProtocol !== "openapi-v1") return false;
-    return true;
+    return canonical !== undefined && same(canonical, row) && epoch?.live === true && epoch.incarnation === row.incarnation;
   }
   function current(row: OpenApiCanonicalConnection) {
-    if (!isCurrent(row)) fail();
-    return context.accounts.get(row.accountId) ?? fail();
+    if (!hasCurrentReceipt(row)) fail();
+    const account = context.accounts.get(row.accountId) ?? fail();
+    if (account.vendorId !== row.vendorId || account.description.hostBindingProtocol !== "openapi-v1") fail();
+    return account;
   }
   function active(id: string, vendorId: string) {
     const attempt = context.attempts.get(id);
@@ -74,12 +73,14 @@ export function createOpenApiConnect(context: OpenApiConnectContext) {
   function begin(vendorId: string, expected?: OpenApiCanonicalConnection) {
     return context.transaction(() => {
       if (expected) current(expected);
-      // Reap only authority that already fails active(). Current committed receipts
-      // outlive initiation TTL; unexpired initial attempts remain usable.
+      // Reap only expired or superseded authority using receipt/epoch metadata.
+      // Never deserialize Account stubs here: a removed Worker can make a current
+      // Account unloadable, and restoring it must leave the receipt retryable.
+      // Current committed receipts outlive initiation TTL.
       let reconnectReserved = false;
       for (const pending of context.attempts.list()) {
-        const stale = pending.committed ? !isCurrent(pending.committed) :
-          context.now() >= pending.expiresAt || (pending.expected !== undefined && !isCurrent(pending.expected));
+        const stale = pending.committed ? !hasCurrentReceipt(pending.committed) :
+          context.now() >= pending.expiresAt || (pending.expected !== undefined && !hasCurrentReceipt(pending.expected));
         if (stale) context.attempts.delete(pending.id);
         else if (expected && !pending.committed && pending.expected && same(pending.expected, expected)) reconnectReserved = true;
       }

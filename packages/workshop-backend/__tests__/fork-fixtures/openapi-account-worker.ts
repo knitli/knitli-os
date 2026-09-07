@@ -2,8 +2,10 @@
 export * from "../../src/server";
 export { default } from "../../src/server";
 // The pool discovers direct exports without bundling export-star dependencies.
+export { GatekeeperConnectCallbackImpl } from "../../src/user";
 export { OpenApiConnectAuthorityImpl, OpenApiConnectionNotificationsImpl } from "../../src/fork/openapi-connect";
 import { DurableObject, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import type { GatekeeperConnectCallback } from "@gadgets/workshop-shared/gatekeeper";
 import type { OpenApiConnectAuthority, OpenApiConnectReceipt } from "@gadgets/workshop-shared/fork/openapi-connect";
 import type { DraftReference, HostDraftAuthority } from "@gadgets/workshop-shared/fork/openapi-host-binding";
 
@@ -51,6 +53,10 @@ export class OpenApiAccountTestControl extends DurableObject {
   createAuthority(userId: string, attemptId: string, vendorId: string) {
     return this.ctx.exports.OpenApiConnectAuthorityImpl({props: {userId, attemptId, vendorId}});
   }
+  setLegacyAccountDescription(enabled: boolean) { this.ctx.storage.kv.put("legacyAccountDescription", enabled); }
+  legacyAccountDescription(): boolean { return this.ctx.storage.kv.get<boolean>("legacyAccountDescription") ?? false; }
+  saveLegacyCallback(callback: Fetcher<GatekeeperConnectCallback>) { this.ctx.storage.kv.put("legacyCallback", callback); }
+  legacyCallback(): Fetcher<GatekeeperConnectCallback> { return this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("legacyCallback")!; }
   saveAuthority(authority: Fetcher<OpenApiConnectAuthority>) { this.ctx.storage.kv.put("authority", authority); }
   authority() { return this.ctx.storage.kv.get<Fetcher<OpenApiConnectAuthority>>("authority")!; }
   saveReceipt(receipt: OpenApiConnectReceipt) { this.ctx.storage.kv.put("receipt", receipt); }
@@ -78,7 +84,7 @@ export class OpenApiAccountTest extends WorkerEntrypoint<Cloudflare.Env, {
   async describe() {
     await this.control().arrive("description");
     return {displayName: "API", avatar: {url: "https://workshop.test/avatar"},
-      uniqueName: "test-account", hostBindingProtocol: "openapi-v1" as const};
+      uniqueName: "test-account", ...(await this.control().legacyAccountDescription() ? {} : {hostBindingProtocol: "openapi-v1" as const})};
   }
   async revoke() { await this.control().arrive("provider"); }
   async startBoundResourceConfigurator(_pattern: string, authority: HostDraftAuthority) {
@@ -97,9 +103,15 @@ export class OpenApiAccountTest extends WorkerEntrypoint<Cloudflare.Env, {
 }
 
 /** Persistable test vendor exercises the real authenticated User connect branch. */
-export class OpenApiConnectVendorTest extends WorkerEntrypoint<Cloudflare.Env, {controlId: string}> {
-  async describe() { return {displayName: "Test OpenAPI", url: "https://workshop.test", hostConnectProtocol: "openapi-v1" as const}; }
-  async connectAccount() { throw new Error("generic callback must not be issued"); }
+export class OpenApiConnectVendorTest extends WorkerEntrypoint<Cloudflare.Env, {controlId: string; legacy?: boolean}> {
+  async describe() { return {displayName: "Test OpenAPI", url: "https://workshop.test", ...(this.ctx.props.legacy ? {} : {hostConnectProtocol: "openapi-v1" as const})}; }
+  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>) {
+    if (!this.ctx.props.legacy) throw new Error("generic callback must not be issued");
+    const exports = this.ctx.exports as Cloudflare.Exports & {OpenApiAccountTestControl: DurableObjectNamespace<OpenApiAccountTestControl>};
+    const control = exports.OpenApiAccountTestControl.get(exports.OpenApiAccountTestControl.idFromString(this.ctx.props.controlId));
+    await control.saveLegacyCallback(callback);
+    return {url: "https://workshop.test/connect"};
+  }
   async connectBoundAccount(authority: Fetcher<OpenApiConnectAuthority>) {
     const exports = this.ctx.exports as Cloudflare.Exports & {OpenApiAccountTestControl: DurableObjectNamespace<OpenApiAccountTestControl>};
     const control = exports.OpenApiAccountTestControl.get(exports.OpenApiAccountTestControl.idFromString(this.ctx.props.controlId));

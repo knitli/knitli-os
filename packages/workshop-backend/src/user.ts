@@ -1761,7 +1761,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return undefined;
   }
 
+  async #assertLegacyConnectVendor(vendorId: string) {
+    const vendor = this.vendors.get(vendorId);
+    if (!vendor) throw new Error("No such service: " + vendorId);
+    // Legacy callbacks are persistable and may predate a vendor protocol upgrade.
+    // Recheck after their Account.describe() and before any revoke or account write.
+    if ((await vendor.describe()).hostConnectProtocol === "openapi-v1") throw new Error("OPENAPI_CONNECT_UNAVAILABLE");
+  }
+
   async putConnectedAccount(record: ConnectedAccountRecord) {
+    await this.#assertLegacyConnectVendor(record.vendorId);
     let uniqueName = record.description.uniqueName;
     if (uniqueName &&
         this.#findConnectedAccountByIdentity(record.vendorId, uniqueName, record.id)) {
@@ -1798,6 +1807,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     const binding = this.#openApiBinding();
     const expected = binding.snapshot(accountId);
     const description = await record.account.describe();
+    await this.#assertLegacyConnectVendor(record.vendorId);
     binding.assertUnchanged(accountId, expected);
     record.description = description;
     record.credentialsExpired = false;

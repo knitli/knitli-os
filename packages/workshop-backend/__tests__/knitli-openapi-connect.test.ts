@@ -16,12 +16,12 @@ const failure = "OPENAPI_CONNECT_UNAVAILABLE";
 async function fixture() {
   const user = env.TEST_USER.getByName(crypto.randomUUID());
   const control = env.TEST_OPENAPI_ACCOUNT_CONTROL.getByName(crypto.randomUUID());
-  async function configure(vendorId = "openapi") {
+  async function configure(vendorId = "openapi", legacy = false) {
     await runInDurableObject(user, instance => {
       const exports = instance["ctx"].exports as Cloudflare.Exports & {
-        OpenApiConnectVendorTest: (options: {props: {controlId: string}}) => Fetcher<OpenApiConnectVendorTest>;
+        OpenApiConnectVendorTest: (options: {props: {controlId: string; legacy?: boolean}}) => Fetcher<OpenApiConnectVendorTest>;
       };
-      instance["vendors"].set(vendorId, exports.OpenApiConnectVendorTest({props: {controlId: control.id.toString()}}) as Fetcher<GatekeeperVendor>);
+      instance["vendors"].set(vendorId, exports.OpenApiConnectVendorTest({props: {controlId: control.id.toString(), legacy}}) as Fetcher<GatekeeperVendor>);
     });
   }
   async function account(destinationControl = control) {
@@ -80,6 +80,92 @@ describe("authenticated OpenAPI canonical connect", () => {
     await expect(Promise.resolve(f.authority.complete(f.request))).rejects.toThrow(failure);
     expect((await f.control.events()).description).toBe(0);
     expect((await rows(f.user)).accounts).toEqual([]);
+  });
+
+  it.each([false, true])("rejects retained legacy completion after vendor upgrade (already completed: %s)", async alreadyCompleted => {
+    const f = await fixture();
+    const vendorId = "upgrading-vendor";
+    await f.configure(vendorId, true);
+    await f.user.connectAccount(vendorId);
+    const callback = await f.control.legacyCallback();
+    if (alreadyCompleted) await callback.complete(f.request.account);
+    const before = await rows(f.user);
+    await evictDurableObject(f.user);
+    await evictDurableObject(f.control);
+    await f.configure(vendorId);
+    const retained = await f.control.legacyCallback();
+    await expect(Promise.resolve(retained.complete(f.request.account))).rejects.toThrow(failure);
+    expect(await rows(f.user)).toEqual(before);
+    expect((await f.control.events()).provider).toBe(0);
+    await f.user.connectAccount(vendorId);
+    const bound = await f.control.authority();
+    detachReceipt(await bound.complete(f.request));
+    expect((await rows(f.user)).canonical).toHaveLength(1);
+  });
+
+  it("rechecks vendor upgrade after a legacy completion pauses at Account.describe", async () => {
+    const f = await fixture();
+    const vendorId = "upgrading-vendor";
+    await f.configure(vendorId, true);
+    await f.user.connectAccount(vendorId);
+    const callback = await f.control.legacyCallback();
+    await f.control.pause("description");
+    const pending = callback.complete(f.request.account);
+    await f.control.waitEntered("description");
+    await f.configure(vendorId);
+    await f.control.release("description");
+    await expect(Promise.resolve(pending)).rejects.toThrow(failure);
+    expect((await rows(f.user)).accounts).toEqual([]);
+    expect((await rows(f.user)).epochs).toEqual([]);
+    expect((await f.control.events()).provider).toBe(0);
+  });
+
+  it.each([false, true])("blocks legacy notification metadata promotion after upgrade (suspended: %s)", async suspended => {
+    const f = await fixture();
+    const vendorId = "upgrading-vendor";
+    await f.configure(vendorId, true);
+    await f.control.setLegacyAccountDescription(true);
+    await f.user.connectAccount(vendorId);
+    const callback = await f.control.legacyCallback();
+    await callback.complete(f.request.account);
+    const before = await rows(f.user);
+    const accountId = before.accounts[0].id;
+    if (suspended) await f.control.pause("description");
+    else {
+      await f.configure(vendorId);
+      await f.control.setLegacyAccountDescription(false);
+    }
+    const restore = callback.credentialsRestored();
+    if (suspended) {
+      await f.control.waitEntered("description");
+      await f.configure(vendorId);
+      await f.control.setLegacyAccountDescription(false);
+      await f.control.release("description");
+    }
+    await expect(Promise.resolve(restore)).rejects.toThrow(failure);
+    expect(await rows(f.user)).toEqual(before);
+    await runInDurableObject(f.user, instance => {
+      expect(instance["storage"].connectedAccounts.get(accountId)?.description.hostBindingProtocol).toBeUndefined();
+    });
+  });
+
+  it("preserves ordinary legacy completion and retry, but rejects a removed vendor", async () => {
+    const f = await fixture();
+    const vendorId = "ordinary-vendor";
+    await f.configure(vendorId, true);
+    await f.user.connectAccount(vendorId);
+    const callback = await f.control.legacyCallback();
+    await callback.complete(f.request.account);
+    await callback.complete(f.request.account);
+    await callback.credentialsExpired();
+    await callback.credentialsRestored();
+    const before = await rows(f.user);
+    expect(before.accounts).toHaveLength(1);
+    expect(before.canonical).toEqual([]);
+    await runInDurableObject(f.user, instance => { instance["vendors"].delete(vendorId); });
+    await expect(Promise.resolve(callback.complete(f.request.account))).rejects.toThrow("No such service: " + vendorId);
+    expect(await rows(f.user)).toEqual(before);
+    expect((await f.control.events()).provider).toBe(0);
   });
 
   it("validates generated RPC completion arguments before Account RPC", async () => {

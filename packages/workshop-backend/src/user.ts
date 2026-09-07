@@ -1,3 +1,5 @@
+import { createOpenApiConnect, type OpenApiConnectAttempt, type OpenApiCanonicalConnection } from "./fork/openapi-connect";
+import type { OpenApiConnectCompletion, OpenApiConnectVendor } from "@gadgets/workshop-shared/fork/openapi-connect";
 import { createOpenApiUserBinding, type OpenApiAccountEpoch, type OpenApiAccountCleanup, type OpenApiDraftCleanupReceipt, type OpenApiWorkspaceRetirement } from "./fork/openapi-user-binding";
 import type { BindingRow } from "./fork/openapi-binding-ledger";
 import type { BoundIdentity } from "@gadgets/workshop-shared/fork/openapi-host-binding";
@@ -166,6 +168,8 @@ function makeUserStorage(storage: DurableObjectStorage) {
       gadgets: collection<GadgetRecord>()({
         primaryKey: "id"
       }),
+      openApiConnectAttempts: collection<OpenApiConnectAttempt>()({ primaryKey: "id" }),
+      openApiCanonicalConnections: collection<OpenApiCanonicalConnection>()({ primaryKey: "key" }),
       openApiDraftIssuers: collection<{ draftId: string; authorityId: string }>()({ primaryKey: "draftId" }),
       openApiDrafts: collection<BindingRow>()({ primaryKey: row => row.reference.draftId }),
       openApiAccountEpochs: collection<OpenApiAccountEpoch>()({ primaryKey: "id" }),
@@ -1159,6 +1163,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error(`The "${vendorId}" gatekeeper is disabled on this deployment.`);
     }
 
+    if ((await vendor.describe()).hostConnectProtocol === "openapi-v1") {
+      const authority = this.#openApiConnect().begin(vendorId);
+      const {url} = await (vendor as Fetcher<GatekeeperVendor & OpenApiConnectVendor>).connectBoundAccount(authority, {resourceUrlPatterns});
+      return {url};
+    }
+
     let accountId = this.storage.nextAccountId.get();
     this.storage.nextAccountId.put(accountId + 1);
 
@@ -1550,6 +1560,46 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!record) throw new Error("No such account.");
     return record.account.reconnect();
   }
+
+  #openApiConnect() {
+    return createOpenApiConnect({
+      ownerId: this.ctx.id.toString(), now: () => Date.now(),
+      transaction: operation => this.ctx.storage.transactionSync(operation),
+      attempts: {get: id => this.storage.openApiConnectAttempts.get(id), put: row => { this.storage.openApiConnectAttempts.put(row); }},
+      canonical: {get: key => this.storage.openApiCanonicalConnections.get(key), put: row => { this.storage.openApiCanonicalConnections.put(row); }},
+      accounts: {get: id => this.storage.connectedAccounts.get(id), put: row => { this.storage.connectedAccounts.put(row); }},
+      epochs: {get: id => this.storage.openApiAccountEpochs.get(id), put: row => { this.storage.openApiAccountEpochs.put(row); }},
+      reserveAccountId: () => {
+        const id = this.storage.nextAccountId.get();
+        this.storage.nextAccountId.put(id + 1);
+        return id;
+      },
+      checkVendor: async vendorId => {
+        const vendor = this.vendors.get(vendorId);
+        if (!vendor || (await vendor.describe()).hostConnectProtocol !== "openapi-v1" ||
+            (await readAdminConfig(this.env)).disabledGatekeepers.includes(vendorId.toLowerCase())) {
+          throw new Error("OPENAPI_CONNECT_UNAVAILABLE");
+        }
+      },
+      fenceAccount: id => { this.#openApiBinding().fence(id); },
+      drainCleanup: id => this.#openApiBinding().drainCleanup(id),
+      authority: attempt => this.ctx.exports.OpenApiConnectAuthorityImpl({props: {
+        userId: this.ctx.id.toString(), attemptId: attempt.id, vendorId: attempt.vendorId,
+      }}),
+      notifications: row => this.ctx.exports.OpenApiConnectionNotificationsImpl({props: {userId: this.ctx.id.toString(), row}}),
+    });
+  }
+
+  /** Internal delegates used exclusively by host-minted private entrypoints. */
+  async openApiConnectIdentity(attemptId: string, vendorId: string) { return this.#openApiConnect().identity(attemptId, vendorId); }
+  /** Recheck one retained private connect admission. */
+  async assertOpenApiConnectActive(attemptId: string, vendorId: string) { await this.#openApiConnect().assertActive(attemptId, vendorId); }
+  /** Complete through canonical storage, without legacy replacement or duplicate revocation. */
+  async completeOpenApiConnect(attemptId: string, vendorId: string, request: OpenApiConnectCompletion) { return this.#openApiConnect().complete(attemptId, vendorId, request); }
+  /** Admit reconnect under the expected current host connection generation. */
+  async beginOpenApiReconnect(attemptId: string, vendorId: string, expectedConnectionGeneration: number) { return this.#openApiConnect().reconnect(attemptId, vendorId, expectedConnectionGeneration); }
+  /** Apply notifications only to their exact canonical receipt and incarnation. */
+  async notifyOpenApiCredentials(row: OpenApiCanonicalConnection, expired: boolean, expiresAt?: Date) { await this.#openApiConnect().notify(row, expired, expiresAt); }
 
   #scheduleOpenApiCleanup() {
     this.ctx.waitUntil(this.ctx.storage.setAlarm(Date.now() + 30_000));

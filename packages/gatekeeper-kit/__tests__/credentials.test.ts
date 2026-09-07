@@ -29,6 +29,63 @@ const live: Creds = { token: "live", expiresAt: Date.now() + 60 * 60 * 1000 };
 const stale: Creds = { token: "stale", expiresAt: Date.now() + 1000 };
 
 describe("CredentialCoordinator", () => {
+  it("encloses complete publications and clear once, after provider work", async () => {
+    const kv = fakeKv();
+    let applying = false;
+    const changes: Parameters<NonNullable<CredentialCoordinatorOptions<Creds>["mutation"]>>[0][] = [];
+    const guarded: CredentialsKv = {
+      get: kv.get,
+      put: (key, value) => { expect(applying).toBe(true); kv.put(key, value); },
+      delete: key => { expect(applying).toBe(true); kv.delete(key); },
+    };
+    kv.put("accessToken", stale);
+    const instance = new CredentialCoordinator<Creds>(guarded, {
+      expiresAt: creds => creds.expiresAt,
+      legacyKeys: ["accessToken"],
+      upgrade: legacy => {
+        expect(applying).toBe(false);
+        return legacy.get<Creds>("accessToken");
+      },
+      mutation: (change, apply) => {
+        expect(applying).toBe(false);
+        changes.push(change);
+        applying = true;
+        try { apply(); } finally { applying = false; }
+      },
+    });
+    expect(instance.stored()).toEqual(stale);
+    expect(kv.get("accessToken")).toBeUndefined();
+    instance.connect(stale);
+    const refresh = async () => {
+      expect(applying).toBe(false);
+      return live;
+    };
+    await instance.fresh(refresh);
+    await instance.rotate(refresh);
+    instance.clear();
+    expect(changes).toEqual([
+      { kind: "publish", credentials: stale },
+      { kind: "publish", credentials: stale },
+      { kind: "publish", credentials: live },
+      { kind: "publish", credentials: live },
+      { kind: "clear" },
+    ]);
+    expect(kv.get("credentials")).toBeUndefined();
+    expect(kv.get("credentials:migrated")).toBe(true);
+  });
+
+  it("does not publish an overtaken refresh through the mutation hook", async () => {
+    const mutation = vi.fn((_change, apply: () => void) => apply());
+    const instance = new CredentialCoordinator<Creds>(makeKv(), { mutation });
+    instance.connect(stale);
+    const pending = Promise.withResolvers<Creds>();
+    const refreshing = instance.rotate(() => pending.promise);
+    instance.connect(live);
+    pending.resolve({ token: "overtaken", expiresAt: live.expiresAt });
+    await expect(refreshing).resolves.toEqual(live);
+    expect(mutation).toHaveBeenCalledTimes(2);
+  });
+
   it("reports expiry when nothing is stored", async () => {
     await expect(coordinator(makeKv()).fresh(async () => live))
       .rejects.toThrow(CredentialsExpiredError);

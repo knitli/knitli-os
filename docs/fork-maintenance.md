@@ -337,3 +337,9 @@ Intentional, reviewed differences from upstream. Keep this current.
   during a sync; the tsconfig remains upstream-owned and subject to the audit.
 - **Check:** Run the reload-helper tests and complete authenticated OpenAPI host
   test file after fresh Worker builds, plus the fork audit tests.
+
+### Credential mutation transaction hook
+
+- **Where:** `packages/gatekeeper-kit/src/credentials.ts`, existing credential tests, and fork-owned `packages/gatekeeper-kit/__tests__/workerd/credential-mutation.test.ts`.
+- **What:** Optional synchronous `mutation(change, apply)` encloses complete connect, refresh/rotate, legacy publication, and clear writes once. The default calls `apply` directly; lazy identity/connection initialization and empty migration reads retain upstream behavior.
+- **Why:** Hosted Account credential publication must share its real storage transaction with generation and enrollment receipts, including rollback after credential writes. Source and existing tests remain upstream-audited; only the exact new test path is fork-owned.

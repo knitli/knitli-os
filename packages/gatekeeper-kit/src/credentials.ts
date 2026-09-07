@@ -54,6 +54,12 @@ export type CredentialCoordinatorOptions<Creds> = {
   expiresAt?(credentials: Creds): number | undefined;
   /** How far ahead of `expiresAt` to refresh. Non-negative and finite; 0 refreshes at expiry. */
   refreshSkewMs?: number;
+  /**
+   * Encloses a complete credential publication or clear in the host's synchronous transaction.
+   * Invoke `apply` exactly once before returning; neither the hook nor `apply` may defer writes.
+   * Provider refresh and legacy reads complete before this hook runs. Omitted hooks apply directly.
+   */
+  mutation?(change: { kind: "publish"; credentials: Creds } | { kind: "clear" }, apply: () => void): void;
   /** Keys owned by the pre-kit credential layout. */
   legacyKeys?: readonly string[];
   /**
@@ -118,8 +124,10 @@ export class CredentialCoordinator<Creds> {
     // Canonical record first, legacy keys second. Both land in one implicit transaction, so a
     // machine failure takes neither; the order is what makes a throw between them survivable, since
     // the grant is already readable under its new key before the old one goes away.
-    this.#commit(upgraded);
-    this.#reap();
+    this.#mutate({ kind: "publish", credentials: upgraded }, () => {
+      this.#commit(upgraded);
+      this.#reap();
+    });
     return upgraded;
   }
 
@@ -133,8 +141,10 @@ export class CredentialCoordinator<Creds> {
    * @param credentials New credentials.
    */
   connect(credentials: Creds): void {
-    this.#kv.put(CONNECTION_KEY, generateNonce());
-    this.#commit(credentials);
+    this.#mutate({ kind: "publish", credentials }, () => {
+      this.#kv.put(CONNECTION_KEY, generateNonce());
+      this.#commit(credentials);
+    });
   }
 
   /** @returns The stable identity of the current connection. */
@@ -157,13 +167,21 @@ export class CredentialCoordinator<Creds> {
 
   /** Clears credentials and prevents legacy migration from restoring them. */
   clear(): void {
-    this.#kv.put(MIGRATED_KEY, true);
-    this.#kv.put(CONNECTION_KEY, generateNonce());
-    this.#supersede();
-    // Before the record goes, so a failed reap leaves the canonical grant rather than only the
-    // legacy one a rolled-back reader would still accept. Retries the migration's reap.
-    this.#reap();
-    this.#kv.delete(CREDENTIALS_KEY);
+    this.#mutate({ kind: "clear" }, () => {
+      this.#kv.put(MIGRATED_KEY, true);
+      this.#kv.put(CONNECTION_KEY, generateNonce());
+      this.#supersede();
+      // Before the record goes, so a failed reap leaves the canonical grant rather than only the
+      // legacy one a rolled-back reader would still accept. Retries the migration's reap.
+      this.#reap();
+      this.#kv.delete(CREDENTIALS_KEY);
+    });
+  }
+
+  /** Runs one complete synchronous mutation; internal write helpers must not wrap again. */
+  #mutate(change: { kind: "publish"; credentials: Creds } | { kind: "clear" }, apply: () => void): void {
+    if (this.#options.mutation) this.#options.mutation(change, apply);
+    else apply();
   }
 
   /** Removes all configured legacy credential keys. */
@@ -249,7 +267,7 @@ export class CredentialCoordinator<Creds> {
     }
 
     if (this.identity() !== fence) return this.#overtaken();
-    this.#commit(refreshed);
+    this.#mutate({ kind: "publish", credentials: refreshed }, () => this.#commit(refreshed));
     return refreshed;
   }
 

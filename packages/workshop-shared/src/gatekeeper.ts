@@ -38,6 +38,8 @@ export type AvatarImage = {
 
 /** Describes a connected GatekeeperVendor, for display purposes. */
 export type VendorDescription = {
+  /** Selects the private authenticated OpenAPI connect port; ordinary vendors retain callbacks. */
+  hostConnectProtocol?: "openapi-v1";
   /** Human-readable name of the service, e.g. "Google", "GitHub", etc. */
   displayName: string;
 

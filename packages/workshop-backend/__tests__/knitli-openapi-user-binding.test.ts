@@ -1,7 +1,7 @@
 import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import type { UserDurableObject } from "../src/user";
 import type { OverseerDurableObject } from "../src/overseer";
-import type { OpenApiAccountTest, OpenApiAccountTestControl } from "./fork-fixtures/openapi-account-worker";
+import type { OpenApiAccountTest, OpenApiAccountTestControl, OpenApiConnectVendorTest } from "./fork-fixtures/openapi-account-worker";
 import { env, RpcStub, RpcTarget } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import type {
@@ -9,7 +9,7 @@ import type {
   DraftReference,
   HostDraftAuthority,
 } from "@gadgets/workshop-shared/fork/openapi-host-binding";
-import type { GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
+import type { GatekeeperUser, GatekeeperVendor } from "@gadgets/workshop-shared/gatekeeper";
 import {
   createOpenApiUserBinding,
   type OpenApiAccountEpoch,
@@ -570,7 +570,8 @@ describe("actual User DO lifecycle hooks", () => {
               description,
               vendorId: "openapi",
             };
-            await user.putConnectedAccount(successor);
+            configureLegacyReplacementVendor(user);
+        await user.putConnectedAccount(successor);
             const successorEpoch = storage.openApiAccountEpochs.get(0)!;
             expect(successorEpoch.live).toBe(true);
             expect(successorEpoch.incarnation).not.toBe(fenced.incarnation);
@@ -757,6 +758,14 @@ describe("actual User legacy resolver guard", () => {
 });
 
 
+// These replacement cases exercise an ordinary vendor's legacy callback path.
+function configureLegacyReplacementVendor(user: UserDurableObject) {
+  const exports = user["ctx"].exports as Cloudflare.Exports & {
+    OpenApiConnectVendorTest: LoopbackForExport<typeof OpenApiConnectVendorTest>;
+  };
+  user["vendors"].set("openapi", exports.OpenApiConnectVendorTest({props: {controlId: "unused", legacy: true}}) as unknown as Service<GatekeeperVendor>);
+}
+
 async function durableCleanupFixture() {
   const name = crypto.randomUUID();
   const user = env.TEST_USER.getByName(name);
@@ -865,6 +874,7 @@ describe("actual User durable account cleanup", () => {
       const rejected = expect(first).rejects.toThrow("BINDING_ACCOUNT_REPLACED");
       try {
         await control.waitEntered("provider");
+        configureLegacyReplacementVendor(instance);
         await instance.putConnectedAccount(instance["storage"].connectedAccounts.get(0)!);
         const successor = instance["storage"].openApiAccountEpochs.get(0)!;
         expect(successor.live).toBe(true);

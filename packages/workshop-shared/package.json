@@ -7,6 +7,10 @@
       "types": "./src/fork/approval-registration.ts",
       "import": "./src/fork/approval-registration.ts"
     },
+    "./fork/openapi-connect": {
+      "types": "./src/fork/openapi-connect.ts",
+      "import": "./src/fork/openapi-connect.ts"
+    },
     "./fork/openapi-host-binding": {
       "types": "./src/fork/openapi-host-binding.ts",
       "import": "./src/fork/openapi-host-binding.ts"

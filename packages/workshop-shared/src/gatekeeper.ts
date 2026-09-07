@@ -1,3 +1,4 @@
+import type { ActionRegistrationReceiptV1, EnsureActionRegistrationV1 } from "./fork/approval-registration";
 // This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
 // provides connectivity to some external service which AI Gadgets can then manipulate. Each
 // installation of the Gadgets Workshop may have access to different adapters, typically based on
@@ -1015,6 +1016,9 @@ export interface ApprovalQueue extends ObservationAuthorizer {
    *   does not complete, any SQL writes performed just before submit() are rolled back...
    */
   submitAction(action: number, description: ActionDescription): Promise<void>;
+
+  /** Durably register an exact manual-only OpenAPI presentation; retries reuse the host row. */
+  ensureRegistration?(request: EnsureActionRegistrationV1): Promise<ActionRegistrationReceiptV1>;
 
   /**
    * Notifies the overseer that the gadget (or an agent) has requested to register a persistent

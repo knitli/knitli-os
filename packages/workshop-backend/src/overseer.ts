@@ -1,3 +1,5 @@
+import type { ActionRegistrationReceiptV1, EnsureActionRegistrationV1 } from "@gadgets/workshop-shared/fork/approval-registration";
+import { ensureActionRegistration, type ApprovalRegistrationRecord } from "./fork/approval-registration";
 import { createOpenApiRecoveryRunner } from "./fork/openapi-recovery";
 import type { BlueprintBindingAssignment, PendingBlueprintSetup } from "@gadgets/workshop-shared/api";
 import { createBlueprintSetup, pendingBlueprintSetup, runBlueprintSetup, type BlueprintSetupState } from "./fork/blueprint-setup";
@@ -1267,6 +1269,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
           }
         }
       }),
+
+      // Permanent commitments are intentionally independent of action-history retention.
+      approvalRegistrations: collection<ApprovalRegistrationRecord>()({ primaryKey: "key" }),
 
       actions: collection<ActionRecord>()({
         primaryKey: "id",
@@ -6091,6 +6096,50 @@ class OverseerImpl implements AgentHooks {
     this.#associateAction(caller, actionId);
   }
 
+  // hookId is captured by the host queue; it is never accepted in the public request.
+  async ensureRegistration(gatekeeperId: number, request: EnsureActionRegistrationV1,
+      caller: GatekeeperCaller, generation?: number, hookId?: number): Promise<ActionRegistrationReceiptV1> {
+    if (generation === undefined || !this.findOpenApiBinding(gatekeeperId)) {
+      throw new Error("BINDING_NOT_ACTIVE");
+    }
+    let sharing: SharingManager;
+    return ensureActionRegistration({
+      gatekeeperId,
+      assertReady: async () => {
+        await this.checkOpenApiAccountReadiness(gatekeeperId, generation);
+        sharing = await this.getSharingManager();
+      },
+      assertActiveBindingNow: () => {
+        this.assertGatekeeperUsable(gatekeeperId);
+        if (hookId !== undefined) requireLiveHook(this, hookId);
+        if (this.storage.prohibitAllSharing.get()) throw new Error("Workspace sharing is prohibited.");
+        this.assertGatekeeperObserverReadinessNow(gatekeeperId, sharing);
+        if (!this.findOpenApiBinding(gatekeeperId)) throw new Error("BINDING_NOT_ACTIVE");
+        this.assertOpenApiBindingActiveNow(gatekeeperId, generation);
+      },
+      transaction: body => this.storage.transaction(() => body({
+        get: key => this.storage.approvalRegistrations.get(key),
+        put: row => { this.storage.approvalRegistrations.put(row); },
+        createPendingAction: captured => {
+          const id = this.storage.nextActionId.get();
+          this.storage.nextActionId.put(id + 1);
+          const gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
+          this.storage.actions.put({ id, gatekeeperId, caller,
+            resourceTitle: gatekeeper?.resourceTitle, resourceUrl: gatekeeper?.resourceUrl,
+            action: captured.actionId, createdAt: new Date(), state: "pending", type: "action",
+            description: captured.safeDescription });
+          return id;
+        },
+      })),
+      associateInsertedAction: id => { void this.#associateAction(caller, id); },
+      markAwaitDecisionIfPending: id => {
+        if (caller.from === "agent" && this.storage.actions.get(id)?.state === "pending") {
+          this.#getOrCreateCapturedActions(caller.chatId).awaitDecision = true;
+        }
+      },
+    }, request);
+  }
+
   async submitAction(gatekeeperId: number, action: number,
                      description: ActionDescription, caller: GatekeeperCaller, openApiGeneration?: number)
       : Promise<void> {
@@ -9491,8 +9540,13 @@ class OverseerImpl implements AgentHooks {
     if (!observerVendorId(record)) return;
 
     let sharing = await this.getSharingManager();
+    this.assertGatekeeperObserverReadinessNow(gatekeeperId, sharing);
+  }
+
+  // Synchronous final readiness check also used by durable approval registration transactions.
+  assertGatekeeperObserverReadinessNow(gatekeeperId: number, sharing: SharingManager): void {
     this.assertNoRevocationPending();
-    record = this.#readyGatekeeperRecord(gatekeeperId);
+    const record = this.#readyGatekeeperRecord(gatekeeperId);
     if (!observerVendorId(record)) return;
 
     let useScopeIncludesTarget = this.#inScopeGatekeepers("use")
@@ -13607,6 +13661,11 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   submitAction(action: number, description: ActionDescription): Promise<void> {
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
     return this.impl.submitAction(this.gatekeeperId, action, description, this.caller, this.#openApiGeneration);
+  }
+
+  ensureRegistration(request: EnsureActionRegistrationV1): Promise<ActionRegistrationReceiptV1> {
+    if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
+    return this.impl.ensureRegistration(this.gatekeeperId, request, this.caller, this.#openApiGeneration, this.hookId);
   }
 
   bindHook<Hook extends RpcTarget>(

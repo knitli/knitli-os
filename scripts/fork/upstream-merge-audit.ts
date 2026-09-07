@@ -82,6 +82,7 @@ export const FORK_OWNED_PREFIXES = [
   "scripts/fork/capnweb-native-validation.test.ts",
   "packages/workshop-shared/src/fork/",
   "packages/workshop-backend/src/fork/",
+  "packages/workshop-backend/__tests__/knitli-approval-registration.test.ts",
   "packages/workshop-backend/__tests__/knitli-openapi-binding-ledger.test.ts",
   "packages/workshop-backend/__tests__/knitli-openapi-user-binding.test.ts",
   "packages/workshop-backend/__tests__/fork-fixtures/",

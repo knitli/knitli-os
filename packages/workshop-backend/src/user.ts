@@ -1159,9 +1159,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!vendor) {
       throw new Error("No such service: " + vendorId);
     }
-    if ((await readAdminConfig(this.env)).disabledGatekeepers.includes(vendorId.toLowerCase())) {
-      throw new Error(`The "${vendorId}" gatekeeper is disabled on this deployment.`);
-    }
+    await this.#enforceGatekeeperVendorPolicy(vendorId, `The "${vendorId}" gatekeeper is disabled on this deployment.`);
 
     if ((await vendor.describe()).hostConnectProtocol === "openapi-v1") {
       const authority = this.#openApiConnect().begin(vendorId);
@@ -1565,7 +1563,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return createOpenApiConnect({
       ownerId: this.ctx.id.toString(), now: () => Date.now(),
       transaction: operation => this.ctx.storage.transactionSync(operation),
-      attempts: {get: id => this.storage.openApiConnectAttempts.get(id), put: row => { this.storage.openApiConnectAttempts.put(row); }},
+      attempts: {get: id => this.storage.openApiConnectAttempts.get(id), put: row => { this.storage.openApiConnectAttempts.put(row); },
+        list: () => this.storage.openApiConnectAttempts.list(), delete: id => { this.storage.openApiConnectAttempts.delete(id); }},
       canonical: {get: key => this.storage.openApiCanonicalConnections.get(key), put: row => { this.storage.openApiCanonicalConnections.put(row); }},
       accounts: {get: id => this.storage.connectedAccounts.get(id), put: row => { this.storage.connectedAccounts.put(row); }},
       epochs: {get: id => this.storage.openApiAccountEpochs.get(id), put: row => { this.storage.openApiAccountEpochs.put(row); }},
@@ -1576,10 +1575,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       },
       checkVendor: async vendorId => {
         const vendor = this.vendors.get(vendorId);
-        if (!vendor || (await vendor.describe()).hostConnectProtocol !== "openapi-v1" ||
-            (await readAdminConfig(this.env)).disabledGatekeepers.includes(vendorId.toLowerCase())) {
+        if (!vendor || (await vendor.describe()).hostConnectProtocol !== "openapi-v1") {
           throw new Error("OPENAPI_CONNECT_UNAVAILABLE");
         }
+        await this.#enforceGatekeeperVendorPolicy(vendorId, "OPENAPI_CONNECT_UNAVAILABLE");
       },
       fenceAccount: id => { this.#openApiBinding().fence(id); },
       drainCleanup: id => this.#openApiBinding().drainCleanup(id),
@@ -1808,13 +1807,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   // Shared capability-minting policy boundary for legacy and bound OpenAPI resources.
   // Read deployment policy after provider resolution on every call; never cache it here.
-  async #enforceGatekeeperResourcePolicy(accountVendorId: string, resource: SupportedResource) {
+  async #enforceGatekeeperVendorPolicy(accountVendorId: string,
+    disabledMessage = `The "${accountVendorId}" gatekeeper is disabled on this deployment by an administrator.`) {
     const config = await readAdminConfig(this.env);
+    if (config.disabledGatekeepers.includes(accountVendorId.toLowerCase())) throw new Error(disabledMessage);
+    return config;
+  }
+
+  async #enforceGatekeeperResourcePolicy(accountVendorId: string, resource: SupportedResource) {
+    const config = await this.#enforceGatekeeperVendorPolicy(accountVendorId);
     const vendorId = accountVendorId.toLowerCase();
-    if (config.disabledGatekeepers.includes(vendorId)) {
-      throw new Error(
-        `The "${accountVendorId}" gatekeeper is disabled on this deployment by an administrator.`);
-    }
     if (isResourceDisabled(config, vendorId, resource.urlPattern)) {
       throw new Error(
         `The "${resource.title}" resource is disabled on this deployment by an administrator.`);

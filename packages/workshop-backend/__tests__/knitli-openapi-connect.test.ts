@@ -16,12 +16,12 @@ const failure = "OPENAPI_CONNECT_UNAVAILABLE";
 async function fixture() {
   const user = env.TEST_USER.getByName(crypto.randomUUID());
   const control = env.TEST_OPENAPI_ACCOUNT_CONTROL.getByName(crypto.randomUUID());
-  async function configure() {
+  async function configure(vendorId = "openapi") {
     await runInDurableObject(user, instance => {
       const exports = instance["ctx"].exports as Cloudflare.Exports & {
         OpenApiConnectVendorTest: (options: {props: {controlId: string}}) => Fetcher<OpenApiConnectVendorTest>;
       };
-      instance["vendors"].set("openapi", exports.OpenApiConnectVendorTest({props: {controlId: control.id.toString()}}) as Fetcher<GatekeeperVendor>);
+      instance["vendors"].set(vendorId, exports.OpenApiConnectVendorTest({props: {controlId: control.id.toString()}}) as Fetcher<GatekeeperVendor>);
     });
   }
   async function account(destinationControl = control) {
@@ -144,7 +144,7 @@ describe("authenticated OpenAPI canonical connect", () => {
     await first.notifications.credentialsExpired();
     await expect(Promise.resolve(f.authority.beginReconnect(2))).rejects.toThrow(failure);
     const reconnect = await f.authority.beginReconnect(1);
-    const rival = await f.authority.beginReconnect(1);
+    await expect(Promise.resolve(f.authority.beginReconnect(1))).rejects.toThrow(failure);
     expect((await reconnect.getIdentity()).expectedConnectionGeneration).toBe(1);
     const next = detachReceipt(await reconnect.complete({...f.request, receiptDigest: "b".repeat(64)}));
     expect(next.providerAccountId).toBe(first.providerAccountId);
@@ -155,13 +155,115 @@ describe("authenticated OpenAPI canonical connect", () => {
     const before = await rows(f.user);
     await expect(Promise.resolve(first.notifications.credentialsExpired())).rejects.toThrow(failure);
     await expect(Promise.resolve(first.notifications.credentialsRestored())).rejects.toThrow(failure);
-    await expect(Promise.resolve(rival.complete({...f.request, receiptDigest: "c".repeat(64)}))).rejects.toThrow(failure);
+    await expect(Promise.resolve(f.authority.beginReconnect(1))).rejects.toThrow(failure);
     await expect(Promise.resolve(f.authority.assertActive())).rejects.toThrow(failure);
     expect(await rows(f.user)).toEqual(before);
     await next.notifications.credentialsExpired();
     expect((await rows(f.user)).accounts[0].expired).toBe(true);
     await next.notifications.credentialsRestored();
     expect((await rows(f.user)).accounts[0].expired).toBe(false);
+  });
+
+  it("reserves one concurrent reconnect and replaces it only after expiry", async () => {
+    const f = await fixture();
+    detachReceipt(await f.authority.complete(f.request));
+    const results = await Promise.allSettled([
+      Promise.resolve(f.authority.beginReconnect(1)), Promise.resolve(f.authority.beginReconnect(1)),
+    ]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+    const rejected = results.find(result => result.status === "rejected")!;
+    expect(rejected.reason.message).toContain(failure);
+    const reserved = results.find(result => result.status === "fulfilled")!.value;
+    const identity = await reserved.getIdentity();
+    // A provider refresh does not change this host reservation. No Account
+    // credential counter is supplied here; its independent CAS belongs to handoff.
+    expect(identity.expectedConnectionGeneration).toBe(1);
+    await evictDurableObject(f.user);
+    await f.configure();
+    await expect(Promise.resolve(f.authority.beginReconnect(1))).rejects.toThrow(failure);
+    await f.control.pause("description");
+    const suspended = reserved.complete({...f.request, receiptDigest: "c".repeat(64)});
+    await f.control.waitEntered("description");
+    await runInDurableObject(f.user, instance => {
+      const attempt = instance["storage"].openApiConnectAttempts.get(identity.connectAttemptId)!;
+      instance["storage"].openApiConnectAttempts.put({...attempt, expiresAt: 0});
+    });
+    const replacement = await f.authority.beginReconnect(1);
+    expect((await replacement.getIdentity()).connectAttemptId).not.toBe(identity.connectAttemptId);
+    await f.control.release("description");
+    await expect(Promise.resolve(suspended)).rejects.toThrow(failure);
+    await expect(Promise.resolve(reserved.complete({...f.request, receiptDigest: "c".repeat(64)}))).rejects.toThrow(failure);
+    expect((await f.control.events()).description).toBe(2);
+    const next = detachReceipt(await replacement.complete({...f.request, receiptDigest: "b".repeat(64)}));
+    expect(next.connectionGeneration).toBe(2);
+    await expect(Promise.resolve(f.authority.beginReconnect(1))).rejects.toThrow(failure);
+  });
+
+  it("namespaces equal provider profile and principal identities by vendor", async () => {
+    const f = await fixture();
+    const first = detachReceipt(await f.authority.complete(f.request));
+    await f.configure("another-vendor");
+    await f.user.connectAccount("another-vendor");
+    const other = await f.control.authority();
+    expect((await other.getIdentity()).vendorId).toBe("another-vendor");
+    const second = detachReceipt(await other.complete(f.request));
+    expect(second.providerAccountId).not.toBe(first.providerAccountId);
+    expect((await rows(f.user)).canonical.map(row => row.vendorId).toSorted()).toEqual(["another-vendor", "openapi"]);
+    await first.notifications.credentialsExpired();
+    expect((await rows(f.user)).accounts.find(row => row.id === second.providerAccountId)?.expired).toBe(false);
+  });
+
+  it("reaps only expired or superseded attempts while retaining current receipts and active fences", async () => {
+    const f = await fixture();
+    const initialId = (await f.authority.getIdentity()).connectAttemptId;
+    detachReceipt(await f.authority.complete(f.request));
+    const reconnect = await f.authority.beginReconnect(1);
+    const successorId = (await reconnect.getIdentity()).connectAttemptId;
+    const successorRequest = {...f.request, receiptDigest: "b".repeat(64)};
+    detachReceipt(await reconnect.complete(successorRequest));
+    await f.user.connectAccount("openapi");
+    const abandoned = await f.control.authority();
+    const abandonedId = (await abandoned.getIdentity()).connectAttemptId;
+    await f.user.connectAccount("openapi");
+    const live = await f.control.authority();
+    const liveId = (await live.getIdentity()).connectAttemptId;
+    await runInDurableObject(f.user, instance => {
+      for (const id of [successorId, abandonedId]) {
+        const attempt = instance["storage"].openApiConnectAttempts.get(id)!;
+        instance["storage"].openApiConnectAttempts.put({...attempt, expiresAt: 0});
+      }
+    });
+    await f.user.connectAccount("openapi");
+    const ids = await runInDurableObject(f.user, instance => [...instance["storage"].openApiConnectAttempts.list()].map(row => row.id));
+    expect(ids).not.toContain(initialId);
+    expect(ids).not.toContain(abandonedId);
+    expect(ids).toContain(successorId);
+    expect(ids).toContain(liveId);
+    await expect(Promise.resolve(abandoned.assertActive())).rejects.toThrow(failure);
+    await live.assertActive();
+    await evictDurableObject(f.user);
+    await f.configure();
+    const retry = detachReceipt(await reconnect.complete(successorRequest));
+    expect(retry.connectionGeneration).toBe(2);
+    await retry.notifications.credentialsExpired();
+  });
+
+  it("rechecks shared vendor policy for retained admission and preserves connect errors", async () => {
+    const f = await fixture();
+    await runInDurableObject(f.user, async instance => {
+      const originalEnv = instance["env"];
+      const readPolicy = vi.fn(async () => JSON.stringify({disabledGatekeepers: ["openapi"]}));
+      instance["env"] = {...originalEnv, BLUEPRINTS: {get: readPolicy} as unknown as KVNamespace};
+      try {
+        await expect(instance.connectAccount("openapi")).rejects.toThrow('The "openapi" gatekeeper is disabled on this deployment.');
+        const id = [...instance["storage"].openApiConnectAttempts.list()][0].id;
+        await expect(instance.assertOpenApiConnectActive(id, "openapi")).rejects.toThrow(failure);
+        expect(readPolicy).toHaveBeenCalledTimes(2);
+      } finally { instance["env"] = originalEnv; }
+    });
+    await f.authority.assertActive();
+    expect((await f.control.events()).description).toBe(0);
   });
 
   it("rechecks notification incarnation after a suspended description RPC", async () => {

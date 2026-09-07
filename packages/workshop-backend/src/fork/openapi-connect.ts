@@ -10,7 +10,7 @@ export type OpenApiConnectAttempt = {
   expected?: OpenApiCanonicalConnection;
   committed?: OpenApiCanonicalConnection;
 };
-/** Immutable completion indexed by the provider-verified profile/principal tuple. */
+/** Immutable completion indexed by the vendor-scoped provider-verified profile/principal tuple. */
 export type OpenApiCanonicalConnection = {
   key: string; attemptId: string; vendorId: string; accountId: number; incarnation: string;
   profileId: string; principalId: string; receiptDigest: string; destinationCommitment: string;
@@ -24,7 +24,8 @@ export type OpenApiConnectedAccount = {
 /** Synchronous durable adapters keep canonical completion and account incarnation atomic. */
 export type OpenApiConnectContext = {
   ownerId: string; now(): number; transaction<T>(operation: () => T): T;
-  attempts: { get(id: string): OpenApiConnectAttempt | undefined; put(row: OpenApiConnectAttempt): void };
+  attempts: { get(id: string): OpenApiConnectAttempt | undefined; put(row: OpenApiConnectAttempt): void;
+    list(): Iterable<OpenApiConnectAttempt>; delete(id: string): void };
   canonical: { get(key: string): OpenApiCanonicalConnection | undefined; put(row: OpenApiCanonicalConnection): void };
   accounts: { get(id: number): OpenApiConnectedAccount | undefined; put(row: OpenApiConnectedAccount): void };
   epochs: { get(id: number): OpenApiAccountEpoch | undefined; put(row: OpenApiAccountEpoch): void };
@@ -43,13 +44,17 @@ const same = (a: OpenApiCanonicalConnection, b: OpenApiCanonicalConnection) =>
 
 /** Private connect lifecycle for one authenticated User DO. */
 export function createOpenApiConnect(context: OpenApiConnectContext) {
-  function current(row: OpenApiCanonicalConnection) {
+  function isCurrent(row: OpenApiCanonicalConnection) {
     const canonical = context.canonical.get(row.key);
     const epoch = context.epochs.get(row.accountId);
-    const account = context.accounts.get(row.accountId) ?? fail();
+    const account = context.accounts.get(row.accountId);
     if (!canonical || !same(canonical, row) || !epoch?.live || epoch.incarnation !== row.incarnation ||
-        account.vendorId !== row.vendorId || account.description.hostBindingProtocol !== "openapi-v1") fail();
-    return account;
+        account?.vendorId !== row.vendorId || account.description.hostBindingProtocol !== "openapi-v1") return false;
+    return true;
+  }
+  function current(row: OpenApiCanonicalConnection) {
+    if (!isCurrent(row)) fail();
+    return context.accounts.get(row.accountId) ?? fail();
   }
   function active(id: string, vendorId: string) {
     const attempt = context.attempts.get(id);
@@ -69,6 +74,18 @@ export function createOpenApiConnect(context: OpenApiConnectContext) {
   function begin(vendorId: string, expected?: OpenApiCanonicalConnection) {
     return context.transaction(() => {
       if (expected) current(expected);
+      // Reap only authority that already fails active(). Current committed receipts
+      // outlive initiation TTL; unexpired initial attempts remain usable.
+      let reconnectReserved = false;
+      for (const pending of context.attempts.list()) {
+        const stale = pending.committed ? !isCurrent(pending.committed) :
+          context.now() >= pending.expiresAt || (pending.expected !== undefined && !isCurrent(pending.expected));
+        if (stale) context.attempts.delete(pending.id);
+        else if (expected && !pending.committed && pending.expected && same(pending.expected, expected)) reconnectReserved = true;
+      }
+      // Reserve one host reconnect before any provider credential work. The Account
+      // independently CASes its credential generation during the later handoff.
+      if (reconnectReserved) fail();
       const attempt: OpenApiConnectAttempt = {
         id: crypto.randomUUID(), vendorId, accountId: expected?.accountId ?? context.reserveAccountId(),
         incarnation: crypto.randomUUID(), expiresAt: context.now() + 10 * 60_000, expected,
@@ -115,7 +132,7 @@ export function createOpenApiConnect(context: OpenApiConnectContext) {
         await admitted(id, vendorId);
         return receipt(attempt.committed);
       }
-      const key = JSON.stringify([request.profileId, request.principalId]);
+      const key = JSON.stringify([vendorId, request.profileId, request.principalId]);
       if (attempt.expected && (key !== attempt.expected.key || request.destinationCommitment !== attempt.expected.destinationCommitment)) fail();
       const account = attempt.expected ? current(attempt.expected).account : request.account;
       const description = await account.describe();

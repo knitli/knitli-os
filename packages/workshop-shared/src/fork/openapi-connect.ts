@@ -9,10 +9,30 @@ export type OpenApiConnectIdentity = {
   vendorId: string;
   /** Opaque, independently admitted connection attempt. */
   connectAttemptId: string;
+  /** Host initiation deadline; an already committed exact completion remains retryable afterward. */
+  expiresAt: number;
   /** Host connection generation being replaced, distinct from the Account credential counter. */
   expectedConnectionGeneration?: number;
 };
 
+/** Exact orphan credential receipt named by a fresh authenticated first-connect attempt. */
+export type OpenApiFirstConnectReservation = {
+  /** Admitted provider profile. */
+  profileId: string;
+  /** Provider-verified principal in the authenticated owner namespace. */
+  principalId: string;
+  /** Exact prior connector receipt; the destination independently verifies its credential generation. */
+  previousReceiptDigest: string;
+  /** Immutable destination that may publish the successor credential receipt. */
+  destinationCommitment: string;
+};
+/** Host canonical-key reservation, bounded by the fresh attempt's existing lifetime. */
+export type OpenApiFirstConnectReservationReceipt = OpenApiFirstConnectReservation & {
+  /** Fresh host authority that exclusively owns this reservation. */
+  connectAttemptId: string;
+  /** Original host attempt deadline; retries never extend it. */
+  expiresAt: number;
+};
 /** Immutable credential completion; contains no credentials or browser-provided owner identity. */
 export type OpenApiConnectCompletion = {
   /** Admitted provider profile. */
@@ -45,6 +65,8 @@ export interface OpenApiConnectAuthority extends WorkerEntrypoint {
   getIdentity(): Promise<OpenApiConnectIdentity>;
   /** Recheck attempt admission immediately before external effects. */
   assertActive(): Promise<void>;
+  /** Reserve a never-completed canonical key; historical disconnected connections also reject. */
+  reserveFirstConnect(request: OpenApiFirstConnectReservation): Promise<OpenApiFirstConnectReservationReceipt>;
   /** Commit once; exact retries retain the original Account and never invoke a supplied replacement. */
   complete(request: OpenApiConnectCompletion): Promise<OpenApiConnectReceipt>;
   /** Admit a reconnect only while this receipt and numeric generation remain current. */

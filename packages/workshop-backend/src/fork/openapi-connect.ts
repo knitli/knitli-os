@@ -1,7 +1,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import type { AccountDescription, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
-import type { OpenApiConnectAuthority, OpenApiConnectCompletion, OpenApiConnectIdentity, OpenApiConnectReceipt, OpenApiConnectionNotifications } from "@gadgets/workshop-shared/fork/openapi-connect";
+import type { OpenApiConnectAuthority, OpenApiConnectCompletion, OpenApiConnectIdentity, OpenApiConnectReceipt, OpenApiConnectionNotifications, OpenApiFirstConnectReservation, OpenApiFirstConnectReservationReceipt } from "@gadgets/workshop-shared/fork/openapi-connect";
 import type { OpenApiAccountEpoch } from "./openapi-user-binding";
 
 /** User-owned pending attempt, including the expected canonical receipt for reconnect. */
@@ -9,6 +9,8 @@ export type OpenApiConnectAttempt = {
   id: string; vendorId: string; accountId: number; incarnation: string; expiresAt: number;
   expected?: OpenApiCanonicalConnection;
   committed?: OpenApiCanonicalConnection;
+  /** Live canonical-key reservation for an exact connector-owned orphan receipt. */
+  firstConnectReservation?: OpenApiFirstConnectReservation;
 };
 /** Immutable completion indexed by the vendor-scoped provider-verified profile/principal tuple. */
 export type OpenApiCanonicalConnection = {
@@ -41,6 +43,10 @@ const same = (a: OpenApiCanonicalConnection, b: OpenApiCanonicalConnection) =>
   a.key === b.key && a.attemptId === b.attemptId && a.vendorId === b.vendorId &&
   a.accountId === b.accountId && a.incarnation === b.incarnation && a.receiptDigest === b.receiptDigest &&
   a.destinationCommitment === b.destinationCommitment && a.connectionGeneration === b.connectionGeneration;
+
+function canonicalKey(vendorId: string, value: {profileId: string; principalId: string}) {
+  return JSON.stringify([vendorId, value.profileId, value.principalId]);
+}
 
 /** Private connect lifecycle for one authenticated User DO. */
 export function createOpenApiConnect(context: OpenApiConnectContext) {
@@ -99,6 +105,17 @@ export function createOpenApiConnect(context: OpenApiConnectContext) {
     if (request.profileId !== row.profileId || request.principalId !== row.principalId ||
         request.receiptDigest !== row.receiptDigest || request.destinationCommitment !== row.destinationCommitment) fail();
   }
+  function assertReservation(attempt: OpenApiConnectAttempt, request: {profileId: string; principalId: string; destinationCommitment: string}) {
+    const key = canonicalKey(attempt.vendorId, request);
+    const reserved = attempt.firstConnectReservation;
+    if (reserved && (reserved.profileId !== request.profileId || reserved.principalId !== request.principalId ||
+        reserved.destinationCommitment !== request.destinationCommitment || context.canonical.get(key) !== undefined)) fail();
+    for (const pending of context.attempts.list()) {
+      if (pending.id !== attempt.id && pending.vendorId === attempt.vendorId && !pending.committed &&
+          pending.firstConnectReservation && context.now() < pending.expiresAt &&
+          canonicalKey(pending.vendorId, pending.firstConnectReservation) === key) fail();
+    }
+  }
   function receipt(row: OpenApiCanonicalConnection): OpenApiConnectReceipt {
     current(row);
     return { providerAccountId: row.accountId, accountIncarnation: row.incarnation,
@@ -108,10 +125,32 @@ export function createOpenApiConnect(context: OpenApiConnectContext) {
     begin,
     async identity(id: string, vendorId: string): Promise<OpenApiConnectIdentity> {
       const attempt = await admitted(id, vendorId);
-      return {ownerId: context.ownerId, vendorId, connectAttemptId: id,
+      return {ownerId: context.ownerId, vendorId, connectAttemptId: id, expiresAt: attempt.expiresAt,
         expectedConnectionGeneration: attempt.expected?.connectionGeneration};
     },
     async assertActive(id: string, vendorId: string) { await admitted(id, vendorId); },
+    async reserveFirstConnect(id: string, vendorId: string, request: OpenApiFirstConnectReservation): Promise<OpenApiFirstConnectReservationReceipt> {
+      if (Object.keys(request).some(key => !["profileId", "principalId", "previousReceiptDigest", "destinationCommitment"].includes(key))) fail();
+      for (const value of [request.profileId, request.principalId, request.destinationCommitment]) {
+        if (!value.trim() || new TextEncoder().encode(value).length > 256) fail();
+      }
+      if (!/^[a-f0-9]{64}$/.test(request.previousReceiptDigest)) fail();
+      await admitted(id, vendorId);
+      return context.transaction(() => {
+        const attempt = active(id, vendorId);
+        // Canonical metadata survives disconnect. Its absence, not a missing predecessor attempt,
+        // proves this is a never-completed first connection; no historical tombstones are needed.
+        if (attempt.expected || attempt.committed || context.canonical.get(canonicalKey(vendorId, request)) !== undefined) fail();
+        const previous = attempt.firstConnectReservation;
+        if (previous && (previous.profileId !== request.profileId || previous.principalId !== request.principalId ||
+            previous.previousReceiptDigest !== request.previousReceiptDigest || previous.destinationCommitment !== request.destinationCommitment)) fail();
+        assertReservation(attempt, request);
+        const reservation = {profileId: request.profileId, principalId: request.principalId,
+          previousReceiptDigest: request.previousReceiptDigest, destinationCommitment: request.destinationCommitment};
+        context.attempts.put({...attempt, firstConnectReservation: reservation});
+        return {...reservation, connectAttemptId: attempt.id, expiresAt: attempt.expiresAt};
+      });
+    },
     async reconnect(id: string, vendorId: string, expectedConnectionGeneration: number) {
       const attempt = await admitted(id, vendorId);
       const row = attempt.committed ?? fail();
@@ -133,7 +172,8 @@ export function createOpenApiConnect(context: OpenApiConnectContext) {
         await admitted(id, vendorId);
         return receipt(attempt.committed);
       }
-      const key = JSON.stringify([vendorId, request.profileId, request.principalId]);
+      const key = canonicalKey(vendorId, request);
+      assertReservation(attempt, request);
       if (attempt.expected && (key !== attempt.expected.key || request.destinationCommitment !== attempt.expected.destinationCommitment)) fail();
       const account = attempt.expected ? current(attempt.expected).account : request.account;
       const description = await account.describe();
@@ -143,6 +183,7 @@ export function createOpenApiConnect(context: OpenApiConnectContext) {
         attempt = active(id, vendorId);
         // Concurrent exact completions may both have crossed describe(); only one commits.
         if (attempt.committed) { immutable(request, attempt.committed); return attempt.committed; }
+        assertReservation(attempt, request);
         const previous = context.canonical.get(key);
         if (attempt.expected) {
           if (!previous || !same(previous, attempt.expected)) fail();
@@ -193,6 +234,7 @@ export class OpenApiConnectAuthorityImpl extends WorkerEntrypoint<Cloudflare.Env
   async getIdentity(): ReturnType<OpenApiConnectAuthority["getIdentity"]> { return this.#user().openApiConnectIdentity(this.ctx.props.attemptId, this.ctx.props.vendorId); }
   async assertActive(): ReturnType<OpenApiConnectAuthority["assertActive"]> { await this.#user().assertOpenApiConnectActive(this.ctx.props.attemptId, this.ctx.props.vendorId); }
   async complete(request: OpenApiConnectCompletion): ReturnType<OpenApiConnectAuthority["complete"]> { return this.#user().completeOpenApiConnect(this.ctx.props.attemptId, this.ctx.props.vendorId, request); }
+  async reserveFirstConnect(request: OpenApiFirstConnectReservation): ReturnType<OpenApiConnectAuthority["reserveFirstConnect"]> { return this.#user().reserveOpenApiFirstConnect(this.ctx.props.attemptId, this.ctx.props.vendorId, request); }
   async beginReconnect(expectedConnectionGeneration: number): ReturnType<OpenApiConnectAuthority["beginReconnect"]> { return this.#user().beginOpenApiReconnect(this.ctx.props.attemptId, this.ctx.props.vendorId, expectedConnectionGeneration); }
 }
 /** Notifications are separate persistable entrypoints with no completion method. */

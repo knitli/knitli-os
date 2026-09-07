@@ -1,5 +1,5 @@
 import { createOpenApiConnect, type OpenApiConnectAttempt, type OpenApiCanonicalConnection } from "./fork/openapi-connect";
-import type { OpenApiConnectCompletion, OpenApiConnectVendor } from "@gadgets/workshop-shared/fork/openapi-connect";
+import type { OpenApiConnectCompletion, OpenApiConnectVendor, OpenApiFirstConnectReservation } from "@gadgets/workshop-shared/fork/openapi-connect";
 import { createOpenApiUserBinding, type OpenApiAccountEpoch, type OpenApiAccountCleanup, type OpenApiDraftCleanupReceipt, type OpenApiWorkspaceRetirement } from "./fork/openapi-user-binding";
 import type { BindingRow } from "./fork/openapi-binding-ledger";
 import type { BoundIdentity } from "@gadgets/workshop-shared/fork/openapi-host-binding";
@@ -1595,6 +1595,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async assertOpenApiConnectActive(attemptId: string, vendorId: string) { await this.#openApiConnect().assertActive(attemptId, vendorId); }
   /** Complete through canonical storage, without legacy replacement or duplicate revocation. */
   async completeOpenApiConnect(attemptId: string, vendorId: string, request: OpenApiConnectCompletion) { return this.#openApiConnect().complete(attemptId, vendorId, request); }
+  /** Reserve a never-completed canonical key through a fresh host-minted capability. */
+  async reserveOpenApiFirstConnect(attemptId: string, vendorId: string, request: OpenApiFirstConnectReservation) { return this.#openApiConnect().reserveFirstConnect(attemptId, vendorId, request); }
   /** Admit reconnect under the expected current host connection generation. */
   async beginOpenApiReconnect(attemptId: string, vendorId: string, expectedConnectionGeneration: number) { return this.#openApiConnect().reconnect(attemptId, vendorId, expectedConnectionGeneration); }
   /** Apply notifications only to their exact canonical receipt and incarnation. */

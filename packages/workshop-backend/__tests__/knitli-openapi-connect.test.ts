@@ -421,3 +421,144 @@ describe("authenticated OpenAPI canonical connect", () => {
     expect((await rows(f.user)).accounts[0].expired).toBe(true);
   });
 });
+
+describe("fresh first-connect canonical reservation", () => {
+  const reservation = {profileId: "profile", principalId: "principal", previousReceiptDigest: "c".repeat(64), destinationCommitment: "destination"};
+
+  it("reserves an exact tuple across eviction and completes a different successor receipt", async () => {
+    const f = await fixture();
+    const identity = await f.authority.getIdentity();
+    expect(identity.expiresAt).toBeGreaterThan(Date.now());
+    const reserved = {...await f.authority.reserveFirstConnect(reservation)};
+    expect(reserved).toEqual({...reservation, connectAttemptId: identity.connectAttemptId, expiresAt: identity.expiresAt});
+    expect({...await f.authority.reserveFirstConnect(reservation)}).toEqual(reserved);
+    expect((await f.control.events()).description).toBe(0);
+    await evictDurableObject(f.user);
+    await f.configure();
+    expect({...await f.authority.reserveFirstConnect(reservation)}).toEqual(reserved);
+    const result = detachReceipt(await f.authority.complete(f.request));
+    expect(result.connectionGeneration).toBe(1);
+    expect((await rows(f.user)).canonical[0].receiptDigest).toBe(f.request.receiptDigest);
+    expect((await rows(f.user)).accounts).toHaveLength(1);
+    await expect(Promise.resolve(f.authority.reserveFirstConnect(reservation))).rejects.toThrow(failure);
+  });
+
+  it("rejects malformed, cross-User and wrong-vendor reservation RPCs without Account invocation", async () => {
+    const f = await fixture();
+    const identity = await f.authority.getIdentity();
+    const reserve = (request: unknown) => Reflect.get(f.authority, "reserveFirstConnect")(request);
+    await expect(Promise.resolve(reserve({...reservation, previousReceiptDigest: 1}))).rejects.toThrow(/capnweb-validate:.*previousReceiptDigest.*expected string/);
+    await expect(Promise.resolve(reserve({...reservation, ownerId: "foreign"}))).rejects.toThrow(failure);
+    await expect(Promise.resolve(f.authority.reserveFirstConnect({...reservation, previousReceiptDigest: "bad"}))).rejects.toThrow(failure);
+    await expect(Promise.resolve(f.authority.reserveFirstConnect({...reservation, principalId: " "}))).rejects.toThrow(failure);
+    await expect(Promise.resolve((await f.authorityFor(identity.connectAttemptId, "other")).reserveFirstConnect(reservation))).rejects.toThrow(failure);
+    const foreign = env.TEST_USER.getByName(crypto.randomUUID());
+    await expect(Promise.resolve((await f.authorityFor(identity.connectAttemptId, "openapi", foreign.id.toString())).reserveFirstConnect(reservation))).rejects.toThrow(failure);
+    expect((await f.control.events()).description).toBe(0);
+    expect((await rows(f.user)).accounts).toEqual([]);
+  });
+
+  it("keeps one immutable reservation per attempt and excludes competing first completions", async () => {
+    const f = await fixture();
+    await f.authority.reserveFirstConnect(reservation);
+    for (const patch of [{profileId: "other"}, {principalId: "other"}, {previousReceiptDigest: "d".repeat(64)}, {destinationCommitment: "other"}]) {
+      await expect(Promise.resolve(f.authority.reserveFirstConnect({...reservation, ...patch}))).rejects.toThrow(failure);
+    }
+    for (const patch of [{profileId: "other"}, {principalId: "other"}, {destinationCommitment: "other"}]) {
+      await expect(Promise.resolve(f.authority.complete({...f.request, ...patch}))).rejects.toThrow(failure);
+    }
+    await f.user.connectAccount("openapi");
+    const competitor = await f.control.authority();
+    await expect(Promise.resolve(competitor.reserveFirstConnect(reservation))).rejects.toThrow(failure);
+    await expect(Promise.resolve(competitor.complete(f.request))).rejects.toThrow(failure);
+    expect((await f.control.events()).description).toBe(0);
+    expect((await rows(f.user)).accounts).toEqual([]);
+  });
+
+  it("fences a completion already paused at Account description when a fresh reservation wins", async () => {
+    const f = await fixture();
+    await f.control.pause("description");
+    const pending = f.authority.complete(f.request);
+    await f.control.waitEntered("description");
+    await f.user.connectAccount("openapi");
+    const successor = await f.control.authority();
+    await successor.reserveFirstConnect(reservation);
+    await f.control.release("description");
+    await expect(Promise.resolve(pending)).rejects.toThrow(failure);
+    expect((await rows(f.user)).accounts).toEqual([]);
+    detachReceipt(await successor.complete(f.request));
+    expect((await rows(f.user)).accounts).toHaveLength(1);
+    expect((await f.control.events()).description).toBe(2);
+  });
+
+  it("rejects recovery for committed, disconnected and reconnect canonical history", async () => {
+    const f = await fixture();
+    const first = detachReceipt(await f.authority.complete(f.request));
+    const reconnect = await f.authority.beginReconnect(1);
+    await expect(Promise.resolve(reconnect.reserveFirstConnect(reservation))).rejects.toThrow(failure);
+    await f.user.connectAccount("openapi");
+    const fresh = await f.control.authority();
+    await expect(Promise.resolve(fresh.reserveFirstConnect(reservation))).rejects.toThrow(failure);
+    await f.user.disconnectAccount(first.providerAccountId);
+    expect((await rows(f.user)).canonical).toHaveLength(1);
+    await expect(Promise.resolve(fresh.reserveFirstConnect(reservation))).rejects.toThrow(failure);
+    expect((await f.control.events()).description).toBe(1);
+  });
+
+  it("rechecks canonical absence after a paused description instead of reviving disconnected history", async () => {
+    const f = await fixture();
+    await f.authority.reserveFirstConnect(reservation);
+    await f.control.pause("description");
+    const pending = f.authority.complete(f.request);
+    await f.control.waitEntered("description");
+    await runInDurableObject(f.user, instance => {
+      instance["storage"].openApiCanonicalConnections.put({key: JSON.stringify(["openapi", "profile", "principal"]),
+        attemptId: "disconnected", vendorId: "openapi", accountId: 999, incarnation: "disconnected", profileId: "profile", principalId: "principal",
+        receiptDigest: "d".repeat(64), destinationCommitment: "destination", connectionGeneration: 1});
+    });
+    await f.control.release("description");
+    await expect(Promise.resolve(pending)).rejects.toThrow(failure);
+    expect((await rows(f.user)).accounts).toEqual([]);
+    expect((await rows(f.user)).canonical[0].attemptId).toBe("disconnected");
+  });
+
+  it("expires and reaps reservations without retaining predecessor tombstones", async () => {
+    const f = await fixture();
+    const id = (await f.authority.getIdentity()).connectAttemptId;
+    await f.authority.reserveFirstConnect(reservation);
+    await runInDurableObject(f.user, instance => {
+      const attempt = instance["storage"].openApiConnectAttempts.get(id)!;
+      instance["storage"].openApiConnectAttempts.put({...attempt, expiresAt: 0});
+    });
+    await expect(Promise.resolve(f.authority.reserveFirstConnect(reservation))).rejects.toThrow(failure);
+    await expect(Promise.resolve(f.authority.complete(f.request))).rejects.toThrow(failure);
+    await f.user.connectAccount("openapi");
+    const successor = await f.control.authority();
+    expect(await runInDurableObject(f.user, instance => instance["storage"].openApiConnectAttempts.get(id))).toBeUndefined();
+    await successor.reserveFirstConnect({...reservation, previousReceiptDigest: "d".repeat(64)});
+    detachReceipt(await successor.complete(f.request));
+    expect((await rows(f.user)).accounts).toHaveLength(1);
+    expect((await f.control.events()).description).toBe(1);
+  });
+
+  it("retains exact committed recovery completion after host TTL and host eviction", async () => {
+    const f = await fixture();
+    const id = (await f.authority.getIdentity()).connectAttemptId;
+    await f.authority.reserveFirstConnect(reservation);
+    const first = detachReceipt(await f.authority.complete(f.request));
+    await runInDurableObject(f.user, instance => {
+      const attempt = instance["storage"].openApiConnectAttempts.get(id)!;
+      instance["storage"].openApiConnectAttempts.put({...attempt, expiresAt: 0});
+    });
+    await f.user.connectAccount("openapi");
+    await evictDurableObject(f.user);
+    await f.configure();
+    const substituteControl = env.TEST_OPENAPI_ACCOUNT_CONTROL.getByName(crypto.randomUUID());
+    const retry = detachReceipt(await f.authority.complete({...f.request, account: await f.account(substituteControl)}));
+    expect(retry.providerAccountId).toBe(first.providerAccountId);
+    expect(retry.accountIncarnation).toBe(first.accountIncarnation);
+    expect(retry.connectionGeneration).toBe(1);
+    expect((await substituteControl.events()).description).toBe(0);
+    expect((await rows(f.user)).accounts).toHaveLength(1);
+  });
+});

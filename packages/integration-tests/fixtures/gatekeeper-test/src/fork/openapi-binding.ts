@@ -1,3 +1,4 @@
+import type { EnsureActionRegistrationV1, ActionRegistrationReceiptV1 } from "@gadgets/workshop-shared/fork/approval-registration";
 // Test-only connector implementation. Authorities stay in RPC closures, never control responses.
 import { RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
@@ -291,6 +292,15 @@ class OpenApiSession extends RpcTarget implements TestSession {
     return this.#control.dispatchOpenApi(this.#label, this.#draftId);
   }
   async observe(): Promise<void> { await this.readValue(); }
+  // Test-only forwarding over the real host queue. No provider write or action engine.
+  async registerApproval(request: EnsureActionRegistrationV1, loseResponse = false, loseBeforeCommit = false): Promise<ActionRegistrationReceiptV1> {
+    if (loseBeforeCommit) throw new Error("LostResponseBeforeCommit");
+    const ensure = this.#approval.ensureRegistration;
+    if (typeof ensure !== "function") throw new Error("REGISTRATION_UNAVAILABLE");
+    const receipt = await ensure(request);
+    if (loseResponse) throw new Error("LostResponse");
+    return receipt;
+  }
   async writeValue(_value: number): Promise<number> { throw new Error("FIXTURE_WRITES_UNSUPPORTED"); }
   async writeValues(_values: number[]): Promise<number[]> { throw new Error("FIXTURE_WRITES_UNSUPPORTED"); }
   async act(): Promise<void> { throw new Error("FIXTURE_WRITES_UNSUPPORTED"); }

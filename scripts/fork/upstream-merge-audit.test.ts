@@ -394,6 +394,7 @@ test("OpenAPI host binding files are explicitly fork owned", () => {
   for (const path of [
     "packages/workshop-shared/src/fork/",
     "packages/workshop-backend/src/fork/",
+    "packages/workshop-backend/__tests__/knitli-approval-registration.test.ts",
     "packages/workshop-backend/__tests__/knitli-openapi-binding-ledger.test.ts",
     "packages/workshop-backend/__tests__/knitli-openapi-user-binding.test.ts",
   "packages/workshop-backend/__tests__/fork-fixtures/",
@@ -411,6 +412,7 @@ test("OpenAPI host binding files are explicitly fork owned", () => {
   }
   assert.equal(isForkOwned("packages/workshop-backend/src/user.ts"), false);
   assert.equal(isForkOwned("packages/workshop-shared/src/gatekeeper.ts"), false);
+  assert.equal(isForkOwned("packages/workshop-backend/src/overseer.ts"), false);
 });
 
 /** A real sync whose ours-only resolution silently drops a clean upstream edit. */

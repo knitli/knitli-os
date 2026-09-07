@@ -6096,8 +6096,9 @@ class OverseerImpl implements AgentHooks {
     this.#associateAction(caller, actionId);
   }
 
+  // hookId is captured by the host queue; it is never accepted in the public request.
   async ensureRegistration(gatekeeperId: number, request: EnsureActionRegistrationV1,
-      caller: GatekeeperCaller, generation?: number): Promise<ActionRegistrationReceiptV1> {
+      caller: GatekeeperCaller, generation?: number, hookId?: number): Promise<ActionRegistrationReceiptV1> {
     if (generation === undefined || !this.findOpenApiBinding(gatekeeperId)) {
       throw new Error("BINDING_NOT_ACTIVE");
     }
@@ -6109,6 +6110,8 @@ class OverseerImpl implements AgentHooks {
         sharing = await this.getSharingManager();
       },
       assertActiveBindingNow: () => {
+        this.assertGatekeeperUsable(gatekeeperId);
+        if (hookId !== undefined) requireLiveHook(this, hookId);
         if (this.storage.prohibitAllSharing.get()) throw new Error("Workspace sharing is prohibited.");
         this.assertGatekeeperObserverReadinessNow(gatekeeperId, sharing);
         if (!this.findOpenApiBinding(gatekeeperId)) throw new Error("BINDING_NOT_ACTIVE");
@@ -13662,7 +13665,7 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
 
   ensureRegistration(request: EnsureActionRegistrationV1): Promise<ActionRegistrationReceiptV1> {
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
-    return this.impl.ensureRegistration(this.gatekeeperId, request, this.caller, this.#openApiGeneration);
+    return this.impl.ensureRegistration(this.gatekeeperId, request, this.caller, this.#openApiGeneration, this.hookId);
   }
 
   bindHook<Hook extends RpcTarget>(

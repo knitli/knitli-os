@@ -1,4 +1,4 @@
-import { env } from "cloudflare:workers";
+import { env, RpcStub } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import type { EnsureActionRegistrationV1 } from "@gadgets/workshop-shared/fork/approval-registration";
@@ -118,7 +118,7 @@ declare module "cloudflare:workers" {
   interface ProvidedEnv { TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>; }
 }
 type Impl = OverseerDurableObject["impl"];
-async function withHost(body: (impl: Impl) => Promise<void>) {
+async function withHost(body: (impl: Impl, instance: OverseerDurableObject) => Promise<void>) {
   const stub = env.TEST_OVERSEER.getByName(`approval-${crypto.randomUUID()}`);
   await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
     const impl = instance.impl;
@@ -128,7 +128,7 @@ async function withHost(body: (impl: Impl) => Promise<void>) {
     impl.storage.gatekeepers.put({ id: 0, resourceTitle: "Fixture", class: {} as never, creationSpec: { type: "gatekeeper", vendorId: "test", resourceUrl: "https://example.test/api", typeUrlPattern: "https://*" } });
     const account = vi.spyOn(impl, "checkOpenApiAccountReadiness").mockResolvedValue();
     const sharing = vi.spyOn(impl, "getSharingManager").mockResolvedValue({ getEffectiveRole: () => undefined } as never);
-    try { await body(impl); } finally { account.mockRestore(); sharing.mockRestore(); }
+    try { await body(impl, instance); } finally { account.mockRestore(); sharing.mockRestore(); }
   });
 }
 describe("actual Overseer registration storage", () => {
@@ -170,6 +170,65 @@ describe("actual Overseer registration storage", () => {
       expect([...impl.storage.approvalRegistrations.list()]).toHaveLength(0);
       expect(impl.storage.nextActionId.get()).toBe(0);
     } finally { pause.mockRestore(); }
+  }));
+  it.each(["disabled", "deleted"] as const)("rejects an issued native hook queue when its hook is %s during readiness", async state => withHost(async (impl, instance) => {
+    impl.storage.boundHooks.put({ id: 7, actionId: 999, gatekeeperId: 0, vendorId: "test",
+      controller: {} as never, callback: {} as never,
+      description: { title: "Fixture hook", description: "Fixture hook" }, enabled: true });
+    const originalEnv = instance["env"];
+    Object.assign(instance, { env: { ...originalEnv, BLUEPRINTS: { get: async () => null } } });
+    const issued = await instance.startHook(7);
+    using queue = new RpcStub(issued.approvalQueue);
+    const ensure = queue.ensureRegistration;
+    if (typeof ensure !== "function") throw new Error("Missing real queue registration method");
+    let release!: () => void, entered!: () => void;
+    const paused = new Promise<void>(resolve => { release = resolve; });
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const sharing = await impl.getSharingManager();
+    const readiness = vi.spyOn(impl, "getSharingManager").mockImplementation(async () => { entered(); await paused; return sharing; });
+    let pending: Promise<unknown> | undefined;
+    try {
+      pending = Promise.resolve(ensure(await fixture()));
+      const rejected = expect(pending).rejects.toThrow("Hook has been deleted or disabled.");
+      await Promise.race([reached, pending.then(() => { throw new Error("Registration completed before readiness pause"); })]);
+      const hook = impl.storage.boundHooks.get(7)!;
+      if (state === "disabled") impl.storage.boundHooks.put({ ...hook, enabled: false });
+      else impl.storage.boundHooks.delete(7);
+      expect(impl.storage.openApiBindings.get("draft")?.state).toBe("active");
+      release(); await rejected;
+      expect([...impl.storage.actions.list()]).toHaveLength(0);
+      expect([...impl.storage.approvalRegistrations.list()]).toHaveLength(0);
+      expect(impl.storage.nextActionId.get()).toBe(0);
+    } finally {
+      release(); await pending?.catch(() => {});
+      readiness.mockRestore(); issued.callback[Symbol.dispose]();
+      Object.assign(instance, { env: originalEnv });
+    }
+  }));
+  it("rejects an unhooked registration quarantined during readiness", async () => withHost(async impl => {
+    impl.storage.gadgets.put({ type: "gadget", id: 100, title: "G", created: new Date(0), bindingName: "G", bindings: {} });
+    const leave = impl.joinSession("use");
+    const restart = vi.spyOn(impl, "scheduleAccessRestart").mockResolvedValue();
+    let release!: () => void, entered!: () => void;
+    const paused = new Promise<void>(resolve => { release = resolve; });
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const sharing = await impl.getSharingManager();
+    const readiness = vi.spyOn(impl, "getSharingManager").mockImplementation(async () => { entered(); await paused; return sharing; });
+    let pending: Promise<unknown> | undefined;
+    try {
+      pending = impl.ensureRegistration(0, await fixture(), { from: "user" }, 1);
+      const rejected = expect(pending).rejects.toThrow("The workspace is restarting to apply a connection change. Please retry.");
+      await Promise.race([reached, pending.then(() => { throw new Error("Registration completed before readiness pause"); })]);
+      impl.bindWorkpiece(100, "API", 0);
+      expect(restart).toHaveBeenCalledOnce(); expect(impl.gatekeeperUsable(0)).toBe(false);
+      release(); await rejected;
+      expect([...impl.storage.actions.list()]).toHaveLength(0);
+      expect([...impl.storage.approvalRegistrations.list()]).toHaveLength(0);
+      expect(impl.storage.nextActionId.get()).toBe(0);
+    } finally {
+      release(); await pending?.catch(() => {});
+      readiness.mockRestore(); restart.mockRestore(); leave();
+    }
   }));
   it("rolls back actual durable allocation and action insertion if mapping insertion fails", async () => withHost(async impl => {
     const request = await fixture();

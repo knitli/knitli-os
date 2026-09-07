@@ -77,6 +77,7 @@ export interface MergeUnderAudit {
  * `docs/fork-maintenance.md`.
  */
 export const FORK_OWNED_PREFIXES = [
+  "packages/gatekeeper-kit/__tests__/workerd/credential-mutation.test.ts",
   "patches/capnweb-validate@0.3.0.patch",
   "scripts/fork/capnweb-native-validation.test.ts",
   "packages/workshop-shared/src/fork/",

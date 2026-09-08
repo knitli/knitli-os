@@ -838,15 +838,29 @@ describe("ScheduleDriver", () => {
         },
         activationTime,
       );
-      await makeActiveScheduleDue(driver, "workspace-a", scheduleId);
     }
-    await updateSchedule(driver, "workspace-a", "broken", (stored) => ({
-      ...stored,
-      state: {
-        ...stored.state,
-        spec: { kind: "interval", everyMs: 0, anchorMs: activationTime },
-      },
-    }));
+    // Enabling another schedule replans the alarm. Keep both schedules in the future
+    // until the malformed row and due times can be installed without an RPC gap.
+    await runInDurableObject(driver, (_instance, state) => {
+      state.storage.transactionSync(() => {
+        for (const scheduleId of ["broken", "healthy"]) {
+          const key = `schedule:workspace-a:${scheduleId}`;
+          const stored = state.storage.kv.get<StoredSchedule>(key);
+          if (stored?.state.status !== "active") throw new Error("Expected active schedule");
+          state.storage.kv.put<StoredSchedule>(key, {
+            ...stored,
+            state: {
+              ...stored.state,
+              nextFire: 1,
+              spec:
+                scheduleId === "broken"
+                  ? { kind: "interval", everyMs: 0, anchorMs: activationTime }
+                  : stored.state.spec,
+            },
+          });
+        }
+      });
+    });
 
     await expect(runDurableObjectAlarm(driver)).resolves.toBe(true);
     await vi.waitFor(async () => {

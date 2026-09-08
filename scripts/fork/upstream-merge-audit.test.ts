@@ -180,6 +180,42 @@ function inRepo<T>(dir: string, body: () => T): T {
   }
 }
 
+for (const variation of ["upstream only", "fork reflow", "fork comment", "unavailable base"] as const) {
+  test(`format drift attribution: ${variation}`, () => {
+    const dir = scratchRepo();
+    const run = (...args: string[]) =>
+      execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+    const path = "src/shared.ts";
+    const file = join(dir, path);
+    const original = "// Original comment\nexport const value = 1;\n";
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, original);
+      run("add", path);
+      run("commit", "-q", "-m", "shared source");
+      const base = run("rev-parse", "HEAD");
+      run("checkout", "-q", "-B", "upstream", base);
+      writeFileSync(file, "// Updated upstream comment\nexport const value = 1;\n");
+      run("commit", "-qam", "upstream documentation");
+      if (variation === "unavailable base") run("checkout", "-q", "--orphan", "unrelated");
+      else run("checkout", "-q", "-B", "feature", base);
+      writeFileSync(file, variation === "fork reflow"
+        ? "// Original comment\nexport const value =\n  1;\n"
+        : variation === "fork comment"
+          ? "// Fork comment\nexport const value = 1;\n"
+          : original);
+      writeFileSync(join(dir, "unrelated.txt"), "Independent fork change\n");
+      run("add", ".");
+      run("commit", "-q", "-m", "fork work");
+      inRepo(dir, () => {
+        const findings = auditFormatDrift({ upstreamRef: "upstream", oursRef: "HEAD" });
+        assert.deepEqual(findings.map(finding => finding.path),
+          variation === "upstream only" ? [] : [path]);
+      });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+
 for (const variation of ["exact pair", "changed fork", "changed upstream", "unrelated path"] as const) {
   test(`comment-only formatting exception: ${variation}`, () => {
     const exception = FORMAT_EXCEPTIONS[0]!;

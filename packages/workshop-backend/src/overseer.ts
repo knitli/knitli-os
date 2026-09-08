@@ -1,4 +1,4 @@
-import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, suspendRecoveredApprovalTurn } from "./fork/approval-continuation";
+import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import type { ActionRegistrationReceiptV1, EnsureActionRegistrationV1 } from "@gadgets/workshop-shared/fork/approval-registration";
 import { ensureActionRegistration, type ApprovalRegistrationRecord } from "./fork/approval-registration";
 import { createOpenApiRecoveryRunner } from "./fork/openapi-recovery";
@@ -1939,9 +1939,10 @@ class OverseerImpl implements AgentHooks {
       return;
     }
 
-    if (suspendRecoveredApprovalTurn(
-      [...this.storage.chats.list({prefix: `${keyString(record.chatId)}.`, reverse: true})],
-      id => this.storage.actions.get(id))) {
+    const approval = recoverApprovalTurn(
+      this.storage.chats.list({prefix: `${keyString(record.chatId)}.`, reverse: true}),
+      id => this.storage.actions.get(id));
+    if (approval.suspend) {
       const meta = this.storage.chatMeta.get(record.chatId);
       if (meta) {
         delete meta.activeAgent;
@@ -1951,6 +1952,9 @@ class OverseerImpl implements AgentHooks {
       this.#unregisterRunningAgent(record.chatId);
       this.#deliverWaitingExternalMessageResponse(record.chatId);
       return;
+    }
+    if (approval.summary && approval.author) {
+      this.addChatMessages(record.chatId, approval.author, [{type: "message", message: approval.summary}]);
     }
     await this.#runAgentTurn(
         record.chatId, aiModel, record.initiator, record.callbackInitiated, liveChat);
@@ -7617,17 +7621,20 @@ class OverseerImpl implements AgentHooks {
       const captured = this.#consumedApprovalWaiters.get(chatId);
       this.#consumedApprovalWaiters.delete(chatId);
       const waiters = this.approvalWaiters(chatId);
-      const summary = completed && activeRecord &&
-        !this.isPreparingChatMessage(chatId) && liveChat.pendingAgentCallbacks.length === 0
+      const summary = completed && activeRecord && !this.isPreparingChatMessage(chatId)
         ? approvedCapturedActionSummary(captured, waiters) : undefined;
-      if (summary && meta && activeRecord) {
-        this.addChatMessages(chatId, initiator, [{type: "message", message: summary}]);
+      const approvalAuthor = approvalSummaryAuthor(waiters?.actions);
+      if (summary && approvalAuthor && meta) {
+        this.addChatMessages(chatId, approvalAuthor, [{type: "message", message: summary}]);
+        meta = this.storage.chatMeta.get(chatId);
+      }
+      if (liveChat.pendingAgentCallbacks.length > 0) {
+        this.#startAgentForCallbacks(meta, liveChat);
+      } else if (summary && approvalAuthor && meta && activeRecord) {
         const resumed = this.storage.chatMeta.get(chatId)!;
         resumed.activeAgent = aiModel.profile;
         this.storage.chatMeta.put(resumed);
         this.startAgent(chatId, aiModel, initiator, activeRecord.initiatorUserId);
-      } else if (liveChat.pendingAgentCallbacks.length > 0) {
-        this.#startAgentForCallbacks(meta, liveChat);
       } else {
         this.#deliverWaitingExternalMessageResponse(chatId);
 

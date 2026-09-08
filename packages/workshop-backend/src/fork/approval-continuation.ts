@@ -1,4 +1,4 @@
-import type { AiChatMessage } from "@gadgets/workshop-shared/api";
+import type { AiChatMessage, AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
 import type { ActionRecord } from "../overseer";
 
 type AwaitedAction = Extract<ActionRecord, { type: "action" }>;
@@ -19,7 +19,7 @@ export function currentApprovalWaiters(
         (message.author.type === "user" || message.author.type === "gadget")) {
       return { boundary: message.sequence, actions: result.toReversed() };
     }
-    if (message.type !== "action" || seen.has(message.actionId)) continue;
+    if (message.type !== "action" || message.author.type !== "agent" || seen.has(message.actionId)) continue;
     seen.add(message.actionId);
     const record = action(message.actionId);
     if (!record) return undefined;
@@ -44,18 +44,27 @@ export function approvedCapturedActionSummary(
   return approvedActionSummary(current.actions);
 }
 
-/** Agent replay skips action cards, so derive a surviving decision wait before replay. */
-export function suspendRecoveredApprovalTurn(
-  newestFirst: readonly AiChatMessage[],
-  action: (id: number) => ActionRecord | undefined,
-): boolean {
+/** Attribute the combined summary to the resolver who completed the last approval. */
+export function approvalSummaryAuthor(actions: readonly AwaitedAction[] | undefined): AiChatAuthorInfo | undefined {
+  if (!approvedActionSummary(actions)) return undefined;
+  return actions!.reduce((last, action) => (action.appliedAt?.getTime() ?? 0) >=
+    (last.appliedAt?.getTime() ?? 0) ? action : last).resolvedBy;
+}
+
+/** Recover an awaited turn with a replayable message, reading only its current boundary. */
+export function recoverApprovalTurn(
+  newestFirst: Iterable<AiChatMessage>, action: (id: number) => ActionRecord | undefined,
+): { suspend: boolean; summary?: string; author?: AiChatAuthorInfo } {
   let hasReference = false;
-  for (const message of newestFirst) {
-    if (message.type === "agentCallback" || message.type === "message" &&
-        (message.author.type === "user" || message.author.type === "gadget")) break;
-    if (message.type === "action") hasReference = true;
+  function* observed() {
+    for (const message of newestFirst) {
+      if (message.type === "action" && message.author.type === "agent") hasReference = true;
+      yield message;
+    }
   }
-  if (!hasReference) return false;
-  const current = currentApprovalWaiters(newestFirst, action);
-  return !current || current.actions.some(record => record.state !== "approved");
+  const current = currentApprovalWaiters(observed(), action);
+  if (!hasReference || current?.actions.length === 0) return { suspend: false };
+  const summary = approvedActionSummary(current?.actions);
+  const author = approvalSummaryAuthor(current?.actions);
+  return summary && author ? { suspend: false, summary, author } : { suspend: true };
 }

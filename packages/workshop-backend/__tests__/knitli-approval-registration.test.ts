@@ -138,9 +138,10 @@ describe("actual Overseer registration storage", () => {
     expect(first).toEqual({ registrationId: 0 });
     expect(impl.consumeCapturedActions(1)).toEqual({ actions: [0], accessedGadget: false, awaitDecision: true });
     await impl.ensureRegistration(0, request, { ...caller, chatId: 2 }, 1);
-    expect(impl.consumeCapturedActions(2)).toEqual({ actions: [], accessedGadget: false, awaitDecision: true });
+    expect(impl.consumeCapturedActions(2)).toEqual({ actions: [0], accessedGadget: false, awaitDecision: true });
     let record = impl.storage.actions.get(0)!;
     expect(record.description).toEqual(request.safeDescription);
+    expect(record.caller).toEqual(caller);
     impl.storage.actions.put({ ...record, state: terminal });
     await expect(impl.ensureRegistration(0, request, caller, 1)).resolves.toEqual(first);
     expect(impl.storage.actions.get(0)?.state).toBe(terminal);

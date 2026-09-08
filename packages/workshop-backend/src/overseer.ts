@@ -1,3 +1,4 @@
+import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, suspendRecoveredApprovalTurn } from "./fork/approval-continuation";
 import type { ActionRegistrationReceiptV1, EnsureActionRegistrationV1 } from "@gadgets/workshop-shared/fork/approval-registration";
 import { ensureActionRegistration, type ApprovalRegistrationRecord } from "./fork/approval-registration";
 import { createOpenApiRecoveryRunner } from "./fork/openapi-recovery";
@@ -1938,6 +1939,19 @@ class OverseerImpl implements AgentHooks {
       return;
     }
 
+    if (suspendRecoveredApprovalTurn(
+      [...this.storage.chats.list({prefix: `${keyString(record.chatId)}.`, reverse: true})],
+      id => this.storage.actions.get(id))) {
+      const meta = this.storage.chatMeta.get(record.chatId);
+      if (meta) {
+        delete meta.activeAgent;
+        meta.lastActive = this.getChatTimestamp();
+        this.storage.chatMeta.put(meta);
+      }
+      this.#unregisterRunningAgent(record.chatId);
+      this.#deliverWaitingExternalMessageResponse(record.chatId);
+      return;
+    }
     await this.#runAgentTurn(
         record.chatId, aiModel, record.initiator, record.callbackInitiated, liveChat);
   }
@@ -5777,6 +5791,12 @@ class OverseerImpl implements AgentHooks {
   // the chat log after the tool returns. `awaitDecision` is true if any captured action needs it.
   #capturedActions = new Map<number, {actions: number[], accessedGadget: boolean,
                                       awaitDecision: boolean}>();
+  // Consumed references may not be in chat history yet when approval arrives.
+  #consumedApprovalWaiters = new Map<number, { boundary: number; actionIds: number[] }>();
+  approvalWaiters(chatId: number) {
+    return currentApprovalWaiters(this.storage.chats.list({prefix: `${keyString(chatId)}.`, reverse: true}),
+      id => this.storage.actions.get(id));
+  }
 
   // Maps chat ID to connectionRequest message bodies created by that chat's agent during the
   // current step. Spliced into the chat log after the tool call returns (see
@@ -6134,7 +6154,9 @@ class OverseerImpl implements AgentHooks {
       associateInsertedAction: id => { void this.#associateAction(caller, id); },
       markAwaitDecisionIfPending: id => {
         if (caller.from === "agent" && this.storage.actions.get(id)?.state === "pending") {
-          this.#getOrCreateCapturedActions(caller.chatId).awaitDecision = true;
+          const captured = this.#getOrCreateCapturedActions(caller.chatId);
+          if (!captured.actions.includes(id)) captured.actions.push(id);
+          captured.awaitDecision = true;
         }
       },
     }, request);
@@ -7373,6 +7395,8 @@ class OverseerImpl implements AgentHooks {
     // balance once the turn completes (see the `finally` below) so the next billing decision
     // reflects the spend this turn just incurred, rather than waiting for the cache TTL to lapse.
     let byokOwnerStub: DurableObjectStub<UserDurableObject> | undefined;
+    let completed = false;
+    const activeRecord = this.storage.activeAgents.get(chatId);
     let startedAt = Date.now();
     const turnLogger = this.logger.with({
       operation: "agent.run",
@@ -7504,6 +7528,7 @@ class OverseerImpl implements AgentHooks {
         }]);
         hasBeenNudged = true;
       }
+      completed = outcome === "ok";
       turnLogger.debug("agent run finished", {
         event: "agent.run.finished", outcome,
         durationMs: Date.now() - startedAt,
@@ -7587,8 +7612,21 @@ class OverseerImpl implements AgentHooks {
       }
       liveChat.activeAgentCallbacks.clear();
 
-      // If any new messages were queued waiting for the agent to finish, deliver them now.
-      if (liveChat.pendingAgentCallbacks.length > 0) {
+      // Approval may win before captured references reach durable history. Recheck
+      // the normally suspended turn after its step commits, without another await.
+      const captured = this.#consumedApprovalWaiters.get(chatId);
+      this.#consumedApprovalWaiters.delete(chatId);
+      const waiters = this.approvalWaiters(chatId);
+      const summary = completed && activeRecord &&
+        !this.isPreparingChatMessage(chatId) && liveChat.pendingAgentCallbacks.length === 0
+        ? approvedCapturedActionSummary(captured, waiters) : undefined;
+      if (summary && meta && activeRecord) {
+        this.addChatMessages(chatId, initiator, [{type: "message", message: summary}]);
+        const resumed = this.storage.chatMeta.get(chatId)!;
+        resumed.activeAgent = aiModel.profile;
+        this.storage.chatMeta.put(resumed);
+        this.startAgent(chatId, aiModel, initiator, activeRecord.initiatorUserId);
+      } else if (liveChat.pendingAgentCallbacks.length > 0) {
         this.#startAgentForCallbacks(meta, liveChat);
       } else {
         this.#deliverWaitingExternalMessageResponse(chatId);
@@ -9088,6 +9126,10 @@ class OverseerImpl implements AgentHooks {
       : {actions: number[], accessedGadget: boolean, awaitDecision: boolean} | undefined {
     let result = this.#capturedActions.get(chatId);
     this.#capturedActions.delete(chatId);
+    if (result?.awaitDecision) {
+      const waiters = this.approvalWaiters(chatId);
+      if (waiters) this.#consumedApprovalWaiters.set(chatId, {boundary: waiters.boundary, actionIds: result.actions});
+    }
     return result;
   }
 
@@ -11739,8 +11781,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     // If this was an awaited agent action, resume only after all awaited actions in the turn are
     // approved. If applyPendingAction throws, the action stays pending and the turn stays suspended.
-    if (action.caller.from === "agent" && action.description.awaitDecision) {
-      await this.#maybeResumeAfterActionDecision(action.caller.chatId);
+    if (action.description.awaitDecision) {
+      for (const chat of this.impl.storage.chatMeta.list()) {
+        if (this.impl.approvalWaiters(chat.id)?.actions.some(waiter => waiter.id === id)) {
+          await this.#maybeResumeAfterActionDecision(chat.id);
+        }
+      }
     }
 
     // Clearing this manual gate may unblock later auto-eligible pending actions on the same
@@ -11822,42 +11868,18 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // Resume a turn suspended on awaitDecision once all awaited actions from that turn are approved.
   // Scoping to the current turn prevents older rejected actions from blocking future resumes.
   async #maybeResumeAfterActionDecision(chatId: number): Promise<void> {
-    let awaited: (ActionRecord & {type: "action"})[] = [];
-    for (let msg of this.impl.storage.chats.list(
-        {prefix: `${keyString(chatId)}.`, reverse: true})) {
-      // Stop at whatever started the current turn: a user/gadget message or a gadget callback.
-      // (agentNudge is mid-turn, so it isn't a boundary.)
-      if (msg.type === "agentCallback") break;
-      if (msg.type === "message" &&
-          (msg.author.type === "user" || msg.author.type === "gadget")) {
-        break;
-      }
-      if (msg.type === "action") {
-        let record = this.impl.storage.actions.get(msg.actionId);
-        if (record && record.type === "action" &&
-            record.caller.from === "agent" && record.description.awaitDecision) {
-          awaited.push(record);
-        }
-      }
-    }
-    awaited.reverse();  // Present titles chronologically.
-
-    // Only resume when every awaited action in the turn has been decided and all were approved.
-    if (awaited.length === 0) return;                       // No awaited action in current turn.
-    if (awaited.some(r => r.state === "pending")) return;   // Still waiting on a decision.
-    if (awaited.some(r => r.state === "rejected")) return;  // Denial leaves the turn ended.
-
-    // Persist one note for replay; raw action cards are not surfaced to the LLM. Concurrent
-    // approvals could both pass the gate above and append duplicate notes (the DO input gate is
-    // open across these awaits), but that's cosmetic — #resumeSuspendedAgent still starts one turn.
-    let titleList = awaited.map(r => `"${r.description.title}"`).join(", ");
-    let summary =
-        `The changes you submitted have been approved and applied: ${titleList}. ` +
-        `Reads now reflect them.`;
-    let author = await this.#getClientProfile();
+    if (this.impl.storage.chatMeta.get(chatId)?.activeAgent) return;
+    const waiters = this.impl.approvalWaiters(chatId);
+    const summary = approvedActionSummary(waiters?.actions);
+    if (!waiters || !summary) return;
+    const author = await this.#getClientProfile();
+    const current = this.impl.approvalWaiters(chatId);
+    if (this.impl.storage.chatMeta.get(chatId)?.activeAgent || !current ||
+        current.boundary !== waiters.boundary || current.actions.length !== waiters.actions.length ||
+        current.actions.some((action, index) => action.id !== waiters.actions[index]!.id) ||
+        approvedActionSummary(current.actions) !== summary) return;
     this.impl.addChatMessages(chatId, author, [{type: "message", message: summary}]);
-
-    await this.#resumeSuspendedAgent(chatId);
+    await this.#resumeSuspendedAgent(chatId, this.impl.approvalWaiters(chatId)?.boundary);
   }
 
   async rejectAction(id: number): Promise<void> {
@@ -11986,8 +12008,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   // Restart a suspended agent turn after its outcome is recorded in chat history (accepted
   // connection, or all awaited actions approved). Denials intentionally don't call this.
-  async #resumeSuspendedAgent(chatId: number): Promise<void> {
+  async #resumeSuspendedAgent(chatId: number, approvalBoundary?: number): Promise<void> {
     await this.impl.waitForChatMessagePreparation(chatId);
+    if (approvalBoundary !== undefined && this.impl.approvalWaiters(chatId)?.boundary !== approvalBoundary) return;
     let meta = this.impl.storage.chatMeta.get(chatId);
     if (!meta) return;  // Chat deleted.
     if (meta.activeAgent) return;  // Already running; it'll pick up the change on its next read.
@@ -12009,11 +12032,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let preparation = this.impl.waitForChatMessagePreparation(chatId);
     if (preparation) {
       await preparation;
-      return this.#resumeSuspendedAgent(chatId);
+      return this.#resumeSuspendedAgent(chatId, approvalBoundary);
     }
 
     // Re-read after the await: another concurrent accept may have started the agent in the
     // meantime. Avoid starting a second agent loop for the same chat.
+    if (approvalBoundary !== undefined && this.impl.approvalWaiters(chatId)?.boundary !== approvalBoundary) return;
     let fresh = this.impl.storage.chatMeta.get(chatId);
     if (!fresh || fresh.activeAgent) return;
 

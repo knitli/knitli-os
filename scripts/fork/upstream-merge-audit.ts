@@ -413,6 +413,7 @@ export function auditFormatDrift(opts: {
   onException?: (exception: FormatException) => void;
 }): FormatChurnFile[] {
   const { oursRef, upstreamRef } = opts;
+  const baseRef = gitOrNull(["merge-base", upstreamRef, oursRef])?.trim();
   const churn: FormatChurnFile[] = [];
   for (const path of [...changedFiles(upstreamRef, oursRef)].toSorted()) {
     if (isForkOwned(path) || !isSourceFile(path)) continue;
@@ -421,6 +422,9 @@ export function auditFormatDrift(opts: {
     // A file upstream does not have cannot have been reformatted away from it.
     if (theirs === null || ours === null || ours === theirs) continue;
     if (normalizeForFormatComparison(ours) !== normalizeForFormatComparison(theirs)) continue;
+
+    // Upstream-only comment changes are not fork churn. Unavailable ancestry cannot grant a skip.
+    if (baseRef && gitOrNull(["show", `${baseRef}:${path}`]) === ours) continue;
 
     const exception = FORMAT_EXCEPTIONS.find(entry => entry.path === path &&
       entry.upstreamBlob === git(["rev-parse", `${upstreamRef}:${path}`]).trim() &&

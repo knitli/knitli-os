@@ -11782,7 +11782,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // If this was an awaited agent action, resume only after all awaited actions in the turn are
     // approved. If applyPendingAction throws, the action stays pending and the turn stays suspended.
     if (action.description.awaitDecision) {
-      for (const chat of this.impl.storage.chatMeta.list()) {
+      // History inspection opens another KV iterator; finish the metadata iterator first.
+      for (const chat of Array.from(this.impl.storage.chatMeta.list())) {
         if (this.impl.approvalWaiters(chat.id)?.actions.some(waiter => waiter.id === id)) {
           await this.#maybeResumeAfterActionDecision(chat.id);
         }

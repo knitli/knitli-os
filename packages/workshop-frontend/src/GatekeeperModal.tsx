@@ -746,15 +746,19 @@ export default function GatekeeperModal({
     setCreating(true)
     let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
     let transferred = false
+    let stage: 'collect-resource-url' | 'get-overseer' | 'new-gatekeeper' | 'attach-gatekeeper' = 'collect-resource-url'
     try {
       if (!configuratorFrameState?.frame || configuratorFrameState.accountId !== selectedAccountId || configuratorFrameState.resourceUrlPattern !== resourceUrlPattern) {
         throw new Error('Configurator is not ready.')
       }
       const resourceUrl = await configuratorCollectResourceUrlRef.current?.()
       if (!resourceUrl) throw new Error('Configurator did not provide a resource URL.')
+      stage = 'get-overseer'
       const overseer = await getOverseer()
+      stage = 'new-gatekeeper'
       gatekeeper = await overseer.newGatekeeper(selectedAccountId, resourceUrl)
       if (gatekeeper) {
+        stage = 'attach-gatekeeper'
         await onCreated(gatekeeper)
         transferred = true
         onClose()
@@ -762,7 +766,11 @@ export default function GatekeeperModal({
         toasts.add({ title: 'Failed to create connection', variant: 'error' })
       }
     } catch (err) {
-      console.error('Failed to create resource gatekeeper:', err)
+      console.error('Failed to create resource gatekeeper:', {
+        stage,
+        failureCode: err instanceof Error && err.message.startsWith('Subrequest depth limit exceeded.')
+          ? 'depth-limit' : 'unavailable',
+      })
       toasts.add({ title: err instanceof Error && err.message ? err.message : 'Failed to create connection', variant: 'error' })
     } finally {
       if (gatekeeper && !transferred) gatekeeper[Symbol.dispose]()

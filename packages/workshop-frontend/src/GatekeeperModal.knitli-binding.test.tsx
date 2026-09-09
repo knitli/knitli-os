@@ -27,6 +27,8 @@ const RESOURCE: SupportedResource = {
   description: "Administrator-curated profile.",
 };
 
+let collectFailure: Error | undefined;
+
 const toastAdd = vi.fn<(toast: { title: string; variant: string }) => void>();
 
 vi.mock("@cloudflare/kumo", async (importOriginal) => {
@@ -72,7 +74,10 @@ vi.mock("./ResourceConfiguratorHost", () => ({
     useEffect(() => {
       if (!frame) return;
       onCollectResourceUrlChange?.(
-        async () => "https://ai-executor.invalid/profiles/11111111-1111-1111-1111-111111111111",
+        async () => {
+          if (collectFailure) throw collectFailure;
+          return PROFILE_URL;
+        },
       );
       onSelectionReadyChange?.(true);
       return () => onCollectResourceUrlChange?.(null);
@@ -234,6 +239,7 @@ describe("authenticated OpenAPI configurator startup", () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     toastAdd.mockClear();
+    collectFailure = undefined;
   });
 
   async function render(
@@ -277,6 +283,32 @@ describe("authenticated OpenAPI configurator startup", () => {
     expect(resource).toBeDefined();
     await act(async () => resource!.click());
   }
+
+  it.each([
+    { stage: "collect-resource-url", failureCode: "depth-limit" },
+    { stage: "new-gatekeeper", failureCode: "depth-limit" },
+    { stage: "new-gatekeeper", failureCode: "unavailable" },
+  ] as const)("reports only bounded diagnostics when $stage fails with $failureCode", async ({ stage, failureCode }) => {
+    const testApi = buildApi({ autoProvisionsAccount: true, bound: true, initialAccount: true, grantable: true });
+    const failure = new Error(`${failureCode === "depth-limit" ? "Subrequest depth limit exceeded. " : ""}PRIVATE_DIAGNOSTIC_SENTINEL`);
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    if (stage === "collect-resource-url") collectFailure = failure;
+    const newGatekeeper = vi.fn<() => Promise<never>>().mockRejectedValue(failure);
+    const overseer = {
+      startBoundResourceConfigurator: vi.fn<() => Promise<{ iframeHtml: string; ui: { [Symbol.dispose](): void } }>>().mockResolvedValue({ iframeHtml: "<html></html>", ui: { [Symbol.dispose]() {} } }),
+      newGatekeeper,
+    } as unknown as RpcStub<Overseer>;
+    const onClose = vi.fn<() => void>();
+    const rendered = await render(testApi.api, vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue(overseer), { onClose });
+    await chooseResource(rendered.container, "Knitli AI");
+    const add = [...rendered.container.querySelectorAll("button")].find(button => button.textContent === "Add connection");
+    expect(add).toBeDefined();
+    await act(async () => add!.click());
+    expect(newGatekeeper).toHaveBeenCalledTimes(stage === "new-gatekeeper" ? 1 : 0);
+    expect(diagnostic.mock.calls).toEqual([["Failed to create resource gatekeeper:", { stage, failureCode }]]);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(toastAdd).toHaveBeenCalledWith({ title: failure.message, variant: "error" });
+  });
 
   it("materializes the workspace before starting v1 configuration", async () => {
     const testApi = buildApi({ autoProvisionsAccount: true, bound: true });

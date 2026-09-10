@@ -20,6 +20,7 @@
   - Alias name: `` `${sessionTypeName(serverId, discriminator)}_${short}` `` — the session type name, one underscore, the short name verbatim.
 - **Additive.** With `defs` absent, the output is byte-identical to today. `gatekeeper-mcp` (`src/mcp.ts:470`) and `gatekeeper-mcp-portal` (`src/portal.ts:617`) call `generateSessionTypes` without it and must compile and behave identically.
 - **Scope guard.** Nothing beyond these three changes, their tests, and the pin that delivers them (Task 5). No OpenAPI-specific code enters this fork. No refactor of `schema-to-ts.ts` beyond what the hook needs, and none of `session.ts` beyond the read branch of `callTool` plus the new `describeRead`. **`src/facet.ts` and `src/action-store.ts` are not touched.**
+- **Fork hygiene.** This is a fork of `cloudflare/cloudflare-os`; read `docs/fork-maintenance.md` before writing anything. Every fork test lives under `packages/mcp-shared/__tests__/fork/`, and **every upstream-owned test file ends this plan byte-identical to `foundation/main`** — `git diff --exit-code foundation/main -- <path>` empty for each. Upstream `src/` files are edited only where an addition cannot work otherwise, each edit an optional parameter or an added list entry with an upstream-preserving default, and each recorded in the divergence inventory. Never reformat an upstream-owned file. Tasks 1 to 3 break the test rule and Task 4 repairs it; write new tests under `__tests__/fork/` from the start if you are working these tasks fresh.
 - Doc-comment every exported member added (repo rule, `CLAUDE.md`).
 - Every new test must be shown red before the change and green after. Prefer mutating a fixture; when source must be broken, restore it in the same command. Record which sabotage reddened which tests in the PR.
 - Commit messages are conventional (`feat(mcp-shared): ...`) and end with the line:
@@ -49,11 +50,17 @@ Eight existing files change. Only the first four carry logic. Every test file is
 | `packages/mcp-shared/README.md` | What each module of this package is for | One line of the module table | 4 |
 | `/opt/coder/knitli-site/apps/os/cloudflare-os` | The gitlink pinning this fork into the site repo | Move the pin to the merged commit | 5 |
 
-One file is created:
+Five files are created, all of them under the fork-owned test tree by the end of Task 4:
 
-| File | Responsibility |
-| --- | --- |
-| `packages/mcp-shared/__tests__/fixtures/session-types-no-defs.txt` | The generator's output for a broad fixture catalog, captured before the change. Written by Vitest, committed, read-only thereafter. |
+| File | Responsibility | Task |
+| --- | --- | --- |
+| `packages/mcp-shared/__tests__/fork/fixtures/session-types-no-defs.txt` | The generator's output for a broad fixture catalog, captured before any change. Written by Vitest, committed, read-only thereafter. | 1, moved in 4 |
+| `packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts` | The `defs` alias cases, and the byte-identity snapshot | 4 |
+| `packages/mcp-shared/__tests__/fork/session-read-authorization.test.ts` | The refused-read and `describeRead` override cases | 4 |
+| `packages/mcp-shared/__tests__/fork/tools-max-arguments.test.ts` | The argument-budget cases | 4 |
+| `packages/mcp-shared/__tests__/fork/session-methods-reserved.test.ts` | That a tool cannot shadow `describeRead` | 4 |
+
+Task 1 writes the fixture to `__tests__/fixtures/` and Tasks 1 to 3 write their tests into the upstream test files; Task 4 moves all of it into `__tests__/fork/`. Working these tasks fresh, create them at the fork paths from the start and Task 4's first eleven steps collapse to nothing.
 
 `.txt`, not `.d.ts`: `tsconfig.test.json` includes `__tests__`, and a `.d.ts` under it would be pulled into the test program.
 
@@ -1086,36 +1093,482 @@ EOF
 
 ---
 
-## Task 4: Prove the workspace is unaffected, and say so in the module table
+## Task 4: Move the fork's tests into a fork-owned tree, record the divergence, prove the workspace
 
-The changes are only worth calling additive if the two consumers are shown to compile, and `packages/mcp-shared/README.md` is where a reader learns what each module does.
+Tasks 1 to 3 put every new test inside a test file upstream also has. `docs/fork-maintenance.md` rule 4 forbids that, for a reason this repo has already paid for once: those lines conflict on every sync forever, and nothing requires them to be there. This task moves them into `packages/mcp-shared/__tests__/fork/`, leaves each upstream test file byte-identical to `foundation/main`, registers the new tree with the audit, writes down the three divergences, and then runs the workspace proof.
+
+Two commits: the move, then the audit and inventory. A reviewer checks the first by diffing against upstream and the second by reading it.
 
 **Files:**
+- Create: `packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts`
+- Create: `packages/mcp-shared/__tests__/fork/session-read-authorization.test.ts`
+- Create: `packages/mcp-shared/__tests__/fork/tools-max-arguments.test.ts`
+- Create: `packages/mcp-shared/__tests__/fork/session-methods-reserved.test.ts`
+- Move: `packages/mcp-shared/__tests__/fixtures/session-types-no-defs.txt` → `packages/mcp-shared/__tests__/fork/fixtures/session-types-no-defs.txt`
+- Restore to upstream: `packages/mcp-shared/__tests__/{schema-to-ts,session,tools,session-methods}.test.ts`
+- Modify: `packages/mcp-shared/vitest.config.ts` (one glob)
+- Modify: `scripts/fork/upstream-merge-audit.ts` (`FORK_OWNED_PREFIXES`)
+- Modify: `docs/fork-maintenance.md` (the rule 1 list, and three inventory entries)
 - Modify: `packages/mcp-shared/README.md:24`
 
 **Interfaces:**
-- Consumes: the committed changes from Tasks 2 and 3.
-- Produces: a fork branch that is green under `pnpm build`, `pnpm test` and `pnpm lint`, which is the precondition for merging it and bumping the pin in Task 5.
+- Consumes: the committed changes from Tasks 2 and 3, including the Task 3 addendum that adds `protected readonly maxArguments` to `McpSessionBase` and passes it through the action branch. Step 1 derives what moves from `git diff foundation/main` rather than from a fixed list, so a test that landed late is still caught.
+- Produces: a branch on which `git diff foundation/main -- packages/mcp-shared/__tests__/` names only files under `__tests__/fork/`, `pnpm fork:audit` exits 0, and `pnpm build`, `pnpm test` and `pnpm lint` are green. That is the precondition for merging, and for the pin in Task 5.
 
-- [ ] **Step 1: Type-check every package**
+**What stays in an upstream file.** The four `src/` changes — `schema-to-ts.ts`, `session.ts`, `tools.ts`, and the one-line `RESERVED_METHOD_NAMES` entry in `session-methods.ts`. Rule 3 permits an upstream edit reduced to a seam, and each of these is an optional parameter or an added list entry with an upstream-preserving default. Rule 4 governs *tests*, which have no such constraint: nothing forces them to live in a file upstream owns.
+
+- [ ] **Step 1: Enumerate exactly what has to move**
+
+Do not work from memory. Ask git what Tasks 1 to 3 added to each upstream test file:
+
+```bash
+cd /opt/coder/knitli-os
+git fetch foundation main
+git diff --stat foundation/main -- packages/mcp-shared/__tests__/
+for f in schema-to-ts session tools session-methods; do
+  echo "=== $f ==="
+  git diff foundation/main -- "packages/mcp-shared/__tests__/$f.test.ts"
+done
+```
+
+Expected: five paths — the four test files plus the new `__tests__/fixtures/session-types-no-defs.txt`. Every `+` line in those four diffs either moves to a fork file or is reverted. Keep the output; Step 8 checks the same four paths come back empty.
+
+At the time of writing the four diffs are:
+
+| Upstream file | What Tasks 1-3 added |
+| --- | --- |
+| `schema-to-ts.test.ts` | `JsonSchema` added to the `../src/client.js` type import; `TYPE_NAME`; `SNAPSHOT_TOOLS`; `generateWithDefs`; the byte-identity snapshot test inside the existing `describe("generateSessionTypes", …)`; and the whole `describe("generateSessionTypes named schemas", { timeout: 15_000 }, …)` block with its `message` fixture and eight tests |
+| `session.test.ts` | the `ObservationDescription` type import; `ClassifiedTool` added to the `../src/tools.js` import; two top-level tests, the second declaring a local `Restated` subclass |
+| `tools.test.ts` | the whole `describe("describeCall with a caller-supplied argument budget", …)` block, with `TRUNCATION`, `jsonBlock`, `rendered` and two tests |
+| `session-methods.test.ts` | one array element — `"describe_read"` appended inside the existing `skips the session's own methods` test |
+
+The Task 3 addendum may have added more. The diff is the authority, not this table.
+
+- [ ] **Step 2: Move the snapshot fixture with git, not by hand**
+
+```bash
+cd /opt/coder/knitli-os
+mkdir -p packages/mcp-shared/__tests__/fork/fixtures
+git mv packages/mcp-shared/__tests__/fixtures/session-types-no-defs.txt \
+       packages/mcp-shared/__tests__/fork/fixtures/session-types-no-defs.txt
+rmdir packages/mcp-shared/__tests__/fixtures
+```
+
+`git mv` so the bytes are carried across. Regenerating it — by letting Vitest write it at the new path — would destroy the one artifact proving the generator's output did not move in Task 2.
+
+The `toMatchFileSnapshot` argument inside the moved test does not change. It is `"./fixtures/session-types-no-defs.txt"`, resolved relative to the test file, and test and fixture move together.
+
+- [ ] **Step 3: Let Vitest see the new directory**
+
+`packages/mcp-shared/vitest.config.ts` matches one level only, so a test under `__tests__/fork/` would be collected by nothing and the suite would still be green. Replace:
+
+```ts
+    include: ["__tests__/*.test.ts"],
+```
+
+with:
+
+```ts
+    include: ["__tests__/**/*.test.ts"],
+```
+
+That is what `packages/integration-tests/vitest.config.ts` already uses for its own `__tests__/fork/` tree, and `**/*` still matches everything the old glob did.
+
+`tsconfig.test.json` needs no change: its `"include": ["src", "__tests__"]` names directories, which already covers subdirectories. Step 9's build is what confirms it rather than assumption.
+
+- [ ] **Step 4: Create the generator's fork test file**
+
+Create `packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts` with this header, imports and duplicated helpers:
+
+```ts
+// Named `$defs` type aliases -- Knitli fork tests.
+//
+// Split out of the upstream `schema-to-ts.test.ts` so the fork's cases live in a file upstream does
+// not have and can never conflict with. See docs/fork-maintenance.md, rules 1 and 4.
+//
+// These cover the optional `defs` field on `generateSessionTypes`: one exported alias per named
+// schema, a `$ref` into that map rendering as the alias, and -- the property the rest of it rests
+// on -- output byte-identical to upstream's for a caller that supplies no `defs`, which is every MCP
+// connector.
+//
+// The helpers below are copied from the upstream file rather than imported from it. Test scaffolding
+// is cheap to duplicate; a permanent conflict is not.
+
+import { describe, expect, it } from "vitest";
+// typescript6 = npm:typescript@6.0.3: this test drives the JS compiler API, which the
+// TypeScript 7 package does not ship. The workspace "typescript" (tsgo) only type-checks.
+import ts from "typescript6";
+import { MCP_BASE_TYPES } from "../../src/base-types.js";
+import { generateSessionTypes, sessionTypeName } from "../../src/schema-to-ts.js";
+import type { ClassifiedTool } from "../../src/tools.js";
+import type { JsonSchema, McpTool } from "../../src/client.js";
+
+function tool(
+  declaration: McpTool, mode: "read" | "action" = "read", autoApprovable = false,
+): ClassifiedTool {
+  return { tool: declaration, mode, autoApprovable, classifiedBy: "server-annotation" };
+}
+
+function generate(tools: ClassifiedTool[], baseTypes = "// base\n"): string {
+  return generateSessionTypes({
+    baseTypes,
+    serverId: "acme-crm",
+    serverName: "Acme CRM",
+    endpoint: "https://acme.example/mcp",
+    discriminator: "https://acme.example/mcp",
+    trust: "byo",
+    tools,
+  });
+}
+
+// The only gate on generated output being valid TypeScript: generateSessionTypes emits .d.ts text at
+// runtime (portal.ts, mcp.ts) from live MCP schemas, so tsgo never sees it. Note this is 6.0.3's
+// checker, not the 7.0.2 one the repo type-checks with -- forced, while TS 7 ships no compiler API.
+// The generated types are structural, not the inference corners where the port might plausibly differ.
+function expectTypeScriptToCompile(source: string): void {
+  const fileName = "generated.d.ts";
+  const options: ts.CompilerOptions = { noEmit: true, strict: true };
+  const host = ts.createCompilerHost(options);
+  const getSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (name, languageVersion, onError, shouldCreateNewSourceFile) =>
+    name === fileName
+      ? ts.createSourceFile(name, source, languageVersion, true, ts.ScriptKind.TS)
+      : getSourceFile(name, languageVersion, onError, shouldCreateNewSourceFile);
+  host.fileExists = name => name === fileName || ts.sys.fileExists(name);
+  host.readFile = name => name === fileName ? source : ts.sys.readFile(name);
+
+  const errors = ts.getPreEmitDiagnostics(ts.createProgram([fileName], options, host))
+    .filter(diagnostic => diagnostic.file?.fileName === fileName)
+    .map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"));
+  expect(errors).toEqual([]);
+}
+```
+
+Then **cut** — do not retype — these constructs out of `__tests__/schema-to-ts.test.ts` and paste them below that block, in this order:
+
+1. `const TYPE_NAME = …`
+2. `const SNAPSHOT_TOOLS: ClassifiedTool[] = [ … ];`
+3. `function generateWithDefs( … )`
+4. The byte-identity snapshot test, lifted out of the upstream `describe("generateSessionTypes", …)` block and wrapped in its own `describe("generateSessionTypes without named schemas", { timeout: 15_000 }, () => { … })`, so it keeps the 15-second timeout that block gave it.
+5. The entire `describe("generateSessionTypes named schemas", { timeout: 15_000 }, () => { … })` block, unchanged.
+
+Retyping a test body is how a moved assertion quietly weakens. Cut and paste, then change nothing but the import specifiers already handled above.
+
+- [ ] **Step 5: Create the session's fork test file**
+
+Create `packages/mcp-shared/__tests__/fork/session-read-authorization.test.ts`:
+
+```ts
+// Read authorization before dispatch -- Knitli fork tests.
+//
+// Split out of the upstream `session.test.ts` so the fork's cases live in a file upstream does not
+// have. See docs/fork-maintenance.md, rules 1 and 4.
+//
+// `McpSessionBase.callTool` authorizes a read before making it rather than after, and builds the
+// observation through an overridable `describeRead`, so a connector whose calls are not MCP tool
+// calls can record what it actually did. Each test builds its own host and queue inline, the way the
+// upstream file does, so nothing here is shared with it.
+
+import type { ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+
+import { expect, it } from "vitest";
+import { McpSessionBase, type McpSessionHost } from "../../src/session.js";
+import { classifyTool, type ClassifiedTool } from "../../src/tools.js";
+```
+
+Then cut the two tests Task 3 added to `__tests__/session.test.ts` — the refused-read test and the `describeRead` override test, including its local `Restated` subclass — and paste them below, unchanged apart from the imports above.
+
+- [ ] **Step 6: Create the approval-prompt fork test file**
+
+Create `packages/mcp-shared/__tests__/fork/tools-max-arguments.test.ts`:
+
+```ts
+// A caller-settable argument budget in the approval prompt -- Knitli fork tests.
+//
+// Split out of the upstream `tools.test.ts` so the fork's cases live in a file upstream does not
+// have. See docs/fork-maintenance.md, rules 1 and 4.
+//
+// `describeCall` takes an optional `maxArguments`, defaulting to the 4000 an MCP tool call has
+// always used. A connector whose arguments are structured rather than a free-form blob can lower it.
+
+import { describe, expect, it } from "vitest";
+import { describeCall } from "../../src/tools.js";
+```
+
+Then cut the whole `describe("describeCall with a caller-supplied argument budget", …)` block out of `__tests__/tools.test.ts` and paste it below.
+
+- [ ] **Step 7: Create the reserved-name fork test file**
+
+The upstream edit here is one array element inside an existing upstream test, which rule 4 does not allow us to keep. Step 8 reverts it; this file asserts the same property from our side — the better test anyway, since upstream's loop covers upstream's three names and ours covers ours.
+
+Create `packages/mcp-shared/__tests__/fork/session-methods-reserved.test.ts`:
+
+```ts
+// `describeRead` is a reserved method name -- Knitli fork test.
+//
+// The upstream `session-methods.test.ts` pins that a tool cannot claim one of the session's own
+// method names. `describeRead` is ours, so its case lives here rather than as an extra element
+// inside upstream's loop. See docs/fork-maintenance.md, rules 1 and 4.
+//
+// It matters because `installToolMethods` defines each tool's delegate on the session subclass's
+// prototype. Without the reservation, a server publishing a tool named `describe_read` would shadow
+// the hook, and every read on that binding would be described by the tool delegate instead.
+
+import { expect, it } from "vitest";
+
+import { RESERVED_METHOD_NAMES, toolMethodNames } from "../../src/session-methods.js";
+import type { ClassifiedTool } from "../../src/tools.js";
+
+function tool(name: string): ClassifiedTool {
+  return {
+    tool: { name, inputSchema: { type: "object", properties: {} } },
+    mode: "read",
+    autoApprovable: false,
+    classifiedBy: "default",
+  } as unknown as ClassifiedTool;
+}
+
+it("gives a tool no delegate that would shadow describeRead", () => {
+  expect(RESERVED_METHOD_NAMES.has("describeRead")).toBe(true);
+  expect(toolMethodNames([tool("describe_read")]).size).toBe(0);
+});
+```
+
+- [ ] **Step 8: Restore the four upstream test files and prove byte-identity**
+
+The cuts above left each upstream file with the fork's constructs removed. Rather than trust that by eye, take upstream's copy outright — nothing else in those files was ever ours:
+
+```bash
+cd /opt/coder/knitli-os
+git checkout foundation/main -- \
+  packages/mcp-shared/__tests__/schema-to-ts.test.ts \
+  packages/mcp-shared/__tests__/session.test.ts \
+  packages/mcp-shared/__tests__/tools.test.ts \
+  packages/mcp-shared/__tests__/session-methods.test.ts
+```
+
+Then prove it, one path at a time, which is what rule 4 asks for:
+
+```bash
+git diff --exit-code foundation/main -- packages/mcp-shared/__tests__/schema-to-ts.test.ts
+git diff --exit-code foundation/main -- packages/mcp-shared/__tests__/session.test.ts
+git diff --exit-code foundation/main -- packages/mcp-shared/__tests__/tools.test.ts
+git diff --exit-code foundation/main -- packages/mcp-shared/__tests__/session-methods.test.ts
+```
+
+Expected: no output and exit 0 from all four. Any output means something of ours is still in an upstream file.
+
+Then confirm nothing else under `__tests__/` diverges:
+
+```bash
+git diff --name-only foundation/main -- packages/mcp-shared/__tests__/
+```
+
+Expected: only paths beginning `packages/mcp-shared/__tests__/fork/`.
+
+- [ ] **Step 9: Run the suite and the package build**
+
+Run: `pnpm --filter @gadgets/mcp-shared test:run`
+
+Expected: PASS, with the same test count as at the end of Task 3. A *lower* count is the failure this step exists to catch: it means Step 3's glob did not take and the fork directory is being collected by nothing. Confirm the four fork files appear by name in the output.
+
+Run: `vp run -F @gadgets/mcp-shared build`
+
+Expected: PASS, which is also what confirms `tsconfig.test.json` reaches the new directory unchanged.
+
+- [ ] **Step 10: Sabotage — one per moved file, to show the move kept their teeth**
+
+A moved test that can no longer fail is a moved test that no longer tests. Re-run one sabotage per file, taken from the tables in Tasks 2 and 3, against the moved copy:
+
+```bash
+cd /opt/coder/knitli-os
+cp packages/mcp-shared/src/schema-to-ts.ts /tmp/s2ts-src.bak
+cp packages/mcp-shared/src/session.ts /tmp/session.bak
+cp packages/mcp-shared/src/tools.ts /tmp/tools.bak
+cp packages/mcp-shared/src/session-methods.ts /tmp/session-methods.bak
+
+# schema-to-ts-defs: Task 2 sabotage (d) -- comment out the two `lines.push`
+# calls inside the alias loop in generateSessionTypes.
+pnpm --filter @gadgets/mcp-shared test:run -- fork/schema-to-ts-defs           # expect RED
+cp /tmp/s2ts-src.bak packages/mcp-shared/src/schema-to-ts.ts
+
+# session-read-authorization: Task 3 sabotage (a) -- move the
+# `await this.#queue.authorizeObservation(...)` line back below the `host.call` line.
+pnpm --filter @gadgets/mcp-shared test:run -- fork/session-read-authorization  # expect RED
+cp /tmp/session.bak packages/mcp-shared/src/session.ts
+
+# tools-max-arguments: Task 3 sabotage (c) -- replace
+# `args.maxArguments ?? MAX_ARGUMENTS` with `MAX_ARGUMENTS`.
+pnpm --filter @gadgets/mcp-shared test:run -- fork/tools-max-arguments         # expect RED
+cp /tmp/tools.bak packages/mcp-shared/src/tools.ts
+
+# session-methods-reserved: remove "describeRead" from RESERVED_METHOD_NAMES.
+pnpm --filter @gadgets/mcp-shared test:run -- fork/session-methods-reserved    # expect RED
+cp /tmp/session-methods.bak packages/mcp-shared/src/session-methods.ts
+
+pnpm --filter @gadgets/mcp-shared test:run                                     # expect GREEN
+```
+
+Each break must redden its own file and leave the upstream files green. A sabotage that reddens nothing means the moved test is not running — go back to Step 3 before going any further.
+
+- [ ] **Step 11: Commit the move**
+
+```bash
+cd /opt/coder/knitli-os
+git add packages/mcp-shared/__tests__ packages/mcp-shared/vitest.config.ts
+git status --short packages/mcp-shared/__tests__
+```
+
+Check that output before committing: the fixture must appear as a rename (`R`), not as a delete plus an add.
+
+```bash
+git commit -m "$(cat <<'EOF'
+test(mcp-shared): move the fork's tests into a fork-owned tree
+
+Tasks 1 to 3 added the fork's cases to `schema-to-ts.test.ts`, `session.test.ts`,
+`tools.test.ts` and `session-methods.test.ts`, all of which upstream also has and
+actively develops. Every one of those lines would have conflicted on each sync,
+and nothing required them to be there -- rule 4 of docs/fork-maintenance.md, and
+the same mistake `observer-privacy.test.ts` was split out to fix.
+
+They now live under `packages/mcp-shared/__tests__/fork/`, one file per subject,
+with the snapshot fixture moved beside them by `git mv` so its bytes are carried
+across rather than regenerated. All four upstream test files are byte-identical
+to foundation/main again. The helpers the moved tests need are duplicated rather
+than imported, which is the trade rule 4 names: scaffolding is cheap, a permanent
+conflict is not.
+
+`vitest.config.ts` now matches `__tests__/**/*.test.ts` so the new directory is
+collected at all, as integration-tests already does for its own fork tree.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+EOF
+)"
+```
+
+- [ ] **Step 12: Register the new tree with the audit**
+
+Two places, and the audit script says to keep them in step. In `scripts/fork/upstream-merge-audit.ts`, add the prefix to `FORK_OWNED_PREFIXES`, beside the other package-scoped test trees rather than in the trailing block:
+
+```ts
+  "packages/integration-tests/fixtures/gatekeeper-test/src/fork/",
+  "packages/integration-tests/fixtures/fork/",
+  "packages/integration-tests/src/fork/",
+  "packages/mcp-shared/__tests__/fork/",
+```
+
+In `docs/fork-maintenance.md`, add the matching line to the rule 1 list, after the `packages/integration-tests/src/fork/` entry:
+
+```markdown
+- `packages/mcp-shared/__tests__/fork/` — MCP session and type-generation hooks for the OpenAPI connector.
+```
+
+This is what keeps `auditDroppedHunks` from ever treating the tree as contested: `isForkOwned` skips it, because upstream has no file there to drop.
+
+- [ ] **Step 13: Write down the three divergences**
+
+Rule 5: an unrecorded divergence is silently reverted by the next sync, or silently kept after upstream has moved on, and neither shows as a conflict. Append three entries to the `## Divergence inventory` section of `docs/fork-maintenance.md`, in the existing `Where / Introduced / What / Why / Known cost` shape. Fill each `**Introduced:**` with the actual commit hash from `git log --oneline` rather than the placeholders below.
+
+```markdown
+### `generateSessionTypes` emits named aliases for supplied `$defs`
+
+- **Where:** `generateSessionTypes()`, `renderType()` and `renderObject()` in
+  `packages/mcp-shared/src/schema-to-ts.ts`
+- **Introduced:** `d57cc3d`, guard in `31dfc39`
+- **What:** An optional `defs: Record<string, JsonSchema>` on the argument object. When present, one
+  `export type <SessionType>_<short>` alias is emitted per entry — after the header comment, before
+  the per-tool argument interfaces, in ascending name order — each rendered from depth 0 with its own
+  node budget, and a `{ $ref: "#/$defs/<short>" }` renders as that alias. The map threads through
+  `renderType` and `renderObject` as a required parameter, so the compiler names any call site that
+  was missed.
+- **Why:** The OpenAPI connector resolves its own schema closure and would otherwise inline one
+  shared component into every operation that mentions it, or lose it to `MAX_DEPTH`. Upstream's MCP
+  connectors resolve nothing and want neither.
+- **Upstream-preserving default:** omit `defs`. The alias map is then empty, no alias lines are
+  emitted, and every `$ref` renders `unknown` exactly as before. `__tests__/fork/fixtures/session-types-no-defs.txt`
+  is a byte-for-byte snapshot of the generator's output for a broad catalog with no `defs`, and it is
+  what proves this rather than asserting it.
+- **Known cost:** a `defs` map whose entries reach their own alias without passing through an object,
+  array or tuple would emit circularly-referencing aliases that TypeScript rejects, costing the
+  reader the whole file. A direct self-reference is guarded — it degrades to `unknown` — but a
+  self-reference inside a top-level union, and a mutual cycle between two entries, are not. The only
+  producer builds `defs` from an OpenAPI component closure, where neither is expressible; detection
+  belongs in that producer if one ever is.
+
+### Reads are authorized before dispatch, through an overridable `describeRead`
+
+- **Where:** `McpSessionBase.callTool()` and the new `describeRead()` in
+  `packages/mcp-shared/src/session.ts`; one entry in `RESERVED_METHOD_NAMES` in
+  `packages/mcp-shared/src/session-methods.ts`
+- **Introduced:** `bda5d32`
+- **What:** Upstream calls the tool, then calls `authorizeObservation`. We authorize first and call
+  second. The description is built by a new `protected describeRead(entry, args)`, whose default body
+  is exactly the `describeCall` the read branch used to build. `describeRead` joins
+  `RESERVED_METHOD_NAMES`, since `installToolMethods` defines tool delegates on the session
+  subclass's prototype and a tool named `describe_read` would otherwise shadow the hook. The action
+  branch keeps its own `describeCall` call, so an override cannot reach approval text.
+- **Why:** Authorizing afterwards means a refused observation has already been fetched: the record
+  says the read did not happen and the endpoint saw that it did. A denial that cannot un-send the
+  request is not a denial. The hook exists because a connector whose calls are not MCP tool calls has
+  to be able to record the method and path it actually requested.
+- **Upstream-preserving default:** not overriding `describeRead`. Both MCP connectors record
+  byte-identical text to before, which upstream's own `describeCall` blocks in `tools.test.ts` still
+  pin.
+- **Known cost:** a read that fails after authorization now leaves an authorized observation behind
+  where it previously left none. That is the right way round — the alternative hands the agent data
+  nobody permitted — but it is a change in what the record contains, and the old order could not
+  produce it.
+
+### `describeCall` takes a caller-settable argument budget
+
+- **Where:** `describeCall()` in `packages/mcp-shared/src/tools.ts`, and the `maxArguments` field on
+  `McpSessionBase` in `packages/mcp-shared/src/session.ts`
+- **Introduced:** `bda5d32`
+- **What:** An optional `maxArguments?: number` on `describeCall`'s argument object, used in place of
+  the module-private `MAX_ARGUMENTS` at the truncation site, plus a `protected readonly maxArguments`
+  on the session that is passed through on both the read and action paths.
+- **Why:** An MCP tool call's arguments are one free-form object, and 4000 characters is a reasonable
+  cap for it. A connector whose arguments are an HTTP request split into path, query, headers and
+  body wants a shorter prompt, because the approver has to read it.
+- **Upstream-preserving default:** omit it. `MAX_ARGUMENTS` stays 4000 and stays module-private, so
+  nothing outside the file can even name the default, and every MCP prompt renders as before.
+- **Known cost:** none identified. The value only shortens what a person reads; it cannot widen what
+  is disclosed.
+```
+
+- [ ] **Step 14: Run the fork audit**
+
+```bash
+cd /opt/coder/knitli-os
+git fetch foundation main
+pnpm fork:audit
+```
+
+Expected: exit 0, ending in `Clean: no dropped upstream hunks, no formatting-only divergence, no removed files restored.`
+
+Read the two lines above that. `Formatting checked against: foundation/main` without `(UNVERIFIED)` is what makes the run worth anything; if it says the upstream ref is missing, or warns that the clone is shallow, the audit exits 2 and its "no findings" means only that it could not look.
+
+Be clear about what this proves. The formatting check fires only on a file whose entire divergence from upstream normalises away to nothing, and our `src/` diffs are semantic, so the audit was already green before this task — it is not what shows rule 4 was followed. Step 8's four `git diff --exit-code` checks are. What the audit adds is that Step 12 registered the tree, so no future sync treats it as contested.
+
+- [ ] **Step 15: Type-check every package**
 
 Run: `pnpm build`
 
-Expected: PASS. This is the proof the Global Constraints ask for: `gatekeeper-mcp` (`src/mcp.ts:470`) and `gatekeeper-mcp-portal` (`src/portal.ts:617`) are the only callers outside this package's own tests, and both still compile against the widened signature because `defs` is optional. If either fails, the field was not made optional.
+Expected: PASS. This is the proof the Global Constraints ask for: `gatekeeper-mcp` (`src/mcp.ts:470`) and `gatekeeper-mcp-portal` (`src/portal.ts:617`) are the only callers of `generateSessionTypes` outside this package's own tests, and both still compile, because every one of the three hooks is optional.
 
-- [ ] **Step 2: Run every package's tests**
+- [ ] **Step 16: Run every package's tests**
 
 Run: `pnpm test`
 
-Expected: PASS. `packages/mcp-shared/__tests__/session-methods-e2e.test.ts` also calls `generateSessionTypes`, and it is the only place that can catch the generated types and the installed methods drifting apart.
+Expected: PASS. Confirm in the output that `@gadgets/gatekeeper-mcp` and `@gadgets/gatekeeper-mcp-portal` both ran, since they are the two consumers whose behaviour must be unchanged. `packages/mcp-shared/__tests__/session-methods-e2e.test.ts` also calls `generateSessionTypes`, and it is the only place that can catch the generated types and the installed methods drifting apart.
 
-- [ ] **Step 3: Lint**
+- [ ] **Step 17: Lint**
 
 Run: `pnpm lint`
 
 Expected: PASS. This runs `lint:check` (oxlint), `types:scripts` and `types:check` — what CI enforces.
 
-- [ ] **Step 4: Update the module table**
+- [ ] **Step 18: Update the module table**
 
 In `packages/mcp-shared/README.md`, replace line 24:
 
@@ -1129,26 +1582,44 @@ with:
 | `schema-to-ts` | JSON Schema to TypeScript, strict `callTool` overloads plus progressive discovery; optional named `$defs` aliases for callers that resolve their own references |
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 19: Commit the audit registration and the inventory**
 
 ```bash
 cd /opt/coder/knitli-os
-git add packages/mcp-shared/README.md
+git add scripts/fork/upstream-merge-audit.ts docs/fork-maintenance.md \
+        packages/mcp-shared/README.md
 git commit -m "$(cat <<'EOF'
-docs(mcp-shared): note $defs aliases in the module table
+docs(fork): own the mcp-shared fork tests and record three divergences
+
+Adds `packages/mcp-shared/__tests__/fork/` to FORK_OWNED_PREFIXES and to rule 1's
+list, so a sync never treats the tree as contested, and writes down the three
+intentional differences from upstream: named `$defs` aliases in
+`generateSessionTypes`, read authorization ahead of dispatch through an
+overridable `describeRead`, and a caller-settable argument budget in
+`describeCall`. Each entry names the upstream-preserving default that keeps both
+MCP connectors behaving exactly as they did.
+
+Rule 5 exists because an unrecorded divergence is reverted silently by the next
+sync, or kept silently after upstream has moved on, and neither shows up as a
+conflict.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 EOF
 )"
 ```
 
-- [ ] **Step 6: Open the PR**
+- [ ] **Step 20: Open the PR**
 
-Include both sabotage tables verbatim — Task 2 Step 6 and Task 3 Step 6 — plus the Task 1 snapshot sabotage (`ping` renamed to `pong` reddened the snapshot test, restoring it went green). Twelve breaks in all. "Tests pass" is not evidence; which sabotage reddened which test is.
+Include all three sabotage tables verbatim — Task 2 Step 6, Task 3 Step 6, and Task 4 Step 10 — plus the Task 1 snapshot sabotage (`ping` renamed to `pong` reddened the snapshot test, restoring it went green). Sixteen breaks in all. "Tests pass" is not evidence; which sabotage reddened which test is.
 
-State that `pnpm build` covers `gatekeeper-mcp` and `gatekeeper-mcp-portal`, that the committed snapshot is what proves their generated output unchanged, and that the existing `describeCall` blocks in `tools.test.ts` are what prove their approval and observation text unchanged.
+State four things a reviewer would otherwise have to derive:
 
-Group the commits so a reviewer can read the generator change apart from the session change: they share a branch but nothing else.
+- `pnpm build` and `pnpm test` cover `gatekeeper-mcp` and `gatekeeper-mcp-portal`, the only two consumers.
+- `__tests__/fork/fixtures/session-types-no-defs.txt` is what proves their generated output unchanged, and upstream's own `describeCall` blocks in `tools.test.ts` are what prove their approval and observation text unchanged.
+- Every fork test now lives under `packages/mcp-shared/__tests__/fork/`, and all four upstream test files are byte-identical to `foundation/main` — paste the four `git diff --exit-code` invocations from Step 8 and their empty output.
+- The three divergences are recorded in `docs/fork-maintenance.md`, each with the default that keeps upstream's behaviour.
+
+Group the commits so a reviewer can read the generator change, the session change, and the fork-hygiene move apart from each other. They share a branch and nothing else.
 
 Task 5 needs this merged to `main` on `https://github.com/knitli/knitli-os.git`, so land the PR before starting it.
 

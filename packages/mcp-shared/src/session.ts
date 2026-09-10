@@ -113,10 +113,11 @@ export class McpSessionBase extends RpcTarget {
    * The longest rendering of a tool call's arguments reproduced in an approval prompt, passed
    * through to `describeCall`'s own `maxArguments`. `undefined` keeps `describeCall`'s default.
    *
-   * A subclass overrides it to lengthen the prompt for arguments that are structured rather than a
-   * free-form blob -- an HTTP request split into path, query, headers and body -- so the approver
-   * reads the whole thing rather than a truncated fragment. It cannot reword the prompt: the
-   * action-branch text below is not overridable, only this one number is.
+   * A subclass overrides it to raise or lower that budget for arguments that are structured rather
+   * than a free-form blob -- an HTTP request split into path, query, headers and body -- so the
+   * approver reads the whole thing rather than a truncated fragment, or so a bulky blob does not
+   * fill the prompt. It cannot reword the prompt: the action-branch text below is not overridable,
+   * only this one number is.
    */
   protected readonly maxArguments: number | undefined = undefined;
 
@@ -205,8 +206,11 @@ export class McpSessionBase extends RpcTarget {
    * override cannot reword what a person reads when approving a write.
    *
    * `protected` is a compile-time marker, not a runtime one, so this is an ordinary method on an
-   * `RpcTarget`. That is harmless here: it takes a tool the caller already holds and returns text
-   * built from it, reaching no credential, no host method and no stored state.
+   * `RpcTarget`, reachable over RPC even from a bare `@validateRpc()` subclass: the validator
+   * transform skips protected members, but the runtime does not hide them. That is harmless here --
+   * it takes a tool the caller already holds and returns text built from it, reaching no credential,
+   * no host method and no stored state -- and it is why an override must stay just as pure: no
+   * queue, no host call, no state.
    */
   protected describeRead(
     entry: ClassifiedTool, args: Record<string, unknown>,
@@ -218,6 +222,7 @@ export class McpSessionBase extends RpcTarget {
       toolArgs: args,
       mode: entry.mode,
       classifiedBy: entry.classifiedBy,
+      maxArguments: this.maxArguments,
     });
   }
 

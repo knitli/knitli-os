@@ -230,8 +230,9 @@ export function describeCall(args: {
    * truncation notice. Defaults to `MAX_ARGUMENTS`, which is what an MCP tool call has always used.
    *
    * A caller whose arguments are structured rather than a free-form blob -- an HTTP request split
-   * into path, query, headers and body -- can lower it so the approver reads a prompt rather than
-   * scrolls one. Raising it past what a person will read buys nothing.
+   * into path, query, headers and body -- can raise or lower it: lower so the approver reads a
+   * prompt rather than scrolls one, raise so a payload that would otherwise truncate reaches the
+   * approver whole. Raising it past what a person will actually read buys nothing.
    */
   maxArguments?: number;
 }): { title: string; description: string } {

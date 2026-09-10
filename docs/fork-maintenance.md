@@ -348,23 +348,28 @@ Intentional, reviewed differences from upstream. Keep this current.
   `describeCall()` text the read branch always built, so a subclass that does not override it sees
   identical approval/observation records to before the reordering — proven by
   `packages/mcp-shared/__tests__/fork/session-read-authorization.test.ts`.
+- **Scope:** `listTools()`'s three branches — reading the full catalog via `host.tools()`, a single
+  tool via `host.findTool()`, or a search via `host.searchTools()` — still authorize after the host
+  call returns; only `callTool`'s read branch moved to authorize before dispatch, by design.
 
 ### Caller-settable argument budget in `describeCall`/`maxArguments`
 
 - **Where:** `describeCall()` in `packages/mcp-shared/src/tools.ts`, and the
   `protected readonly maxArguments` field on `McpSessionBase` in `packages/mcp-shared/src/session.ts`
-- **Introduced:** `bda5d32`, `ff09d2a`
+- **Introduced:** `bda5d32`, `ff09d2a`, `d8a2f3b`
 - **What:** `describeCall()` takes an optional `maxArguments`, capping how much of the rendered
   arguments JSON reaches the approval prompt before truncation; it defaults to the module-private
   `MAX_ARGUMENTS` (4000), which is what an MCP tool call has always used. `McpSessionBase` exposes the
   same budget as an overridable `protected readonly maxArguments: number | undefined = undefined`
-  field, passed through on the action branch's `describeCall` call, so a subclass can raise or lower
-  it. `maxArguments` is reserved in `RESERVED_METHOD_NAMES` for the same reason `describeRead` is: it
-  is now a named instance field, so a tool named `max_arguments` would otherwise get an unreachable
-  generated delegate shadowing it.
+  field, passed through on both the action branch's `describeCall` call and the default
+  `describeRead()` body's, so a subclass can raise or lower it for either branch. `maxArguments` is
+  reserved in `RESERVED_METHOD_NAMES` for the same reason `describeRead` is: it is now a named
+  instance field, so a tool named `max_arguments` would otherwise get an unreachable generated
+  delegate shadowing it.
 - **Why:** A connector whose arguments are structured rather than a free-form blob — an HTTP request
-  split into path, query, headers and body — can lower the cap so the approver reads a prompt rather
-  than scrolls one.
+  split into path, query, headers and body — can raise or lower the cap: lower so the approver reads a
+  prompt rather than scrolls one, raise so a payload that would otherwise truncate reaches the
+  approver whole.
 - **Known cost:** a subclass raising the cap past what a person will actually read buys nothing but is
   not prevented.
 - **Upstream-preserving default:** `describeCall`'s `maxArguments` is optional and `McpSessionBase`'s

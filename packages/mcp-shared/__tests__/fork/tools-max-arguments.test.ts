@@ -86,3 +86,46 @@ it("lets a subclass raise or lower the approval-prompt argument cap", async () =
   await baseSession.callTool(entry.tool.name, longArgs);
   expect(base[0].description).not.toContain("... (truncated)");
 });
+
+it("carries a subclass's raised argument cap into a read's authorized observation too", async () => {
+  // `describeRead`'s default body used to call `describeCall` without `maxArguments`, so a subclass
+  // that only raised the cap got it on actions but not reads -- a read-only tool's approval text
+  // stayed capped at 4000 regardless of what the subclass set. This pins the pass-through onto the
+  // read branch specifically.
+  const entry = classifyTool({
+    name: "jira_search_issues",
+    annotations: { readOnlyHint: true },
+  }, "byo");
+  const longArgs = { query: "x".repeat(6000) };
+  const host = {
+    serverName: "Jira",
+    endpoint: "https://mcp.example.com",
+    scope: { serverId: "jira" },
+    findTool: async () => entry,
+    call: async (fn: (client: never) => Promise<unknown>) => fn({
+      callTool: async () => ({ content: [] }),
+    } as never),
+  } as unknown as McpSessionHost;
+  // The tail the renderer appends in place of what it dropped -- see `describeCall`'s own budget
+  // test above.
+  const TRUNCATION = "\n... (truncated)";
+  const jsonBlock = (description: string) =>
+    description.split("```json\n")[1].split("\n```")[0];
+
+  class Raised extends McpSessionBase {
+    protected override readonly maxArguments = 5000;
+  }
+  const raised: { description: string }[] = [];
+  const raisedSession = new Raised(host, {
+    authorizeObservation: (description: { description: string }) => { raised.push(description); },
+  } as never);
+  await raisedSession.callTool(entry.tool.name, longArgs);
+  expect(jsonBlock(raised[0].description)).toHaveLength(5000 + TRUNCATION.length);
+
+  const base: { description: string }[] = [];
+  const baseSession = new McpSessionBase(host, {
+    authorizeObservation: (description: { description: string }) => { base.push(description); },
+  } as never);
+  await baseSession.callTool(entry.tool.name, longArgs);
+  expect(jsonBlock(base[0].description)).toHaveLength(4000 + TRUNCATION.length);
+});

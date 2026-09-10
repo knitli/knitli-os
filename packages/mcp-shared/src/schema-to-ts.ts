@@ -275,6 +275,38 @@ function argumentStyle(schema: JsonSchema | undefined): ArgumentStyle {
   return extra === true || isPlainObject(extra) ? "freeform" : "none";
 }
 
+// The bound on chained root `$ref`s a tool's own `inputSchema` may take before resolution gives up.
+// Small on purpose: a real catalog nests through at most a handful of shared shapes, and a chain in a
+// caller-supplied `defs` map is not this generator's to trust indefinitely -- a cycle in it must
+// terminate here rather than loop.
+const MAX_ROOT_REF_HOPS = 8;
+
+// Resolves a *root* `$ref` on a tool's `inputSchema` -- the whole schema, not a property inside it --
+// against `defs`, following a chain of such refs. Neither `argumentStyle` nor `renderObject` resolves
+// a `$ref` itself, so a tool whose `inputSchema` is exactly `{ $ref: "#/$defs/CreateArgs" }` would
+// otherwise be classified as taking no arguments at all, however many required properties the
+// referenced def declares.
+//
+// A ref this can't follow -- the target is missing, its key is not `DEFS_KEY_PATTERN`, or the chain
+// runs past `MAX_ROOT_REF_HOPS` -- is left exactly as it was: the original schema comes back and the
+// caller falls back to today's behaviour, same as a caller that never passed `defs` at all.
+function resolveRootDefRef(
+  schema: JsonSchema | undefined, defs: Record<string, JsonSchema> | undefined,
+): JsonSchema | undefined {
+  let current = schema;
+  for (let hop = 0; hop < MAX_ROOT_REF_HOPS; hop++) {
+    const ref = current?.$ref;
+    if (typeof ref !== "string" || !ref.startsWith(DEFS_REF_PREFIX)) return current;
+    const short = ref.slice(DEFS_REF_PREFIX.length);
+    const target = defs && DEFS_KEY_PATTERN.test(short) && Object.hasOwn(defs, short)
+      ? defs[short]
+      : undefined;
+    if (!target) return schema;
+    current = target;
+  }
+  return schema;
+}
+
 // The interface name carrying each typed tool's arguments, keyed by wire name.
 //
 // `pascalCase` is lossy: `list_issues` and `list-issues` both reduce to `ListIssues`, so two tools
@@ -284,10 +316,12 @@ function argumentStyle(schema: JsonSchema | undefined): ArgumentStyle {
 //
 // Ordered by wire name, not by catalog order: `tools/list` is unordered, so indexing by position
 // would let the same two tools swap interfaces between one regeneration and the next.
-function argsInterfaceNames(typeName: string, tools: ClassifiedTool[]): Map<string, string> {
+function argsInterfaceNames(
+  typeName: string, tools: ClassifiedTool[], defs: Record<string, JsonSchema> | undefined,
+): Map<string, string> {
   const claims = new Map<string, string[]>();
   for (const { tool } of tools) {
-    if (argumentStyle(tool.inputSchema) !== "typed") continue;
+    if (argumentStyle(resolveRootDefRef(tool.inputSchema, defs)) !== "typed") continue;
     const base = `${typeName}_${pascalCase(tool.name)}Args`;
     const existing = claims.get(base);
     if (existing) existing.push(tool.name);
@@ -312,12 +346,25 @@ function argsInterfaceNames(typeName: string, tools: ClassifiedTool[]): Map<stri
 // Sorted by short name, for the same reason `argsInterfaceNames` is ordered by wire name: this file
 // is regenerated when a catalog revision changes and is cached against it, so what it contains must
 // depend on the names alone and not on the order the caller happened to walk its schemas in.
+//
+// `${typeName}_${short}` never collides between two defs -- `defs` keys are unique by construction --
+// but it can collide with an args interface name from `argsInterfaceNames`: a def named `SearchArgs`
+// beside a tool named `search` both want
+// `${typeName}_SearchArgs`, and TypeScript merges a `type` and an `interface` sharing one name into a
+// hard error (TS2300) that fails the whole generated file. `takenNames` is that reserved set, so a
+// colliding alias is pushed to a distinct name instead -- repeating the suffix until it clears both
+// the args interfaces and every alias already claimed in this pass.
 function defAliasNames(
-  typeName: string, defs: Record<string, JsonSchema> | undefined,
+  typeName: string, defs: Record<string, JsonSchema> | undefined, takenNames: ReadonlySet<string>,
 ): Map<string, string> {
   const names = new Map<string, string>();
+  const taken = new Set(takenNames);
   for (const short of Object.keys(defs ?? {}).toSorted()) {
-    if (DEFS_KEY_PATTERN.test(short)) names.set(short, `${typeName}_${short}`);
+    if (!DEFS_KEY_PATTERN.test(short)) continue;
+    let alias = `${typeName}_${short}`;
+    while (taken.has(alias)) alias += "_Def";
+    names.set(short, alias);
+    taken.add(alias);
   }
   return names;
 }
@@ -377,8 +424,12 @@ export function generateSessionTypes(args: {
   lines.push("// the grant named its tools explicitly.");
   lines.push("");
 
+  // Computed before the aliases below, so `defAliasNames` knows which interface names are already
+  // claimed and can steer clear of them.
+  const argsNames = argsInterfaceNames(typeName, args.tools, args.defs);
+
   // Named schemas, emitted once each, ahead of the interfaces that reference them.
-  const aliases = defAliasNames(typeName, args.defs);
+  const aliases = defAliasNames(typeName, args.defs, new Set(argsNames.values()));
   for (const [short, aliasName] of aliases) {
     // Depth 0 and a fresh budget per alias: that reset is what naming a schema buys.
     const rendered = renderType(
@@ -394,14 +445,14 @@ export function generateSessionTypes(args: {
   }
 
   // Per-tool argument interfaces, so agents can name and compose them.
-  const argsNames = argsInterfaceNames(typeName, args.tools);
   for (const { tool } of args.tools) {
-    if (argumentStyle(tool.inputSchema) !== "typed") continue;
+    const resolvedSchema = resolveRootDefRef(tool.inputSchema, args.defs);
+    if (argumentStyle(resolvedSchema) !== "typed") continue;
     const argsName = argsNames.get(tool.name)!;
     lines.push(docComment(tool.description ?? tool.title, "").trimEnd());
     // Per tool, so one baroque schema degrades itself and not the rest of the catalog.
     const rendered = renderObject(
-      tool.inputSchema!, "", 0, { remaining: MAX_RENDER_NODES }, aliases);
+      resolvedSchema!, "", 0, { remaining: MAX_RENDER_NODES }, aliases);
     lines.push(`export interface ${argsName} ${rendered}`);
     lines.push("");
   }
@@ -445,7 +496,7 @@ export function generateSessionTypes(args: {
     const method = wireToMethod.get(entry.tool.name);
     if (!method) continue;
     lines.push(docComment(toolDoc(entry, args.tools), "  ").trimEnd());
-    switch (argumentStyle(entry.tool.inputSchema)) {
+    switch (argumentStyle(resolveRootDefRef(entry.tool.inputSchema, args.defs))) {
       case "none":
         lines.push(`  ${method}(): Promise<McpCallResult>;`);
         break;
@@ -466,7 +517,7 @@ export function generateSessionTypes(args: {
   lines.push("   * cannot have a named method.");
   lines.push("   */");
   for (const { tool } of args.tools) {
-    switch (argumentStyle(tool.inputSchema)) {
+    switch (argumentStyle(resolveRootDefRef(tool.inputSchema, args.defs))) {
       case "none":
         lines.push(`  callTool(name: ${quote(tool.name)}, args?: Record<string, never>): Promise<McpCallResult>;`);
         break;

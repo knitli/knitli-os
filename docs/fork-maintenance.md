@@ -324,6 +324,14 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **Known cost:** an invalid-identifier `defs` key is silently dropped rather than surfaced, and a
   self-referencing entry silently degrades to `unknown` rather than failing generation — both
   documented in the fork test rather than in the generated output.
+- **Root `$ref` resolution:** a tool's `inputSchema` that is itself `{ $ref: "#/$defs/<short>" }` (not
+  a `$ref` nested inside a property) is resolved against `defs` — following a bounded chain of such
+  refs — before the tool is classified or its args interface rendered, so it is no longer read as
+  declaring no arguments at all.
+- **Alias/args-interface disambiguation:** a def whose alias name would collide with a tool's
+  generated args interface name (e.g. a def `SearchArgs` beside a tool `search`) is renamed to a
+  distinct identifier, since TypeScript fails the whole file (TS2300) when a `type` and an `interface`
+  share a name; `$ref`s into the renamed def still resolve to it.
 - **Upstream-preserving default:** `defs` is optional and defaults to absent. Callers that do not pass
   it get byte-identical output to before the change — proven by
   `packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts`'s

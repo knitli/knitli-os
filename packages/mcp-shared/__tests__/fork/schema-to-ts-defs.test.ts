@@ -269,4 +269,51 @@ describe("generateSessionTypes with named schemas", { timeout: 15_000 }, () => {
     expect(output).toContain(`next?: ${TYPE_NAME}_node;`);
     expectTypeScriptToCompile(output);
   });
+
+  it("resolves a tool's root-level $ref against defs instead of treating it as no arguments", () => {
+    // `inputSchema` here is not an object schema that happens to have a `$ref` property -- the whole
+    // schema IS the `$ref`. Neither `argumentStyle` nor `renderObject` looks inside a `$ref` on its
+    // own, so without resolving this first, `create_thing` would be classified as taking no
+    // arguments at all, even though the referenced def has a required property.
+    const output = generateWithDefs([tool({
+      name: "create_thing",
+      inputSchema: { $ref: "#/$defs/CreateArgs" },
+    }, "action")], {
+      CreateArgs: {
+        type: "object",
+        properties: { title: { type: "string" } },
+        required: ["title"],
+      },
+    });
+
+    const argsInterface = `${TYPE_NAME}_CreateThingArgs`;
+    expect(output).toContain(`export interface ${argsInterface} {`);
+    expect(output).toContain("title: string;");
+    expect(output).toContain(`createThing(args: ${argsInterface}): Promise<McpCallResult>;`);
+    expectTypeScriptToCompile(output);
+  });
+
+  it("disambiguates a def alias that collides with a generated args interface name", () => {
+    // The tool `search` claims `${TYPE_NAME}_SearchArgs` as its own args interface. A def also named
+    // `SearchArgs` wants the same identifier for its alias -- and TypeScript merges a same-named
+    // `type` and `interface` into a hard error (TS2300) that fails the whole generated file.
+    const output = generateWithDefs([tool({
+      name: "search",
+      inputSchema: {
+        type: "object",
+        properties: { q: { type: "string" }, extra: { $ref: "#/$defs/SearchArgs" } },
+        required: ["q"],
+      },
+    })], {
+      SearchArgs: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+    });
+
+    const argsInterface = `${TYPE_NAME}_SearchArgs`;
+    const disambiguatedAlias = `${TYPE_NAME}_SearchArgs_Def`;
+    expect(output).toContain(`export interface ${argsInterface} {`);
+    expect(output).toContain(`export type ${disambiguatedAlias} = {`);
+    // The `$ref` inside `search`'s own args must still resolve to the (renamed) alias, not `unknown`.
+    expect(output).toContain(`extra?: ${disambiguatedAlias};`);
+    expectTypeScriptToCompile(output);
+  });
 });

@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Teach `generateSessionTypes()` in `packages/mcp-shared/src/schema-to-ts.ts` to accept an optional map of named JSON schemas and emit one exported TypeScript alias per entry, so a `$ref` into that map renders as the alias instead of `unknown`, then move the `knitli-site` submodule pin onto it.
+**Goal:** Make three additive changes in `packages/mcp-shared` that a non-MCP connector needs — named type aliases for supplied `$defs`, read authorization that happens before the call rather than after, and a caller-settable argument budget in the approval prompt — then move the `knitli-site` submodule pin onto them.
 
-**Architecture:** One additive optional field, `defs`, on the existing `generateSessionTypes({...})` argument object. It is reduced once to a `short name → alias name` map, that map is threaded as a required parameter through `renderType` and `renderObject` (so the compiler proves no call site was missed), and each entry's body is rendered from depth 0 with its own node budget. With the field absent the map is empty, no alias lines are emitted, and every `$ref` still renders `unknown` — byte-identical output for the two MCP connectors, which never pass it.
+**Architecture:** Three hooks, each inert unless a caller reaches for it. `generateSessionTypes` gains an optional `defs` field, reduced once to a `short name → alias name` map that is threaded as a required parameter through `renderType` and `renderObject` (so the compiler proves no call site was missed), with each entry's body rendered from depth 0 and its own node budget. `McpSessionBase.callTool` authorizes a read before making it, through a new overridable `describeRead`, so a subclass can record what it actually did while the MCP connectors' records stay byte-identical. `describeCall` takes an optional `maxArguments`. With none of the three supplied, output and behaviour are what they are today.
 
 **Tech Stack:** TypeScript 7 (tsgo) for type-checking, TypeScript 6.0.3 (the `typescript6` alias) for the tests that compile generated output, Vitest 4.1.10 in Node, pnpm workspaces, Vite+ (`vp`) task runner, oxlint.
 
-**Spec:** `/opt/coder/knitli-site/apps/os/docs/superpowers/specs/2026-09-10-openapi-native-connector-design.md` — sections 8 (this change), 11 (the "Generator" test bullet), and 13 (plan 1) bind this plan. Read the whole spec once before starting.
+**Spec:** `/opt/coder/knitli-site/apps/os/docs/superpowers/specs/2026-09-10-openapi-native-connector-design.md` — sections 8 (Task 2), 9 as revised after this plan's first draft (Task 3), 11 (the "Generator" test bullet), and 13 (plan 1) bind this plan. Read the whole spec once before starting.
 
 ## Global Constraints
 
@@ -19,7 +19,7 @@
   - Resolvable pointer form: `#/$defs/<short>`
   - Alias name: `` `${sessionTypeName(serverId, discriminator)}_${short}` `` — the session type name, one underscore, the short name verbatim.
 - **Additive.** With `defs` absent, the output is byte-identical to today. `gatekeeper-mcp` (`src/mcp.ts:470`) and `gatekeeper-mcp-portal` (`src/portal.ts:617`) call `generateSessionTypes` without it and must compile and behave identically.
-- **Scope guard.** Nothing beyond this change, its tests, and the pin that delivers it (Task 4). No OpenAPI-specific code enters this fork. No refactor of `schema-to-ts.ts` beyond what the hook needs. `src/session.ts`, `src/facet.ts` and `src/action-store.ts` are not touched.
+- **Scope guard.** Nothing beyond these three changes, their tests, and the pin that delivers them (Task 5). No OpenAPI-specific code enters this fork. No refactor of `schema-to-ts.ts` beyond what the hook needs, and none of `session.ts` beyond the read branch of `callTool` plus the new `describeRead`. **`src/facet.ts` and `src/action-store.ts` are not touched.**
 - Doc-comment every exported member added (repo rule, `CLAUDE.md`).
 - Every new test must be shown red before the change and green after. Prefer mutating a fixture; when source must be broken, restore it in the same command. Record which sabotage reddened which tests in the PR.
 - Commit messages are conventional (`feat(mcp-shared): ...`) and end with the line:
@@ -29,20 +29,25 @@
 
 1. **Pure alias cycles are not guarded.** A `defs` map in which a schema reaches its own alias without passing through an object, array or tuple — `{ a: { $ref: "#/$defs/b" }, b: { $ref: "#/$defs/a" } }` — emits `export type X_a = X_b; export type X_b = X_a;`, which TypeScript rejects (TS2456), costing the reader the whole file rather than one type. This plan does not guard it: a correct guard is a graph walk over unguarded ref positions that the spec does not ask for, and the only producer (the adapter in spec §7) builds `defs` from an OpenAPI component closure, where a pure-alias cycle is not expressible. Recursion *through a property* (`{ child: { $ref: "#/$defs/self" } }`) is legal TypeScript, is the whole point of naming schemas, and is exercised by Task 2. If a producer that can emit a pure cycle is ever added, the check belongs in that producer, not here.
 2. **The plan filename says `and-invoke`; there is no invoke work.** Spec §9 removed it — the connector overrides `McpFacetBase.call()` the way `__tests__/facet.test.ts:47-66` does, so nothing in `session.ts`, `facet.ts` or `action-store.ts` changes. The path is kept as instructed; the plan contains only the generator change.
-3. **Task 4 leaves this repository.** Spec §13 makes "Submodule bumped in knitli-site" part of plan 1, so it is here as the last task. It is the only task touching `/opt/coder/knitli-site`, and it changes one gitlink and nothing else. Drop it if the pin is being managed elsewhere; the first three tasks stand on their own.
+3. **Task 5 leaves this repository.** Spec §13 makes "Submodule bumped in knitli-site" part of plan 1, so it is here as the last task. It is the only task touching `/opt/coder/knitli-site`, and it changes one gitlink and nothing else. Drop it if the pin is being managed elsewhere; the first four tasks stand on their own.
+4. **Task 3 records an observation for a read that then fails.** Authorizing before the call is the point of the change, so a read whose HTTP or transport step subsequently errors now leaves an authorized observation behind where it previously left none. That is the correct trade — the alternative permits data to reach the agent unauthorized — but it is a visible change in what the record contains, and it is not something the old order could produce.
 
 ---
 
 ## File Structure
 
-Four existing files change. Only the first two carry logic.
+Eight existing files change. Only the first four carry logic. Every test file is extended, never replaced or paralleled.
 
 | File | Responsibility | Change | Task |
 | --- | --- | --- | --- |
 | `packages/mcp-shared/src/schema-to-ts.ts` | Renders one server's `.d.ts` from its tool catalog | Add the `defs` field, the alias-name map, the alias emission block, and the `$ref` hook; thread the map through `renderType` and `renderObject` | 2 |
-| `packages/mcp-shared/__tests__/schema-to-ts.test.ts` | The only gate on generated output being valid TypeScript | Add the baseline snapshot test and the alias tests. **Extend this file; do not create a parallel one.** | 1, 2 |
-| `packages/mcp-shared/README.md` | What each module of this package is for | One line of the module table | 3 |
-| `/opt/coder/knitli-site/apps/os/cloudflare-os` | The gitlink pinning this fork into the site repo | Move the pin to the merged commit | 4 |
+| `packages/mcp-shared/src/session.ts` | The Gadget-facing session; every tool call a Gadget can make arrives here | Authorize a read before calling it, through a new overridable `describeRead`. The action branch is untouched. | 3 |
+| `packages/mcp-shared/src/tools.ts` | The trust boundary, and the Markdown an approver reads | One optional `maxArguments` on `describeCall`, defaulting to today's constant | 3 |
+| `packages/mcp-shared/__tests__/schema-to-ts.test.ts` | The only gate on generated output being valid TypeScript | Add the baseline snapshot test and the alias tests | 1, 2 |
+| `packages/mcp-shared/__tests__/session.test.ts` | What the session does with a host and a queue | Add the refused-read and `describeRead` override tests | 3 |
+| `packages/mcp-shared/__tests__/tools.test.ts` | What the approval prompt renders from untrusted text | Add the two argument-budget tests | 3 |
+| `packages/mcp-shared/README.md` | What each module of this package is for | One line of the module table | 4 |
+| `/opt/coder/knitli-site/apps/os/cloudflare-os` | The gitlink pinning this fork into the site repo | Move the pin to the merged commit | 5 |
 
 One file is created:
 
@@ -684,16 +689,413 @@ EOF
 
 ---
 
-## Task 3: Prove the workspace is unaffected, and say so in the module table
+## Task 3: Authorize a read before making it, and let a caller bound the argument text
 
-The change is only worth calling additive if the two consumers are shown to compile, and `packages/mcp-shared/README.md` is where a reader learns what each module does.
+Two changes in one task: they are the same connector's needs, they land in one commit, and neither is separately reviewable — the session change is what makes an overridable read description worth having, and the argument budget exists because a non-MCP connector's arguments are structured rather than free-form.
+
+Independent of Tasks 1 and 2. It touches neither `schema-to-ts.ts` nor its test, so it may be worked in either order; it is placed third only so the commit history reads generator-then-session.
+
+**Files:**
+- Modify: `packages/mcp-shared/src/session.ts` (the import at 8-9, a new method before `callTool`, and the `described` / read branch at 196-210)
+- Modify: `packages/mcp-shared/src/tools.ts` (`describeCall`'s argument type at 221-228, and the truncation site at 238-240)
+- Test: `packages/mcp-shared/__tests__/session.test.ts` (modify — two tests)
+- Test: `packages/mcp-shared/__tests__/tools.test.ts` (modify — one `describe` block of two tests)
+
+**Interfaces:**
+- Consumes: nothing from Tasks 1 or 2.
+- Produces, for the connector plan that depends on this one:
+  - `protected describeRead(entry: ClassifiedTool, args: Record<string, unknown>): ObservationDescription` on `McpSessionBase` — called once per read, before `host.call`, its result passed straight to `authorizeObservation`. The default body is exactly the `describeCall` the read branch used to build.
+  - `describeCall(args: { serverName; endpoint; tool; toolArgs; mode; classifiedBy; maxArguments?: number })`, where `maxArguments` defaults to the existing `MAX_ARGUMENTS` of 4000.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `__tests__/session.test.ts`, widen the imports. Replace:
+
+```ts
+import { McpSessionBase, type McpSessionHost, type StoredAction } from "../src/session.js";
+import { MAX_TOOL_NAME_CHARS } from "../src/client.js";
+import { classifyTool } from "../src/tools.js";
+```
+
+with:
+
+```ts
+import type { ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+
+import { McpSessionBase, type McpSessionHost, type StoredAction } from "../src/session.js";
+import { MAX_TOOL_NAME_CHARS } from "../src/client.js";
+import { classifyTool, type ClassifiedTool } from "../src/tools.js";
+```
+
+Append these two tests to the end of that file. It has no `describe` blocks; flat `it(...)` calls are its shape.
+
+```ts
+it("does not reach the endpoint when a read's observation is refused", async () => {
+  // Authorizing after the call meant a refused observation had already been fetched: the record says
+  // the read did not happen and the server saw that it did. A denial that cannot un-send the request
+  // is not a denial.
+  let calls = 0;
+  const entry = classifyTool({
+    name: "jira_search_issues",
+    annotations: { readOnlyHint: true },
+  }, "byo");
+  const host = {
+    serverName: "Jira",
+    endpoint: "https://mcp.example.com",
+    scope: { serverId: "jira" },
+    findTool: async () => entry,
+    call: async (fn: (client: never) => Promise<unknown>) => {
+      calls++;
+      return fn({ callTool: async () => ({ content: [] }) } as never);
+    },
+  } as unknown as McpSessionHost;
+  const queue = {
+    authorizeObservation: () => { throw new Error("Observation refused."); },
+  };
+  const session = new McpSessionBase(host, queue as never);
+
+  await expect(session.callTool("jira_search_issues", { query: "open" }))
+    .rejects.toThrow("Observation refused.");
+  expect(calls).toBe(0);
+});
+
+it("lets a subclass restate what a read records", async () => {
+  // A connector whose calls are not MCP tool calls has to be able to record what it actually did.
+  // Without the hook the record names a tool the user has never seen.
+  const entry = classifyTool({
+    name: "me_list_messages",
+    annotations: { readOnlyHint: true },
+  }, "byo");
+  const observations: ObservationDescription[] = [];
+  const host = {
+    serverName: "Graph",
+    endpoint: "https://graph.example.com",
+    scope: {},
+    findTool: async () => entry,
+    call: async (fn: (client: never) => Promise<unknown>) =>
+      fn({ callTool: async () => ({ content: [] }) } as never),
+  } as unknown as McpSessionHost;
+  const queue = {
+    authorizeObservation: (d: ObservationDescription) => { observations.push(d); },
+  };
+
+  class Restated extends McpSessionBase {
+    protected override describeRead(
+      readEntry: ClassifiedTool, args: Record<string, unknown>,
+    ): ObservationDescription {
+      return {
+        title: `GET /me/messages`,
+        description: `Listed messages with ${JSON.stringify(args)}, for ${readEntry.tool.name}.`,
+      };
+    }
+  }
+  const session = new Restated(host, queue as never);
+
+  await session.callTool("me_list_messages", { top: 5 });
+
+  expect(observations).toHaveLength(1);
+  expect(observations[0].title).toBe("GET /me/messages");
+  expect(observations[0].description)
+    .toBe('Listed messages with {"top":5}, for me_list_messages.');
+});
+```
+
+In `__tests__/tools.test.ts`, append this `describe` block. That file is organized into `describe` blocks, one per aspect of `describeCall`.
+
+```ts
+describe("describeCall with a caller-supplied argument budget", () => {
+  // The tail the renderer appends in place of what it dropped.
+  const TRUNCATION = "\n... (truncated)";
+
+  // The JSON between the two fences `describeCall` opens itself. The arguments below carry no
+  // backticks, so nothing else in the description can look like a fence.
+  const jsonBlock = (description: string) =>
+    description.split("```json\n")[1].split("\n```")[0];
+
+  const rendered = (maxArguments?: number) => describeCall({
+    serverName: "Acme",
+    endpoint: "https://mcp.acme.com/mcp",
+    tool: { name: "send" },
+    toolArgs: { note: "x".repeat(6000) },
+    mode: "action",
+    classifiedBy: "default",
+    maxArguments,
+  }).description;
+
+  it("truncates at the caller's budget when one is given", () => {
+    // A connector whose arguments are structured -- path, query, headers, body -- wants a shorter
+    // prompt than one whose arguments are a free-form blob.
+    const block = jsonBlock(rendered(50));
+    expect(block).toHaveLength(50 + TRUNCATION.length);
+    expect(block.endsWith(TRUNCATION)).toBe(true);
+  });
+
+  it("falls back to the built-in budget when none is given", () => {
+    const block = jsonBlock(rendered());
+    expect(block).toHaveLength(4000 + TRUNCATION.length);
+    expect(block.endsWith(TRUNCATION)).toBe(true);
+  });
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `pnpm --filter @gadgets/mcp-shared test:run -- session tools`
+
+Expected: three of the four FAIL.
+
+- "does not reach the endpoint when a read's observation is refused" fails on `expect(calls).toBe(0)` receiving 1 — the call is made first today, and the refusal arrives too late to stop it.
+- "lets a subclass restate what a read records" fails on the title, which is still `Graph: me_list_messages`. Vitest strips the `override` keyword, so the subclass method exists but nothing calls it.
+- "truncates at the caller's budget" fails with a length of `4000 + 16` instead of `50 + 16`; the extra property is ignored.
+- "falls back to the built-in budget" passes already, because it asserts the behaviour that must not change. Sabotage (d) in Step 5 is what shows it red.
+
+Type errors also appear under `vp run -F @gadgets/mcp-shared build` — `override` on a method the base does not declare, and `maxArguments` as an excess property. Both are expected; Vitest is what produces the red above, since it transpiles without checking.
+
+- [ ] **Step 3: Add the argument budget to `describeCall`**
+
+In `src/tools.ts`, replace the argument type of `describeCall`:
+
+```ts
+export function describeCall(args: {
+  serverName: string;
+  endpoint: string;
+  tool: McpTool;
+  toolArgs: Record<string, unknown>;
+  mode: "read" | "action";
+  classifiedBy: ClassificationSource;
+}): { title: string; description: string } {
+```
+
+with:
+
+```ts
+export function describeCall(args: {
+  serverName: string;
+  endpoint: string;
+  tool: McpTool;
+  toolArgs: Record<string, unknown>;
+  mode: "read" | "action";
+  classifiedBy: ClassificationSource;
+  /**
+   * Longest rendering of the arguments to reproduce before the remainder is replaced by a
+   * truncation notice. Defaults to `MAX_ARGUMENTS`, which is what an MCP tool call has always used.
+   *
+   * A caller whose arguments are structured rather than a free-form blob -- an HTTP request split
+   * into path, query, headers and body -- can lower it so the approver reads a prompt rather than
+   * scrolls one. Raising it past what a person will read buys nothing.
+   */
+  maxArguments?: number;
+}): { title: string; description: string } {
+```
+
+Then replace the truncation site:
+
+```ts
+  if (rendered.length > MAX_ARGUMENTS) {
+    rendered = `${rendered.slice(0, MAX_ARGUMENTS)}\n... (truncated)`;
+  }
+```
+
+with:
+
+```ts
+  const maxArguments = args.maxArguments ?? MAX_ARGUMENTS;
+  if (rendered.length > maxArguments) {
+    rendered = `${rendered.slice(0, maxArguments)}\n... (truncated)`;
+  }
+```
+
+`MAX_ARGUMENTS` stays a module-private constant. Nothing outside this file needs to name the default.
+
+- [ ] **Step 4: Authorize the read first, through `describeRead`**
+
+In `src/session.ts`, widen the type import at the top. Replace:
+
+```ts
+import type { ActionDescription, ActionKind, ApprovalQueue }
+  from "@gadgets/workshop-shared/gatekeeper";
+```
+
+with:
+
+```ts
+import type { ActionDescription, ActionKind, ApprovalQueue, ObservationDescription }
+  from "@gadgets/workshop-shared/gatekeeper";
+```
+
+Add the new method to `McpSessionBase` immediately after `#noSuchToolMessage` and before `callTool`:
+
+```ts
+  /**
+   * The observation recorded for one read, built before the call is made.
+   *
+   * Overridable so a connector whose calls are not MCP tool calls can record what it actually did --
+   * a method and a path, say -- rather than a wire name the person reading the record has never
+   * seen. The default is the same text `describeCall` renders for an action, which is what both MCP
+   * connectors record and what they keep.
+   *
+   * Reads only. The action branch builds its description from `describeCall` directly, so an
+   * override cannot reword what a person reads when approving a write.
+   *
+   * `protected` is a compile-time marker, not a runtime one, so this is an ordinary method on an
+   * `RpcTarget`. That is harmless here: it takes a tool the caller already holds and returns text
+   * built from it, reaching no credential, no host method and no stored state.
+   */
+  protected describeRead(
+    entry: ClassifiedTool, args: Record<string, unknown>,
+  ): ObservationDescription {
+    return describeCall({
+      serverName: this.#host.serverName,
+      endpoint: this.#host.endpoint,
+      tool: entry.tool,
+      toolArgs: args,
+      mode: entry.mode,
+      classifiedBy: entry.classifiedBy,
+    });
+  }
+```
+
+Then replace this block in `callTool`:
+
+```ts
+    const described = describeCall({
+      serverName: host.serverName,
+      endpoint: host.endpoint,
+      tool: entry.tool,
+      toolArgs,
+      mode: entry.mode,
+      classifiedBy: entry.classifiedBy,
+    });
+
+    if (entry.mode === "read") {
+      const result = await host.call(client => client.callTool(name, toolArgs));
+      // Authorize before the data is handed back, per the gatekeeper contract.
+      await this.#queue.authorizeObservation(described);
+      return toCallResult(result);
+    }
+
+    const staged = host.stageAction(name, toolArgs);
+```
+
+with:
+
+```ts
+    if (entry.mode === "read") {
+      // Authorize before the call, not after it. Authorizing afterwards meant a refused observation
+      // had already been fetched: the record says the read did not happen and the endpoint saw that
+      // it did. A read that fails after this point leaves an authorized observation behind, which is
+      // the right way round -- the alternative hands the agent data nobody permitted.
+      await this.#queue.authorizeObservation(this.describeRead(entry, toolArgs));
+      const result = await host.call(client => client.callTool(name, toolArgs));
+      return toCallResult(result);
+    }
+
+    const described = describeCall({
+      serverName: host.serverName,
+      endpoint: host.endpoint,
+      tool: entry.tool,
+      toolArgs,
+      mode: entry.mode,
+      classifiedBy: entry.classifiedBy,
+    });
+
+    const staged = host.stageAction(name, toolArgs);
+```
+
+The shared `const described` is split rather than kept: a read no longer builds a description it discards, and the action branch keeps its own `describeCall` so that overriding `describeRead` cannot reach the approval text. The duplicated argument object is the price of that separation, and it is the cheaper half of the trade.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `pnpm --filter @gadgets/mcp-shared test:run`
+
+Expected: PASS, whole package. The existing tests are the guard on what must not have moved — `tools.test.ts`'s four `describeCall` blocks still pin the prompt text, and `session.test.ts`'s pending-action test still pins the action path.
+
+Run: `vp run -F @gadgets/mcp-shared build`
+
+Expected: PASS, including `tsconfig.test.json`, which is what type-checks the `override` in the new subclass.
+
+- [ ] **Step 6: Sabotage — four narrow breaks**
+
+```bash
+cd /opt/coder/knitli-os
+cp packages/mcp-shared/src/session.ts /tmp/session.bak
+cp packages/mcp-shared/src/tools.ts /tmp/tools.bak
+
+# (a) Put the authorization back after the call: in the read branch, move the
+#     `await this.#queue.authorizeObservation(...)` line below the `host.call` line.
+pnpm --filter @gadgets/mcp-shared test:run -- session   # expect RED
+cp /tmp/session.bak packages/mcp-shared/src/session.ts
+
+# (b) Bypass the hook: in the read branch, replace
+#     `this.describeRead(entry, toolArgs)` with a direct
+#     `describeCall({ serverName: host.serverName, endpoint: host.endpoint,
+#      tool: entry.tool, toolArgs, mode: entry.mode, classifiedBy: entry.classifiedBy })`.
+pnpm --filter @gadgets/mcp-shared test:run -- session   # expect RED
+cp /tmp/session.bak packages/mcp-shared/src/session.ts
+
+# (c) Ignore the caller's budget: in describeCall, replace
+#     `args.maxArguments ?? MAX_ARGUMENTS` with `MAX_ARGUMENTS`.
+pnpm --filter @gadgets/mcp-shared test:run -- tools     # expect RED
+cp /tmp/tools.bak packages/mcp-shared/src/tools.ts
+
+# (d) Change the default: in describeCall, replace
+#     `args.maxArguments ?? MAX_ARGUMENTS` with `args.maxArguments ?? 500`.
+pnpm --filter @gadgets/mcp-shared test:run -- tools     # expect RED
+cp /tmp/tools.bak packages/mcp-shared/src/tools.ts
+pnpm --filter @gadgets/mcp-shared test:run              # expect GREEN
+```
+
+Expected results, for the PR description:
+
+| Sabotage | Tests that go red |
+| --- | --- |
+| (a) authorization moved back after the call | refused read reaches the endpoint |
+| (b) `describeRead` bypassed at the call site | subclass restates a read |
+| (c) caller's budget ignored | truncates at the caller's budget |
+| (d) default budget changed from 4000 to 500 | falls back to the built-in budget |
+
+Each break reds exactly one of the four, which is what pins each test to a distinct regression. Sabotage (a) must not red the subclass test: if it does, that test is asserting ordering rather than the override, and needs its own `call` counter removed.
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd /opt/coder/knitli-os
+git add packages/mcp-shared/src/session.ts packages/mcp-shared/src/tools.ts \
+        packages/mcp-shared/__tests__/session.test.ts \
+        packages/mcp-shared/__tests__/tools.test.ts
+git commit -m "$(cat <<'EOF'
+feat(mcp-shared): authorize a read before making it, via an overridable describeRead
+
+`McpSessionBase.callTool` authorized a read *after* fetching it, so a refused
+observation had already reached the endpoint: the record said the read did not
+happen and the server saw that it did. The authorization now precedes the call.
+
+The description is built by a new `protected describeRead`, whose default body
+is the `describeCall` the read branch used to build, so both MCP connectors
+record byte-identical text. A connector whose calls are not MCP tool calls can
+override it to record what it actually did. The action branch keeps its own
+`describeCall`, so an override cannot reword approval text.
+
+`describeCall` also takes an optional `maxArguments`, defaulting to the existing
+4000, for a caller whose arguments are structured rather than free-form.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
+## Task 4: Prove the workspace is unaffected, and say so in the module table
+
+The changes are only worth calling additive if the two consumers are shown to compile, and `packages/mcp-shared/README.md` is where a reader learns what each module does.
 
 **Files:**
 - Modify: `packages/mcp-shared/README.md:24`
 
 **Interfaces:**
-- Consumes: the committed change from Task 2.
-- Produces: a fork branch that is green under `pnpm build`, `pnpm test` and `pnpm lint`, which is the precondition for merging it and bumping the pin in Task 4.
+- Consumes: the committed changes from Tasks 2 and 3.
+- Produces: a fork branch that is green under `pnpm build`, `pnpm test` and `pnpm lint`, which is the precondition for merging it and bumping the pin in Task 5.
 
 - [ ] **Step 1: Type-check every package**
 
@@ -742,23 +1144,25 @@ EOF
 
 - [ ] **Step 6: Open the PR**
 
-Include the sabotage table from Task 2 Step 6 verbatim, plus the Task 1 snapshot sabotage (`ping` renamed to `pong` reddened the snapshot test, restoring it went green). "Tests pass" is not evidence; which sabotage reddened which test is.
+Include both sabotage tables verbatim — Task 2 Step 6 and Task 3 Step 6 — plus the Task 1 snapshot sabotage (`ping` renamed to `pong` reddened the snapshot test, restoring it went green). Twelve breaks in all. "Tests pass" is not evidence; which sabotage reddened which test is.
 
-State that `pnpm build` covers `gatekeeper-mcp` and `gatekeeper-mcp-portal`, and that the committed snapshot is what proves their output unchanged.
+State that `pnpm build` covers `gatekeeper-mcp` and `gatekeeper-mcp-portal`, that the committed snapshot is what proves their generated output unchanged, and that the existing `describeCall` blocks in `tools.test.ts` are what prove their approval and observation text unchanged.
 
-Task 4 needs this merged to `main` on `https://github.com/knitli/knitli-os.git`, so land the PR before starting it.
+Group the commits so a reviewer can read the generator change apart from the session change: they share a branch but nothing else.
+
+Task 5 needs this merged to `main` on `https://github.com/knitli/knitli-os.git`, so land the PR before starting it.
 
 ---
 
-## Task 4: Bump the submodule pin in knitli-site
+## Task 5: Bump the submodule pin in knitli-site
 
-Spec §13 makes this part of plan 1: the change is only reachable by the connector rebuild once `knitli-site` points at it. This is the one task outside `/opt/coder/knitli-os`.
+Spec §13 makes this part of plan 1: none of the three changes is reachable by the connector rebuild until `knitli-site` points at them. This is the one task outside `/opt/coder/knitli-os`.
 
 **Files:**
 - Modify: `/opt/coder/knitli-site/apps/os/cloudflare-os` (the gitlink, not the contents)
 
 **Interfaces:**
-- Consumes: the merge commit on `knitli-os` `main` produced by Task 3 Step 6.
+- Consumes: the merge commit on `knitli-os` `main` produced by Task 4 Step 6.
 - Produces: a `knitli-site` commit whose `apps/os/cloudflare-os` gitlink names that commit, which the connector plan builds against.
 
 - [ ] **Step 1: Check for a stale local submodule ignore setting**
@@ -785,7 +1189,7 @@ git -C apps/os/cloudflare-os checkout origin/main
 git -C apps/os/cloudflare-os log --oneline -1
 ```
 
-Expected: the last command prints the merge commit from Task 3 Step 6, not `4400e22`.
+Expected: the last command prints the merge commit from Task 4 Step 6, not `4400e22`.
 
 - [ ] **Step 3: Confirm the change is visible to git**
 
@@ -803,11 +1207,13 @@ Expected: `M apps/os/cloudflare-os`, and a diff reading `-Subproject commit 4400
 cd /opt/coder/knitli-site
 git add apps/os/cloudflare-os
 git commit -m "$(cat <<'EOF'
-chore(os): bump knitli-os for mcp-shared $defs aliases
+chore(os): bump knitli-os for the mcp-shared connector hooks
 
-Picks up the optional `defs` field on `generateSessionTypes`, which the OpenAPI
-connector rebuild needs to render named type aliases instead of `unknown` for
-every schema reference.
+Picks up the three additive changes the OpenAPI connector rebuild needs: the
+optional `defs` field on `generateSessionTypes`, so schema references render as
+named aliases instead of `unknown`; read authorization ahead of the call through
+an overridable `describeRead`, so the connector records the method and path it
+actually requested; and a caller-settable `maxArguments` on `describeCall`.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 EOF

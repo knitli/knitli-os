@@ -59,6 +59,7 @@ Upstream has no file there, so nothing in them can ever conflict. Today:
 - `packages/workshop-frontend/src/fork/DeferredBlueprintSetup.test.tsx` — deferred setup UI regressions.
 - `packages/workshop-frontend/src/fork/Connections.blueprint-owner.test.tsx` — owner-only blueprint setup visibility regressions.
 - `packages/integration-tests/fixtures/gatekeeper-test/src/fork/` — authenticated OpenAPI host binding.
+- `packages/mcp-shared/__tests__/fork/` — named `$defs` aliases, read-before-dispatch authorization, and the caller-settable argument budget.
 - `scripts/fork/` — fork tooling.
 - `docs/fork-maintenance.md` — this file.
 
@@ -306,6 +307,83 @@ Intentional, reviewed differences from upstream. Keep this current.
   deployment-injected runtime binding, not OAuth credentials) and to `NOT_INSTALLABLE`.
 - **Why:** Both are data-only additions to existing upstream sets — the cheapest possible shape for
   an upstream edit, and the shape to aim for elsewhere.
+
+### Named `$defs` aliases in `generateSessionTypes`
+
+- **Where:** `generateSessionTypes` in `packages/mcp-shared/src/schema-to-ts.ts`
+- **Introduced:** `d57cc3d`, `31dfc39`
+- **What:** `generateSessionTypes` takes a new optional `defs: Record<string, JsonSchema>` argument.
+  Each entry emits once as `export type <SessionType>_<name> = ...` at depth 0 with its own node
+  budget, and a `{ $ref: "#/$defs/<name>" }` anywhere in the generated types renders as that alias
+  instead of being inlined or degrading to `unknown`. A `defs` entry that resolves to exactly its own
+  alias name degrades to `unknown` rather than emitting `export type X_a = X_a;`, which is invalid
+  TypeScript (TS2456) and would fail the whole generated file over one type.
+- **Why:** A schema shape shared by many tools on one MCP server was previously re-inlined at every
+  call site in the generated `.d.ts`. Naming it once shrinks the generated file and lets a caller that
+  resolves its own references reuse the alias.
+- **Known cost:** an invalid-identifier `defs` key is silently dropped rather than surfaced, and a
+  self-referencing entry silently degrades to `unknown` rather than failing generation — both
+  documented in the fork test rather than in the generated output.
+- **Root `$ref` resolution:** a tool's `inputSchema` that is itself `{ $ref: "#/$defs/<short>" }` (not
+  a `$ref` nested inside a property) is resolved against `defs` — following a bounded chain of such
+  refs — before the tool is classified or its args interface rendered, so it is no longer read as
+  declaring no arguments at all.
+- **Alias/args-interface disambiguation:** a def whose alias name would collide with a tool's
+  generated args interface name (e.g. a def `SearchArgs` beside a tool `search`) is renamed to a
+  distinct identifier, since TypeScript fails the whole file (TS2300) when a `type` and an `interface`
+  share a name; `$ref`s into the renamed def still resolve to it.
+- **Upstream-preserving default:** `defs` is optional and defaults to absent. Callers that do not pass
+  it get byte-identical output to before the change — proven by
+  `packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts`'s
+  `generateSessionTypes without named schemas` snapshot test.
+
+### Read-before-dispatch authorization via `describeRead`
+
+- **Where:** `McpSessionBase.callTool`'s read branch in `packages/mcp-shared/src/session.ts`, plus the
+  new `protected describeRead()` hook
+- **Introduced:** `bda5d32`
+- **What:** The read branch now calls `queue.authorizeObservation()` *before* `host.call()`, not
+  after. The observation it records comes from `describeRead()`, whose default body is the same
+  `describeCall()` the read branch used to build inline, so both MCP connectors record byte-identical
+  text. `describeRead` is reserved in `RESERVED_METHOD_NAMES` so a tool named `describe_read` cannot
+  shadow the hook via `installToolMethods`.
+- **Why:** Authorizing after the call meant a refused observation had already reached the endpoint —
+  the record said the read did not happen while the server saw that it did.
+- **Known cost:** a refused read now fails before the endpoint is reached rather than after, which is
+  the intended behavior change; a subclass that overrides `describeRead` to restate what a read
+  records takes on keeping that text meaningful to an approver.
+- **Upstream-preserving default:** the default `describeRead()` body reproduces the exact
+  `describeCall()` text the read branch always built, so a subclass that does not override it sees
+  identical approval/observation records to before the reordering — proven by
+  `packages/mcp-shared/__tests__/fork/session-read-authorization.test.ts`.
+- **Scope:** `listTools()`'s three branches — reading the full catalog via `host.tools()`, a single
+  tool via `host.findTool()`, or a search via `host.searchTools()` — still authorize after the host
+  call returns; only `callTool`'s read branch moved to authorize before dispatch, by design.
+
+### Caller-settable argument budget in `describeCall`/`maxArguments`
+
+- **Where:** `describeCall()` in `packages/mcp-shared/src/tools.ts`, and the
+  `protected readonly maxArguments` field on `McpSessionBase` in `packages/mcp-shared/src/session.ts`
+- **Introduced:** `bda5d32`, `ff09d2a`, `d8a2f3b`
+- **What:** `describeCall()` takes an optional `maxArguments`, capping how much of the rendered
+  arguments JSON reaches the approval prompt before truncation; it defaults to the module-private
+  `MAX_ARGUMENTS` (4000), which is what an MCP tool call has always used. `McpSessionBase` exposes the
+  same budget as an overridable `protected readonly maxArguments: number | undefined = undefined`
+  field, passed through on both the action branch's `describeCall` call and the default
+  `describeRead()` body's, so a subclass can raise or lower it for either branch. `maxArguments` is
+  reserved in `RESERVED_METHOD_NAMES` for the same reason `describeRead` is: it is now a named
+  instance field, so a tool named `max_arguments` would otherwise get an unreachable generated
+  delegate shadowing it.
+- **Why:** A connector whose arguments are structured rather than a free-form blob — an HTTP request
+  split into path, query, headers and body — can raise or lower the cap: lower so the approver reads a
+  prompt rather than scrolls one, raise so a payload that would otherwise truncate reaches the
+  approver whole.
+- **Known cost:** a subclass raising the cap past what a person will actually read buys nothing but is
+  not prevented.
+- **Upstream-preserving default:** `describeCall`'s `maxArguments` is optional and `McpSessionBase`'s
+  field defaults to `undefined`, so `args.maxArguments ?? MAX_ARGUMENTS` reduces to the original 4000
+  cap when neither is set — proven by
+  `packages/mcp-shared/__tests__/fork/tools-max-arguments.test.ts`.
 
 ## Open questions
 

@@ -31,6 +31,19 @@ type RenderBudget = { remaining: number };
 // Longest description text copied into a JSDoc comment.
 const MAX_DOC_LENGTH = 600;
 
+// The one `$ref` form this generator resolves: a pointer into the caller's own `defs` map. Any other
+// pointer names a document the generator never sees, and a guessed type is worse than none.
+const DEFS_REF_PREFIX = "#/$defs/";
+
+// A `defs` key usable as a TypeScript identifier fragment. A key that is not one would be emitted as
+// `export type Session_bad-key = ...`, a syntax error -- and a syntax error costs the agent the whole
+// file rather than one type, the same failure `argsInterfaceNames` guards against for tool names.
+// Such an entry is dropped, and references to it render `unknown` as they did before.
+const DEFS_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// Short name to emitted alias name, for the named schemas one render may resolve.
+type DefAliases = ReadonlyMap<string, string>;
+
 function quote(value: string): string {
   return JSON.stringify(value);
 }
@@ -106,9 +119,17 @@ function unionTypes(types: string[]): string {
 // `unknown` rather than a guess, since the agent will trust a wrong type.
 function renderType(
   schema: JsonSchema | undefined, indent: string, depth: number, budget: RenderBudget,
+  aliases: DefAliases,
 ): string {
   if (!schema || depth > MAX_DEPTH || --budget.remaining < 0) return "unknown";
-  if (schema.$ref !== undefined) return "unknown";
+
+  const ref = schema.$ref;
+  if (ref !== undefined) {
+    const alias = typeof ref === "string" && ref.startsWith(DEFS_REF_PREFIX)
+      ? aliases.get(ref.slice(DEFS_REF_PREFIX.length))
+      : undefined;
+    return alias ?? "unknown";
+  }
 
   if (schema.const !== undefined) return quoteLiteral(schema.const);
 
@@ -118,19 +139,21 @@ function renderType(
 
   const alternatives = schema.anyOf ?? schema.oneOf;
   if (Array.isArray(alternatives) && alternatives.length > 0) {
-    return unionTypes(alternatives.map(member => renderType(member, indent, depth + 1, budget)));
+    return unionTypes(
+      alternatives.map(member => renderType(member, indent, depth + 1, budget, aliases)));
   }
 
   // allOf is only handled for the common "merge object shapes" case.
   if (Array.isArray(schema.allOf) && schema.allOf.length > 0) {
-    const rendered = schema.allOf.map(member => renderType(member, indent, depth + 1, budget));
+    const rendered = schema.allOf.map(
+      member => renderType(member, indent, depth + 1, budget, aliases));
     return rendered.join(" & ");
   }
 
   if (Array.isArray(schema.type)) {
     if (schema.type.length === 0) return "unknown";
-    return unionTypes(
-      schema.type.map(type => renderType({ ...schema, type }, indent, depth + 1, budget)));
+    return unionTypes(schema.type.map(
+      type => renderType({ ...schema, type }, indent, depth + 1, budget, aliases)));
   }
 
   const type = schema.type;
@@ -148,18 +171,18 @@ function renderType(
     case "array": {
       if (Array.isArray(schema.items)) {
         return `[${schema.items.map(item =>
-          renderType(item, indent, depth + 1, budget)).join(", ")}]`;
+          renderType(item, indent, depth + 1, budget, aliases)).join(", ")}]`;
       }
-      const element = renderType(schema.items, indent, depth + 1, budget);
+      const element = renderType(schema.items, indent, depth + 1, budget, aliases);
       return element.includes("|") || element.includes("&")
         ? `Array<${element}>`
         : `${element}[]`;
     }
     case "object":
-      return renderObject(schema, indent, depth, budget);
+      return renderObject(schema, indent, depth, budget, aliases);
     default:
       // No `type`, but object-ish keywords present: treat as an object.
-      if (schema.properties) return renderObject(schema, indent, depth, budget);
+      if (schema.properties) return renderObject(schema, indent, depth, budget, aliases);
       return "unknown";
   }
 }
@@ -172,7 +195,7 @@ function quoteLiteral(value: unknown): string {
 }
 
 function renderObject(
-  schema: JsonSchema, indent: string, depth: number, budget: RenderBudget,
+  schema: JsonSchema, indent: string, depth: number, budget: RenderBudget, aliases: DefAliases,
 ): string {
   const properties = isPlainObject(schema.properties)
     ? schema.properties
@@ -190,7 +213,7 @@ function renderObject(
     const propertySchema = isPlainObject(property) ? property as JsonSchema : undefined;
     const optional = required.has(name) ? "" : "?";
     const key = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : quote(name);
-    const rendered = renderType(propertySchema, inner, depth + 1, budget);
+    const rendered = renderType(propertySchema, inner, depth + 1, budget, aliases);
     propertyTypes.push(rendered);
     const description = typeof propertySchema?.description === "string"
       ? propertySchema.description
@@ -203,7 +226,8 @@ function renderObject(
     members.push(`${inner}[key: string]: unknown;`);
   } else if (isPlainObject(extra)) {
     const optional = Object.keys(properties).some(name => !required.has(name));
-    const types = [renderType(extra as JsonSchema, inner, depth + 1, budget), ...propertyTypes];
+    const types = [
+      renderType(extra as JsonSchema, inner, depth + 1, budget, aliases), ...propertyTypes];
     if (optional) types.push("undefined");
     members.push(`${inner}[key: string]: ${unionTypes(types)};`);
   }
@@ -251,6 +275,44 @@ function argumentStyle(schema: JsonSchema | undefined): ArgumentStyle {
   return extra === true || isPlainObject(extra) ? "freeform" : "none";
 }
 
+// The bound on chained root `$ref`s a tool's own `inputSchema` may take before resolution gives up.
+// Small on purpose: a real catalog nests through at most a handful of shared shapes, and a chain in a
+// caller-supplied `defs` map is not this generator's to trust indefinitely -- a cycle in it must
+// terminate here rather than loop.
+const MAX_ROOT_REF_HOPS = 8;
+
+// Resolves a *root* `$ref` on a tool's `inputSchema` -- the whole schema, not a property inside it --
+// against `defs`, following a chain of such refs. Neither `argumentStyle` nor `renderObject` resolves
+// a `$ref` itself, so a tool whose `inputSchema` is exactly `{ $ref: "#/$defs/CreateArgs" }` would
+// otherwise be classified as taking no arguments at all, however many required properties the
+// referenced def declares.
+//
+// A ref this can't follow -- the target is missing, its key is not `DEFS_KEY_PATTERN`, or the chain
+// runs past `MAX_ROOT_REF_HOPS` -- is left exactly as it was: the original schema comes back and the
+// caller falls back to today's behaviour, same as a caller that never passed `defs` at all.
+function resolveRootDefRef(
+  schema: JsonSchema | undefined, defs: Record<string, JsonSchema> | undefined,
+): JsonSchema | undefined {
+  let current = schema;
+  for (let hop = 0; hop < MAX_ROOT_REF_HOPS; hop++) {
+    const ref = current?.$ref;
+    if (typeof ref !== "string" || !ref.startsWith(DEFS_REF_PREFIX)) return current;
+    const short = ref.slice(DEFS_REF_PREFIX.length);
+    const target = defs && DEFS_KEY_PATTERN.test(short) && Object.hasOwn(defs, short)
+      ? defs[short]
+      : undefined;
+    if (!target) return schema;
+    current = target;
+  }
+  // The loop's own per-iteration check above never runs for the hop that lands on a concrete
+  // schema, since the loop condition stops the loop first once `MAX_ROOT_REF_HOPS` refs have
+  // resolved. Repeat it once here: a chain of exactly `MAX_ROOT_REF_HOPS` refs in a row still
+  // resolves; one ref more than that falls back to the original, unresolved schema, same as any
+  // other chain this function can't follow.
+  const ref = current?.$ref;
+  return typeof ref === "string" && ref.startsWith(DEFS_REF_PREFIX) ? schema : current;
+}
+
 // The interface name carrying each typed tool's arguments, keyed by wire name.
 //
 // `pascalCase` is lossy: `list_issues` and `list-issues` both reduce to `ListIssues`, so two tools
@@ -260,10 +322,12 @@ function argumentStyle(schema: JsonSchema | undefined): ArgumentStyle {
 //
 // Ordered by wire name, not by catalog order: `tools/list` is unordered, so indexing by position
 // would let the same two tools swap interfaces between one regeneration and the next.
-function argsInterfaceNames(typeName: string, tools: ClassifiedTool[]): Map<string, string> {
+function argsInterfaceNames(
+  typeName: string, tools: ClassifiedTool[], defs: Record<string, JsonSchema> | undefined,
+): Map<string, string> {
   const claims = new Map<string, string[]>();
   for (const { tool } of tools) {
-    if (argumentStyle(tool.inputSchema) !== "typed") continue;
+    if (argumentStyle(resolveRootDefRef(tool.inputSchema, defs)) !== "typed") continue;
     const base = `${typeName}_${pascalCase(tool.name)}Args`;
     const existing = claims.get(base);
     if (existing) existing.push(tool.name);
@@ -279,6 +343,34 @@ function argsInterfaceNames(typeName: string, tools: ClassifiedTool[]): Map<stri
     wireNames.toSorted().forEach((wire, index) => {
       names.set(wire, base.replace(/Args$/, `${index + 1}Args`));
     });
+  }
+  return names;
+}
+
+// The exported alias name for each named schema, keyed by the short name its `$ref`s point at.
+//
+// Sorted by short name, for the same reason `argsInterfaceNames` is ordered by wire name: this file
+// is regenerated when a catalog revision changes and is cached against it, so what it contains must
+// depend on the names alone and not on the order the caller happened to walk its schemas in.
+//
+// `${typeName}_${short}` never collides between two defs -- `defs` keys are unique by construction --
+// but it can collide with an args interface name from `argsInterfaceNames`: a def named `SearchArgs`
+// beside a tool named `search` both want
+// `${typeName}_SearchArgs`, and TypeScript merges a `type` and an `interface` sharing one name into a
+// hard error (TS2300) that fails the whole generated file. `takenNames` is that reserved set, so a
+// colliding alias is pushed to a distinct name instead -- repeating the suffix until it clears both
+// the args interfaces and every alias already claimed in this pass.
+function defAliasNames(
+  typeName: string, defs: Record<string, JsonSchema> | undefined, takenNames: ReadonlySet<string>,
+): Map<string, string> {
+  const names = new Map<string, string>();
+  const taken = new Set(takenNames);
+  for (const short of Object.keys(defs ?? {}).toSorted()) {
+    if (!DEFS_KEY_PATTERN.test(short)) continue;
+    let alias = `${typeName}_${short}`;
+    while (taken.has(alias)) alias += "_Def";
+    names.set(short, alias);
+    taken.add(alias);
   }
   return names;
 }
@@ -303,6 +395,23 @@ export function generateSessionTypes(args: {
   discriminator: string;
   trust: ServerTrust;
   tools: ClassifiedTool[];
+  /**
+   * Named schemas shared across this catalog's tools, keyed by the short name their `$ref`s point
+   * at: a schema of `{ $ref: "#/$defs/<short>" }` renders as the exported alias
+   * `<SessionType>_<short>` rather than `unknown`. Each entry is emitted once, rendered from depth 0
+   * with its own node budget -- so the depth limit restarts inside that alias body, not for every
+   * place a `$ref` to it appears; a reference sitting deeper than the limit, or reached after the
+   * referencing tool's own budget is spent, still renders `unknown` there.
+   *
+   * A body that renders to exactly its own alias name (a bare self-`$ref`) degrades to `unknown`
+   * rather than emitting a circular declaration. Mutual cycles across two or more entries
+   * (`a` -> `b` -> `a`, each a bare `$ref`) are not detected and remain a known limitation.
+   *
+   * Omit it -- as both MCP connectors do -- and the output is byte-identical to a caller that never
+   * knew about this field: every `$ref` renders `unknown`, since nothing here resolves references.
+   * A key that is not a TypeScript identifier is dropped rather than emitted as a syntax error.
+   */
+  defs?: Record<string, JsonSchema>;
 }): string {
   const typeName = sessionTypeName(args.serverId, args.discriminator);
   const lines: string[] = [args.baseTypes.trimEnd(), ""];
@@ -321,14 +430,35 @@ export function generateSessionTypes(args: {
   lines.push("// the grant named its tools explicitly.");
   lines.push("");
 
+  // Computed before the aliases below, so `defAliasNames` knows which interface names are already
+  // claimed and can steer clear of them.
+  const argsNames = argsInterfaceNames(typeName, args.tools, args.defs);
+
+  // Named schemas, emitted once each, ahead of the interfaces that reference them.
+  const aliases = defAliasNames(typeName, args.defs, new Set(argsNames.values()));
+  for (const [short, aliasName] of aliases) {
+    // Depth 0 and a fresh budget per alias: that reset is what naming a schema buys.
+    const rendered = renderType(
+      args.defs![short], "", 0, { remaining: MAX_RENDER_NODES }, aliases);
+    // A body that renders to exactly its own alias name is a bare self-`$ref`
+    // (`{ $ref: "#/$defs/<short>" }`): emitting it verbatim produces `export type X_a = X_a;`,
+    // TS2456, which fails the whole file rather than one type. Recursion through an object
+    // property (`{ next: X_a }`) is legal TypeScript and renders as a larger string that this
+    // equality check never matches, so it is untouched. Mutual cycles (`a` -> `b` -> `a`) are not
+    // caught here and remain a documented ceiling.
+    lines.push(`export type ${aliasName} = ${rendered === aliasName ? "unknown" : rendered};`);
+    lines.push("");
+  }
+
   // Per-tool argument interfaces, so agents can name and compose them.
-  const argsNames = argsInterfaceNames(typeName, args.tools);
   for (const { tool } of args.tools) {
-    if (argumentStyle(tool.inputSchema) !== "typed") continue;
+    const resolvedSchema = resolveRootDefRef(tool.inputSchema, args.defs);
+    if (argumentStyle(resolvedSchema) !== "typed") continue;
     const argsName = argsNames.get(tool.name)!;
     lines.push(docComment(tool.description ?? tool.title, "").trimEnd());
     // Per tool, so one baroque schema degrades itself and not the rest of the catalog.
-    const rendered = renderObject(tool.inputSchema!, "", 0, { remaining: MAX_RENDER_NODES });
+    const rendered = renderObject(
+      resolvedSchema!, "", 0, { remaining: MAX_RENDER_NODES }, aliases);
     lines.push(`export interface ${argsName} ${rendered}`);
     lines.push("");
   }
@@ -372,7 +502,7 @@ export function generateSessionTypes(args: {
     const method = wireToMethod.get(entry.tool.name);
     if (!method) continue;
     lines.push(docComment(toolDoc(entry, args.tools), "  ").trimEnd());
-    switch (argumentStyle(entry.tool.inputSchema)) {
+    switch (argumentStyle(resolveRootDefRef(entry.tool.inputSchema, args.defs))) {
       case "none":
         lines.push(`  ${method}(): Promise<McpCallResult>;`);
         break;
@@ -393,7 +523,7 @@ export function generateSessionTypes(args: {
   lines.push("   * cannot have a named method.");
   lines.push("   */");
   for (const { tool } of args.tools) {
-    switch (argumentStyle(tool.inputSchema)) {
+    switch (argumentStyle(resolveRootDefRef(tool.inputSchema, args.defs))) {
       case "none":
         lines.push(`  callTool(name: ${quote(tool.name)}, args?: Record<string, never>): Promise<McpCallResult>;`);
         break;

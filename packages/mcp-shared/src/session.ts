@@ -5,7 +5,7 @@
 // supplies. The base never touches the Durable Object, the account, or the endpoint's credentials.
 
 import { RpcTarget, type RpcStub } from "cloudflare:workers";
-import type { ActionDescription, ActionKind, ApprovalQueue }
+import type { ActionDescription, ActionKind, ApprovalQueue, ObservationDescription }
   from "@gadgets/workshop-shared/gatekeeper";
 
 import {
@@ -109,6 +109,18 @@ export class McpSessionBase extends RpcTarget {
   #host: McpSessionHost;
   #queue: RpcStub<ApprovalQueue>;
 
+  /**
+   * The longest rendering of a tool call's arguments reproduced in an approval prompt, passed
+   * through to `describeCall`'s own `maxArguments`. `undefined` keeps `describeCall`'s default.
+   *
+   * A subclass overrides it to raise or lower that budget for arguments that are structured rather
+   * than a free-form blob -- an HTTP request split into path, query, headers and body -- so the
+   * approver reads the whole thing rather than a truncated fragment, or so a bulky blob does not
+   * fill the prompt. It cannot reword the prompt: the action-branch text below is not overridable,
+   * only this one number is.
+   */
+  protected readonly maxArguments: number | undefined = undefined;
+
   constructor(host: McpSessionHost, queue: RpcStub<ApprovalQueue>) {
     super();
     this.#host = host;
@@ -182,6 +194,38 @@ export class McpSessionBase extends RpcTarget {
       : `This binding does not grant a tool named "${name}".`;
   }
 
+  /**
+   * The observation recorded for one read, built before the call is made.
+   *
+   * Overridable so a connector whose calls are not MCP tool calls can record what it actually did --
+   * a method and a path, say -- rather than a wire name the person reading the record has never
+   * seen. The default is the same text `describeCall` renders for an action, which is what both MCP
+   * connectors record and what they keep.
+   *
+   * Reads only. The action branch builds its description from `describeCall` directly, so an
+   * override cannot reword what a person reads when approving a write.
+   *
+   * `protected` is a compile-time marker, not a runtime one, so this is an ordinary method on an
+   * `RpcTarget`, reachable over RPC even from a bare `@validateRpc()` subclass: the validator
+   * transform skips protected members, but the runtime does not hide them. That is harmless here --
+   * it takes a tool the caller already holds and returns text built from it, reaching no credential,
+   * no host method and no stored state -- and it is why an override must stay just as pure: no
+   * queue, no host call, no state.
+   */
+  protected describeRead(
+    entry: ClassifiedTool, args: Record<string, unknown>,
+  ): ObservationDescription {
+    return describeCall({
+      serverName: this.#host.serverName,
+      endpoint: this.#host.endpoint,
+      tool: entry.tool,
+      toolArgs: args,
+      mode: entry.mode,
+      classifiedBy: entry.classifiedBy,
+      maxArguments: this.maxArguments,
+    });
+  }
+
   async callTool(name: string, args?: Record<string, unknown>): Promise<McpCallResult> {
     requireToolName("callTool", name);
     const toolArgs = args ?? {};
@@ -193,6 +237,16 @@ export class McpSessionBase extends RpcTarget {
     const entry = await host.findTool(name);
     if (!entry) throw new Error(this.#noSuchToolMessage(name));
 
+    if (entry.mode === "read") {
+      // Authorize before the call, not after it. Authorizing afterwards meant a refused observation
+      // had already been fetched: the record says the read did not happen and the endpoint saw that
+      // it did. A read that fails after this point leaves an authorized observation behind, which is
+      // the right way round -- the alternative hands the agent data nobody permitted.
+      await this.#queue.authorizeObservation(this.describeRead(entry, toolArgs));
+      const result = await host.call(client => client.callTool(name, toolArgs));
+      return toCallResult(result);
+    }
+
     const described = describeCall({
       serverName: host.serverName,
       endpoint: host.endpoint,
@@ -200,14 +254,8 @@ export class McpSessionBase extends RpcTarget {
       toolArgs,
       mode: entry.mode,
       classifiedBy: entry.classifiedBy,
+      maxArguments: this.maxArguments,
     });
-
-    if (entry.mode === "read") {
-      const result = await host.call(client => client.callTool(name, toolArgs));
-      // Authorize before the data is handed back, per the gatekeeper contract.
-      await this.#queue.authorizeObservation(described);
-      return toCallResult(result);
-    }
 
     const staged = host.stageAction(name, toolArgs);
     const description: ActionDescription = {

@@ -3,7 +3,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["__tests__/*.test.ts"],
+    include: ["__tests__/**/*.test.ts"],
     environment: "node",
     alias: {
       // Lets modules that declare a Durable Object or an `RpcTarget` be imported at all. See the

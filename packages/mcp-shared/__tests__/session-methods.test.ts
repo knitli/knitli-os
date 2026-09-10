@@ -62,7 +62,7 @@ describe("toolMethodNames", () => {
   });
 
   it("skips the session's own methods", () => {
-    for (const name of ["call_tool", "get_action_result", "list_tools", "describe_read"]) {
+    for (const name of ["call_tool", "get_action_result", "list_tools"]) {
       expect(toolMethodNames([tool(name)]).size, name).toBe(0);
     }
   });

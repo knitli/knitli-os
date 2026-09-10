@@ -9,9 +9,8 @@
 // passed through on the staged-action `describeCall` call, so a subclass can raise it instead.
 
 import { describe, expect, it } from "vitest";
-import { describeCall } from "../../src/tools.js";
+import { classifyTool, describeCall } from "../../src/tools.js";
 import { McpSessionBase, type McpSessionHost, type StoredAction } from "../../src/session.js";
-import { classifyTool } from "../../src/tools.js";
 
 describe("describeCall with a caller-supplied argument budget", () => {
   // The tail the renderer appends in place of what it dropped.

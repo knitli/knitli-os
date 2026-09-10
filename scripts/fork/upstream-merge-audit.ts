@@ -98,10 +98,10 @@ export const FORK_OWNED_PREFIXES = [
   "packages/integration-tests/fixtures/gatekeeper-test/src/fork/",
   "packages/integration-tests/fixtures/fork/",
   "packages/integration-tests/src/fork/",
+  "packages/mcp-shared/__tests__/fork/",
 
   "packages/gatekeeper-ai-executor/",
   "packages/integration-tests/__tests__/fork/",
-  "packages/mcp-shared/__tests__/fork/",
   "scripts/fork/",
   ".github/workflows/fork-audit.yml",
   "docs/fork-maintenance.md",

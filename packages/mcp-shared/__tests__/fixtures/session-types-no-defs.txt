@@ -1,0 +1,206 @@
+// Base types for MCP-server sessions.
+//
+// These are prepended to every generated per-server `.d.ts` (see `schema-to-ts.ts`), so a workspace's
+// coding agent always has them in scope. One method per tool and `callTool` overloads are generated
+// from the server's own tool catalog and appended below this file's contents.
+
+/** A block of content returned by an MCP tool. */
+export type McpContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "audio"; data: string; mimeType: string }
+  | { type: "resource_link"; uri: string; name?: string; description?: string; mimeType?: string }
+  | { type: "resource"; resource: { uri: string; mimeType?: string; text?: string; blob?: string } };
+
+/**
+ * Outcome of `callTool` or `getActionResult`.
+ *
+ * Read-only tools resolve to `"ok"` straight away. Everything else is an action: it is queued for
+ * approval and resolves to `"pending"`, then to `"ok"`, `"rejected"`, or `"failed"`.
+ */
+export type McpCallResult =
+  | {
+      status: "ok";
+      /** Content blocks as returned by the server. */
+      content: McpContent[];
+      /** All text blocks concatenated, for the common case where that is all you need. */
+      text: string;
+      /** Present when the tool declares an output schema and returned structured data. */
+      structuredContent?: unknown;
+      /** True when the tool itself reported failure (the call succeeded; the tool did not). */
+      isError?: boolean;
+    }
+  | {
+      status: "pending";
+      /** Pass to `getActionResult` to collect the outcome once it has been decided. */
+      actionId: number;
+      /** Human-readable explanation to relay to the user. */
+      message: string;
+    }
+  | {
+      status: "rejected";
+      /** Why the action was not performed. */
+      message: string;
+    }
+  | {
+      status: "failed";
+      /** The approved call failed. Its message says whether it may have taken effect. */
+      message: string;
+    };
+
+/** How this deployment classified one tool. */
+export type McpToolMode =
+  // Returns data immediately; every call is recorded as an observation.
+  | "read"
+  // Queued for approval before it runs.
+  | "action";
+
+/** Description of one tool exposed by the session. */
+export type McpToolInfo = {
+  /** Tool name, as passed to `callTool`. The generated method name is derived from it. */
+  name: string;
+  /** Display title, if the server supplied one. */
+  title?: string;
+  /** The server's own description of the tool. */
+  description?: string;
+  /** Whether calls are observations or approval-gated actions. */
+  mode: McpToolMode;
+  /**
+   * Why the tool was classified this way: `"server-annotation"` when the server's own
+   * `readOnlyHint` decided it, `"default"` when nothing was declared and it was treated as an
+   * action. Recorded so an audit can find every call that was trusted on the server's word.
+   */
+  classifiedBy: "server-annotation" | "default";
+  /** JSON Schema for the tool's arguments when it fits the connector's definition budget. */
+  inputSchema?: unknown;
+};
+
+/** Bounded search result. Request the exact name through `listTools({ name })` for its schema. */
+export type McpToolSummary = Omit<McpToolInfo, "inputSchema">;
+
+/** Progressive catalog lookup through the existing `listTools` session method. */
+export type McpToolListOptions =
+  | { search: string; name?: never }
+  | { name: string; search?: never };
+
+// ---------------------------------------------------------------------------
+// Generated from the tool catalog of "Acme CRM" (https://acme.example/mcp).
+// Regenerated when the server's catalog revision changes. A grant is a scope -- the
+// whole endpoint, one portal server, or a fixed list of tool names -- and not a
+// snapshot of this catalog: a tool the server adds later becomes callable too, unless
+// the grant named its tools explicitly.
+
+/**
+ * Finds a thing.
+ */
+export interface McpAcmeCrm90f4Session_SearchArgs {
+  /**
+   * What to look for.
+   */
+  q: string;
+  limit?: number;
+  flag?: boolean;
+  tags?: string[];
+  pair?: [string, number];
+  choice?: "a" | "b";
+  fixed?: 7;
+  either?: string | number;
+  merged?: {
+    a?: string;
+  } & {
+    b?: number;
+  };
+  multi?: string | null;
+  nested?: {
+    deep: string;
+  };
+  freeform?: Record<string, unknown>;
+  "content-type"?: string;
+  ref?: unknown;
+}
+
+/**
+ * Sends a mail.
+ */
+export interface McpAcmeCrm90f4Session_SendMailArgs {
+  to: string;
+}
+
+/**
+ * Session for the "Acme CRM" MCP server.
+ *
+ * Of the 4 currently described tool(s), 3 are read-only
+ * and return results immediately as observations. The remaining 1
+ * described tool(s) are treated as actions:
+ * `callTool` queues them for approval and returns `{ status: "pending" }`; the result
+ * becomes available through `getActionResult` once a human approves.
+ * When using this session from `executeCode`, return from that executeCode call as soon as
+ * an action is pending so its approval can appear in chat. Approval resumes the agent;
+ * denial ends the turn. Call `getActionResult` after approval.
+ *
+ * This server was supplied by the user, so no action is ever applied automatically.
+ *
+ * Only the owner can open a workspace using this binding. To give it to someone else,
+ * publish it as a blueprint so they connect their own account.
+ */
+export interface McpAcmeCrm90f4Session {
+  /** Lists currently described tools. */
+  listTools(): Promise<McpToolInfo[]>;
+  /** Searches for up to 20 matching tool summaries. */
+  listTools(options: { search: string; name?: never }): Promise<McpToolSummary[]>;
+  /** Returns zero or one exact granted tool definition by wire name. */
+  listTools(options: { name: string; search?: never }): Promise<McpToolInfo[]>;
+  listTools(options: McpToolListOptions): Promise<McpToolInfo[] | McpToolSummary[]>;
+
+  /**
+   * Finds a thing.
+   *
+   * Read-only: returns `{ status: "ok" }` and is recorded as an observation.
+   */
+  search(args: McpAcmeCrm90f4Session_SearchArgs): Promise<McpCallResult>;
+
+  /**
+   * Read-only: returns `{ status: "ok" }` and is recorded as an observation.
+   */
+  ping(): Promise<McpCallResult>;
+
+  /**
+   * Read-only: returns `{ status: "ok" }` and is recorded as an observation.
+   */
+  passthrough(args?: Record<string, unknown>): Promise<McpCallResult>;
+
+  /**
+   * Sends a mail.
+   *
+   * Action: queued for approval; the result arrives via `getActionResult`.
+   * Calls `send_mail`.
+   */
+  sendMail(args: McpAcmeCrm90f4Session_SendMailArgs): Promise<McpCallResult>;
+
+  /**
+   * Calls a tool by its exact name, as the server publishes it.
+   *
+   * Equivalent to the named methods above, with static argument checking for tools that
+   * cannot have a named method.
+   */
+  callTool(name: "search", args: McpAcmeCrm90f4Session_SearchArgs): Promise<McpCallResult>;
+  callTool(name: "ping", args?: Record<string, never>): Promise<McpCallResult>;
+  callTool(name: "passthrough", args?: Record<string, unknown>): Promise<McpCallResult>;
+  callTool(name: "send_mail", args: McpAcmeCrm90f4Session_SendMailArgs): Promise<McpCallResult>;
+  /** Calls a dynamically discovered tool by exact wire name. */
+  callTool<Name extends string>(
+    name: Name,
+    ...args: Name extends "search" | "ping" | "passthrough" | "send_mail"
+      ? [args: never]
+      : [args?: Record<string, unknown>]
+  ): Promise<McpCallResult>;
+
+  /**
+   * Fetches the result of a queued action.
+   *
+   * Returns `{ status: "pending" }` while the action is awaiting review, the completed
+   * result once applied, `{ status: "rejected" }` if denied, or `{ status: "failed" }`
+   * if the approved call failed.
+   */
+  getActionResult(actionId: number): Promise<McpCallResult>;
+}

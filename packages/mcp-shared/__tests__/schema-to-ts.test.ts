@@ -6,7 +6,7 @@ import { MCP_BASE_TYPES } from "../src/base-types.js";
 import { generateSessionTypes, sessionTypeName, } from "../src/schema-to-ts.js";
 import { classifyTool } from "../src/tools.js";
 import type { ClassifiedTool } from "../src/tools.js";
-import type { McpTool } from "../src/client.js";
+import type { JsonSchema, McpTool } from "../src/client.js";
 
 function tool(
   declaration: McpTool, mode: "read" | "action" = "read", autoApprovable = false,
@@ -64,6 +64,53 @@ function expectTypeScriptProgramToCompile(source: string): void {
     .map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"));
   expect(errors).toEqual([]);
 }
+
+// The interface name every generated file in this suite declares. Derived once, because both the
+// alias names and the argument interface names are built from it.
+const TYPE_NAME = sessionTypeName("acme-crm", "https://acme.example/mcp");
+
+// Broad enough that the committed snapshot is worth having: every branch of the renderer appears at
+// least once, so a change to any of them moves the file. The `$ref` is deliberate -- with no `defs`
+// supplied it must stay `unknown`, which is exactly the property the snapshot pins.
+const SNAPSHOT_TOOLS: ClassifiedTool[] = [
+  tool({
+    name: "search",
+    title: "Search",
+    description: "Finds a thing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        q: { type: "string", description: "What to look for." },
+        limit: { type: "integer" },
+        flag: { type: "boolean" },
+        tags: { type: "array", items: { type: "string" } },
+        pair: { type: "array", items: [{ type: "string" }, { type: "number" }] },
+        choice: { enum: ["a", "b"] },
+        fixed: { const: 7 },
+        either: { anyOf: [{ type: "string" }, { type: "number" }] },
+        merged: {
+          allOf: [
+            { type: "object", properties: { a: { type: "string" } } },
+            { type: "object", properties: { b: { type: "number" } } },
+          ],
+        },
+        multi: { type: ["string", "null"] },
+        nested: { type: "object", properties: { deep: { type: "string" } }, required: ["deep"] },
+        freeform: { type: "object", additionalProperties: true },
+        "content-type": { type: "string" },
+        ref: { $ref: "#/$defs/message" },
+      },
+      required: ["q"],
+    },
+  }),
+  tool({ name: "ping" }),
+  tool({ name: "passthrough", inputSchema: { type: "object", additionalProperties: true } }),
+  tool({
+    name: "send_mail",
+    description: "Sends a mail.",
+    inputSchema: { type: "object", properties: { to: { type: "string" } }, required: ["to"] },
+  }, "action"),
+];
 
 describe("sessionTypeName", () => {
   const url = "https://acme.example/mcp";
@@ -460,6 +507,14 @@ session.listTools(ambiguousOptions);
     expect(output).toContain("searchTools(): Promise<McpCallResult>;");
     expect(output).toContain("listTools(options: { search: string; name?: never })");
     expect(output).toContain('callTool(name: "search_tools"');
+  });
+
+  // The whole file, byte for byte, for a caller that supplies no named schemas. Fragment assertions
+  // cannot show that nothing *else* moved, and the two MCP connectors are exactly such callers: a
+  // stray blank line here is a diff in every generated type surface they hand their agents.
+  it("renders a catalog byte-identically when no named schemas are supplied", async () => {
+    await expect(generate(SNAPSHOT_TOOLS, MCP_BASE_TYPES))
+      .toMatchFileSnapshot("./fixtures/session-types-no-defs.txt");
   });
 });
 

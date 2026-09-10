@@ -304,7 +304,13 @@ function resolveRootDefRef(
     if (!target) return schema;
     current = target;
   }
-  return schema;
+  // The loop's own per-iteration check above never runs for the hop that lands on a concrete
+  // schema, since the loop condition stops the loop first once `MAX_ROOT_REF_HOPS` refs have
+  // resolved. Repeat it once here: a chain of exactly `MAX_ROOT_REF_HOPS` refs in a row still
+  // resolves; one ref more than that falls back to the original, unresolved schema, same as any
+  // other chain this function can't follow.
+  const ref = current?.$ref;
+  return typeof ref === "string" && ref.startsWith(DEFS_REF_PREFIX) ? schema : current;
 }
 
 // The interface name carrying each typed tool's arguments, keyed by wire name.

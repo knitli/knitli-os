@@ -316,4 +316,51 @@ describe("generateSessionTypes with named schemas", { timeout: 15_000 }, () => {
     expect(output).toContain(`extra?: ${disambiguatedAlias};`);
     expectTypeScriptToCompile(output);
   });
+
+  // A chain of `hops` root refs, `L1 -> L2 -> ... -> L(hops-1) -> Terminal`, with `Terminal` set to
+  // `terminal`. `hops` counts every dereference a tool's `inputSchema` (itself `{ $ref: "#/$defs/L1"
+  // }`) needs to reach `terminal` -- this is the count `resolveRootDefRef`'s `MAX_ROOT_REF_HOPS`
+  // bound is measured against.
+  function chainedRootRefDefs(hops: number, terminal: JsonSchema): Record<string, JsonSchema> {
+    const defs: Record<string, JsonSchema> = { Terminal: terminal };
+    for (let level = 1; level < hops; level++) {
+      defs[`L${level}`] = { $ref: `#/$defs/${level === hops - 1 ? "Terminal" : `L${level + 1}`}` };
+    }
+    return defs;
+  }
+
+  it("resolves a tool's inputSchema through a chain of exactly MAX_ROOT_REF_HOPS root $refs", () => {
+    // This is exactly where the original implementation's off-by-one lived: the loop's own
+    // per-hop "is this still a ref?" check never runs for the hop that lands on the concrete
+    // schema, because the loop condition stops the loop first once the bound is spent.
+    const defs = chainedRootRefDefs(8, {
+      type: "object",
+      properties: { title: { type: "string" } },
+      required: ["title"],
+    });
+    const output = generateWithDefs(
+      [tool({ name: "create_thing", inputSchema: { $ref: "#/$defs/L1" } }, "action")], defs);
+
+    const argsInterface = `${TYPE_NAME}_CreateThingArgs`;
+    expect(output).toContain(`export interface ${argsInterface} {`);
+    expect(output).toContain("title: string;");
+    expect(output).toContain(`createThing(args: ${argsInterface}): Promise<McpCallResult>;`);
+    expectTypeScriptToCompile(output);
+  });
+
+  it("falls back to today's behaviour for a chain one root $ref longer than MAX_ROOT_REF_HOPS", () => {
+    const defs = chainedRootRefDefs(9, {
+      type: "object",
+      properties: { title: { type: "string" } },
+      required: ["title"],
+    });
+    const output = generateWithDefs(
+      [tool({ name: "create_thing", inputSchema: { $ref: "#/$defs/L1" } }, "action")], defs);
+
+    // Unresolved: the tool is classified as taking no arguments, same as any other root $ref this
+    // generator can't follow.
+    expect(output).not.toContain(`${TYPE_NAME}_CreateThingArgs`);
+    expect(output).toContain("createThing(): Promise<McpCallResult>;");
+    expectTypeScriptToCompile(output);
+  });
 });

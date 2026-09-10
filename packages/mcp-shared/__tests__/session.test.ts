@@ -328,3 +328,44 @@ it("lets a subclass restate what a read records", async () => {
   expect(observations[0].description)
     .toBe('Listed messages with {"top":5}, for me_list_messages.');
 });
+
+it("lets a subclass raise or lower the approval-prompt argument cap", async () => {
+  // The cap only reaches the action branch: a read's approval text goes through `describeRead`, not
+  // this field, so this pins the pass-through into the staged-action `describeCall` call specifically.
+  const entry = classifyTool({ name: "jira_create_issue" }, "byo");
+  const longArgs = { body: "x".repeat(200) };
+  const staged: StoredAction = {
+    id: 9,
+    toolName: entry.tool.name,
+    args: longArgs,
+    state: "pending",
+    submittedAt: 0,
+  };
+  const makeHost = () => ({
+    serverName: "Jira",
+    endpoint: "https://mcp.example.com",
+    scope: { serverId: "jira" },
+    findTool: async () => entry,
+    stageAction: () => staged,
+    discardStagedAction() {},
+    actionKindFor: () => ({ tag: "jira:create", label: "Create issue" }),
+  } as unknown as McpSessionHost);
+
+  class Capped extends McpSessionBase {
+    protected override readonly maxArguments = 50;
+  }
+
+  const capped: { description: string }[] = [];
+  const cappedSession = new Capped(makeHost(), {
+    submitAction: (_id: number, description: { description: string }) => { capped.push(description); },
+  } as never);
+  await cappedSession.callTool(entry.tool.name, longArgs);
+  expect(capped[0].description).toContain("... (truncated)");
+
+  const base: { description: string }[] = [];
+  const baseSession = new McpSessionBase(makeHost(), {
+    submitAction: (_id: number, description: { description: string }) => { base.push(description); },
+  } as never);
+  await baseSession.callTool(entry.tool.name, longArgs);
+  expect(base[0].description).not.toContain("... (truncated)");
+});

@@ -109,6 +109,17 @@ export class McpSessionBase extends RpcTarget {
   #host: McpSessionHost;
   #queue: RpcStub<ApprovalQueue>;
 
+  /**
+   * The longest rendering of a tool call's arguments reproduced in an approval prompt, passed
+   * through to `describeCall`'s own `maxArguments`. `undefined` keeps `describeCall`'s default.
+   *
+   * A subclass overrides it to lengthen the prompt for arguments that are structured rather than a
+   * free-form blob -- an HTTP request split into path, query, headers and body -- so the approver
+   * reads the whole thing rather than a truncated fragment. It cannot reword the prompt: the
+   * action-branch text below is not overridable, only this one number is.
+   */
+  protected readonly maxArguments: number | undefined = undefined;
+
   constructor(host: McpSessionHost, queue: RpcStub<ApprovalQueue>) {
     super();
     this.#host = host;
@@ -238,6 +249,7 @@ export class McpSessionBase extends RpcTarget {
       toolArgs,
       mode: entry.mode,
       classifiedBy: entry.classifiedBy,
+      maxArguments: this.maxArguments,
     });
 
     const staged = host.stageAction(name, toolArgs);

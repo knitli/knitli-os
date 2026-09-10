@@ -346,8 +346,13 @@ export function generateSessionTypes(args: {
    * Named schemas shared across this catalog's tools, keyed by the short name their `$ref`s point
    * at: a schema of `{ $ref: "#/$defs/<short>" }` renders as the exported alias
    * `<SessionType>_<short>` rather than `unknown`. Each entry is emitted once, rendered from depth 0
-   * with its own node budget, so the depth limit restarts at every named boundary instead of
-   * counting from wherever the schema was first reached.
+   * with its own node budget -- so the depth limit restarts inside that alias body, not for every
+   * place a `$ref` to it appears; a reference sitting deeper than the limit, or reached after the
+   * referencing tool's own budget is spent, still renders `unknown` there.
+   *
+   * A body that renders to exactly its own alias name (a bare self-`$ref`) degrades to `unknown`
+   * rather than emitting a circular declaration. Mutual cycles across two or more entries
+   * (`a` -> `b` -> `a`, each a bare `$ref`) are not detected and remain a known limitation.
    *
    * Omit it -- as both MCP connectors do -- and the output is byte-identical to a caller that never
    * knew about this field: every `$ref` renders `unknown`, since nothing here resolves references.
@@ -378,7 +383,13 @@ export function generateSessionTypes(args: {
     // Depth 0 and a fresh budget per alias: that reset is what naming a schema buys.
     const rendered = renderType(
       args.defs![short], "", 0, { remaining: MAX_RENDER_NODES }, aliases);
-    lines.push(`export type ${aliasName} = ${rendered};`);
+    // A body that renders to exactly its own alias name is a bare self-`$ref`
+    // (`{ $ref: "#/$defs/<short>" }`): emitting it verbatim produces `export type X_a = X_a;`,
+    // TS2456, which fails the whole file rather than one type. Recursion through an object
+    // property (`{ next: X_a }`) is legal TypeScript and renders as a larger string that this
+    // equality check never matches, so it is untouched. Mutual cycles (`a` -> `b` -> `a`) are not
+    // caught here and remain a documented ceiling.
+    lines.push(`export type ${aliasName} = ${rendered === aliasName ? "unknown" : rendered};`);
     lines.push("");
   }
 

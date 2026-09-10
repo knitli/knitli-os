@@ -668,6 +668,7 @@ describe("generateSessionTypes with named schemas", { timeout: 15_000 }, () => {
     const aliased = generateWithDefs(
       [tool({ name: "deep", inputSchema: wrap(5, { $ref: "#/$defs/chain" }) })],
       { chain: chain(6) });
+    expect(aliased).toContain(`w: ${TYPE_NAME}_chain;`);
     expect(aliased).toContain("next: string;");
     expect(aliased).not.toContain("next: unknown;");
     expectTypeScriptToCompile(aliased);
@@ -697,5 +698,29 @@ describe("generateSessionTypes with named schemas", { timeout: 15_000 }, () => {
     const zebra = output.indexOf(`export type ${TYPE_NAME}_zebra =`);
     expect(alpha).toBeGreaterThan(-1);
     expect(zebra).toBeGreaterThan(alpha);
+    expectTypeScriptToCompile(output);
+  });
+
+  it("degrades a self-referencing named schema to unknown instead of emitting a circular alias", () => {
+    // `export type X_a = X_a;` is TS2456, "Type alias circularly references itself" -- and it costs
+    // the whole generated file, not one type. A bare self-`$ref` body must fall back to `unknown`.
+    const output = generateWithDefs([tool({ name: "ping" })], { a: { $ref: "#/$defs/a" } });
+    expect(output).toContain(`export type ${TYPE_NAME}_a = unknown;`);
+    expectTypeScriptToCompile(output);
+  });
+
+  it("still resolves a self-reference reached through an object property", () => {
+    // The self-reference guard only catches a body that renders to *exactly* its own alias name.
+    // A `$ref` back to the same schema, reached through a property, is legal recursive TypeScript
+    // and must keep resolving -- inlining could never express it at all.
+    const output = generateWithDefs([tool({ name: "ping" })], {
+      node: {
+        type: "object",
+        properties: { next: { $ref: "#/$defs/node" } },
+      },
+    });
+    expect(output).toContain(`export type ${TYPE_NAME}_node = {`);
+    expect(output).toContain(`next?: ${TYPE_NAME}_node;`);
+    expectTypeScriptToCompile(output);
   });
 });

@@ -225,6 +225,15 @@ export function describeCall(args: {
   toolArgs: Record<string, unknown>;
   mode: "read" | "action";
   classifiedBy: ClassificationSource;
+  /**
+   * Longest rendering of the arguments to reproduce before the remainder is replaced by a
+   * truncation notice. Defaults to `MAX_ARGUMENTS`, which is what an MCP tool call has always used.
+   *
+   * A caller whose arguments are structured rather than a free-form blob -- an HTTP request split
+   * into path, query, headers and body -- can lower it so the approver reads a prompt rather than
+   * scrolls one. Raising it past what a person will read buys nothing.
+   */
+  maxArguments?: number;
 }): { title: string; description: string } {
   // The arguments are the agent's text, and the agent is who this prompt protects the user from, so
   // they get the same treatment as the server's description. `JSON.stringify` escapes quotes and
@@ -235,8 +244,9 @@ export function describeCall(args: {
   } catch {
     rendered = "(arguments could not be displayed)";
   }
-  if (rendered.length > MAX_ARGUMENTS) {
-    rendered = `${rendered.slice(0, MAX_ARGUMENTS)}\n... (truncated)`;
+  const maxArguments = args.maxArguments ?? MAX_ARGUMENTS;
+  if (rendered.length > maxArguments) {
+    rendered = `${rendered.slice(0, maxArguments)}\n... (truncated)`;
   }
 
   const provenance = args.mode === "read"

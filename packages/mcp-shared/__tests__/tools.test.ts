@@ -273,3 +273,37 @@ describe("describeCall with an untrusted tool name", () => {
     expect(named("linear_create_issue").description).toContain("`linear_create_issue`");
   });
 });
+
+describe("describeCall with a caller-supplied argument budget", () => {
+  // The tail the renderer appends in place of what it dropped.
+  const TRUNCATION = "\n... (truncated)";
+
+  // The JSON between the two fences `describeCall` opens itself. The arguments below carry no
+  // backticks, so nothing else in the description can look like a fence.
+  const jsonBlock = (description: string) =>
+    description.split("```json\n")[1].split("\n```")[0];
+
+  const rendered = (maxArguments?: number) => describeCall({
+    serverName: "Acme",
+    endpoint: "https://mcp.acme.com/mcp",
+    tool: { name: "send" },
+    toolArgs: { note: "x".repeat(6000) },
+    mode: "action",
+    classifiedBy: "default",
+    maxArguments,
+  }).description;
+
+  it("truncates at the caller's budget when one is given", () => {
+    // A connector whose arguments are structured -- path, query, headers, body -- wants a shorter
+    // prompt than one whose arguments are a free-form blob.
+    const block = jsonBlock(rendered(50));
+    expect(block).toHaveLength(50 + TRUNCATION.length);
+    expect(block.endsWith(TRUNCATION)).toBe(true);
+  });
+
+  it("falls back to the built-in budget when none is given", () => {
+    const block = jsonBlock(rendered());
+    expect(block).toHaveLength(4000 + TRUNCATION.length);
+    expect(block.endsWith(TRUNCATION)).toBe(true);
+  });
+});

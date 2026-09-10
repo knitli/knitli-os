@@ -1,8 +1,10 @@
 import { expect, it } from "vitest";
 
+import type { ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+
 import { McpSessionBase, type McpSessionHost, type StoredAction } from "../src/session.js";
 import { MAX_TOOL_NAME_CHARS } from "../src/client.js";
-import { classifyTool } from "../src/tools.js";
+import { classifyTool, type ClassifiedTool } from "../src/tools.js";
 
 it("reports an execution failure distinctly from a rejected approval", async () => {
   const failed: StoredAction = {
@@ -256,4 +258,73 @@ it("refuses oversized tool names before consulting the host", async () => {
   await expect(session.listTools({ name: oversized })).rejects.toThrow(/tool name.*at most/i);
   await expect(session.callTool(oversized)).rejects.toThrow(/tool name.*at most/i);
   expect(finds).toBe(0);
+});
+
+it("does not reach the endpoint when a read's observation is refused", async () => {
+  // Authorizing after the call meant a refused observation had already been fetched: the record says
+  // the read did not happen and the server saw that it did. A denial that cannot un-send the request
+  // is not a denial.
+  let calls = 0;
+  const entry = classifyTool({
+    name: "jira_search_issues",
+    annotations: { readOnlyHint: true },
+  }, "byo");
+  const host = {
+    serverName: "Jira",
+    endpoint: "https://mcp.example.com",
+    scope: { serverId: "jira" },
+    findTool: async () => entry,
+    call: async (fn: (client: never) => Promise<unknown>) => {
+      calls++;
+      return fn({ callTool: async () => ({ content: [] }) } as never);
+    },
+  } as unknown as McpSessionHost;
+  const queue = {
+    authorizeObservation: () => { throw new Error("Observation refused."); },
+  };
+  const session = new McpSessionBase(host, queue as never);
+
+  await expect(session.callTool("jira_search_issues", { query: "open" }))
+    .rejects.toThrow("Observation refused.");
+  expect(calls).toBe(0);
+});
+
+it("lets a subclass restate what a read records", async () => {
+  // A connector whose calls are not MCP tool calls has to be able to record what it actually did.
+  // Without the hook the record names a tool the user has never seen.
+  const entry = classifyTool({
+    name: "me_list_messages",
+    annotations: { readOnlyHint: true },
+  }, "byo");
+  const observations: ObservationDescription[] = [];
+  const host = {
+    serverName: "Graph",
+    endpoint: "https://graph.example.com",
+    scope: {},
+    findTool: async () => entry,
+    call: async (fn: (client: never) => Promise<unknown>) =>
+      fn({ callTool: async () => ({ content: [] }) } as never),
+  } as unknown as McpSessionHost;
+  const queue = {
+    authorizeObservation: (d: ObservationDescription) => { observations.push(d); },
+  };
+
+  class Restated extends McpSessionBase {
+    protected override describeRead(
+      readEntry: ClassifiedTool, args: Record<string, unknown>,
+    ): ObservationDescription {
+      return {
+        title: `GET /me/messages`,
+        description: `Listed messages with ${JSON.stringify(args)}, for ${readEntry.tool.name}.`,
+      };
+    }
+  }
+  const session = new Restated(host, queue as never);
+
+  await session.callTool("me_list_messages", { top: 5 });
+
+  expect(observations).toHaveLength(1);
+  expect(observations[0].title).toBe("GET /me/messages");
+  expect(observations[0].description)
+    .toBe('Listed messages with {"top":5}, for me_list_messages.');
 });

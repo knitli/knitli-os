@@ -112,6 +112,21 @@ const SNAPSHOT_TOOLS: ClassifiedTool[] = [
   }, "action"),
 ];
 
+function generateWithDefs(
+  tools: ClassifiedTool[], defs: Record<string, JsonSchema>, baseTypes = MCP_BASE_TYPES,
+): string {
+  return generateSessionTypes({
+    baseTypes,
+    serverId: "acme-crm",
+    serverName: "Acme CRM",
+    endpoint: "https://acme.example/mcp",
+    discriminator: "https://acme.example/mcp",
+    trust: "byo",
+    tools,
+    defs,
+  });
+}
+
 describe("sessionTypeName", () => {
   const url = "https://acme.example/mcp";
 
@@ -571,4 +586,116 @@ it("numbers colliding interfaces by wire name, not by catalog order", () => {
       .map(match => `${match[1]}=${match[2]}`)
       .toSorted();
   expect(names(forward)).toEqual(names(reversed));
+});
+
+// Named schemas let one shape be declared once and referenced by many tools, instead of being
+// inlined per tool (or lost to the depth cap). The MCP connectors pass none, so every one of these
+// exercises a path that is dormant for them -- which is why the snapshot in this file matters.
+describe("generateSessionTypes with named schemas", { timeout: 15_000 }, () => {
+  const message: JsonSchema = {
+    type: "object",
+    properties: { subject: { type: "string" }, body: { type: "string" } },
+    required: ["subject"],
+  };
+
+  it("emits one exported alias per named schema and points references at it", () => {
+    const output = generateWithDefs([tool({
+      name: "send_mail",
+      inputSchema: {
+        type: "object",
+        properties: { draft: { $ref: "#/$defs/message" } },
+        required: ["draft"],
+      },
+    }, "action")], { message });
+
+    expect(output).toContain(`export type ${TYPE_NAME}_message = {`);
+    expect(output).toContain("subject: string;");
+    expect(output).toContain("body?: string;");
+    expect(output).toContain(`draft: ${TYPE_NAME}_message;`);
+    expectTypeScriptToCompile(output);
+  });
+
+  it("emits a shared schema once however many tools reference it", () => {
+    // The reason for naming them at all: inlining put a whole copy in every tool that mentioned it.
+    const draft: JsonSchema = { $ref: "#/$defs/message" };
+    const output = generateWithDefs(
+      ["read_mail", "send_mail"].map(name => tool({
+        name,
+        inputSchema: { type: "object", properties: { draft }, required: ["draft"] },
+      })),
+      { message });
+
+    const declarations = output.match(new RegExp(`export type ${TYPE_NAME}_message =`, "g"));
+    expect(declarations?.length).toBe(1);
+    expect(output).toContain(`draft: ${TYPE_NAME}_message;`);
+    expectTypeScriptToCompile(output);
+  });
+
+  it("still renders a reference it cannot resolve as unknown", () => {
+    // Nothing here resolves references on its own, so a pointer into a document the generator never
+    // saw stays `unknown` -- the behaviour both MCP connectors depend on.
+    const output = generateWithDefs([tool({
+      name: "opaque",
+      inputSchema: {
+        type: "object",
+        properties: {
+          elsewhere: { $ref: "#/definitions/Thing" },
+          absent: { $ref: "#/$defs/nosuch" },
+        },
+      },
+    })], { message });
+
+    expect(output).toContain("elsewhere?: unknown;");
+    expect(output).toContain("absent?: unknown;");
+    expectTypeScriptToCompile(output);
+  });
+
+  it("restarts the depth budget at every named schema", () => {
+    // `chain` is six levels deep: it renders whole from depth 0, and is cut off by MAX_DEPTH when
+    // reached from a property five levels down. Naming it is what buys back the difference.
+    const chain = (levels: number): JsonSchema => levels === 0
+      ? { type: "string" }
+      : { type: "object", properties: { next: chain(levels - 1) }, required: ["next"] };
+    const wrap = (levels: number, inner: JsonSchema): JsonSchema => levels === 0
+      ? inner
+      : { type: "object", properties: { w: wrap(levels - 1, inner) }, required: ["w"] };
+
+    const inlined = generate(
+      [tool({ name: "deep", inputSchema: wrap(5, chain(6)) })], MCP_BASE_TYPES);
+    expect(inlined).toContain("next: unknown;");
+    expect(inlined).not.toContain("next: string;");
+
+    const aliased = generateWithDefs(
+      [tool({ name: "deep", inputSchema: wrap(5, { $ref: "#/$defs/chain" }) })],
+      { chain: chain(6) });
+    expect(aliased).toContain("next: string;");
+    expect(aliased).not.toContain("next: unknown;");
+    expectTypeScriptToCompile(aliased);
+  });
+
+  it("drops a named schema whose key is not a TypeScript identifier", () => {
+    // `export type X_bad-key = string;` is a syntax error, and a syntax error costs the reader the
+    // whole file rather than one type -- the failure `argsInterfaceNames` guards against for tools.
+    const output = generateWithDefs([tool({
+      name: "odd",
+      inputSchema: { type: "object", properties: { v: { $ref: "#/$defs/bad-key" } } },
+    })], { "bad-key": { type: "string" } });
+
+    expect(output).not.toContain("bad-key");
+    expect(output).toContain("v?: unknown;");
+    expectTypeScriptToCompile(output);
+  });
+
+  it("orders aliases by name, so an unchanged catalog produces an unchanged file", () => {
+    // This file is cached against a catalog revision. If emitted order followed the order the caller
+    // happened to walk its schemas in, every regeneration could reshuffle it for no reason.
+    const output = generateWithDefs([tool({ name: "ping" })], {
+      zebra: { type: "string" },
+      alpha: { type: "number" },
+    });
+    const alpha = output.indexOf(`export type ${TYPE_NAME}_alpha =`);
+    const zebra = output.indexOf(`export type ${TYPE_NAME}_zebra =`);
+    expect(alpha).toBeGreaterThan(-1);
+    expect(zebra).toBeGreaterThan(alpha);
+  });
 });

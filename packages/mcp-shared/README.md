@@ -21,7 +21,7 @@ does so through a named hook (`staticToken`, `mintAccount`), not a private copy.
 | `client` | Bounded Streamable HTTP transport (`initialize`, `tools/list`, `tools/call`) using official MCP wire types |
 | `oauth` | Small adapter around the official MCP client's OAuth errors and token revocation gap |
 | `tools` | The trust boundary: read/action classification, auto-approval eligibility, approval prompts, catalog fingerprinting |
-| `schema-to-ts` | JSON Schema to TypeScript, strict `callTool` overloads plus progressive discovery |
+| `schema-to-ts` | JSON Schema to TypeScript, strict `callTool` overloads plus progressive discovery; optional named `$defs` aliases for callers that resolve their own references |
 | `session-methods` | Installs those methods at runtime, so the generated types are not a fiction |
 | `tool-search` | The one query matcher every catalog search uses, so a query cannot mean two things |
 | `portal` | Gateway detection, tool-name to upstream-server mapping, server listing |

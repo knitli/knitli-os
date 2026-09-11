@@ -53,7 +53,14 @@ const MAX_QUEUED_DISCOVERIES = 32;
 
 /** Common session, catalog, action, and sharing behavior for connector-owned MCP facets. */
 export abstract class McpFacetBase<
-  Env extends ConnectionEnv,
+  // `& Cloudflare.Env`, not just `ConnectionEnv`: `Gatekeeper<Session>` extends the bare
+  // (ambient-`Cloudflare.Env`-defaulted) `DurableObject`, so `Env` must be assignable to whatever
+  // `Cloudflare.Env` resolves to in the consuming package's own compile, or `implements
+  // Gatekeeper<Session>` fails to typecheck. Every real connector's generated `Env` already equals
+  // its own package's `Cloudflare.Env` merge, so this costs concrete connectors nothing; it only
+  // surfaces once a package's `worker-configuration.d.ts` actually populates `Cloudflare.Env` (older
+  // generated files leave it empty, which is why this went unnoticed until now).
+  Env extends ConnectionEnv & Cloudflare.Env,
   Props extends FacetProps,
   Session extends McpSessionBase,
 > extends DurableObject<Env, Props> implements Gatekeeper<Session>, McpSessionHost {

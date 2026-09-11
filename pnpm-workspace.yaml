@@ -8,10 +8,6 @@ packages:
 # needing to hand edit a bunch of different package.json files.
 catalog:
   '@cloudflare/vitest-pool-workers': ^0.22.0
-  # The successor Cloudflare renamed vitest-pool-workers to. Only gatekeeper-linear is on it so
-  # far -- every other workerd-tested package still pins the entry above -- see that package's
-  # vitest.worker.config.ts for why it's the one that moved.
-  '@cloudflare/vitest-plugin': ^1.1.0
   '@cloudflare/workers-types': ^5.20260903.1
   capnweb: ^0.12.0
   # jsdiff: line diffs in workshop-backend (formatUnifiedDiff) and gatekeeper-github (the

@@ -17,8 +17,9 @@
     "capnweb-validate": "catalog:"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "catalog:",
+    "@cloudflare/vitest-pool-workers": "catalog:",
     "@gadgets/scripts": "workspace:*",
+    "miniflare": "5.20260801.0-alpha",
     "typescript": "catalog:",
     "vitest": "catalog:",
     "wrangler": "catalog:"

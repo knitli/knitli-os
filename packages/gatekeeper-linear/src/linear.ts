@@ -176,6 +176,15 @@ function badRequest(message: string): Response {
   return new Response(message, { status: 400, headers: { "Content-Type": "text/plain; charset=utf-8" } });
 }
 
+// `idFromString` still throws for a well-formed 64-hex string that isn't an id of this namespace
+// (never minted by `UserAccount.newUniqueId()`), so the hex-shape check at each call site below
+// doesn't make it safe to call uncaught. Centralized so both call sites refuse the link the same
+// way instead of surfacing that throw as an unhandled 500. Same fix shape as `openAccountStub` in
+// `gatekeeper-openapi/src/index.ts`.
+function userAccountStub(ctx: ExecutionContext, doId: string) {
+  return ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(doId));
+}
+
 function getBaseUrl(env: Env): string {
   return stripTrailingSlashes(env.BASE_URL ?? "http://localhost:8787/gatekeeper/linear");
 }
@@ -412,7 +421,8 @@ export default {
     const path = relPath.slice(1).split("/");
 
     // Step 1: user opens the connect link (<doId>/<nonce>) -> redirect to Linear's consent screen.
-    // Validate the DO id is 64 hex chars (not just 64 chars) so idFromString() can't throw a 500.
+    // Hex-shape check narrows to plausible ids; userAccountStub() still catches idFromString()
+    // throwing on a well-formed id from the wrong namespace.
     if (path.length === 2 && /^[0-9a-f]{64}$/.test(path[0]) && /^[0-9a-f]{64}$/.test(path[1])) {
       if (!env.CLIENT_ID || !env.CLIENT_SECRET) {
         return new Response(NOT_CONFIGURED_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
@@ -420,7 +430,12 @@ export default {
 
       const doId = path[0];
       const initiationNonce = path[1];
-      const stub = ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(doId));
+      let stub: ReturnType<typeof userAccountStub>;
+      try {
+        stub = userAccountStub(ctx, doId);
+      } catch {
+        return new Response(INVALID_LINK_HTML, { status: 400, headers: { "Content-Type": "text/html; charset=utf-8" } });
+      }
       const begun = await stub.beginOAuthFlow(initiationNonce);
       if (begun === null) {
         return new Response(INVALID_LINK_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
@@ -455,12 +470,18 @@ export default {
       const code = url.searchParams.get("code");
       if (!code) return badRequest("Error: no 'code' provided");
 
-      // Validate the DO id shape before idFromString(), which throws (→ unhandled 500) on garbage.
+      // Hex-shape check narrows to plausible ids; userAccountStub() still catches idFromString()
+      // throwing on a well-formed id from the wrong namespace.
       if (!/^[0-9a-f]{64}$/.test(doId)) {
         return new Response(INVALID_LINK_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
       }
 
-      const stub = ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(doId));
+      let stub: ReturnType<typeof userAccountStub>;
+      try {
+        stub = userAccountStub(ctx, doId);
+      } catch {
+        return new Response(INVALID_LINK_HTML, { status: 400, headers: { "Content-Type": "text/html; charset=utf-8" } });
+      }
       const accepted = await stub.acceptAuthCode(code, oauthNonce);
       if (!accepted) {
         return new Response(INVALID_LINK_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });

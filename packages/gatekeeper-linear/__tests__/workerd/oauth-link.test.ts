@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 // syntactically valid but foreign id used to reach `idFromString` uncaught and surface as an
 // unhandled 500. `userAccountStub()` in `src/linear.ts` now wraps that call in try/catch. This
 // runs under the real workerd pool (no fake `ctx.exports`) so the throw is genuine, same pattern
-// as `gatekeeper-openapi/__tests__/harness.test.ts`.
+// as `gatekeeper-google/__tests__/workerd/worker.ts` + `vitest.worker.config.ts`.
 const BASE = "http://localhost:8787/gatekeeper/linear";
 const FOREIGN_ID = "a".repeat(64);
 const NONCE = "b".repeat(64);

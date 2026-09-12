@@ -1780,8 +1780,6 @@ export type AgentSpawnerConfig = {
  * createGadget()/getGadget()).
  */
 export interface Overseer extends RpcTarget {
-  /** Start an opt-in private configurator bound to this authenticated owner workspace. */
-  startBoundResourceConfigurator(accountId: number, resourceUrlPattern: string): Promise<ResourceConfiguratorFrame>;
   /** Get metadata describing this workspace. */
   getMetadata(): Promise<GadgetMetadata>;
 
@@ -1955,16 +1953,6 @@ export interface Overseer extends RpcTarget {
    * programmatically spawn AI agents to complete tasks.
    */
   newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>>;
-
-  /** Owner-only setup remaining from a blueprint; survives closing or reloading the workspace. */
-  getPendingBlueprintSetup(): Promise<PendingBlueprintSetup | null>;
-
-  /**
-   * Complete an exact blueprint binding with an OpenAPI connection created in this workspace.
-   * Omit both arguments to retry saved setup, including dependent agent spawners. Repeating the
-   * same name and workpiece is safe; another workpiece cannot replace a completed assignment.
-   */
-  completeBlueprintBinding(bindingName?: string, gatekeeperId?: WorkpieceId): Promise<void>;
 
   /**
    * Fetch one page of action history, newest first by id (creation order). "all" (the default)
@@ -4081,29 +4069,12 @@ export type BlueprintLibrarySummary = {
   pinned?: boolean;
 };
 
-/** A deferred resource to configure after the new workspace exists; source draft URLs are excluded. */
-export type DeferredBlueprintGatekeeperAssignment = {
-  /** Select workspace-bound OpenAPI configuration after creating the workspace. */
-  type: "deferredGatekeeper";
-  /** The owner's connected OpenAPI account. */
-  accountId: number;
-};
-
-/** Remaining workspace-bound resources from the immutable blueprint setup snapshot. */
-export type PendingBlueprintSetup = {
-  /** Gadget whose exact binding names the setup will populate. */
-  gadgetId: WorkpieceId;
-  /** Unresolved resources; empty while only previously selected setup needs retrying. */
-  bindings: Record<string, {
-    /** Original requirement, with no suggested source-workspace URL. */
-    binding: Extract<BlueprintBinding, { type: "gatekeeper" }>;
-    /** Initial owner account suggestion; another eligible account can complete the requirement. */
-    accountId: number;
-  }>;
-};
-
-/** A concrete blueprint assignment or an explicit request to configure OpenAPI in the new workspace. */
-export type BlueprintBindingAssignment = DeferredBlueprintGatekeeperAssignment | {
+/**
+ * Binding assignment (input to newGadgetFromBlueprint).
+ * When instantiating a blueprint, the user provides a Record mapping binding name ->
+ * assignment. Every required binding in the blueprint must have a corresponding entry.
+ */
+export type BlueprintBindingAssignment = {
   type: "gatekeeper";
   accountId: number;      // user's connected account ID
   resourceUrl: string;

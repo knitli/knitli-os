@@ -29,7 +29,6 @@ import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
-import { validateBlueprintAssignments } from "./fork/blueprint-setup";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -53,7 +52,6 @@ export { AdminSettings };
 
 // Re-export entrypoint types from user.ts.
 export { UserDurableObject, GatekeeperConnectCallbackImpl };
-export { OpenApiConnectAuthorityImpl, OpenApiConnectionNotificationsImpl } from "./fork/openapi-connect";
 
 // Re-export entrypoint types from overseer.ts.
 export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,
@@ -444,11 +442,6 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let codeBytes = await readBlueprintContent(this.env, blueprintId, kvRecord.metadata.version);
     if (!codeBytes) throw new Error("Blueprint content not found in R2.");
 
-    // Workspace-bound drafts cannot be prepared until this workspace exists.
-    await validateBlueprintAssignments(kvRecord.metadata.bindings, bindings,
-      accountId => this.#user.describeBlueprintAccount(accountId));
-    const deferred = Object.values(bindings).some(assignment => assignment.type === "deferredGatekeeper");
-
     // 3. Create new Overseer DO (same as newGadget()).
     let id = this.overseers.newUniqueId().toString();
     await this.#user.newGadget(id, kvRecord.metadata.title);
@@ -458,22 +451,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let overseerDo = this.overseers.get(this.overseers.idFromString(id));
     await overseerDo.initializeFromBlueprint(codeBytes, kvRecord.metadata.title,
         deploymentOutputForBlueprint(await readAdminConfig(this.env), blueprintId,
-            sanitizeBlueprintOutput(kvRecord.metadata.output)),
-      deferred ? { bindings: kvRecord.metadata.bindings, assignments: bindings } : undefined);
-    if (deferred) {
-      try { await overseerResult.completeBlueprintBinding(); }
-      catch (error) {
-        logger.warn("Blueprint setup remains pending in the created workspace", {
-          event: "blueprint.setup.pending", gadgetId: id, blueprintId, error,
-        });
-      }
-      recordAnalytics(this.ctx, this.env, {
-        event_name: "gadget_created", user_id: this.#userId.toString(), gadget_id: id,
-        blueprint_id: blueprintId, source: "blueprint",
-      });
-      // @ts-expect-error Native and Cap'n Web stubs are runtime-compatible.
-      return overseerResult;
-    }
+            sanitizeBlueprintOutput(kvRecord.metadata.output)));
 
     // 5. Create gatekeepers from assignments and bind them into the workspace's (only) gadget.
     let metadata = await overseerResult.getMetadata();

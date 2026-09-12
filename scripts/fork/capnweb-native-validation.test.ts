@@ -78,23 +78,4 @@ export class NativeEndpoint extends NativeTarget implements NativeContract {
       await rm(dir, { recursive: true, force: true });
     }
   });
-
-  test(`${entrypoint}: zero-argument dispatch authority is decorated`, async () => {
-    const cwd = await realpath(resolve(root, "packages/workshop-backend"));
-    const result = await build({
-      absWorkingDir: cwd,
-      entryPoints: ["src/fork/openapi-dispatch-binding.ts"],
-      bundle: false,
-      write: false,
-      format: "esm",
-      platform: "neutral",
-      plugins: [capnwebValidate({ cwd, tsconfig: "tsconfig.json" })],
-    });
-    const code = result.outputFiles[0].text;
-    assert.match(
-      code,
-      /@__cw\.__validateRpcClass\([^)]*\)\s*class OpenApiHostDispatchUseAuthority/,
-    );
-    assert.match(code, /"assertActive": \{ args: \[\], returns:/);
-  });
 }

@@ -35,8 +35,6 @@ function makeOverseer(
       // read. These policy tests do not construct a gatekeeper graph, so retain
       // their focus by supplying the successful async readiness boundary.
       assertGatekeeperObserverReadiness: async () => {},
-      assertOpenApiBindingActiveNow: () => {},
-      findOpenApiBinding: () => undefined,
     },
   });
   return overseer;

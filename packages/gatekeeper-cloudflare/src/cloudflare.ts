@@ -4,8 +4,9 @@ import {
   GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, GatekeeperUserVerifier, VendorDescription,
   GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription,
   SupportedResource, ResourceConfiguratorFrame, ResourceDescription, ApprovalQueue, ActionKind,
-  GitCache, stripTrailingSlashes,
+  GitCache, stripTrailingSlashes, type ConnectInitiator,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { initiatorAllows, refuseForeignBrowser } from "@gadgets/backend-utils/fork/connect-initiator";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import {
   getOAuthConfig, buildAuthorizeUrl, generatePkce, exchangeCode, refreshTokens,
@@ -46,6 +47,8 @@ type StoredNonce = {
   stage: "initiation" | "oauth";
   verifier?: string;
   scopes?: string[];
+  /** Who the Workshop bound this link to, when it bound it to anyone (fork). */
+  initiator?: ConnectInitiator;
 };
 
 // A cached access token plus its absolute expiry (unix ms).
@@ -86,6 +89,8 @@ type Env = Cloudflare.Env & {
   BASE_URL?: string;
   CLIENT_ID?: string;
   CLIENT_SECRET?: string;
+  CF_ACCESS_ISS?: string;
+  CF_ACCESS_AUD?: string;
 };
 
 function getBaseUrl(env: Env) {
@@ -135,6 +140,8 @@ export default {
       const doId = path[0];
       const initiationNonce = path[1];
       const stub = ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(doId));
+      const refused = await refuseForeignBrowser(req, env, stub, logger);
+      if (refused) return refused;
       const begun = await stub.beginOAuthFlow(initiationNonce);
       if (begun === null) {
         return new Response(INVALID_LINK_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
@@ -157,6 +164,8 @@ export default {
       if (!code) return new Response("Error: no 'code' provided");
 
       const stub = ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(doId));
+      const refused = await refuseForeignBrowser(req, env, stub, logger);
+      if (refused) return refused;
       if (!await stub.acceptAuthCode(code, oauthNonce)) {
         return new Response(INVALID_LINK_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
       }
@@ -194,7 +203,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       ? AUTH_SCOPES
       : persistentScopesForResources(options?.resourceUrlPatterns);
     await this.ctx.exports.UserAccount.get(userObjectId)
-        .setCallback(callback, initiationNonce, scopes, authOnly);
+        .setCallback(callback, initiationNonce, scopes, authOnly, options?.initiator);
     return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}` };
   }
 
@@ -215,7 +224,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string,
-                    scopes: string[], ephemeral?: boolean) {
+                    scopes: string[], ephemeral?: boolean, initiator?: ConnectInitiator) {
     if (!this.ctx.storage.kv.get<string>("refreshToken")) {
       this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
     }
@@ -228,17 +237,28 @@ export class UserAccount extends DurableObject<Env> {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
+      initiator,
     });
   }
 
-  async prepareReconnect(initiationNonce: string, scopes: string[]) {
+  async prepareReconnect(initiationNonce: string, scopes: string[], initiator?: ConnectInitiator) {
     this.ctx.storage.kv.put<boolean>("reconnecting", true);
     this.ctx.storage.kv.put<string[]>("scopes", scopes);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
+      initiator,
     });
+  }
+
+  /**
+   * Whether the browser presenting `accessEmail` may continue this connect. Same contract as
+   * `McpAccountBase.initiatorMatches`: a link the Workshop bound to a person is theirs alone; a
+   * link issued without an initiator is good for whoever holds the nonce, as before (fork).
+   */
+  async initiatorMatches(accessEmail: string | null): Promise<boolean> {
+    return initiatorAllows(this.ctx.storage.kv.get<StoredNonce>("nonce")?.initiator, accessEmail);
   }
 
   async getGrantedScopes(): Promise<string[]> {
@@ -263,6 +283,7 @@ export class UserAccount extends DurableObject<Env> {
       expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
       stage: "oauth",
       verifier,
+      initiator: stored.initiator,
     });
     // Fail closed: a missing `scopes` key is legacy or corrupted state, so request only the billing
     // set rather than silently asking for observability the user never chose.
@@ -462,10 +483,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#account().revoke();
   }
 
-  async reconnect(): Promise<{ url: string }> {
+  async reconnect(options?: { initiator?: ConnectInitiator }): Promise<{ url: string }> {
     const initiationNonce = generateNonce();
     const scopes = await this.#account().getGrantedScopes();
-    await this.#account().prepareReconnect(initiationNonce, scopes);
+    await this.#account().prepareReconnect(initiationNonce, scopes, options?.initiator);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 

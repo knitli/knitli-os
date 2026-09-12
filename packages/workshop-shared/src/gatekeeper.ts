@@ -1,4 +1,3 @@
-import type { ActionRegistrationReceiptV1, EnsureActionRegistrationV1 } from "./fork/approval-registration";
 // This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
 // provides connectivity to some external service which AI Gadgets can then manipulate. Each
 // installation of the Gadgets Workshop may have access to different adapters, typically based on
@@ -38,8 +37,6 @@ export type AvatarImage = {
 
 /** Describes a connected GatekeeperVendor, for display purposes. */
 export type VendorDescription = {
-  /** Selects the private authenticated OpenAPI connect port; ordinary vendors retain callbacks. */
-  hostConnectProtocol?: "openapi-v1";
   /** Human-readable name of the service, e.g. "Google", "GitHub", etc. */
   displayName: string;
 
@@ -150,8 +147,6 @@ export function boundAgentCatalog(entries: AgentCatalogEntry[]): AgentCatalog {
 
 /** Describes a connected user account on an external service, for display purposes. */
 export type AccountDescription = {
-  /** Explicit private host-binding protocol; declared v1 accounts must implement its extension. */
-  hostBindingProtocol?: "openapi-v1";
   /** User's display name, e.g. "John Doe". This is a non-unique name that is human-readable. */
   displayName?: string;
 
@@ -1018,9 +1013,6 @@ export interface ApprovalQueue extends ObservationAuthorizer {
    *   does not complete, any SQL writes performed just before submit() are rolled back...
    */
   submitAction(action: number, description: ActionDescription): Promise<void>;
-
-  /** Durably register an exact manual-only OpenAPI presentation; retries reuse the host row. */
-  ensureRegistration?(request: EnsureActionRegistrationV1): Promise<ActionRegistrationReceiptV1>;
 
   /**
    * Notifies the overseer that the gadget (or an agent) has requested to register a persistent

@@ -3,18 +3,6 @@
   "version": "1.0.0",
   "type": "module",
   "exports": {
-    "./fork/approval-registration": {
-      "types": "./src/fork/approval-registration.ts",
-      "import": "./src/fork/approval-registration.ts"
-    },
-    "./fork/openapi-connect": {
-      "types": "./src/fork/openapi-connect.ts",
-      "import": "./src/fork/openapi-connect.ts"
-    },
-    "./fork/openapi-host-binding": {
-      "types": "./src/fork/openapi-host-binding.ts",
-      "import": "./src/fork/openapi-host-binding.ts"
-    },
     "./api": {
       "types": "./src/api.ts",
       "import": "./src/api.ts"

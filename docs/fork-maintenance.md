@@ -44,21 +44,8 @@ Upstream has no file there, so nothing in them can ever conflict. Today:
 
 - `packages/gatekeeper-ai-executor/` — the AI Executor gatekeeper, ~19k lines, zero conflict surface.
 - `packages/integration-tests/__tests__/fork/` — fork integration tests.
-- `packages/integration-tests/fixtures/fork/` — test-only Worker generation probes.
-- `packages/integration-tests/src/fork/` — bounded generation-aware reload readiness.
-- `packages/workshop-shared/src/fork/` — authenticated OpenAPI host binding.
-- `packages/workshop-backend/src/fork/` — authenticated OpenAPI host binding.
-- `packages/workshop-backend/__tests__/knitli-openapi-binding-ledger.test.ts` — authenticated OpenAPI host binding.
-- `packages/workshop-backend/__tests__/knitli-openapi-user-binding.test.ts` — authenticated OpenAPI host binding.
-- `packages/workshop-backend/__tests__/fork-fixtures/` — test-only OpenAPI host account serviceFetcher and cleanup barriers.
-- `packages/workshop-backend/__tests__/knitli-openapi-dispatch-binding.test.ts` — private OpenAPI dispatch registration and attenuated-use authority.
-- `packages/workshop-backend/__tests__/knitli-openapi-facet-binding.test.ts` — authenticated OpenAPI host binding.
-- `packages/workshop-frontend/src/GatekeeperModal.knitli-binding.test.tsx` — authenticated OpenAPI host binding.
-- `packages/workshop-backend/__tests__/knitli-blueprint-setup.test.ts` — durable deferred blueprint setup regressions.
-- `packages/workshop-frontend/src/fork/DeferredBlueprintSetup.tsx` — workspace-bound completion of deferred blueprint connections.
-- `packages/workshop-frontend/src/fork/DeferredBlueprintSetup.test.tsx` — deferred setup UI regressions.
-- `packages/workshop-frontend/src/fork/Connections.blueprint-owner.test.tsx` — owner-only blueprint setup visibility regressions.
-- `packages/integration-tests/fixtures/gatekeeper-test/src/fork/` — authenticated OpenAPI host binding.
+- `packages/workshop-backend/src/fork/` — approval-turn continuation (approval-continuation.ts).
+- `packages/workshop-backend/__tests__/knitli-approval-continuation.test.ts` — approval-turn continuation regressions.
 - `packages/mcp-shared/__tests__/fork/` — named `$defs` aliases, read-before-dispatch authorization, and the caller-settable argument budget.
 - `scripts/fork/` — fork tooling.
 - `docs/fork-maintenance.md` — this file.
@@ -395,40 +382,16 @@ Intentional, reviewed differences from upstream. Keep this current.
   `foundation/main`, the gate, `runRevocationCleanup()` and this whole divergence entry should be
   able to go.
 
-### OpenAPI host test reload readiness
-
-- **Where:** `packages/integration-tests/src/fork/reload-harness.ts`, the two
-  `fixtures/fork/*-reload-probe.js` wrappers, and the fork host-binding tests.
-- **What:** After a Worker reload, wait for a fresh generation marker from the
-  public primary and each fixture Worker before reconnecting application RPC.
-  Only health requests repeat; an explicit deadline also bounds transports that
-  ignore cancellation. The wrappers delegate application requests and preserve
-  the validated named exports.
-- **Why:** Wrangler can resolve an update before asynchronous proxy switching has
-  finished. A reload test must establish current-generation readiness before it
-  tests recovered host capabilities.
-- **Upstream splice:** `packages/integration-tests/tsconfig.json` excludes only
-  `fixtures/fork/workshop-reload-probe.js` and
-  `fixtures/fork/gatekeeper-reload-probe.js`. These runtime wrappers import the
-  generated validation bundle, which is bundled and exercised by the real Worker
-  tests rather than checked again as TypeScript source. Preserve these exclusions
-  during a sync; the tsconfig remains upstream-owned and subject to the audit.
-- **Check:** Run the reload-helper tests and complete authenticated OpenAPI host
-  test file after fresh Worker builds, plus the fork audit tests.
-
 ### Credential mutation transaction hook
 
 - **Where:** `packages/gatekeeper-kit/src/credentials.ts`, existing credential tests, and fork-owned `packages/gatekeeper-kit/__tests__/workerd/credential-mutation.test.ts`.
 - **What:** Optional synchronous `mutation(change, apply)` encloses complete connect, refresh/rotate, legacy publication, and clear writes once. The default calls `apply` directly; lazy identity/connection initialization and empty migration reads retain upstream behavior.
 - **Why:** Hosted Account credential publication must share its real storage transaction with generation and enrollment receipts, including rollback after credential writes. Source and existing tests remain upstream-audited; only the exact new test path is fork-owned.
 
-OpenAPI approval registration lives in the existing fork-owned shared/backend `src/fork/` directories. Its exact `packages/workshop-backend/__tests__/knitli-approval-registration.test.ts` exemption covers presentation commitments and durable host registration. Full-stack restart fixtures use the existing integration `fork/` prefixes. The narrow `gatekeeper.ts` and `overseer.ts` hooks remain upstream-audited; registration tombstones are retained independently of action history.
+### OpenAPI host protocol (retired 2026-09-12)
 
-### Authenticated OpenAPI connect authority
-
-- **Where:** `packages/workshop-backend/src/fork/openapi-connect.ts`, with storage and policy adapters in `UserDurableObject`.
-- **What:** Canonical identities include vendor, profile, and principal. Reconnect admission reserves one pending attempt per exact current host receipt inside the existing User storage transaction; another admission fails until that attempt expires or commits. The host connection generation fences host publication. The Account must independently compare its credential generation during the later credential handoff; this is not an atomic transaction across Durable Objects.
-- **First-connect recovery:** A fresh authenticated attempt may reserve an exact profile/principal, predecessor receipt digest, and destination only when permanent canonical metadata is absent. Existing attempt rows hold the live reservation; all competing completions check it before Account description and inside the final transaction. Historical disconnected connections reject recovery. The destination independently fences its credential generation. No expired-attempt tombstones or lifetime admission cap are added.
-- **Retention:** Admission lazily removes expired pending attempts and attempts whose expected or committed receipt is no longer current. Current committed attempts survive their initiation timeout for durable receipt retries; unexpired initial attempts remain active. Cleanup introduces no alarm or scheduler.
-- **Policy:** `#enforceGatekeeperVendorPolicy` is the shared fresh vendor authorization check for initial connects, retained OpenAPI authority, and `#enforceGatekeeperResourcePolicy`. The resource check retains its resource-specific policy and existing error messages.
-- **Proof:** `knitli-openapi-connect.test.ts` covers concurrent reservations, expiry replacement, vendor namespaces, cleanup, retained receipts after eviction, and live policy. `knitli-openapi-user-binding.test.ts` covers fresh shared vendor/resource policy on both legacy and OpenAPI paths.
+The authenticated host binding, connect authority, approval registration, deferred blueprint
+setup and their fixtures were removed once knitli-site's native OpenAPI connector
+(`apps/os/packages/gatekeeper-openapi`) shipped on the ordinary vendor/account protocol.
+`scripts/fork/openapi-host-retired.test.ts` fails if any of it comes back. DO storage rows those
+features wrote are left in place; typed-storage ignores undeclared collections.

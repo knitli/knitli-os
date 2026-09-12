@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_ADMIN_CONFIG, defaultOutputFormatId, parseAdminConfig, reorderFormats, resolveFormatOutput, sanitizeOutputOverrides, serializeAdminConfig } from "../src/admin-config.js";
+import { DEFAULT_ADMIN_CONFIG, defaultOutputFormatId, filterEnabledResources, isResourceDisabled, parseAdminConfig, reorderFormats, resolveFormatOutput, sanitizeOutputOverrides, serializeAdminConfig } from "../src/admin-config.js";
 
 describe("parseAdminConfig", () => {
   it("backfills fields missing from a config persisted before they existed", () => {
@@ -115,5 +115,48 @@ describe("admin config site logo", () => {
     let config = parseAdminConfig('{"siteLogoConfigured":true}');
     expect(config.siteLogoConfigured).toBe(true);
     expect(parseAdminConfig(serializeAdminConfig(config))).toEqual(config);
+  });
+});
+
+const MAIL = { urlPattern: "https://graph.microsoft.com/#segment=mail", title: "Mail", description: "" };
+const CALENDAR = { urlPattern: "https://graph.microsoft.com/#segment=calendar", title: "Calendar", description: "" };
+
+describe("resource allow-list", () => {
+  it("treats every resource as off until an admin turns it on", () => {
+    let config = parseAdminConfig(null);
+    expect(config.enabledResources).toEqual({});
+    expect(filterEnabledResources(config, "msgraph", [MAIL, CALENDAR])).toEqual([]);
+    expect(isResourceDisabled(config, "msgraph", MAIL.urlPattern)).toBe(true);
+  });
+
+  it("keeps only the resources the admin enabled, per vendor", () => {
+    let config = parseAdminConfig(JSON.stringify({ enabledResources: { msgraph: [MAIL.urlPattern] } }));
+    expect(filterEnabledResources(config, "msgraph", [MAIL, CALENDAR])).toEqual([MAIL]);
+    expect(filterEnabledResources(config, "linear", [MAIL])).toEqual([]);
+    expect(isResourceDisabled(config, "msgraph", MAIL.urlPattern)).toBe(false);
+    expect(isResourceDisabled(config, "msgraph", CALENDAR.urlPattern)).toBe(true);
+  });
+
+  it("matches the vendor id case-insensitively, the way setResourceEnabled stores it", () => {
+    let config = parseAdminConfig(JSON.stringify({ enabledResources: { msgraph: [MAIL.urlPattern] } }));
+    expect(filterEnabledResources(config, "MsGraph", [MAIL, CALENDAR])).toEqual([MAIL]);
+    expect(isResourceDisabled(config, "MSGRAPH", MAIL.urlPattern)).toBe(false);
+  });
+
+  it("lets an ambient (auto-provisioning) vendor through untouched, since it has no toggles", () => {
+    let config = parseAdminConfig(null);
+    expect(filterEnabledResources(config, "context", [MAIL, CALENDAR], true)).toEqual([MAIL, CALENDAR]);
+    expect(isResourceDisabled(config, "context", MAIL.urlPattern, true)).toBe(false);
+  });
+
+  it("ignores the retired deny-list rather than turning anything on", () => {
+    let config = parseAdminConfig(JSON.stringify({ disabledResources: { msgraph: [CALENDAR.urlPattern] } }));
+    expect(filterEnabledResources(config, "msgraph", [MAIL, CALENDAR])).toEqual([]);
+    expect("disabledResources" in config).toBe(false);
+  });
+
+  it("round-trips the allow-list through serialize/parse", () => {
+    let config = { ...DEFAULT_ADMIN_CONFIG, enabledResources: { msgraph: [MAIL.urlPattern] } };
+    expect(parseAdminConfig(serializeAdminConfig(config)).enabledResources).toEqual({ msgraph: [MAIL.urlPattern] });
   });
 });

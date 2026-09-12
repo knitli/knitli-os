@@ -1120,7 +1120,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
             vendor.getSupportedResources(options),
           ]);
           let enabledResources =
-              filterEnabledResources(config, id, supportedResources);
+              filterEnabledResources(config, id, supportedResources, description.autoProvisionsAccount === true);
           if (enabledResources.length == 0) {
             // Every resource for this vendor is disabled (or it advertised none) — hide the vendor.
             return null;
@@ -1442,7 +1442,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       try {
         supportedResources = await record.account.getSupportedResources();
         supportedResources =
-            filterEnabledResources(config, record.vendorId, supportedResources);
+            filterEnabledResources(config, record.vendorId, supportedResources, record.autoProvisioned === true);
       } catch (err) {
         logger.warn("failed to get supported resources for connected account", {
           event: "connected.account.supported.resources.failed",
@@ -1669,10 +1669,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return config;
   }
 
-  async #enforceGatekeeperResourcePolicy(accountVendorId: string, resource: SupportedResource) {
+  async #enforceGatekeeperResourcePolicy(accountVendorId: string, resource: SupportedResource,
+      ambient = false) {
     const config = await this.#enforceGatekeeperVendorPolicy(accountVendorId);
     const vendorId = accountVendorId.toLowerCase();
-    if (isResourceDisabled(config, vendorId, resource.urlPattern)) {
+    if (isResourceDisabled(config, vendorId, resource.urlPattern, ambient)) {
       throw new Error(
         `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
     }
@@ -1685,7 +1686,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!account) throw new Error("No such account.");
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
 
-    await this.#enforceGatekeeperResourcePolicy(account.vendorId, resource);
+    await this.#enforceGatekeeperResourcePolicy(account.vendorId, resource, account.autoProvisioned === true);
     return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
   }
 

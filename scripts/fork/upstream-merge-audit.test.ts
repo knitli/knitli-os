@@ -432,6 +432,10 @@ test("surviving fork trees are explicitly fork owned", () => {
     "packages/workshop-backend/__tests__/knitli-approval-continuation.test.ts",
     "packages/integration-tests/__tests__/fork/observer-privacy.test.ts",
     "scripts/fork/openapi-host-retired.test.ts",
+    "packages/backend-utils/src/access.ts",
+    "packages/backend-utils/src/fork/connect-initiator.ts",
+    "packages/mcp-shared/__tests__/fork/connect-initiator.test.ts",
+    "scripts/fork/connect-initiator-enforced.test.ts",
   ]) {
     assert.ok(
       FORK_OWNED_PREFIXES.some((prefix) => path.startsWith(prefix)),
@@ -441,6 +445,8 @@ test("surviving fork trees are explicitly fork owned", () => {
   assert.equal(isForkOwned("packages/workshop-backend/src/user.ts"), false);
   assert.equal(isForkOwned("packages/workshop-shared/src/gatekeeper.ts"), false);
   assert.equal(isForkOwned("packages/workshop-shared/src/fork/openapi-host-binding.ts"), false);
+  assert.equal(isForkOwned("packages/backend-utils/src/logger.ts"), false);
+  assert.equal(isForkOwned("packages/gatekeeper-github/src/github.ts"), false);
 });
 
 /** A real sync whose ours-only resolution silently drops a clean upstream edit. */

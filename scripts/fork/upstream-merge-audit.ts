@@ -83,6 +83,11 @@ export const FORK_OWNED_PREFIXES = [
   "packages/workshop-backend/src/fork/",
   "packages/workshop-backend/__tests__/knitli-approval-continuation.test.ts",
   "packages/mcp-shared/__tests__/fork/",
+  "packages/backend-utils/src/access.ts",
+  "packages/backend-utils/src/fork/",
+  "packages/gatekeeper-github/__tests__/workerd/knitli-connect-initiator.test.ts",
+  "packages/gatekeeper-linear/__tests__/workerd/knitli-connect-initiator.test.ts",
+  "packages/gatekeeper-cloudflare/__tests__/workerd/knitli-connect-initiator.test.ts",
 
   "packages/gatekeeper-ai-executor/",
   "packages/integration-tests/__tests__/fork/",

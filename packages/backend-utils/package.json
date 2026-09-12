@@ -4,6 +4,10 @@
   "description": "Shared Worker-side libraries; not a standalone deployable Worker.",
   "type": "module",
   "exports": {
+    "./access": {
+      "types": "./src/access.ts",
+      "import": "./src/access.ts"
+    },
     "./logger": {
       "types": "./src/logger.ts",
       "import": "./src/logger.ts"
@@ -28,7 +32,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@gadgets/error-reporting": "workspace:*"
+    "@gadgets/error-reporting": "workspace:*",
+    "jose": "^6.2.8"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "catalog:",

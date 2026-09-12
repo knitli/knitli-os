@@ -72,6 +72,9 @@ importers:
       '@gadgets/error-reporting':
         specifier: workspace:*
         version: link:../error-reporting
+      jose:
+        specifier: ^6.2.8
+        version: 6.2.8
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: 'catalog:'

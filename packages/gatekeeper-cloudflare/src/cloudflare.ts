@@ -430,14 +430,16 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     return identity?.email ?? null;
   }
 
-  async ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}> {
+  async ensureResources(
+    resourceUrlPatterns: string[], options?: { initiator?: ConnectInitiator },
+  ): Promise<{url?: string}> {
     const account = this.#account();
     const grantedPatterns = new Set(grantedObservabilityResourcePatterns(await account.getGrantedScopes()));
     if (resourceUrlPatterns.every(pattern => grantedPatterns.has(pattern))) return {};
 
     const union = [...new Set([...grantedPatterns, ...resourceUrlPatterns])];
     const initiationNonce = generateNonce();
-    await account.prepareReconnect(initiationNonce, persistentScopesForResources(union));
+    await account.prepareReconnect(initiationNonce, persistentScopesForResources(union), options?.initiator);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 

@@ -326,7 +326,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
-    return this.#user.ensureAccountResources(accountId, resourceUrlPatterns);
+    return this.#user.ensureAccountResources(accountId, resourceUrlPatterns, this.#initiator());
   }
 
   listAddableGatekeepers(): Promise<GatekeeperVendorInfo[]> {

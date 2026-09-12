@@ -5,7 +5,9 @@
 import { createExecutionContext, env, runInDurableObject, waitOnExecutionContext } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { WRONG_ACCOUNT_HTML } from "@gadgets/backend-utils/fork/connect-initiator";
-import type { UserAccount } from "../../src/cloudflare.js";
+import type { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
+import { GatekeeperUserImpl, type UserAccount } from "../../src/cloudflare.js";
+import { ACCOUNT_OBSERVABILITY_RESOURCE } from "../../src/resources.js";
 
 const BASE = "http://localhost:8787/gatekeeper/cloudflare";
 const NONCE = "b".repeat(64);
@@ -96,5 +98,74 @@ describe("oauth callback", () => {
     await runInDurableObject(accounts().get(accounts().idFromString(id)), async (account: UserAccount) => {
       expect(await account.initiatorMatches("adam@example.com")).toBe(true);
     });
+  });
+});
+
+/**
+ * Mint a scope-expansion link the way the Workshop does, by calling `ensureResources` on a
+ * `GatekeeperUserImpl` for `userObjectId`.
+ *
+ * Production reaches that entrypoint as `ctx.exports.GatekeeperUserImpl({props})`
+ * (`cloudflare.ts:331`), but under `@cloudflare/vitest-pool-workers` `ctx.exports` carries only the
+ * classes miniflare has a binding for -- `UserAccount`, the two gatekeeper DOs, `default` -- so a
+ * plain `WorkerEntrypoint` is not reachable by name. Constructing it here instead, from *inside* an
+ * account DO so it gets that worker's own `ctx.exports` and `env` rather than the outer test's proxy
+ * bindings, gives the real class the real `UserAccount` namespace: every storage write these tests
+ * assert on is made by the production code path against a real Durable Object. `ctx` and `env` are
+ * TypeScript-`protected` only, not runtime-private, so the casts are safe.
+ */
+async function expandScopes(
+  userObjectId: DurableObjectId, patterns: string[], options?: { initiator?: { email: string } },
+): Promise<{ url?: string }> {
+  const ns = accounts();
+  return runInDurableObject(ns.get(userObjectId), async (account: UserAccount) => {
+    const inner = account as unknown as { ctx: { exports: unknown }; env: unknown };
+    const user: CloudflareGatekeeperUser = new GatekeeperUserImpl(
+      { props: { userObjectId: userObjectId.toString() }, exports: inner.ctx.exports } as never,
+      inner.env as never);
+    // An upstream caller passes no options at all, so the unbound case must not pass one either.
+    return options ? user.ensureResources(patterns, options) : user.ensureResources(patterns);
+  });
+}
+
+async function get(url: string): Promise<Response> {
+  const ctx = createExecutionContext();
+  const response = await (await import("../../src/cloudflare.js")).default
+    .fetch(new Request(url), env, ctx);
+  await waitOnExecutionContext(ctx);
+  return response;
+}
+
+describe("ensureResources", () => {
+  // A fresh account holds only the billing scopes, so the observability pattern is ungranted and
+  // the branch that mints a reconnect link is the one that runs.
+  const RESOURCES = [ACCOUNT_OBSERVABILITY_RESOURCE.urlPattern];
+
+  it("binds the scope-expansion link it mints to the initiator", async () => {
+    const ns = accounts();
+    const id = ns.newUniqueId();
+    const { url } = await expandScopes(id, RESOURCES, { initiator: { email: "adam@example.com" } });
+    expect(url).toMatch(new RegExp(`^${BASE}/${id}/[0-9a-f]{64}$`));
+
+    // The initiator reached the stored nonce rather than being dropped on the way through.
+    await runInDurableObject(ns.get(id), async (account: UserAccount) => {
+      expect(await account.initiatorMatches("adam@example.com")).toBe(true);
+      expect(await account.initiatorMatches("other@example.com")).toBe(false);
+    });
+
+    // ...so the route guard that already protects every other connect link now covers this one.
+    const response = await get(url!);
+    expect(response.status).toBe(403);
+    expect(await response.text()).toBe(WRONG_ACCOUNT_HTML);
+  });
+
+  it("still mints an unbound link when the caller names no initiator", async () => {
+    const ns = accounts();
+    const id = ns.newUniqueId();
+    const { url } = await expandScopes(id, RESOURCES);
+    const response = await get(url!);
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toContain("dash.cloudflare.com/oauth2/auth");
   });
 });

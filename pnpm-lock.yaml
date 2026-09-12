@@ -903,6 +903,9 @@ importers:
       '@types/node':
         specifier: 26.1.0
         version: 26.1.0
+      jose:
+        specifier: ^6.2.8
+        version: 6.2.8
       typescript:
         specifier: 'catalog:'
         version: 7.0.2

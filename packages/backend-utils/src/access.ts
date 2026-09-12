@@ -6,7 +6,16 @@ export type CfAccessEnv = Readonly<{
   CF_ACCESS_ISS?: string;
 }>;
 
-type AccessTokenVerifier = (token: string, env: CfAccessEnv) => Promise<JWTPayload>;
+export type AccessTokenVerifier = (token: string, env: CfAccessEnv) => Promise<JWTPayload>;
+
+/**
+ * The signature algorithms a Cloudflare Access assertion may use (fork). Pinned rather than left
+ * to `jose`'s default, which accepts any algorithm the JWKS can key: the certs endpoint is not
+ * ours, so "whatever it serves" is not a trust decision this Worker should inherit. Read from
+ * https://<team>.cloudflareaccess.com/cdn-cgi/access/certs on 2026-09-12; widen it only after
+ * re-reading that endpoint.
+ */
+export const CF_ACCESS_JWT_ALGORITHMS = ["RS256"] as const;
 
 const remoteJwkSets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
@@ -20,6 +29,7 @@ async function verifyToken(token: string, env: CfAccessEnv): Promise<JWTPayload>
     remoteJwkSets.set(env.CF_ACCESS_ISS, jwks);
   }
   return (await jwtVerify(token, jwks, {
+    algorithms: [...CF_ACCESS_JWT_ALGORITHMS],
     issuer: env.CF_ACCESS_ISS,
     audience: env.CF_ACCESS_AUD,
   })).payload;

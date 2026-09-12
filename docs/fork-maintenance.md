@@ -428,12 +428,15 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   so adopting one of the eight forces the fix rather than inheriting the gap silently.
 - **Scope expansion too, not only connect:** `GatekeeperUserImpl.ensureResources` mints a reconnect
   link when a connected Cloudflare account is missing an observability scope, and it was the one
-  link-minting route left unbound. `GatekeeperUser.ensureResources`,
+  link-minting route left unbound among the four fixed vendors. `GatekeeperUser.ensureResources`,
   `UserDurableObject.ensureAccountResources` and the `AuthenticatedApi` RPC now thread the initiator
   the way `connectAccount`/`reconnectAccount` already did. The other vendors' one-parameter
-  `ensureResources` implementations need no change: TypeScript allows an implementation to declare
-  fewer parameters than its interface, and capnweb-validate truncates an argument the target does
-  not declare (the same shape `reconnect({initiator})` already relies on).
+  `ensureResources` implementations need no change *to keep compiling or working*: TypeScript allows
+  an implementation to declare fewer parameters than its interface, and capnweb-validate truncates
+  an argument the target does not declare (the same shape `reconnect({initiator})` already relies
+  on). That is a compatibility guarantee, not a security one — `gatekeeper-google` and
+  `gatekeeper-slack` also mint their own unbound reconnect links from `ensureResources`, and remain
+  so under the same owner decision recorded above, not because the bug doesn't apply to them.
 - **Known cost:** fail-closed. A gatekeeper with no `CF_ACCESS_AUD` refuses every *bound* link,
   including one issued moments before a deploy that removed the variable. Links issued without an
   initiator (a deployment with no Access; everything `integration-tests` issues, since

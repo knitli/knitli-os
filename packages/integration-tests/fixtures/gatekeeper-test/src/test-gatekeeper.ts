@@ -21,8 +21,6 @@
 // user. Tests exercise both narratives by choosing reason text.
 
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
-import type { BoundIdentity, DraftReference, HostDraftAuthority, HostFacetBinding, OpenApiFacetFinalizer, OpenApiBoundAccount } from "@gadgets/workshop-shared/fork/openapi-host-binding";
-import { assertDraftLive, assertReference, bindingEvent, openApiControlRequest, openApiEnabled, openApiFinalizer, openApiResource, openApiRevocationFinalizer, sameIdentity, startOpenApiConfigurator, type BindingEvent, type ConnectorDraft, type OpenApiTestEnv, OpenApiRuntime, startOpenApiSession } from "./fork/openapi-binding";
 
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type {
@@ -81,8 +79,6 @@ const AVATAR = {
 // shows the user -- so a test that read a label off `description.uniqueName` can aim an outcome at it
 // without having to learn any internal id.
 
-type FixtureObservation = { method: string; arity: number; propertyNames?: string[] };
-
 type VerifyOutcome = { allow: true } | { allow: false; reason: string };
 
 /**
@@ -118,163 +114,6 @@ function outcomeKey(label: string, resourceUrl?: string): string {
 
 @validateRpc()
 export class TestControl extends DurableObject<Cloudflare.Env> {
-  #openApiRuntime = new OpenApiRuntime();
-
-  /** Test-only timestamp input; simulates past draft expiry without advancing runtime clocks. */
-  setOpenApiDraftExpiry(label: string, draftId: string, expiresAt: number): void {
-    const draft = this.getOpenApiDraft(label, draftId);
-    draft.expiresAt = expiresAt;
-    this.ctx.storage.kv.put(`openapi:draft:${label}:${draftId}`, draft);
-  }
-
-  /** Test-only failure configuration contains no authority or caller-supplied identity. */
-  setOpenApiDraftFailure(label: string, draftId: string, failure: "confirm-selection" | "activation" | "describe"): void {
-    const draft = this.getOpenApiDraft(label, draftId);
-    draft.failure = failure;
-    this.ctx.storage.kv.put(`openapi:draft:${label}:${draftId}`, draft);
-  }
-
-  /** Test-only lost-capability simulation; durable account/draft tombstones remain intact. */
-  dropOpenApiRuntimeCaps(label: string, draftId: string): void {
-    this.#openApiRuntime.drop(label, draftId);
-  }
-
-  /** Test-only protocol footprint, containing argument counts and property names only. */
-  recordFixtureObservation(label: string, observation: FixtureObservation): void {
-    const calls = this.readFixtureObservations(label);
-    calls.push(observation);
-    this.ctx.storage.kv.put(`fixture:observations:${label}`, calls);
-  }
-
-  /** Test-only protocol footprint never returns property values or capabilities. */
-  readFixtureObservations(label: string): FixtureObservation[] {
-    return this.ctx.storage.kv.get<FixtureObservation[]>(`fixture:observations:${label}`) ?? [];
-  }
-
-
-  /** Test-only private activation hook; never reachable through the fixture HTTP controls. */
-  async installOpenApiBinding(label: string, draftId: string, binding: RpcStub<HostFacetBinding>): Promise<void> {
-    const draft = this.getOpenApiDraft(label, draftId);
-    if (!draft.identity || !sameIdentity(draft.identity, await binding.getIdentity())) throw new Error("BINDING_IDENTITY_MISMATCH");
-    await this.#openApiRuntime.install(label, draftId, binding);
-  }
-
-  /** Test-only finalizer capture called only by the authenticated account resolver. */
-  captureOpenApiFinalizer(label: string, draftId: string, finalizer: RpcStub<OpenApiFacetFinalizer>): void {
-    this.#openApiRuntime.captureFinalizer(label, draftId, finalizer);
-  }
-
-  /** Test-only ABA exercise using capabilities captured by the authenticated finalizer. */
-  async rotateOpenApiDispatchKey(label: string, draftId: string): Promise<void> {
-    await this.#openApiRuntime.rotate(label, draftId);
-  }
-
-  /** Test-only liveness result; no capability leaves the private coordinator. */
-  async checkOpenApiDispatchUse(label: string, draftId: string, which: "old" | "current"): Promise<void> {
-    await this.#openApiRuntime.check(label, draftId, which);
-  }
-
-  /** Test-only wrong-facet attempt against a real private finalizer and genuine other binding. */
-  async crossoverOpenApiBinding(label: string, draftId: string, otherDraftId: string): Promise<void> {
-    await this.#openApiRuntime.crossover(label, draftId, otherDraftId);
-  }
-
-  /** Test-only simulated dispatch; never performs provider I/O. */
-  async dispatchOpenApi(label: string, draftId: string): Promise<number> {
-    return this.#openApiRuntime.dispatch(label, draftId, () => {
-      this.assertOpenApiAccountActive(label);
-      const draft = this.getOpenApiDraft(label, draftId);
-      if (draft.state !== "active") throw new Error("BINDING_NOT_ACTIVE");
-    }, () => this.waitAtBarrier(`openapi:dispatch:${draftId}`), event => {
-      const identity = this.getOpenApiDraft(label, draftId).identity;
-      if (!identity) throw new Error("BINDING_IDENTITY_MISSING");
-      this.recordBindingEvent(bindingEvent(event, identity));
-    });
-  }
-
-  /** Test-only drain acknowledgement after the durable revoke fence. */
-  async drainOpenApiDispatches(label: string, draftId: string): Promise<void> {
-    await this.#openApiRuntime.drain(label, draftId);
-  }
-
-  revokeOpenApiAccount(label: string): void {
-    this.ctx.storage.kv.put(`openapi:account-revoked:${label}`, true);
-  }
-
-  assertOpenApiAccountActive(label: string): void {
-    if (this.ctx.storage.kv.get(`openapi:account-revoked:${label}`)) throw new Error("ACCOUNT_REVOKED");
-  }
-
-  putOpenApiDraft(label: string, draft: ConnectorDraft): void {
-    const key = `openapi:draft:${label}:${draft.draftId}`;
-    if (this.ctx.storage.kv.get(key)) throw new Error("DRAFT_CONFLICT");
-    this.ctx.storage.kv.put(key, draft);
-  }
-
-  getOpenApiDraft(label: string, draftId: string): ConnectorDraft {
-    const draft = this.ctx.storage.kv.get<ConnectorDraft>(`openapi:draft:${label}:${draftId}`);
-    if (!draft) throw new Error("DRAFT_NOT_FOUND");
-    return draft;
-  }
-
-  invalidateOpenApiDraft(label: string, draftId: string, kind: "expire" | "cancel"): void {
-    const draft = this.getOpenApiDraft(label, draftId);
-    if (kind === "expire") draft.expired = true;
-    else draft.cancelled = true;
-    this.ctx.storage.kv.put(`openapi:draft:${label}:${draftId}`, draft);
-  }
-
-  prepareOpenApiActivation(label: string, identity: BoundIdentity): void {
-    const draft = this.getOpenApiDraft(label, identity.draftId);
-    assertReference(draft, identity);
-    assertDraftLive(draft);
-    if (draft.identity && !sameIdentity(draft.identity, identity)) throw new Error("BINDING_IDENTITY_MISMATCH");
-    if (!draft.identity) {
-      draft.identity = identity;
-      draft.state = "activating";
-      this.ctx.storage.kv.put(`openapi:draft:${label}:${draft.draftId}`, draft);
-      this.recordBindingEvent(bindingEvent("activation-started", identity));
-    }
-  }
-
-  completeOpenApiActivation(label: string, identity: BoundIdentity): void {
-    const draft = this.getOpenApiDraft(label, identity.draftId);
-    assertDraftLive(draft);
-    if (!draft.identity || !sameIdentity(draft.identity, identity)) throw new Error("BINDING_IDENTITY_MISMATCH");
-    if (draft.state === "active") return;
-    draft.state = "active";
-    this.ctx.storage.kv.put(`openapi:draft:${label}:${draft.draftId}`, draft);
-    this.recordBindingEvent(bindingEvent("activated", identity));
-  }
-
-  beginOpenApiRevocation(label: string, draftId: string): ConnectorDraft {
-    const draft = this.getOpenApiDraft(label, draftId);
-    if (draft.state !== "revoked" && draft.state !== "revoking") {
-      draft.state = "revoking";
-      this.ctx.storage.kv.put(`openapi:draft:${label}:${draftId}`, draft);
-      if (draft.identity) this.recordBindingEvent(bindingEvent("revocation-started", draft.identity));
-    }
-    return draft;
-  }
-
-  completeOpenApiRevocation(label: string, draftId: string): void {
-    const draft = this.getOpenApiDraft(label, draftId);
-    if (draft.state === "revoked") return;
-    draft.state = "revoked";
-    this.ctx.storage.kv.put(`openapi:draft:${label}:${draftId}`, draft);
-    if (draft.identity) this.recordBindingEvent(bindingEvent("revoked", draft.identity));
-  }
-
-  recordBindingEvent(event: BindingEvent): void {
-    const events = this.readBindingEvents(event.draftId);
-    events.push(event);
-    this.ctx.storage.kv.put(`openapi:events:${event.draftId}`, events);
-  }
-
-  readBindingEvents(draftId: string): BindingEvent[] {
-    return this.ctx.storage.kv.get<BindingEvent[]>(`openapi:events:${draftId}`) ?? [];
-  }
-
   // Barriers live in memory, not storage: a rendezvous only has meaning within the one
   // instance whose await points the test is pausing.
   #barriers = new Map<string, Barrier>();
@@ -448,8 +287,7 @@ function resourceName(resourceUrl: string): string {
 // Vendor
 
 type AccountProps = { label: string };
-type BindingProps = AccountProps & {
-  openApiDraftId?: string; resourceUrl: string; ambient?: true };
+type BindingProps = AccountProps & { resourceUrl: string; ambient?: true };
 
 @validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
@@ -472,9 +310,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
   @skipRpcValidation()
   async createAccount(): Promise<Fetcher<GatekeeperUser>> {
     const label = `test-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}@${VENDOR_HOST}`;
-    return openApiEnabled(this.env as OpenApiTestEnv)
-      ? this.ctx.exports.TestOpenApiAccount({ props: { label } })
-      : this.ctx.exports.TestAccount({ props: { label } });
+    return this.ctx.exports.TestAccount({ props: { label } });
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
@@ -540,7 +376,6 @@ export class TestAccount
     class: DurableObjectClass<Gatekeeper<TestSession>>;
     resource: SupportedResource;
   }> {
-    await control(this.ctx.exports).recordFixtureObservation(this.ctx.props.label, { method: "getGatekeeperClassFor", arity: arguments.length });
     const parsed = new URL(url);
     if (
       parsed.host !== VENDOR_HOST ||
@@ -577,7 +412,6 @@ export class TestAccount
   async startResourceConfigurator(
     _resourceUrlPattern: string,
   ): Promise<ResourceConfiguratorFrame> {
-    await control(this.ctx.exports).recordFixtureObservation(this.ctx.props.label, { method: "startResourceConfigurator", arity: arguments.length });
     throw new Error(
       "The test gatekeeper has no resource configurator; bind a URL directly.",
     );
@@ -586,56 +420,6 @@ export class TestAccount
   reconnect(): Promise<{ url: string }> {
     throw new Error("The test gatekeeper has no credentials to reconnect.");
   }
-}
-
-/** Opt-in account; private extension methods are reached through authenticated service RPC. */
-@validateRpc()
-export class TestOpenApiAccount extends TestAccount implements OpenApiBoundAccount {
-  override async describe(): Promise<AccountDescription> {
-    const { singleton: _singleton, ...description } = await super.describe();
-    return { ...description, hostBindingProtocol: "openapi-v1" };
-  }
-
-  override async getSupportedResources(): Promise<SupportedResource[]> {
-    return [openApiResource(this.env as OpenApiTestEnv)];
-  }
-
-  async startBoundResourceConfigurator(pattern: string, authority: RpcStub<HostDraftAuthority>): Promise<ResourceConfiguratorFrame> {
-    await control(this.ctx.exports).assertOpenApiAccountActive(this.ctx.props.label);
-    const resource = openApiResource(this.env as OpenApiTestEnv);
-    if (pattern !== resource.urlPattern) throw new Error("UNSUPPORTED_RESOURCE");
-    return startOpenApiConfigurator(control(this.ctx.exports), this.ctx.props.label, authority, resource);
-  }
-
-  async resolveBoundDraft(reference: DraftReference) {
-    const ctl = control(this.ctx.exports);
-    await ctl.assertOpenApiAccountActive(this.ctx.props.label);
-    const draft = await ctl.getOpenApiDraft(this.ctx.props.label, reference.draftId);
-    assertReference(draft, reference);
-    assertDraftLive(draft);
-    const finalizer = openApiFinalizer(ctl, this.ctx.props.label, reference);
-    await ctl.captureOpenApiFinalizer(this.ctx.props.label, draft.draftId, finalizer);
-    await ctl.waitAtBarrier(`openapi:resolution:${draft.draftId}`);
-    return {
-      class: this.ctx.exports.TestGatekeeper({ props: { label: this.ctx.props.label, resourceUrl: draft.resourceUrl, openApiDraftId: draft.draftId } }),
-      resource: openApiResource(this.env as OpenApiTestEnv),
-      resourceUrl: draft.resourceUrl,
-      finalizer,
-    };
-  }
-
-  override async revoke(): Promise<void> {
-    await control(this.ctx.exports).revokeOpenApiAccount(this.ctx.props.label);
-    await control(this.ctx.exports).recordFixtureObservation(this.ctx.props.label, { method: "revoke", arity: arguments.length });
-  }
-
-  async resolveBoundDraftForRevocation(reference: DraftReference) {
-    const ctl = control(this.ctx.exports);
-    const draft = await ctl.getOpenApiDraft(this.ctx.props.label, reference.draftId);
-    assertReference(draft, reference);
-    return openApiRevocationFinalizer(ctl, this.ctx.props.label, reference);
-  }
-
 }
 
 /**
@@ -773,11 +557,6 @@ export class TestGatekeeper
   implements Gatekeeper<TestSession>
 {
   async describe(): Promise<ResourceDescription> {
-    await control(this.ctx.exports).recordFixtureObservation(this.ctx.props.label, { method: "describe", arity: arguments.length, propertyNames: Object.keys(this.ctx.props).toSorted() });
-    if (this.ctx.props.openApiDraftId) {
-      const draft = await control(this.ctx.exports).getOpenApiDraft(this.ctx.props.label, this.ctx.props.openApiDraftId);
-      if (draft.failure === "describe") throw new Error("FIXTURE_DESCRIPTION_FAILED");
-    }
     if (this.ctx.props.ambient) {
       return {
         url: this.ctx.props.resourceUrl,
@@ -815,9 +594,6 @@ export class TestGatekeeper
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<TestSession> {
-    if (this.ctx.props.openApiDraftId) {
-      return startOpenApiSession(control(this.ctx.exports), this.ctx.props.label, this.ctx.props.openApiDraftId, approvalQueue);
-    }
     const name = resourceName(this.ctx.props.resourceUrl);
     if (name.includes("start-session-barrier")) {
       await control(this.ctx.exports).waitAtBarrier(
@@ -932,11 +708,6 @@ export default {
     // Set what addObserver() should do for one account, either everywhere or (when `resourceUrl`
     // is given) at one binding only.
     // Body: {"label": "...", "allow": false, "reason": "...", "resourceUrl": "..."}
-    if (req.method === "POST" && (openApiEnabled(env as OpenApiTestEnv) || url.pathname === "/control/readFixtureObservations")) {
-      const response = await openApiControlRequest(url.pathname, body, control(ctx.exports));
-      if (response) return response;
-    }
-
     if (url.pathname === "/control/verify-outcome" && req.method === "POST") {
       const { label, allow, reason, resourceUrl } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");

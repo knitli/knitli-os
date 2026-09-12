@@ -77,6 +77,9 @@ export type VendorDescription = {
    * management UI (see AccountDescription.singleton / .providesUi).
    */
   autoProvisionsAccount?: boolean;
+
+  /** If set, this vendor exposes a deployment-admin management UI. */
+  providesAdminUi?: { title: string; icon?: AvatarImage };
 }
 
 /**
@@ -461,6 +464,9 @@ export type GatekeeperConnectOptions = {
 export interface GatekeeperVendor extends WorkerEntrypoint {
   /** Get display info for the service, suitable for display to a user. */
   describe(): Promise<VendorDescription>;
+
+  /** Opens the vendor-owned administration UI for a deployment administrator. */
+  startAdminUi?(context: AppUiContext): Promise<GatekeeperUiFrame | null>;
 
   /**
    * Start the auth flow to connect to the user's remote account. Returns the URL which the user

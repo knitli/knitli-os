@@ -13,6 +13,7 @@ import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
 import { formatBlueprintsManifestVersion, installFormatBlueprints } from './format-blueprints.js';
 import { FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
+import { AdminGatekeeperApps } from './fork/admin-gatekeeper-apps.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
 
@@ -84,6 +85,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // Every bound gatekeeper, keyed by vendor id. Deployment-global (from env bindings), so admin
   // resource listing needs no user context.
   private vendors: Map<string, Service<GatekeeperVendor>>;
+  private adminGatekeeperApps: AdminGatekeeperApps;
   // Every config setter writes the same authoritative singleton and KV mirror. Serialize the full
   // read/modify/write operation so external KV I/O cannot let concurrent setters lose updates.
   private adminConfigMutationTail = Promise.resolve();
@@ -97,6 +99,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     this.storage = makeAdminSettingsStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.vendors = buildGatekeeperVendorMap(env);
+    this.adminGatekeeperApps = new AdminGatekeeperApps(this.vendors);
   }
 
   /**
@@ -344,6 +347,14 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       resourceVendors: await this.#listResourceConfig(config, adminUserId),
       formats: await this.#listFormatConfig(config),
     };
+  }
+
+  listGatekeeperAdminApps() {
+    return this.adminGatekeeperApps.list();
+  }
+
+  getGatekeeperAdminApp(id: string) {
+    return this.adminGatekeeperApps.open(id);
   }
 
   // --- Standard output formats ---
@@ -639,6 +650,14 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
   listAiExecutorProfiles(): Promise<AiExecutorProfile[]> {
     return this.#withInferenceAdmin(async (inferenceAdmin) =>
       await inferenceAdmin.listProfiles());
+  }
+
+  listGatekeeperAdminApps() {
+    return this.admin.listGatekeeperAdminApps();
+  }
+
+  getGatekeeperAdminApp(id: string) {
+    return this.admin.getGatekeeperAdminApp(id);
   }
 
   createAiExecutorProfile(input: AiExecutorProfileInput): Promise<AiExecutorProfile> {

@@ -729,6 +729,13 @@ export type GatekeeperAppInfo = {
   icon?: AvatarImage;
 };
 
+/** A vendor-owned administration app available to deployment administrators. */
+export type AdminGatekeeperAppInfo = {
+  id: string;
+  title: string;
+  icon?: AvatarImage;
+};
+
 // ---------------------------------------------------------------------------
 // Context Library — pluggable separate worker (packages/gatekeeper-context)
 // ---------------------------------------------------------------------------
@@ -1060,6 +1067,9 @@ export const getAiExecutorAdminErrorCode = aiExecutorAdminErrors.getCode;
  * driven). Each setter throws on invalid input.
  */
 export interface AdminApi {
+  listGatekeeperAdminApps(): Promise<AdminGatekeeperAppInfo[]>;
+
+  getGatekeeperAdminApp(id: string): Promise<GatekeeperUiFrame | null>;
   /** List every administrator-curated AI executor profile. */
   listAiExecutorProfiles(): Promise<AiExecutorProfile[]>;
 

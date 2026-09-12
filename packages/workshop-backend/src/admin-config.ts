@@ -34,8 +34,8 @@ export type AdminConfig = {
   banner: BannerConfig;
   /** Accent (brand) color hex, or "" for the default theme. */
   accentColor: string;
-  /** Disabled gatekeeper resources: vendorId -> disabled resource urlPatterns. */
-  disabledResources: Record<string, string[]>;
+  /** Enabled gatekeeper resources: vendorId -> enabled resource urlPatterns. Anything unlisted is off. */
+  enabledResources: Record<string, string[]>;
   /** Fully-disabled gatekeeper vendor ids. */
   disabledGatekeepers: string[];
   /**
@@ -87,7 +87,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   announcement: "",
   banner: { text: "", color: DEFAULT_BANNER_COLOR },
   accentColor: "",
-  disabledResources: {},
+  enabledResources: {},
   disabledGatekeepers: [],
   ambientGatekeeperModes: {},
   formats: [],
@@ -285,11 +285,11 @@ export function parseAdminConfig(raw: string | null): AdminConfig {
   if (!raw) return { ...DEFAULT_ADMIN_CONFIG };
   try {
     let p = JSON.parse(raw) as Partial<AdminConfig>;
-    let disabledResources: Record<string, string[]> = {};
-    if (p.disabledResources && typeof p.disabledResources === "object") {
-      for (let [vendorId, patterns] of Object.entries(p.disabledResources)) {
+    let enabledResources: Record<string, string[]> = {};
+    if (p.enabledResources && typeof p.enabledResources === "object") {
+      for (let [vendorId, patterns] of Object.entries(p.enabledResources)) {
         let list = strings(patterns);
-        if (list.length > 0) disabledResources[vendorId] = list;
+        if (list.length > 0) enabledResources[vendorId.toLowerCase()] = list;
       }
     }
     let ambientGatekeeperModes: Record<string, AmbientGatekeeperMode> = {};
@@ -309,7 +309,7 @@ export function parseAdminConfig(raw: string | null): AdminConfig {
         color: isBannerColor(p.banner?.color) ? p.banner!.color : DEFAULT_BANNER_COLOR,
       },
       accentColor: typeof p.accentColor === "string" ? p.accentColor : "",
-      disabledResources,
+      enabledResources,
       disabledGatekeepers: strings(p.disabledGatekeepers).map(v => v.toLowerCase()),
       ambientGatekeeperModes,
       formats: parseFormats(p.formats),
@@ -328,18 +328,25 @@ export async function readAdminConfig(env: Cloudflare.Env): Promise<AdminConfig>
   return parseAdminConfig(await env.BLUEPRINTS.get(ADMIN_CONFIG_KEY));
 }
 
-// --- Resource-disable helpers ---
+// --- Resource allow-list helpers ---
+//
+// Vendor ids are lowercased here because `setResourceEnabled` stores them lowercased and the
+// readers in user.ts pass whatever case the binding name had. `ambient` marks an auto-provisioning
+// vendor, which has no resource toggles and is governed by `ambientGatekeeperMode` instead.
 
 export function isResourceDisabled(
-    config: AdminConfig, vendorId: string, urlPattern: string): boolean {
-  return config.disabledResources[vendorId]?.includes(urlPattern) ?? false;
+    config: AdminConfig, vendorId: string, urlPattern: string, ambient = false): boolean {
+  if (ambient) return false;
+  return !(config.enabledResources[vendorId.toLowerCase()]?.includes(urlPattern) ?? false);
 }
 
 export function filterEnabledResources(
-    config: AdminConfig, vendorId: string, resources: SupportedResource[]): SupportedResource[] {
-  let disabled = config.disabledResources[vendorId];
-  if (!disabled || disabled.length === 0) return resources;
-  return resources.filter(r => !disabled.includes(r.urlPattern));
+    config: AdminConfig, vendorId: string, resources: SupportedResource[],
+    ambient = false): SupportedResource[] {
+  if (ambient) return resources;
+  let enabled = config.enabledResources[vendorId.toLowerCase()];
+  if (!enabled || enabled.length === 0) return [];
+  return resources.filter(r => enabled.includes(r.urlPattern));
 }
 
 // --- Agent system-prompt instructions ---

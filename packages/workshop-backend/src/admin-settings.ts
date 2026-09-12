@@ -449,11 +449,11 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   async setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void> {
     vendorId = vendorId.toLowerCase();
     await this.#mutateAdminConfig(config => {
-      let map = { ...config.disabledResources };
-      let disabled = new Set(map[vendorId] ?? []);
-      if (enabled) disabled.delete(urlPattern); else disabled.add(urlPattern);
-      if (disabled.size === 0) delete map[vendorId]; else map[vendorId] = [...disabled];
-      return { ...config, disabledResources: map };
+      let map = { ...config.enabledResources };
+      let on = new Set(map[vendorId] ?? []);
+      if (enabled) on.add(urlPattern); else on.delete(urlPattern);
+      if (on.size === 0) delete map[vendorId]; else map[vendorId] = [...on];
+      return { ...config, enabledResources: map };
     });
   }
 
@@ -546,7 +546,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
             // Nothing to toggle for this gatekeeper.
             return null;
           }
-          let disabled = new Set(config.disabledResources[id] ?? []);
+          let enabled = new Set(config.enabledResources[id.toLowerCase()] ?? []);
           return {
             vendorId: id,
             displayName: description.displayName,
@@ -558,7 +558,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
               title: r.title,
               description: r.description,
               icon: r.icon,
-              enabled: !disabled.has(r.urlPattern),
+              enabled: enabled.has(r.urlPattern),
             })),
           };
         } catch (err) {

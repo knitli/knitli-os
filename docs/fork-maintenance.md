@@ -402,7 +402,7 @@ setup and their fixtures were removed once knitli-site's native OpenAPI connecto
 `scripts/fork/openapi-host-retired.test.ts` fails if any of it comes back. DO storage rows those
 features wrote are left in place; typed-storage ignores undeclared collections.
 
-### Connect links are bound to the initiating Access identity in every gatekeeper
+### Connect links are bound to the initiating Access identity in four of twelve hand-rolled gatekeepers
 
 - **Where:** `packages/backend-utils/src/fork/connect-initiator.ts` (fork-owned), called from the
   `fetch` handlers and `UserAccount` classes of `packages/gatekeeper-{github,linear,email,cloudflare}`,
@@ -416,7 +416,24 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 - **Why:** the connect URL's nonce was the whole authorization. Anyone who obtained the link —
   a forwarded message, a shared screen, a shoulder — could complete the connection into the
   initiating user's account. #25 closed it for the MCP family and the OpenAPI connector; this
-  closes it for the four gatekeepers that hand-roll their own account Durable Object.
+  closes it for four of the gatekeepers that hand-roll their own account Durable Object.
+- **Scope, and the eight that are deliberately not fixed:** twelve gatekeepers hand-roll that
+  account shape. Four are fixed — `gatekeeper-{github,linear,cloudflare,email}`, the ones this
+  installation uses. The other eight — `gatekeeper-{google,confluence,notion,slack,supabase,spotify,
+  zoominfo,homeassistant}` — are left exactly as upstream wrote them, by the repository owner's
+  explicit decision on 2026-09-12, because this installation does not use them; their connect links
+  are still good for whoever holds the nonce. That decision is recorded as `OUT_OF_SCOPE` in
+  `scripts/fork/connect-initiator-enforced.test.ts`, which discovers the hand-rolled set from source
+  rather than trusting a hardcoded list: a thirteenth that appears in neither list fails the suite,
+  so adopting one of the eight forces the fix rather than inheriting the gap silently.
+- **Scope expansion too, not only connect:** `GatekeeperUserImpl.ensureResources` mints a reconnect
+  link when a connected Cloudflare account is missing an observability scope, and it was the one
+  link-minting route left unbound. `GatekeeperUser.ensureResources`,
+  `UserDurableObject.ensureAccountResources` and the `AuthenticatedApi` RPC now thread the initiator
+  the way `connectAccount`/`reconnectAccount` already did. The other vendors' one-parameter
+  `ensureResources` implementations need no change: TypeScript allows an implementation to declare
+  fewer parameters than its interface, and capnweb-validate truncates an argument the target does
+  not declare (the same shape `reconnect({initiator})` already relies on).
 - **Known cost:** fail-closed. A gatekeeper with no `CF_ACCESS_AUD` refuses every *bound* link,
   including one issued moments before a deploy that removed the variable. Links issued without an
   initiator (a deployment with no Access; everything `integration-tests` issues, since

@@ -1,5 +1,7 @@
-// Every gatekeeper that hand-rolls its own account Durable Object must check the connect link's
-// initiator before it advances the flow (fork; knitli-site plan 6a).
+// Each gatekeeper that hand-rolls its own account Durable Object AND is used by this installation
+// must check the connect link's initiator before it advances the flow (fork; knitli-site plan 6a).
+// Four of the twelve are in that set; the other eight are named in OUT_OF_SCOPE below, and the
+// last test here fails if a thirteenth appears in neither list.
 //
 // This is a STRUCTURAL guard, not a behavioural one: it reads source, so it proves the call is
 // written, not that it works. github, linear and cloudflare each have a workerd suite that proves
@@ -7,7 +9,7 @@
 // test harness at all, so for that one this file is the only guard there is -- which is why it
 // checks the ordering (guard before the account call) rather than mere presence.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -52,6 +54,70 @@ for (const { file, guarded } of HAND_ROLLED) {
     }
   });
 }
+
+/**
+ * The hand-rolled gatekeepers this installation does not use, and so did not fix. Left exactly as
+ * upstream wrote them: their connect links are still good for whoever holds the nonce.
+ *
+ * This is a record of a decision, not a backlog -- but adopting one of these means fixing it and
+ * moving it into HAND_ROLLED, which is what the discovery test below is here to force.
+ */
+const OUT_OF_SCOPE: Record<string, string> = {
+  "packages/gatekeeper-confluence/src/confluence.ts": "not used by this installation (owner decision, 2026-09-12)",
+  "packages/gatekeeper-google/src/google.ts": "not used by this installation (owner decision, 2026-09-12)",
+  "packages/gatekeeper-homeassistant/src/homeassistant.ts": "not used by this installation (owner decision, 2026-09-12)",
+  "packages/gatekeeper-notion/src/notion.ts": "not used by this installation (owner decision, 2026-09-12)",
+  "packages/gatekeeper-slack/src/slack.ts": "not used by this installation (owner decision, 2026-09-12)",
+  "packages/gatekeeper-spotify/src/spotify.ts": "not used by this installation (owner decision, 2026-09-12)",
+  "packages/gatekeeper-supabase/src/supabase.ts": "not used by this installation (owner decision, 2026-09-12)",
+  "packages/gatekeeper-zoominfo/src/zoominfo.ts": "not used by this installation (owner decision, 2026-09-12)",
+};
+
+/**
+ * A `setCallback(` *definition* -- a method on an account class -- as opposed to a call through
+ * some receiver, which always has a `.` before it. Defining one is what "hand-rolls its own account
+ * Durable Object" means here: it is the method the Workshop hands the connect callback to, and the
+ * point at which an initiator either is or is not stored.
+ */
+const DEFINES_SET_CALLBACK = /^[ \t]+(?:async[ \t]+)?setCallback\(/m;
+
+/** Every TypeScript source under a `packages/gatekeeper-…` that defines its own `setCallback`. */
+function handRolledGatekeepers(): string[] {
+  const found: string[] = [];
+  for (const pkg of readdirSync(join(root, "packages"), { withFileTypes: true })) {
+    if (!pkg.isDirectory() || !pkg.name.startsWith("gatekeeper-")) continue;
+    const src = join(root, "packages", pkg.name, "src");
+    if (!existsSync(src)) continue;
+    for (const name of readdirSync(src)) {
+      const file = `packages/${pkg.name}/src/${name}`;
+      if (name.endsWith(".ts") && DEFINES_SET_CALLBACK.test(read(file))) found.push(file);
+    }
+  }
+  return found.toSorted();
+}
+
+/**
+ * The lists above are hand-maintained, and a gatekeeper added later would be in neither -- passing
+ * this file's per-file tests vacuously, with no initiator support at all and nothing to say so. So
+ * the set is discovered from source and reconciled against them in both directions: an unlisted
+ * gatekeeper fails, and so does a listed one that stopped hand-rolling (which would mean the
+ * discovery had silently gone blind, and every other assertion here with it).
+ *
+ * The MCP family is deliberately absent: it defines no `setCallback` of its own, routing through
+ * `McpAccountBase` (`packages/mcp-shared/src/account.ts`), which is covered below and by
+ * `packages/mcp-shared/__tests__/fork/connect-initiator.test.ts`.
+ */
+test("every hand-rolled gatekeeper is fixed or a named exemption", () => {
+  const found = handRolledGatekeepers();
+  const listed = [...HAND_ROLLED.map(({ file }) => file), ...Object.keys(OUT_OF_SCOPE)].toSorted();
+
+  assert.deepEqual(found.filter((file) => !listed.includes(file)), [],
+    "hand-rolls its own connect flow but is in neither HAND_ROLLED nor OUT_OF_SCOPE: fix it and " +
+    "add it to HAND_ROLLED, or record why it is exempt");
+  assert.deepEqual(listed.filter((file) => !found.includes(file)), [],
+    "listed here but no longer defines its own setCallback( -- either it moved to a shared base " +
+    "(drop the entry) or DEFINES_SET_CALLBACK has gone blind (fix it; these tests depend on it)");
+});
 
 /**
  * The MCP family routes through `handleMcpHttpRequest`, which enforces the initiator itself

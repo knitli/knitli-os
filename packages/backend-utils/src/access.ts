@@ -44,5 +44,6 @@ export async function accessRateLimitKey(payload: JWTPayload): Promise<string | 
   if (payload.sub) return `access-sub:${payload.sub}`;
   if (typeof payload.email !== "string" || payload.email.length === 0) return null;
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload.email));
-  return `access-email:${new Uint8Array(digest).toHex()}`;
+  const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+  return `access-email:${hex}`;
 }

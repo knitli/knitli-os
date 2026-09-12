@@ -404,7 +404,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     if (binding.type === 'gatekeeper') {
       initial = {
         type: 'gatekeeper',
-        accountId: existing?.type === 'gatekeeper' || existing?.type === 'deferredGatekeeper' ? existing.accountId : undefined,
+        accountId: existing?.type === 'gatekeeper' ? existing.accountId : undefined,
         resourceUrl: existing?.type === 'gatekeeper' ? existing.resourceUrl : binding.resourceUrl || '',
       }
     } else if (binding.type === 'aiModel') {
@@ -437,7 +437,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         if (binding.type === 'gatekeeper') {
           if (!binding.resourceUrl) continue
           const matches = findMatchingAccounts(binding)
-          if (matches.length === 1 && matches[0].description.hostBindingProtocol !== 'openapi-v1') {
+          if (matches.length === 1) {
             next[name] = {
               type: 'gatekeeper',
               accountId: matches[0].id,
@@ -500,10 +500,6 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     }))
   }, [])
 
-  const activeAccount = accounts.find(account => account.id === bindingForm[activeBindingName ?? '']?.accountId && account.credentialsValid)
-  const deferActiveBinding = blueprint?.metadata.bindings[activeBindingName ?? '']?.type === 'gatekeeper'
-    && activeAccount?.description.hostBindingProtocol === 'openapi-v1'
-
   const canSaveActiveBinding = useCallback(() => {
     if (!activeBindingName || !blueprint) return false
     const binding = blueprint.metadata.bindings[activeBindingName]
@@ -511,14 +507,14 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     if (!binding || !assignment) return false
     if (binding.type === 'gatekeeper') {
       let a = assignment as any
-      return a.accountId !== undefined && (deferActiveBinding || gatekeeperReady[activeBindingName] === true)
+      return a.accountId !== undefined && gatekeeperReady[activeBindingName] === true
     } else if (binding.type === 'aiModel') {
       return Boolean((assignment as any).modelId)
     } else if (binding.type === 'agentSpawner') {
       return (assignment as any).modelId !== undefined
     }
     return false
-  }, [activeBindingName, blueprint, bindingForm, gatekeeperReady, deferActiveBinding])
+  }, [activeBindingName, blueprint, bindingForm, gatekeeperReady])
 
   const handleSaveActiveBinding = async () => {
     if (!activeBindingName || !blueprint) return
@@ -528,9 +524,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
 
     try {
       let assignment: BlueprintBindingAssignment
-      if (binding.type === 'gatekeeper' && deferActiveBinding) {
-        assignment = { type: 'deferredGatekeeper', accountId: activeAccount!.id }
-      } else if (binding.type === 'gatekeeper') {
+      if (binding.type === 'gatekeeper') {
         const collect = collectorsRef.current.get(activeBindingName)
         if (!collect) {
           throw new Error(`Binding "${activeBindingName}" is not configured.`)
@@ -761,10 +755,9 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   let meta = blueprint.metadata
   let bindingEntries = Object.entries(meta.bindings)
   let activeBinding = activeBindingName ? meta.bindings[activeBindingName] : undefined
-  let readyCount = bindingEntries.filter(([name]) => draftAssignments[name] && draftAssignments[name].type !== 'deferredGatekeeper').length
-  let deferredCount = bindingEntries.filter(([name]) => draftAssignments[name]?.type === 'deferredGatekeeper').length
+  let readyCount = bindingEntries.filter(([name]) => draftAssignments[name]).length
   let unresolvedBindingName = getFirstUnresolvedBindingName()
-  let remainingCount = bindingEntries.length - readyCount - deferredCount
+  let remainingCount = bindingEntries.length - readyCount
   let primaryActionLabel: string
   if (!isAuthenticated) {
     primaryActionLabel = 'Log in to create a gadget'
@@ -773,7 +766,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       ? `Configure ${remainingCount} remaining ${remainingCount === 1 ? 'connection' : 'connections'}`
       : 'Configure connections'
   } else {
-    primaryActionLabel = deferredCount ? 'Create Gadget and finish setup' : 'Create Gadget'
+    primaryActionLabel = 'Create Gadget'
   }
   let createDisabled = creating
   let canDeleteOwnedBlueprint = isOwnBlueprint && !loadingOwnBlueprintState
@@ -970,7 +963,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
               <div className="mb-3 px-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
                 {readyCount === bindingEntries.length
                   ? 'Everything is ready. You can change any connection before creating the Gadget.'
-                  : `${readyCount} of ${bindingEntries.length} ready.${deferredCount ? ` ${deferredCount} to set up in the workspace Connections panel after creation.` : ' Suggestions are used automatically when they match one of your connected accounts.'}`}
+                  : `${readyCount} of ${bindingEntries.length} ready. Suggestions are used automatically when they match one of your connected accounts.`}
               </div>
               <div className="overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base">
                 {bindingEntries.map(([name, binding]) => (
@@ -1066,7 +1059,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   onClick={handleSaveActiveBinding}
                   disabled={!canSaveActiveBinding()}
                 >
-                  {deferActiveBinding ? 'Set up after creating workspace' : 'Save connection'}
+                  Save connection
                 </WorkshopButton>
               </div>
             </>
@@ -1283,16 +1276,17 @@ function BlueprintBindingSummaryCard({
   ].filter(Boolean).join(' · ')
   const usingLabel = (() => {
     if (!assignment) return null
-    if (assignment.type === 'deferredGatekeeper') return null
     if (assignment.type === 'gatekeeper') return assignment.resourceUrl
     if (assignment.type === 'aiModel') {
       return modelsByIdLabel(assignment.modelId)
     }
+    // ponytail: structural guard (not `assignment.type === 'agentSpawner'`) so this keeps
+    // compiling once BlueprintBindingAssignment drops its other non-modelId variants (Task 4).
+    if (!('modelId' in assignment)) return null
     if (assignment.modelId === null) return 'No agent'
     return modelsByIdLabel(assignment.modelId)
   })()
-  const deferred = assignment?.type === 'deferredGatekeeper'
-  const status = deferred ? 'Setup after creation' : assignment ? 'Ready' : suggestion ? 'Suggested' : 'Needs setup'
+  const status = assignment ? 'Ready' : suggestion ? 'Suggested' : 'Needs setup'
   const actionLabel = assignment ? 'Change' : 'Configure'
 
   function modelsByIdLabel(modelId: string) {
@@ -1308,7 +1302,7 @@ function BlueprintBindingSummaryCard({
             {title}
           </h3>
           <span className={`rounded-full px-2 py-0.5 text-[11px] leading-4 font-medium tracking-[-0.1px] ${
-            assignment && !deferred
+            assignment
               ? 'bg-kumo-success-tint text-kumo-success'
               : suggestion
                 ? 'bg-kumo-tint text-kumo-subtle'
@@ -1606,13 +1600,6 @@ function BlueprintGatekeeperBindingField({
     onReadyChangeRef.current(false)
     replaceFrameState(null)
 
-    // A private draft needs a real workspace before configuration can begin.
-    if (selectedAccount.description.hostBindingProtocol === "openapi-v1") {
-      setFrameError(null)
-      setFrameLoading(false)
-      return
-    }
-
     authenticatedApi.startResourceConfigurator(selectedAccount.id, resource.urlPattern)
       .then(frame => {
         if (cancelled) {
@@ -1632,7 +1619,7 @@ function BlueprintGatekeeperBindingField({
     return () => {
       cancelled = true
     }
-  }, [authenticatedApi, selectedAccount?.id, selectedAccount?.description.hostBindingProtocol, resource?.urlPattern, replaceFrameState])
+  }, [authenticatedApi, selectedAccount?.id, resource?.urlPattern, replaceFrameState])
 
   // Bail out if the gatekeeper isn't installed locally or the required resource type isn't
   // offered by the vendor. The binding can't be satisfied in either case.
@@ -1676,9 +1663,7 @@ function BlueprintGatekeeperBindingField({
             </p>
           )}
 
-          {selectedAccount.description.hostBindingProtocol === 'openapi-v1' ? (
-            <p className="text-sm text-kumo-subtle">Choose “Set up after creating workspace” to continue. Finish this required connection in the workspace Connections panel.</p>
-          ) : <ResourceConfiguratorHost
+          <ResourceConfiguratorHost
             frame={frameState?.frame ?? null}
             frameKey={frameState?.key ?? null}
             loading={frameLoading}
@@ -1687,7 +1672,7 @@ function BlueprintGatekeeperBindingField({
             topOffset={10}
             onCollectResourceUrlChange={stableOnCollectorChange}
             onSelectionReadyChange={stableOnReadyChange}
-          />}
+          />
         </div>
       )}
     </div>

@@ -1906,7 +1906,6 @@ export default function GadgetEditor() {
                   gadget={selectedGadgetStub}
                   chatId={effectiveSelectedChatId ?? undefined}
                   authenticatedApi={authenticatedApi}
-                  canManageBlueprintSetup={!metadata.owner}
                   onConnectionsChange={() => setUiReloadTrigger(t => t + 1)}
                   isVisible={activeTab === 'connections'}
                   onHasGatekeepersChange={setHasBindings}

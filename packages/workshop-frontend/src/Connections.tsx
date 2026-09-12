@@ -10,7 +10,6 @@ import {
 import { RpcStub } from 'capnweb'
 import { Overseer, GadgetClient, GadgetBindingInfo, BoundHookInfo, AuthenticatedApi, WorkpieceId } from '@gadgets/workshop-shared/api'
 import GatekeeperModal from './GatekeeperModal'
-import DeferredBlueprintSetup from './fork/DeferredBlueprintSetup'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import { HookToggle } from './components/HookToggle'
 import { useVendorBranding } from './useVendorBranding'
@@ -32,8 +31,6 @@ interface ConnectionsProps {
   // preview immediately, and becomes permanent only when the user accepts the chat's changes.
   chatId?: number
   authenticatedApi: RpcStub<AuthenticatedApi>
-  /** Only workspace owners may retrieve or complete private blueprint setup. */
-  canManageBlueprintSetup?: boolean
   onConnectionsChange?: () => void
   isVisible?: boolean
   onHasGatekeepersChange?: (hasGatekeepers: boolean) => void
@@ -43,7 +40,7 @@ interface ConnectionsProps {
  * Auto-approval rules live in Activity because they apply across the workspace, while this view is
  * scoped to one gadget.
  */
-export default function Connections({ overseer, gadget, chatId, authenticatedApi, canManageBlueprintSetup = false, onConnectionsChange, isVisible, onHasGatekeepersChange }: ConnectionsProps) {
+export default function Connections({ overseer, gadget, chatId, authenticatedApi, onConnectionsChange, isVisible, onHasGatekeepersChange }: ConnectionsProps) {
   const [bindings, setBindings] = useState<GadgetBindingInfo[]>([])
   // Identity of the gadget this tab is showing, needed to offer it to agent spawners.
   const [gadgetInfo, setGadgetInfo] = useState<{ id: WorkpieceId; title: string } | null>(null)
@@ -226,8 +223,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
               Connect resource
             </WorkshopButton>
           </div>
-
-          {canManageBlueprintSetup && gadgetInfo && <DeferredBlueprintSetup overseer={overseer} gadgetId={gadgetInfo.id} isVisible={isVisible} onCompleted={async () => { await loadGatekeepers(); onConnectionsChange?.() }} />}
 
           {loading ? (
             <div className="rounded-xl border border-kumo-line bg-kumo-base px-4 py-6 text-center text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">

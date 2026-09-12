@@ -1280,9 +1280,6 @@ function BlueprintBindingSummaryCard({
     if (assignment.type === 'aiModel') {
       return modelsByIdLabel(assignment.modelId)
     }
-    // ponytail: structural guard (not `assignment.type === 'agentSpawner'`) so this keeps
-    // compiling once BlueprintBindingAssignment drops its other non-modelId variants (Task 4).
-    if (!('modelId' in assignment)) return null
     if (assignment.modelId === null) return 'No agent'
     return modelsByIdLabel(assignment.modelId)
   })()

@@ -8,7 +8,7 @@
 import { RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { validateRpc, skipRpcValidation } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
-import { verifyCfAccessJwt } from "@gadgets/backend-utils/access";
+import { accessEmailReader } from "@gadgets/backend-utils/fork/connect-initiator";
 import {
   matchesResourceUrlPattern,
   stripTrailingSlashes,
@@ -232,12 +232,7 @@ export default {
       accountForId: id => ctx.exports.McpAccount.get(
         ctx.exports.McpAccount.idFromString(id)),
       log: logger,
-      accessEmail: env.CF_ACCESS_AUD
-        ? async request => {
-            const payload = await verifyCfAccessJwt(request, env);
-            return typeof payload?.email === "string" ? payload.email : null;
-          }
-        : undefined,
+      accessEmail: accessEmailReader(env),
       connect: async (request, account, initiationNonce) => {
         if (request.method !== "GET") return new Response("Method Not Allowed", { status: 405 });
         return continueConnect(account, initiationNonce, env);

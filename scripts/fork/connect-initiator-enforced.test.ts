@@ -52,3 +52,26 @@ for (const { file, guarded } of HAND_ROLLED) {
     }
   });
 }
+
+/**
+ * The MCP family routes through `handleMcpHttpRequest`, which enforces the initiator itself
+ * (`packages/mcp-shared/src/http.ts`). What can silently break here is the wiring: an
+ * `accessEmail` option that is absent, or one that re-implements the reader instead of using the
+ * shared one, would make every browser read as anonymous and refuse every bound link.
+ */
+const MCP_WORKERS = [
+  "packages/gatekeeper-mcp/src/mcp.ts",
+  "packages/gatekeeper-mcp-portal/src/portal.ts",
+];
+
+for (const file of MCP_WORKERS) {
+  test(`${file} hands handleMcpHttpRequest the shared Access email reader`, () => {
+    const source = read(file);
+    assert.match(source, /accessEmail: accessEmailReader\(env\)/,
+      `${file} does not pass accessEmailReader(env) to handleMcpHttpRequest`);
+    assert.match(source, /from "@gadgets\/backend-utils\/fork\/connect-initiator"/,
+      `${file} does not import the shared reader`);
+    assert.doesNotMatch(source, /verifyCfAccessJwt/,
+      `${file} still re-implements the reader; use accessEmailReader so one place is tested`);
+  });
+}

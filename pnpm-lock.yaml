@@ -72,6 +72,9 @@ importers:
       '@gadgets/error-reporting':
         specifier: workspace:*
         version: link:../error-reporting
+      '@gadgets/workshop-shared':
+        specifier: workspace:*
+        version: link:../workshop-shared
       jose:
         specifier: ^6.2.8
         version: 6.2.8
@@ -903,6 +906,9 @@ importers:
       '@types/node':
         specifier: 26.1.0
         version: 26.1.0
+      jose:
+        specifier: ^6.2.8
+        version: 6.2.8
       typescript:
         specifier: 'catalog:'
         version: 7.0.2

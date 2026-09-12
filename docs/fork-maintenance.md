@@ -49,6 +49,12 @@ Upstream has no file there, so nothing in them can ever conflict. Today:
 - `packages/mcp-shared/__tests__/fork/` — named `$defs` aliases, read-before-dispatch authorization, and the caller-settable argument budget.
 - `scripts/fork/` — fork tooling.
 - `docs/fork-maintenance.md` — this file.
+- `packages/backend-utils/src/access.ts` — the Cloudflare Access assertion verifier (moved here from
+  `workshop-backend` so gatekeepers can share it).
+- `packages/backend-utils/src/fork/` — the shared connect-initiator guard
+  (`connect-initiator.ts`), used by every gatekeeper that owns its own account Durable Object.
+- `packages/gatekeeper-{github,linear,cloudflare}/__tests__/workerd/knitli-connect-initiator.test.ts`
+  — connect-initiator enforcement regressions.
 
 This list is also encoded as `FORK_OWNED_PREFIXES` in `scripts/fork/upstream-merge-audit.ts`. Add to
 both when you add a tree.
@@ -395,3 +401,53 @@ setup and their fixtures were removed once knitli-site's native OpenAPI connecto
 (`apps/os/packages/gatekeeper-openapi`) shipped on the ordinary vendor/account protocol.
 `scripts/fork/openapi-host-retired.test.ts` fails if any of it comes back. DO storage rows those
 features wrote are left in place; typed-storage ignores undeclared collections.
+
+### Connect links are bound to the initiating Access identity in four of twelve hand-rolled gatekeepers
+
+- **Where:** `packages/backend-utils/src/fork/connect-initiator.ts` (fork-owned), called from the
+  `fetch` handlers and `UserAccount` classes of `packages/gatekeeper-{github,linear,email,cloudflare}`,
+  and from the `handleMcpHttpRequest` options in `packages/gatekeeper-{mcp,mcp-portal}`.
+- **What:** the Workshop attaches `{ initiator: { email } }` to every connect and reconnect
+  (knitli-os#25). Each gatekeeper's account stores it beside the connect nonce, carries it across
+  the OAuth stage where there is one, and the HTTP routes refuse a browser whose own Cloudflare
+  Access assertion names anyone else — 403, `WRONG_ACCOUNT_HTML`, logged as
+  `connect.initiator.mismatch`. Every added parameter is optional and trailing, so an upstream
+  caller that passes nothing behaves exactly as before.
+- **Why:** the connect URL's nonce was the whole authorization. Anyone who obtained the link —
+  a forwarded message, a shared screen, a shoulder — could complete the connection into the
+  initiating user's account. #25 closed it for the MCP family and the OpenAPI connector; this
+  closes it for four of the gatekeepers that hand-roll their own account Durable Object.
+- **Scope, and the eight that are deliberately not fixed:** twelve gatekeepers hand-roll that
+  account shape. Four are fixed — `gatekeeper-{github,linear,cloudflare,email}`, the ones this
+  installation uses. The other eight — `gatekeeper-{google,confluence,notion,slack,supabase,spotify,
+  zoominfo,homeassistant}` — are left exactly as upstream wrote them, by the repository owner's
+  explicit decision on 2026-09-12, because this installation does not use them; their connect links
+  are still good for whoever holds the nonce. That decision is recorded as `OUT_OF_SCOPE` in
+  `scripts/fork/connect-initiator-enforced.test.ts`, which discovers the hand-rolled set from source
+  rather than trusting a hardcoded list: a thirteenth that appears in neither list fails the suite,
+  so adopting one of the eight forces the fix rather than inheriting the gap silently.
+- **Scope expansion too, not only connect:** `GatekeeperUserImpl.ensureResources` mints a reconnect
+  link when a connected Cloudflare account is missing an observability scope, and it was the one
+  link-minting route left unbound among the four fixed vendors. `GatekeeperUser.ensureResources`,
+  `UserDurableObject.ensureAccountResources` and the `AuthenticatedApi` RPC now thread the initiator
+  the way `connectAccount`/`reconnectAccount` already did. The other vendors' one-parameter
+  `ensureResources` implementations need no change *to keep compiling or working*: TypeScript allows
+  an implementation to declare fewer parameters than its interface, and capnweb-validate truncates
+  an argument the target does not declare (the same shape `reconnect({initiator})` already relies
+  on). That is a compatibility guarantee, not a security one — `gatekeeper-google` and
+  `gatekeeper-slack` also mint their own unbound reconnect links from `ensureResources`, and remain
+  so under the same owner decision recorded above, not because the bug doesn't apply to them.
+- **Known cost:** fail-closed. A gatekeeper with no `CF_ACCESS_AUD` refuses every *bound* link,
+  including one issued moments before a deploy that removed the variable. Links issued without an
+  initiator (a deployment with no Access; everything `integration-tests` issues, since
+  `packages/integration-tests/src/harness.ts` sets no `CF_ACCESS_AUD` on the backend) are
+  unaffected.
+- **Upstream-preserving default:** `initiatorAllows(undefined, …)` is `true` and every new
+  parameter is optional, so an unchanged upstream caller sees identical behaviour — proven by the
+  "lets anyone finish a link the host did not bind" and "still redirects an unbound link" cases in
+  `packages/mcp-shared/__tests__/fork/connect-initiator.test.ts` and each gatekeeper's workerd suite.
+- **Structural-only for email:** `packages/gatekeeper-email` has no test harness, so its guard is
+  pinned by `scripts/fork/connect-initiator-enforced.test.ts` rather than a behavioural test.
+  Standing a workerd project up for that package is the follow-up.
+- **`jwtVerify` algorithms are pinned** in `packages/backend-utils/src/access.ts`
+  (`CF_ACCESS_JWT_ALGORITHMS`), read from the live certs endpoint on 2026-09-12.

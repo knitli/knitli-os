@@ -5,6 +5,7 @@
 // without a cast.
 
 import type { TestHooks } from "./worker.js";
+import type { UserAccount } from "../src/cloudflare.js";
 
 declare global {
   namespace Cloudflare {
@@ -12,6 +13,7 @@ declare global {
       // Declared in `vitest.worker.config.ts` rather than `wrangler.jsonc`, so it is absent from the
       // generated `worker-configuration.d.ts`.
       TEST_HOOKS: DurableObjectNamespace<TestHooks>;
+      USER_ACCOUNT: DurableObjectNamespace<UserAccount>;
     }
   }
 }

@@ -655,7 +655,9 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    *
    * SECURITY: As with connectAccount(), any returned URL must include a cryptographic nonce.
    */
-  ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}>;
+  ensureResources(
+    resourceUrlPatterns: string[], options?: { initiator?: ConnectInitiator },
+  ): Promise<{url?: string}>;
 
   // ---------------------------------------------------------------------------
   // Singleton / management-UI capabilities. Present only on accounts created by

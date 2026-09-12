@@ -8,6 +8,10 @@
       "types": "./src/access.ts",
       "import": "./src/access.ts"
     },
+    "./fork/connect-initiator": {
+      "types": "./src/fork/connect-initiator.ts",
+      "import": "./src/fork/connect-initiator.ts"
+    },
     "./logger": {
       "types": "./src/logger.ts",
       "import": "./src/logger.ts"
@@ -33,6 +37,7 @@
   },
   "dependencies": {
     "@gadgets/error-reporting": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
     "jose": "^6.2.8"
   },
   "devDependencies": {

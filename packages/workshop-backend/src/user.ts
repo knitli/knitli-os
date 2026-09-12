@@ -1366,10 +1366,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return (record.account as unknown as SingletonAccountStub).startAppUi(context);
   }
 
-  async ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
+  async ensureAccountResources(
+    accountId: number, resourceUrlPatterns: string[], initiator?: ConnectInitiator,
+  ): Promise<{url?: string}> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
-    return record.account.ensureResources(resourceUrlPatterns);
+    return record.account.ensureResources(resourceUrlPatterns, { initiator });
   }
 
   async subscribeConnectedAccounts(

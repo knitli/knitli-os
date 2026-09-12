@@ -12,11 +12,14 @@ import {
   ApprovalQueue,
   VendorDescription,
   GatekeeperConnectCallback,
+  type ConnectInitiator,
+  type GatekeeperConnectOptions,
   AccountDescription,
   SupportedResource,
   ResourceConfiguratorFrame,
   stripTrailingSlashes,
 } from '@gadgets/workshop-shared/gatekeeper';
+import { initiatorAllows, refuseForeignBrowser } from "@gadgets/backend-utils/fork/connect-initiator";
 import {
   EmailSession,
   EmailHook,
@@ -62,6 +65,8 @@ type Env = Cloudflare.Env & {
   // Base URL (protocol+host+optional path) at which the default fetch handler is served. Should
   // NOT include a trailing slash. Omit for localhost dev server.
   BASE_URL?: string,
+  CF_ACCESS_ISS?: string,
+  CF_ACCESS_AUD?: string,
 }
 
 function getBaseUrl(env: Env) {
@@ -172,6 +177,8 @@ export default {
       // This is a connectAccount completion URL. Route to the UserAccount DO.
       let userObjectId = ctx.exports.UserAccount.idFromString(path[0]);
       let stub: DurableObjectStub<UserAccount> = ctx.exports.UserAccount.get(userObjectId);
+      let refused = await refuseForeignBrowser(req, env, stub, logger);
+      if (refused) return refused;
       if (!await stub.complete(path[1])) {
         return new Response(INVALID_LINK_HTML, {
           headers: { "Content-Type": "text/html; charset=utf-8" }
@@ -271,11 +278,13 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
-  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}> {
+  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
+                       options?: GatekeeperConnectOptions): Promise<{url: string}> {
     let userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     let nonce = generateNonce();
 
-    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, nonce);
+    await this.ctx.exports.UserAccount.get(userObjectId)
+        .setCallback(callback, nonce, options?.initiator);
 
     return {
       url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${nonce}`
@@ -299,17 +308,31 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // track which email addresses have been claimed by this user account.
 
 export class UserAccount extends DurableObject<Env> {
-  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, nonce: string) {
+  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, nonce: string,
+                    initiator?: ConnectInitiator) {
     // Self-delete after 1 hour if never completed.
     this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
 
     this.ctx.storage.kv.put("callback", callback);
-    this.ctx.storage.kv.put("nonce", { value: nonce, expiresAt: Date.now() + NONCE_LIFETIME_MS });
+    this.ctx.storage.kv.put("nonce", {
+      value: nonce, expiresAt: Date.now() + NONCE_LIFETIME_MS, initiator,
+    });
+  }
+
+  /**
+   * Whether the browser presenting `accessEmail` may complete this connect. Same contract as
+   * `McpAccountBase.initiatorMatches`: a link the Workshop bound to a person is theirs alone; a
+   * link issued without an initiator is good for whoever holds the nonce, as before (fork). There
+   * is no OAuth stage here -- visiting the link *is* the completion -- so this is the only check.
+   */
+  async initiatorMatches(accessEmail: string | null): Promise<boolean> {
+    const stored = this.ctx.storage.kv.get<{ initiator?: ConnectInitiator }>("nonce");
+    return initiatorAllows(stored?.initiator, accessEmail);
   }
 
   /** Returns false if the nonce is invalid or expired. */
   async complete(nonce: string): Promise<boolean> {
-    let stored = this.ctx.storage.kv.get<{value: string, expiresAt: number}>("nonce");
+    let stored = this.ctx.storage.kv.get<{value: string, expiresAt: number, initiator?: ConnectInitiator}>("nonce");
     if (!stored || Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, nonce)) {
       return false;
     }

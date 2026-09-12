@@ -143,6 +143,12 @@ describe("resource allow-list", () => {
     expect(isResourceDisabled(config, "MSGRAPH", MAIL.urlPattern)).toBe(false);
   });
 
+  it("lowercases a stored key at parse time, so a hand-edited mixed-case key still matches", () => {
+    let config = parseAdminConfig(JSON.stringify({ enabledResources: { MsGraph: [MAIL.urlPattern] } }));
+    expect(config.enabledResources).toEqual({ msgraph: [MAIL.urlPattern] });
+    expect(filterEnabledResources(config, "msgraph", [MAIL, CALENDAR])).toEqual([MAIL]);
+  });
+
   it("lets an ambient (auto-provisioning) vendor through untouched, since it has no toggles", () => {
     let config = parseAdminConfig(null);
     expect(filterEnabledResources(config, "context", [MAIL, CALENDAR], true)).toEqual([MAIL, CALENDAR]);

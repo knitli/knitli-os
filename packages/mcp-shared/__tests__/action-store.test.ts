@@ -358,4 +358,25 @@ describe("ActionStore", () => {
     await store.apply(staged.id, fn => fn({ callTool: counting } as never), log);
     expect(calls).toBe(1);
   });
+
+  it("acknowledges a deny of an action whose call failed, keeping the failure on record", async () => {
+    const store = new ActionStore(fakeSql());
+    const staged = store.stage("send", { to: "someone" });
+    await expect(store.apply(staged.id, fn => fn({ callTool: async () => { throw new Error("boom"); } } as never), log))
+      .rejects.toThrow(/may or may not have taken effect/);
+    const failed = store.get(staged.id);
+    expect(failed?.state).toBe("failed");
+
+    expect(() => store.reject(staged.id)).not.toThrow();
+    const after = store.get(staged.id);
+    expect(after?.state).toBe("failed");
+    expect(after?.error).toBe(failed?.error);
+  });
+
+  it("still refuses to deny an action that was applied or is being applied", async () => {
+    const store = new ActionStore(fakeSql());
+    const applied = store.stage("send", { applied: true });
+    await store.apply(applied.id, fn => fn({ callTool: ok } as never), log);
+    expect(() => store.reject(applied.id)).toThrow(/already applied/);
+  });
 });

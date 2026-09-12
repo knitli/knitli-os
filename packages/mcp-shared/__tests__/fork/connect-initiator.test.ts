@@ -80,6 +80,19 @@ describe("refuseForeignBrowser", () => {
     expect(await response!.text()).toBe(WRONG_ACCOUNT_HTML);
     expect(events).toEqual(["connect.initiator.mismatch"]);
   });
+
+  it("passes a verified email through to the account, not just a boolean", async () => {
+    // The optional 5th `verifier` parameter is the test seam for the positive path: a real
+    // deployment behind Access has both CF_ACCESS_AUD and CF_ACCESS_ISS configured and a browser
+    // that actually carries a verifiable assertion, so `initiatorMatches` sees an email, not null.
+    const account = accountThatAllows(true);
+    const verifier = async (): Promise<JWTPayload> => ({ email: "adam@example.com" });
+    const request = new Request("https://gk.example/x", {
+      headers: { "cf-access-jwt-assertion": "token" },
+    });
+    expect(await refuseForeignBrowser(request, ACCESS_ENV, account, noLog, verifier)).toBeNull();
+    expect(account.seen).toEqual(["adam@example.com"]);
+  });
 });
 
 describe("the refusal page", () => {

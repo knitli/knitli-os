@@ -70,14 +70,16 @@ export function accessEmailReader(
  * Refuses a browser the host did not issue this connect link to. Returns `null` when the request
  * may proceed, and a 403 page otherwise. Call it on every route that advances a connect -- the
  * connect link itself and, where there is one, the OAuth callback -- before anything is consumed.
+ * `verifier` exists for tests and is forwarded to `accessEmailReader`; real callers omit it.
  */
 export async function refuseForeignBrowser(
   request: Request,
   env: CfAccessEnv,
   account: { initiatorMatches(accessEmail: string | null): Promise<boolean> },
   log: { warn(message: string, fields: { event: string }): void },
+  verifier?: AccessTokenVerifier,
 ): Promise<Response | null> {
-  const read = accessEmailReader(env);
+  const read = accessEmailReader(env, verifier);
   const email = read ? await read(request) : null;
   if (await account.initiatorMatches(email)) return null;
   // The observability logger's field set is closed, so only `event` goes on the line -- and the

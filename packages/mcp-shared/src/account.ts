@@ -13,7 +13,7 @@
 // Every nonce is single-use, time-bounded, and compared in constant time; see `connect-nonce.ts`.
 
 import { DurableObject } from "cloudflare:workers";
-import type { GatekeeperConnectCallback, GatekeeperUser }
+import type { ConnectInitiator, GatekeeperConnectCallback, GatekeeperUser }
   from "@gadgets/workshop-shared/gatekeeper";
 import {
   auth,
@@ -111,11 +111,13 @@ export type ConnectOutcome =
   | { kind: "redirect"; url: string }
   | { kind: "invalid" };
 
-// A single-use secret in the connect flow, and the stage it belongs to.
+// A single-use secret in the connect flow, the stage it belongs to, and, when the host bound the
+// link to a person, who may use it.
 type StoredNonce = {
   value: string;
   expiresAt: number;
   stage: "initiation" | "connecting" | "oauth";
+  initiator?: ConnectInitiator;
 };
 
 // OAuth state held between the redirect out and the callback back.
@@ -231,6 +233,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
 
   async setCallback(
     callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string,
+    initiator?: ConnectInitiator,
   ): Promise<void> {
     // Only arm the abandonment alarm for a first connect; a reconnect already has a server to keep.
     if (!this.hasConnectedServer()) await this.ctx.storage.setAlarm(Date.now() + CONNECT_TIMEOUT_MS);
@@ -239,7 +242,19 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
+      initiator,
     });
+  }
+
+  /**
+   * Whether the browser presenting `accessEmail` may continue this connect. A link the host issued
+   * with an initiator is only good for that person; a link issued without one (a deployment with no
+   * Cloudflare Access) is good for whoever holds the nonce, as before.
+   */
+  async initiatorMatches(accessEmail: string | null): Promise<boolean> {
+    const initiator = this.ctx.storage.kv.get<StoredNonce>("nonce")?.initiator;
+    if (!initiator) return true;
+    return accessEmail !== null && accessEmail.toLowerCase() === initiator.email.toLowerCase();
   }
 
   /**
@@ -277,7 +292,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     this.ctx.storage.kv.put<StoredNonce>("nonce", { ...stored, stage: "initiation" });
   }
 
-  async prepareReconnect(initiationNonce: string): Promise<void> {
+  async prepareReconnect(initiationNonce: string, initiator?: ConnectInitiator): Promise<void> {
     this.advanceConnectionGeneration();
     this.ctx.storage.kv.put("reconnecting", true);
     this.ctx.storage.kv.put("expiredNotified", false);
@@ -285,6 +300,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
+      initiator,
     });
   }
 
@@ -484,6 +500,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
           value: oauthNonce,
           expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
           stage: "oauth",
+          initiator: this.ctx.storage.kv.get<StoredNonce>("nonce")?.initiator,
         });
         this.ctx.storage.kv.put<PendingAuthorization>("pendingAuth", { generation });
         return `${this.ctx.id.toString()}:${oauthNonce}`;

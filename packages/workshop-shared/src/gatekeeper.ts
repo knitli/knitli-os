@@ -445,9 +445,17 @@ export type ResourceConfiguratorFrame = GatekeeperUiFrame;
  * resource authorization at all, which is how a caller connects an account for a non-resource
  * purpose (e.g. billing) without asking the user to grant data access it will never use.
  */
+/**
+ * The verified identity of the person who asked for a connect link (fork). The Workshop fills it
+ * from the session's Cloudflare Access assertion; a vendor that receives it must refuse to finish
+ * the flow for a browser whose own Access assertion names anyone else.
+ */
+export type ConnectInitiator = { email: string };
+
 export type GatekeeperConnectOptions = {
   scopes?: "auth" | "full";
   resourceUrlPatterns?: string[];
+  initiator?: ConnectInitiator;
 };
 
 export interface GatekeeperVendor extends WorkerEntrypoint {
@@ -624,7 +632,7 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    * SECURITY: As with connectAccount(), the returned URL must include a cryptographic nonce to
    * prevent replay attacks.
    */
-  reconnect(): Promise<{url: string}>;
+  reconnect(options?: { initiator?: ConnectInitiator }): Promise<{url: string}>;
 
   /**
    * For vendors that advertise `providesAuth`, returns the account's email address for use as the

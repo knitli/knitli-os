@@ -16,6 +16,7 @@ const server = {
 class TestUser extends McpGatekeeperUserBase<object> {
   revoked = false;
   reconnectNonce: string | undefined;
+  reconnectInitiator: { email: string } | undefined;
 
   protected [mcpGatekeeperUserContext]() {
     return {
@@ -24,7 +25,10 @@ class TestUser extends McpGatekeeperUserBase<object> {
       account: {
         getServer: async () => server,
         revoke: async () => { this.revoked = true; },
-        prepareReconnect: async (nonce: string) => { this.reconnectNonce = nonce; },
+        prepareReconnect: async (nonce: string, initiator?: { email: string }) => {
+          this.reconnectNonce = nonce;
+          this.reconnectInitiator = initiator;
+        },
       },
     };
   }
@@ -57,4 +61,12 @@ it("provides the common MCP account lifecycle", async () => {
 
 it("does not expose connector hooks as string-named methods", () => {
   expect(Object.getOwnPropertyNames(TestUser.prototype)).toEqual(["constructor"]);
+});
+
+it("forwards the reconnect initiator to the account", async () => {
+  const subject = user();
+  const { url } = await subject.reconnect({ initiator: { email: "adam@example.com" } });
+
+  expect(url).toMatch(/^https:\/\/workshop\.example\/gatekeeper\/mcp\/account-id\/[0-9a-f]{64}$/);
+  expect(subject.reconnectInitiator).toEqual({ email: "adam@example.com" });
 });

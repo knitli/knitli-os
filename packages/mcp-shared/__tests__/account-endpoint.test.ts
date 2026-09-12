@@ -469,6 +469,76 @@ describe("connect initiation nonce", () => {
     expect(complete).toHaveBeenCalledOnce();
     expect(await resumed.acceptAuthCode("authorization-code", oauthNonce)).toBe(false);
   });
+
+  it("binds the connect link to the initiator the host recorded", async () => {
+    const context = fakeContext();
+    const nonce = "7".repeat(64);
+    const account = new OAuthFlowAccount(context as never, {});
+    await account.setCallback({ complete: async () => {} } as never, nonce, { email: "Adam@Example.com" });
+
+    expect(await account.initiatorMatches("adam@example.com")).toBe(true);
+    expect(await account.initiatorMatches("mallory@example.com")).toBe(false);
+    expect(await account.initiatorMatches(null)).toBe(false);
+  });
+
+  it("accepts any browser when the host recorded no initiator", async () => {
+    const context = fakeContext();
+    const nonce = "7".repeat(64);
+    const account = new OAuthFlowAccount(context as never, {});
+    await account.setCallback({ complete: async () => {} } as never, nonce);
+
+    expect(await account.initiatorMatches(null)).toBe(true);
+    expect(await account.initiatorMatches("anyone@example.com")).toBe(true);
+  });
+
+  it("keeps the initiator through the OAuth stage so the callback can be checked too", async () => {
+    const context = fakeContext();
+    vi.stubGlobal("fetch", async (input: string) => {
+      const url = String(input);
+      if (url.includes("oauth-protected-resource")) {
+        return Response.json({
+          resource: "https://mcp.example/mcp",
+          authorization_servers: ["https://auth.example"],
+        });
+      }
+      if (url.includes("oauth-authorization-server")) {
+        return Response.json({
+          issuer: "https://auth.example",
+          authorization_endpoint: "https://auth.example/authorize",
+          token_endpoint: "https://auth.example/token",
+          registration_endpoint: "https://auth.example/register",
+          response_types_supported: ["code"],
+        });
+      }
+      if (url === "https://auth.example/register") {
+        return Response.json({
+          client_id: "client-id",
+          redirect_uris: ["https://gatekeeper.example/oauth"],
+          grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"],
+          token_endpoint_auth_method: "none",
+        });
+      }
+      if (url === "https://auth.example/token") {
+        return Response.json({
+          access_token: "access-token",
+          refresh_token: "refresh-token",
+          token_type: "Bearer",
+          expires_in: 3600,
+        });
+      }
+      return new Response("", { status: 404 });
+    });
+    const nonce = "8".repeat(64);
+    const account = new OAuthFlowAccount(context as never, {});
+    await account.setCallback({ complete: async () => {} } as never, nonce, { email: "adam@example.com" });
+    const outcome = await account.beginConnect(nonce, server("https://mcp.example/mcp"));
+    expect(outcome.kind).toBe("redirect");
+
+    const resumed = new OAuthFlowAccount(context as never, {});
+    expect(await resumed.initiatorMatches("adam@example.com")).toBe(true);
+    expect(await resumed.initiatorMatches("mallory@example.com")).toBe(false);
+  });
 });
 
 describe("resolveConnectTarget", () => {

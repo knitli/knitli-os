@@ -13,7 +13,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
-import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { GatekeeperUiFrame, type ConnectInitiator } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
@@ -76,7 +76,8 @@ type Env = Cloudflare.Env & {
 class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   constructor(private ctx: ExecutionContext, private env: Env,
       userId: DurableObjectId,
-      private abortSession: (reason: Error) => void) {
+      private abortSession: (reason: Error) => void,
+      private accessEmail?: string) {
     super();
 
     this.#userId = userId;
@@ -88,6 +89,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   private overseers: DurableObjectNamespace<OverseerDurableObject>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
   private users: DurableObjectNamespace<UserDurableObject>;
+
+  // The identity a connect link is bound to (fork): the verified Access email of this session, or
+  // nothing on a deployment without Access.
+  #initiator(): ConnectInitiator | undefined {
+    return this.accessEmail ? { email: this.accessEmail } : undefined;
+  }
 
   #userId: DurableObjectId;
 
@@ -315,7 +322,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<{url: string}> {
-    return this.#user.connectAccount(vendorId, resourceUrlPatterns);
+    return this.#user.connectAccount(vendorId, resourceUrlPatterns, this.#initiator());
   }
 
   ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
@@ -341,7 +348,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   reconnectAccount(accountId: number): Promise<{url: string}> {
-    return this.#user.reconnectAccount(accountId);
+    return this.#user.reconnectAccount(accountId, this.#initiator());
   }
 
   startResourceConfigurator(
@@ -672,9 +679,12 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     // transient); capability scopes are requested later via an explicit connectAccount. Cloudflare is
     // the exception: signing in with Cloudflare also links AI Gateway billing, so it requests and
     // persists the billing-only scope set up front.
+    // Sign-in links are bound to the initiating Access identity too (fork), when the session has one.
+    const email = typeof this.accessPayload?.email === "string" ? this.accessPayload.email : undefined;
+    const initiator = email ? { initiator: { email } } : {};
     const options = vendorId === CLOUDFLARE_VENDOR_ID
-      ? { scopes: "full" as const, resourceUrlPatterns: [] }
-      : { scopes: "auth" as const };
+      ? { scopes: "full" as const, resourceUrlPatterns: [], ...initiator }
+      : { scopes: "auth" as const, ...initiator };
     const { url } = await vendor.connectAccount(callback, options);
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
@@ -694,7 +704,8 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       user_id: userId.toString(),
       source: "session_token",
     });
-    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
+    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession,
+        typeof this.accessPayload?.email === "string" ? this.accessPayload.email : undefined);
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
@@ -719,7 +730,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       user_id: userId.toString(),
       source: "cf_access",
     });
-    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
+    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession, email);
   }
 
   async login(username: string, passwordHash: Uint8Array): Promise<string | null> {

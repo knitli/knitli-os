@@ -719,6 +719,15 @@ export function backendSecrets({
   };
 }
 
+/**
+ * The Access pair every gatekeeper preview needs as well, keyed as the gatekeeper reads it. A
+ * secret for the same reason as the backend's copy: wrangler would print a var, and the preview
+ * logs are public. With it, a gatekeeper can check the connecting browser against the initiator
+ * the backend bound the link to (fork); without it, every bound link is refused.
+ */
+export function gatekeeperAccessSecrets(access: AccessConfig = resolveAccess()): Record<string, string> {
+  return { CF_ACCESS_AUD: access.aud, CF_ACCESS_ISS: access.iss };
+}
 
 /** Write one package's generated preview config to its `wrangler.staging.jsonc`. */
 export function writePreviewConfig(pkgDir: string, config: StagingConfig): void {

@@ -43,6 +43,7 @@ import {
   ROOT,
   STAGING_CONFIG_NAME,
   backendSecrets,
+  gatekeeperAccessSecrets,
   generatePreviewConfigs,
   previewPullRequestNumber,
   previewUrlFor,
@@ -584,6 +585,7 @@ async function deploy({ dryRun }: { dryRun: boolean }): Promise<void> {
   // holding half of one.
   const secrets = backendSecrets();
   const oauthApps = resolveGatekeeperSecrets();
+  const gatekeeperAccess = gatekeeperAccessSecrets();
   const { previewName, workersDevHost, baseUrl, packages } = generatePreviewConfigs();
   const { gatekeepers, backend, router } = tiers(packages);
 
@@ -592,9 +594,10 @@ async function deploy({ dryRun }: { dryRun: boolean }): Promise<void> {
     console.log(`  tier 1 (${gatekeepers.length} gatekeepers, concurrently):`);
     for (const pkg of gatekeepers) {
       const oauth = oauthApps.get(pkg.name);
+      const held = [...Object.keys(gatekeeperAccess), ...Object.keys(oauth ?? {})];
       console.log(`    ${pkg.name} ` +
           `(no hostname; served at ${baseUrl}/gatekeeper/${gatekeeperShortName(pkg.name)})` +
-          (oauth ? `, holding the ${Object.keys(oauth).join(", ")} secrets` : ""));
+          `, holding the ${held.join(", ")} secrets`);
     }
     console.log(`  tier 2: ${backend.name} (no hostname; served at ` +
         `${baseUrl}/api), bound to the tier 1 previews, holding the ` +
@@ -614,7 +617,7 @@ async function deploy({ dryRun }: { dryRun: boolean }): Promise<void> {
           // Before this gatekeeper's preview, not after, and for the same reason the backend's go
           // before its own: a preview inherits the Previews settings that exist when it is created.
           const oauth = oauthApps.get(pkg.name);
-          if (oauth) await uploadPreviewSecrets(pkg, wrangler.command, oauth);
+          await uploadPreviewSecrets(pkg, wrangler.command, { ...gatekeeperAccess, ...oauth });
           const preview = await deployPreview(pkg, previewName, wrangler.command);
           assertNoPreviewUrl(pkg, preview.url);
           return [pkg.name, preview.id];

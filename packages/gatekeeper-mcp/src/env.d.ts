@@ -5,6 +5,9 @@ declare namespace Cloudflare {
     BASE_URL?: string;
     MCP_ALLOW_INSECURE?: string;
     MCP_CLIENT_NAME?: string;
+    /** Set by the deployment when this Worker sits behind the Workshop's Cloudflare Access app. */
+    CF_ACCESS_ISS?: string;
+    CF_ACCESS_AUD?: string;
   }
 
   interface GlobalProps {

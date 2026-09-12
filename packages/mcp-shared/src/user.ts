@@ -1,5 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import type { AccountDescription, AvatarImage } from "@gadgets/workshop-shared/gatekeeper";
+import type { AccountDescription, AvatarImage, ConnectInitiator }
+  from "@gadgets/workshop-shared/gatekeeper";
 
 import type { ConnectedServer } from "./account.js";
 import { generateNonce } from "./connect-nonce.js";
@@ -13,8 +14,8 @@ export interface McpGatekeeperUserAccount {
   getServer(): Promise<ConnectedServer>;
   /** Revokes the account and its credentials. */
   revoke(): Promise<void>;
-  /** Starts a reconnect with a fresh initiation nonce. */
-  prepareReconnect(initiationNonce: string): Promise<void>;
+  /** Starts a reconnect with a fresh initiation nonce, bound to `initiator` when given. */
+  prepareReconnect(initiationNonce: string, initiator?: ConnectInitiator): Promise<void>;
 }
 
 /** Connector-owned values used by the common MCP account lifecycle. */
@@ -64,10 +65,10 @@ export abstract class McpGatekeeperUserBase<E>
   }
 
   /** Starts reconnecting the connected account. */
-  async reconnect(): Promise<{ url: string }> {
+  async reconnect(options?: { initiator?: ConnectInitiator }): Promise<{ url: string }> {
     const { account, baseUrl } = this[mcpGatekeeperUserContext]();
     const initiationNonce = generateNonce();
-    await account.prepareReconnect(initiationNonce);
+    await account.prepareReconnect(initiationNonce, options?.initiator);
     return {
       url: `${baseUrl}/${this.ctx.props.accountObjectId}/${initiationNonce}`,
     };

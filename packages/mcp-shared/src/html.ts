@@ -83,3 +83,8 @@ export function errorPageHtml(title: string, detail: string): string {
 <body><main><h1>${escapeHtml(title)}</h1>
 <p class="sub">${escapeHtml(detail)}</p></main></body></html>`;
 }
+
+/** Shown when a signed-in person opens a connect link that the Workshop issued to someone else. */
+export const WRONG_ACCOUNT_HTML = errorPageHtml(
+  "This link is not yours",
+  "It was issued to a different signed-in account. Start the connection from your own account.");

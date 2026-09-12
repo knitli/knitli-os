@@ -17,6 +17,7 @@ import {
   R2_MAX_BUCKET_NAME_LENGTH,
   backendSecrets,
   buildPreviewConfigs,
+  gatekeeperAccessSecrets,
   gatekeeperBindingName,
   previewPullRequestNumber,
   resolveAccess,
@@ -287,6 +288,15 @@ test("the backend's secrets are the admin list, the Access pair and the AI gatew
     CF_AI_GATEWAY_PROVIDERS: AI_GATEWAY.providers,
     CF_AI_GATEWAY_USE_BINDING: AI_GATEWAY.useBinding,
   });
+});
+
+test("every gatekeeper's secrets carry the same Access pair as the backend", () => {
+  assert.deepEqual(gatekeeperAccessSecrets(ACCESS), {
+    CF_ACCESS_AUD: ACCESS.aud,
+    CF_ACCESS_ISS: ACCESS.iss,
+  });
+  assert.equal(gatekeeperAccessSecrets(ACCESS).CF_ACCESS_AUD, SECRETS.CF_ACCESS_AUD);
+  assert.equal(gatekeeperAccessSecrets(ACCESS).CF_ACCESS_ISS, SECRETS.CF_ACCESS_ISS);
 });
 
 test("the AI gateway is optional as a group, but not half-configured", () => {

@@ -52,7 +52,6 @@ export { AdminSettings };
 
 // Re-export entrypoint types from user.ts.
 export { UserDurableObject, GatekeeperConnectCallbackImpl };
-export { OpenApiConnectAuthorityImpl, OpenApiConnectionNotificationsImpl } from "./fork/openapi-connect";
 
 // Re-export entrypoint types from overseer.ts.
 export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,

@@ -1780,8 +1780,6 @@ export type AgentSpawnerConfig = {
  * createGadget()/getGadget()).
  */
 export interface Overseer extends RpcTarget {
-  /** Start an opt-in private configurator bound to this authenticated owner workspace. */
-  startBoundResourceConfigurator(accountId: number, resourceUrlPattern: string): Promise<ResourceConfiguratorFrame>;
   /** Get metadata describing this workspace. */
   getMetadata(): Promise<GadgetMetadata>;
 

@@ -8,6 +8,7 @@
 import { RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { validateRpc, skipRpcValidation } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
+import { verifyCfAccessJwt } from "@gadgets/backend-utils/access";
 import {
   matchesResourceUrlPattern,
   stripTrailingSlashes,
@@ -231,6 +232,12 @@ export default {
       accountForId: id => ctx.exports.McpAccount.get(
         ctx.exports.McpAccount.idFromString(id)),
       log: logger,
+      accessEmail: env.CF_ACCESS_AUD
+        ? async request => {
+            const payload = await verifyCfAccessJwt(request, env);
+            return typeof payload?.email === "string" ? payload.email : null;
+          }
+        : undefined,
       connect: async (request, account, initiationNonce) => {
         if (request.method !== "GET") return new Response("Method Not Allowed", { status: 405 });
         return continueConnect(account, initiationNonce, env);
@@ -290,11 +297,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 
   async connectAccount(
     callback: Fetcher<GatekeeperConnectCallback>,
-    _options?: GatekeeperConnectOptions,
+    options?: GatekeeperConnectOptions,
   ): Promise<{ url: string }> {
     const accountId = this.ctx.exports.McpAccount.newUniqueId();
     const initiationNonce = generateNonce();
-    await this.ctx.exports.McpAccount.get(accountId).setCallback(callback, initiationNonce);
+    await this.ctx.exports.McpAccount.get(accountId)
+      .setCallback(callback, initiationNonce, options?.initiator);
     return { url: `${getBaseUrl(this.env)}/${accountId.toString()}/${initiationNonce}` };
   }
 

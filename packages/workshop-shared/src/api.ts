@@ -731,8 +731,11 @@ export type GatekeeperAppInfo = {
 
 /** A vendor-owned administration app available to deployment administrators. */
 export type AdminGatekeeperAppInfo = {
+  /** Deployment-local gatekeeper vendor identifier. */
   id: string;
+  /** Human-readable administration app title supplied by the vendor. */
   title: string;
+  /** Optional decorative vendor icon. */
   icon?: AvatarImage;
 };
 
@@ -1062,13 +1065,16 @@ export const getAiExecutorAdminErrorCode = aiExecutorAdminErrors.getCode;
 /**
  * Capability for managing deployment-wide admin settings, obtained via
  * AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
- * capability is minted, so these methods don't re-check. Covers branding, agent instructions, and
+ * capability is minted, so these methods don't re-check. Covers branding, agent instructions, vendor
+ * administration frames, and
  * which gatekeeper connectors/resources are offered — NOT authentication config (that's env-var
  * driven). Each setter throws on invalid input.
  */
 export interface AdminApi {
+  /** List vendor-owned administration frames available to this deployment administrator. */
   listGatekeeperAdminApps(): Promise<AdminGatekeeperAppInfo[]>;
 
+  /** Open one advertised vendor-owned administration frame, or null when unavailable. */
   getGatekeeperAdminApp(id: string): Promise<GatekeeperUiFrame | null>;
   /** List every administrator-curated AI executor profile. */
   listAiExecutorProfiles(): Promise<AiExecutorProfile[]>;

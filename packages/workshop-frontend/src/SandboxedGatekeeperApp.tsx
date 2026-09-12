@@ -150,7 +150,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
   }
 
   async getResourceEnabled(urlPattern: string): Promise<boolean> {
-    return this.#readResourceEnabled(urlPattern)
+    return (await this.#readResourceEnabled(urlPattern)) ?? false
   }
 
   async setResourceEnabled(urlPattern: string, enabled: boolean): Promise<void> {
@@ -161,14 +161,16 @@ class GatekeeperAppHostImpl extends RpcTarget {
       await control.admin.setResourceEnabled(control.vendorId, urlPattern, false)
       return
     }
-    await this.#readResourceEnabled(urlPattern)
+    if (await this.#readResourceEnabled(urlPattern) === undefined) {
+      throw new Error('Resource is not available.')
+    }
     await control.admin.setResourceEnabled(control.vendorId, urlPattern, true)
     if (!await this.#readResourceEnabled(urlPattern)) {
       throw new Error('Resource availability was not confirmed.')
     }
   }
 
-  async #readResourceEnabled(urlPattern: string): Promise<boolean> {
+  async #readResourceEnabled(urlPattern: string): Promise<boolean | undefined> {
     if (typeof urlPattern !== 'string') throw new TypeError('Invalid resource availability request.')
     const control = this.#adminResourceControl
     if (!control) throw new Error('Admin resource control is not available in this frame.')
@@ -177,7 +179,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
         entry.vendorId === control.vendorId && !entry.autoProvisions,
     )
     const resource = vendor?.resources.find(entry => entry.urlPattern === urlPattern)
-    return resource?.enabled ?? false
+    return resource?.enabled
   }
 
   // The app calls this once to learn the current theme and register a receiver for later changes.
@@ -261,6 +263,8 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, titl
   title?: string,
   adminResourceControl?: AdminResourceControl,
 }) {
+  const adminResourceVendorId = adminResourceControl?.vendorId
+  const adminResourceApi = adminResourceControl?.admin
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
   const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -366,7 +370,9 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, titl
         openTarget,
         openPrompt,
         resolveWorkspaceTitles,
-        adminResourceControl,
+        adminResourceVendorId === undefined || adminResourceApi === undefined
+          ? undefined
+          : { vendorId: adminResourceVendorId, admin: adminResourceApi },
       )
       hostRef.current = host
       sessionRef.current = newMessagePortRpcSession(port, host)
@@ -399,7 +405,7 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, titl
     }
     // Re-establish the session if either the HTML or the `ui` capability changes, so a new frame
     // carrying a fresh stub (even with identical HTML) never keeps talking through the stale one.
-  }, [frame.iframeHtml, frame.ui, gatekeeperVendorId, openPrompt, openTarget, adminResourceControl,
+  }, [frame.iframeHtml, frame.ui, gatekeeperVendorId, openPrompt, openTarget, adminResourceApi, adminResourceVendorId,
       present, resolveWorkspaceTitles, setOverlayPhase])
 
   return (

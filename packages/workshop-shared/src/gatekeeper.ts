@@ -420,7 +420,8 @@ export interface ResourceConfiguratorHost extends RpcTarget {
  * sandbox="allow-scripts" iframe, plus an arbitrary gatekeeper-defined capability exposed to the
  * iframe over a MessagePort RPC session. Used both for the small resource-configurator form
  * (startResourceConfigurator, hosted in the connect modal) and for full-page gatekeeper management
- * apps (startAppUi, e.g. the Context Library file manager, hosted on its own Workshop page).
+ * apps (startAppUi, e.g. the Context Library file manager, hosted on its own Workshop page), and
+ * vendor administration apps (startAdminUi, hosted in deployment administration).
  */
 export type GatekeeperUiFrame = {
   /** Complete HTML for the UI. Workshop hosts it in a sandboxed iframe. */

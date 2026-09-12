@@ -200,7 +200,9 @@ export class ActionStore {
 
   reject(id: number): void {
     const stored = this.get(id);
-    if (!stored || stored.state === "rejected") return;
+    // A failed call is still on the user's approval card and "deny" is how it is dismissed. The
+    // record keeps its failure (it may be outcome-unknown); the host records the rejection.
+    if (!stored || stored.state === "rejected" || stored.state === "failed") return;
     if (stored.state !== "pending") {
       throw new Error(stored.state === "applying"
         ? `MCP action ${id} is already being applied.`

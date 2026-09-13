@@ -31,7 +31,16 @@ export const AdminGatekeeperAppsPanel = ({ admin }: { admin: RpcStub<AdminApi> }
     }
   }, [admin])
 
-  useEffect(() => { void reload(); return () => { generation.current += 1; dispose(selectedFrame.current); selectedFrame.current = null } }, [reload])
+  useEffect(() => {
+    void reload()
+    return () => {
+      generation.current += 1
+      const current = selectedFrame.current
+      selectedFrame.current = null
+      setSelected(null)
+      dispose(current)
+    }
+  }, [reload])
   const close = () => replaceSelected(null)
   const open = async (app: AdminGatekeeperAppInfo) => {
     if (opening) return

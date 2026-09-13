@@ -1,17 +1,24 @@
 // @vitest-environment jsdom
-import { act, StrictMode } from 'react'
+import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import type { RpcStub } from 'capnweb'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, type Mock, vi } from 'vitest'
 import type { AdminApi } from '@gadgets/workshop-shared/api'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { AdminGatekeeperAppsPanel } from './AdminGatekeeperAppsPanel'
 
-const sandboxRender = vi.hoisted(() => vi.fn())
+type SandboxProps = {
+  frame: GatekeeperUiFrame
+  gatekeeperVendorId: string
+  title?: string
+  adminResourceControl?: { vendorId: string; admin: RpcStub<AdminApi> }
+}
+
+const sandboxRender = vi.hoisted(() => vi.fn<(props: SandboxProps) => void>())
 vi.mock('../SandboxedGatekeeperApp', () => ({
-  default: (props: { frame: GatekeeperUiFrame; gatekeeperVendorId: string; title?: string; adminResourceControl?: { vendorId: string; admin: RpcStub<AdminApi> } }) => {
+  default: (props: SandboxProps) => {
     sandboxRender(props)
-    return <iframe title={props.title} />
+    return <iframe sandbox="" title={props.title} />
   },
 }))
 
@@ -29,7 +36,7 @@ function deferred<T>() {
 
 function fakeAdmin(overrides: Partial<AdminApi>): RpcStub<AdminApi> { return overrides as unknown as RpcStub<AdminApi> }
 
-function testFrame(dispose = vi.fn()): GatekeeperUiFrame & { dispose: ReturnType<typeof vi.fn> } {
+function testFrame(dispose = vi.fn<() => void>()): GatekeeperUiFrame & { dispose: Mock<() => void> } {
   return { iframeHtml: '<!doctype html>', ui: { [Symbol.dispose]: dispose } as unknown as GatekeeperUiFrame['ui'], dispose }
 }
 
@@ -49,7 +56,7 @@ describe('AdminGatekeeperAppsPanel', () => {
 
   const render = async (admin: RpcStub<AdminApi>, strict = false) => {
     container = document.createElement('div'); document.body.append(container); root = createRoot(container)
-    await act(async () => root!.render(strict ? <StrictMode><AdminGatekeeperAppsPanel admin={admin} /></StrictMode> : <AdminGatekeeperAppsPanel admin={admin} />))
+    await act(async () => root!.render(strict ? <React.StrictMode><AdminGatekeeperAppsPanel admin={admin} /></React.StrictMode> : <AdminGatekeeperAppsPanel admin={admin} />))
     return container
   }
   const rerender = async (admin: RpcStub<AdminApi>) => { await act(async () => root!.render(<AdminGatekeeperAppsPanel admin={admin} />)) }
@@ -59,7 +66,7 @@ describe('AdminGatekeeperAppsPanel', () => {
 
   it('B-HOST-005 shows loading, retryable error, and empty state', async () => {
     const listing = deferred<typeof app[]>()
-    const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn().mockImplementationOnce(() => listing.promise).mockResolvedValueOnce([]) })
+    const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>().mockImplementationOnce(() => listing.promise).mockResolvedValueOnce([]) })
     const panel = await render(admin)
     expect(panel.textContent).toContain('Connector management')
     expect(panel.textContent).toContain('Loading connector management…')
@@ -72,7 +79,7 @@ describe('AdminGatekeeperAppsPanel', () => {
 
   it('B-HOST-005 exposes only the opening entry as busy and recovers from null', async () => {
     const opening = deferred<GatekeeperUiFrame | null>()
-    const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn().mockResolvedValue([app, otherApp]), getGatekeeperAdminApp: vi.fn().mockImplementation(() => opening.promise) })
+    const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>().mockResolvedValue([app, otherApp]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>().mockImplementation(() => opening.promise) })
     const panel = await render(admin)
     await vi.waitFor(() => expect(panel.textContent).toContain('Manage OpenAPI segments'))
     await click(button(panel, 'Manage OpenAPI segments'))
@@ -90,7 +97,7 @@ describe('AdminGatekeeperAppsPanel', () => {
 
   it('B-HOST-005 labels the frame and disposes close exactly once under StrictMode', async () => {
     const frame = testFrame()
-    const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn().mockResolvedValue(frame) })
+    const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>().mockResolvedValue(frame) })
     const panel = await render(admin, true)
     await vi.waitFor(() => expect(panel.textContent).toContain('Manage OpenAPI segments'))
     await click(button(panel, 'Manage OpenAPI segments'))
@@ -106,7 +113,7 @@ describe('AdminGatekeeperAppsPanel', () => {
 
   it('B-HOST-005 disposes a selected frame once on unmount', async () => {
     const frame = testFrame()
-    const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn().mockResolvedValue(frame) })
+    const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>().mockResolvedValue(frame) })
     const panel = await render(admin)
     await vi.waitFor(() => expect(panel.textContent).toContain('Manage OpenAPI segments'))
     await click(button(panel, 'Manage OpenAPI segments'))
@@ -118,7 +125,7 @@ describe('AdminGatekeeperAppsPanel', () => {
   it('B-HOST-005 disposes a late stale frame once after unmount', async () => {
     const opening = deferred<GatekeeperUiFrame | null>()
     const frame = testFrame()
-    const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn().mockImplementation(() => opening.promise) })
+    const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>().mockImplementation(() => opening.promise) })
     const panel = await render(admin)
     await vi.waitFor(() => expect(panel.textContent).toContain('Manage OpenAPI segments'))
     await click(button(panel, 'Manage OpenAPI segments'))
@@ -131,8 +138,8 @@ describe('AdminGatekeeperAppsPanel', () => {
   it('B-HOST-005 closes a selected frame when AdminApi is replaced and opens a new frame', async () => {
     const oldFrame = testFrame()
     const newFrame = testFrame()
-    const adminA = fakeAdmin({ listGatekeeperAdminApps: vi.fn().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn().mockResolvedValue(oldFrame) })
-    const adminB = fakeAdmin({ listGatekeeperAdminApps: vi.fn().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn().mockResolvedValue(newFrame) })
+    const adminA = fakeAdmin({ listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>().mockResolvedValue(oldFrame) })
+    const adminB = fakeAdmin({ listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>().mockResolvedValue(newFrame) })
     const panel = await render(adminA)
     await vi.waitFor(() => expect(panel.textContent).toContain('Manage OpenAPI segments'))
     await click(button(panel, 'Manage OpenAPI segments'))
@@ -147,5 +154,26 @@ describe('AdminGatekeeperAppsPanel', () => {
     expect(adminB.getGatekeeperAdminApp).toHaveBeenCalledWith('openapi')
     expect(sandboxRender).toHaveBeenLastCalledWith(expect.objectContaining({ frame: newFrame, gatekeeperVendorId: 'openapi', adminResourceControl: { vendorId: 'openapi', admin: adminB } }))
     expect(newFrame.dispose).not.toHaveBeenCalled()
+  })
+
+  it('B-HOST-005 clears a pending open when AdminApi is replaced', async () => {
+    const staleOpen = deferred<GatekeeperUiFrame | null>()
+    const staleFrame = testFrame()
+    const freshFrame = testFrame()
+    const adminA = fakeAdmin({ listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>().mockImplementation(() => staleOpen.promise) })
+    const adminB = fakeAdmin({ listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>().mockResolvedValue(freshFrame) })
+    const panel = await render(adminA)
+    await vi.waitFor(() => expect(panel.textContent).toContain('Manage OpenAPI segments'))
+    await click(button(panel, 'Manage OpenAPI segments'))
+    expect(button(panel, 'Manage OpenAPI segments').disabled).toBe(true)
+    await rerender(adminB)
+    await vi.waitFor(() => expect(adminB.listGatekeeperAdminApps).toHaveBeenCalledOnce())
+    expect(button(panel, 'Manage OpenAPI segments').disabled).toBe(false)
+    await act(async () => { staleOpen.resolve(staleFrame); await Promise.resolve() })
+    expect(staleFrame.dispose).toHaveBeenCalledOnce()
+    expect(button(panel, 'Manage OpenAPI segments').disabled).toBe(false)
+    await click(button(panel, 'Manage OpenAPI segments'))
+    await vi.waitFor(() => expect(panel.querySelector('iframe')).not.toBeNull())
+    expect(adminB.getGatekeeperAdminApp).toHaveBeenCalledWith('openapi')
   })
 })

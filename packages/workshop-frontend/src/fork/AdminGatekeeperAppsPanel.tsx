@@ -38,6 +38,7 @@ export const AdminGatekeeperAppsPanel = ({ admin }: { admin: RpcStub<AdminApi> }
       const current = selectedFrame.current
       selectedFrame.current = null
       setSelected(null)
+      setOpening(null)
       dispose(current)
     }
   }, [reload])

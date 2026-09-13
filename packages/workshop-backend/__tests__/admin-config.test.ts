@@ -120,6 +120,7 @@ describe("admin config site logo", () => {
 
 const MAIL = { urlPattern: "https://graph.microsoft.com/#segment=mail", title: "Mail", description: "" };
 const CALENDAR = { urlPattern: "https://graph.microsoft.com/#segment=calendar", title: "Calendar", description: "" };
+const CUSTOM = { urlPattern: "https://graph.microsoft.com/#tool=*", title: "Custom selection", description: "" };
 
 describe("resource allow-list", () => {
   it("treats every resource as off until an admin turns it on", () => {
@@ -135,6 +136,7 @@ describe("resource allow-list", () => {
     expect(filterEnabledResources(config, "linear", [MAIL])).toEqual([]);
     expect(isResourceDisabled(config, "msgraph", MAIL.urlPattern)).toBe(false);
     expect(isResourceDisabled(config, "msgraph", CALENDAR.urlPattern)).toBe(true);
+    expect(isResourceDisabled(config, "MsGraph", CUSTOM.urlPattern)).toBe(true);
   });
 
   it("matches the vendor id case-insensitively, the way setResourceEnabled stores it", () => {

@@ -43,6 +43,7 @@ export default defineConfig({
           },
           GATEKEEPER_ADMINFRAME: { name: "fake-admin-gatekeepers", entrypoint: "AdminFrameVendor" },
           GATEKEEPER_PLAIN: { name: "fake-admin-gatekeepers", entrypoint: "PlainVendor" },
+          GATEKEEPER_REFINING: { name: "fake-admin-gatekeepers", entrypoint: "RefiningVendor" },
           ADMIN_GATEKEEPER_CONTROL: { name: "fake-admin-gatekeepers", entrypoint: "AdminGatekeeperControl" },
         },
         workers: [{
@@ -151,6 +152,7 @@ export default defineConfig({
           script: `
             import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
             let calls = [];
+            let refiningResolverAdvertised = true;
             function record(vendorId, method, args = []) { calls.push({ vendorId, method, args }); }
             class AdminFrameUi extends RpcTarget { ping() { return "admin-frame-ready"; } }
             function frame() { return { iframeHtml: "<!doctype html><title>Admin frame fixture</title>", ui: new AdminFrameUi() }; }
@@ -168,8 +170,40 @@ export default defineConfig({
               async connectAccount() { record("plain", "connectAccount"); return { url: "https://fixture.invalid/connect" }; }
               async createAccount() { record("plain", "createAccount"); throw new Error("fixture createAccount must not be called"); }
             }
+            const ORIGIN = "https://graph.microsoft.com";
+            const MAIL = ORIGIN + "/#segment=mail";
+            const CALENDAR = ORIGIN + "/#segment=calendar";
+            const CUSTOM = ORIGIN + "/#tool=*";
+            const REVISION = "a".repeat(64);
+            const NARROWED_MAIL = ORIGIN + "/#segment=mail&revision=" + REVISION + "&tool=me.ListMessages";
+            export class RefiningVendor extends WorkerEntrypoint {
+              async describe() {
+                record("refining", "describe");
+                return { displayName: "Refining fixture", url: ORIGIN,
+                  ...(refiningResolverAdvertised ? { resolvesResourceUrls: true } : {}) };
+              }
+              async getSupportedResources() {
+                record("refining", "getSupportedResources");
+                return [
+                  { urlPattern: MAIL, title: "Mail", description: "Mail fixture" },
+                  { urlPattern: CALENDAR, title: "Calendar", description: "Calendar fixture" },
+                  { urlPattern: CUSTOM, title: "Custom", description: "Custom fixture" },
+                ];
+              }
+              async resolveResourceUrl(url) {
+                record("refining", "resolveResourceUrl", [url]);
+                if (url === NARROWED_MAIL || url === MAIL || url === ORIGIN + "/#tool=me.sendMail") {
+                  return url === ORIGIN + "/#tool=me.sendMail" ? CUSTOM : MAIL;
+                }
+                if (url === "fixture:unadvertised") return ORIGIN + "/#segment=unadvertised";
+                if (url === "fixture:throw") throw new Error("REFINING_RESOLVER_SENTINEL " + NARROWED_MAIL);
+                return null;
+              }
+              async connectAccount() { record("refining", "connectAccount"); return { url: "https://fixture.invalid/connect" }; }
+            }
             export class AdminGatekeeperControl extends WorkerEntrypoint {
-              async reset() { calls = []; }
+              async reset() { calls = []; refiningResolverAdvertised = true; }
+              async setRefiningResolverAdvertised(value) { refiningResolverAdvertised = value; }
               async getCalls() { return calls; }
             }
           `,

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 
-import { act, type ComponentProps, type ReactNode, useEffect } from 'react'
+import { act, type ComponentProps, type ReactNode, useEffect, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
@@ -11,6 +11,9 @@ import type { AccountDescription, SupportedResource, VendorDescription } from '@
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const PROFILE_URL = 'https://ai-executor.invalid/profiles/11111111-1111-1111-1111-111111111111'
+const BARE_MAIL = 'https://graph.microsoft.com/#segment=mail'
+const NARROWED_MAIL = `${BARE_MAIL}&revision=${'a'.repeat(64)}&tool=me.ListMessages`
+const BARE_CALENDAR = 'https://graph.microsoft.com/#segment=calendar'
 const RESOURCE: SupportedResource = {
   urlPattern: PROFILE_URL,
   title: 'Production assistant',
@@ -18,6 +21,8 @@ const RESOURCE: SupportedResource = {
 }
 
 const toastAdd = vi.fn<(toast: { title: string, variant: string }) => void>()
+const configuratorSessions: Array<{ initialResourceUrl?: string, resourceUrlPattern?: string }> = []
+const configuratorCleanups = vi.fn<() => void>()
 
 vi.mock('@cloudflare/kumo', () => {
   const Dialog = Object.assign(
@@ -43,17 +48,26 @@ vi.mock('./ResourceConfiguratorHost', () => ({
     frame,
     onCollectResourceUrlChange,
     onSelectionReadyChange,
+    initialResourceUrl,
+    resourceUrlPattern,
   }: {
     frame: unknown
     onCollectResourceUrlChange?: (collect: (() => Promise<string>) | null) => void
     onSelectionReadyChange?: (ready: boolean | null) => void
+    initialResourceUrl?: string
+    resourceUrlPattern?: string
   }) => {
+    const [seed] = useState(() => ({ initialResourceUrl, resourceUrlPattern }))
     useEffect(() => {
       if (!frame) return
-      onCollectResourceUrlChange?.(async () => 'https://ai-executor.invalid/profiles/11111111-1111-1111-1111-111111111111')
+      configuratorSessions.push(seed)
+      onCollectResourceUrlChange?.(async () => seed.initialResourceUrl ?? PROFILE_URL)
       onSelectionReadyChange?.(true)
-      return () => onCollectResourceUrlChange?.(null)
-    }, [frame, onCollectResourceUrlChange, onSelectionReadyChange])
+      return () => {
+        configuratorCleanups()
+        onCollectResourceUrlChange?.(null)
+      }
+    }, [frame, onCollectResourceUrlChange, onSelectionReadyChange, seed])
     return <div>{frame ? 'Profile URL ready' : 'Waiting for profile account'}</div>
   },
 }))
@@ -70,9 +84,9 @@ type TestApi = {
   startResourceConfigurator: ReturnType<typeof vi.fn>
 }
 
-function vendor(autoProvisionsAccount: boolean): VendorDescription {
+function vendor(autoProvisionsAccount: boolean, vendorId = autoProvisionsAccount ? 'ai-executor' : 'google'): VendorDescription {
   return {
-    displayName: autoProvisionsAccount ? 'Knitli AI' : 'Google',
+    displayName: vendorId === 'openapi' ? 'OpenAPI' : autoProvisionsAccount ? 'Knitli AI' : 'Google',
     url: 'https://example.test/',
     autoProvisionsAccount,
   }
@@ -83,14 +97,18 @@ function buildApi({
   provisionFailure,
   grantable = false,
   initialAccount = false,
+  vendorId = autoProvisionsAccount ? 'ai-executor' : 'google',
+  resources = [{ ...RESOURCE, grantable }],
 }: {
   autoProvisionsAccount: boolean
   provisionFailure?: Error
   grantable?: boolean
   initialAccount?: boolean
+  vendorId?: string
+  resources?: SupportedResource[]
 }): TestApi {
   let accountSubscriber: ConnectedAccountsSubscriber | undefined
-  const vendorDescription = vendor(autoProvisionsAccount)
+  const vendorDescription = vendor(autoProvisionsAccount, vendorId)
   const connectAccount = vi.fn<(vendorId: string, resourceUrlPatterns?: string[]) => Promise<{ url: string }>>()
     .mockResolvedValue({ url: 'https://accounts.example.test/oauth' })
   const provisionAmbientAccount = provisionFailure
@@ -110,9 +128,9 @@ function buildApi({
       description: VendorDescription
       supportedResources: SupportedResource[]
     }>>>().mockResolvedValue([{
-      id: autoProvisionsAccount ? 'ai-executor' : 'google',
+      id: vendorId,
       description: vendorDescription,
-      supportedResources: [{ ...RESOURCE, grantable }],
+      supportedResources: resources,
     }]),
     subscribeConnectedAccounts: vi.fn<(
       subscriber: ConnectedAccountsSubscriber,
@@ -123,9 +141,9 @@ function buildApi({
           42,
           { displayName: vendorDescription.displayName } as AccountDescription,
           vendorDescription,
-          [{ ...RESOURCE, grantable }],
+          resources,
           true,
-          autoProvisionsAccount ? 'ai-executor' : 'google',
+          vendorId,
         )
       }
       subscriber.ready()
@@ -160,11 +178,15 @@ describe('GatekeeperModal ambient resource connections', () => {
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
     toastAdd.mockClear()
+    configuratorSessions.length = 0
+    configuratorCleanups.mockClear()
   })
 
   async function render(
     api: RpcStub<AuthenticatedApi>,
-    getOverseer = vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({} as RpcStub<Overseer>),
+    getOverseer = vi.fn<() => Promise<RpcStub<Overseer>>>()
+      .mockResolvedValue({} as RpcStub<Overseer>),
+    props: Partial<ComponentProps<typeof GatekeeperModal>> = {},
   ) {
     currentApi = api
     container = document.createElement('div')
@@ -177,6 +199,7 @@ describe('GatekeeperModal ambient resource connections', () => {
           onClose={() => {}}
           getOverseer={getOverseer}
           onCreated={async () => {}}
+          {...props}
         />,
       )
       await Promise.resolve()
@@ -294,5 +317,94 @@ describe('GatekeeperModal ambient resource connections', () => {
 
     expect([...rendered.container.querySelectorAll('button')]
       .find(button => button.textContent === 'Use another Google account')).toBeDefined()
+  })
+
+  it('H-SUBSET-007 remounts the one-shot configurator only when its effective seed changes', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, initialAccount: true, vendorId: 'openapi', resources: [
+      { urlPattern: BARE_MAIL, title: 'Mail', description: 'Mail.' },
+      { urlPattern: BARE_CALENDAR, title: 'Calendar', description: 'Calendar.' },
+    ] })
+    const rawA = NARROWED_MAIL
+    const rawB = NARROWED_MAIL.replace(`revision=${'a'.repeat(64)}`, `revision=${'b'.repeat(64)}`)
+    const rendered = await render(testApi.api, undefined, {
+      initialVendorId: 'openapi', initialResourceUrl: rawA, initialResourceUrlPattern: BARE_MAIL,
+    })
+    expect(configuratorSessions).toEqual([{ initialResourceUrl: rawA, resourceUrlPattern: BARE_MAIL }])
+
+    await act(async () => {
+      root!.render(<GatekeeperModal open onClose={() => {}} getOverseer={rendered.getOverseer}
+        onCreated={async () => {}} initialVendorId="openapi" initialResourceUrl={rawA}
+        initialResourceUrlPattern={BARE_MAIL} />)
+      await Promise.resolve()
+    })
+    expect(configuratorSessions).toHaveLength(1)
+    expect(configuratorCleanups).not.toHaveBeenCalled()
+
+    await act(async () => {
+      root!.render(<GatekeeperModal open onClose={() => {}} getOverseer={rendered.getOverseer}
+        onCreated={async () => {}} initialVendorId="openapi" initialResourceUrl={rawB}
+        initialResourceUrlPattern={BARE_MAIL} />)
+      await Promise.resolve()
+    })
+    expect(configuratorSessions).toHaveLength(2)
+    expect(configuratorSessions[1]).toEqual({ initialResourceUrl: rawB, resourceUrlPattern: BARE_MAIL })
+    expect(configuratorCleanups).toHaveBeenCalledOnce()
+
+    await act(async () => {
+      root!.render(<GatekeeperModal open onClose={() => {}} getOverseer={rendered.getOverseer}
+        onCreated={async () => {}} initialVendorId="openapi" initialResourceUrl={rawB}
+        initialResourceUrlPattern="https://other.invalid/#resource" />)
+      await Promise.resolve()
+    })
+    expect(configuratorSessions).toHaveLength(3)
+    expect(configuratorSessions[2]).toEqual({ initialResourceUrl: undefined, resourceUrlPattern: BARE_MAIL })
+    expect(configuratorCleanups).toHaveBeenCalledTimes(2)
+  })
+
+  it('H-SUBSET-008 retains strict prefill fallback only for messages without an authoritative pattern', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, initialAccount: true, vendorId: 'openapi', resources: [
+      { urlPattern: BARE_MAIL, title: 'Mail', description: 'Mail.' },
+      { urlPattern: BARE_CALENDAR, title: 'Calendar', description: 'Calendar.' },
+    ] })
+    const matching = await render(testApi.api, undefined, { initialVendorId: 'openapi', initialResourceUrl: BARE_MAIL })
+    expect(matching.container.textContent).toContain('Mail')
+    expect(configuratorSessions).toEqual([{ initialResourceUrl: BARE_MAIL, resourceUrlPattern: BARE_MAIL }])
+    configuratorSessions.length = 0
+    await act(async () => {
+      root!.render(<GatekeeperModal open onClose={() => {}} getOverseer={vi.fn<() => Promise<RpcStub<Overseer>>>()
+        .mockResolvedValue({} as RpcStub<Overseer>)}
+        onCreated={async () => {}} initialVendorId="openapi" initialResourceUrl={NARROWED_MAIL} />)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(matching.container.textContent).toContain('Mail')
+    expect(configuratorSessions).toEqual([{ initialResourceUrl: undefined, resourceUrlPattern: BARE_MAIL }])
+  })
+
+  it('H-SUBSET-006 forwards the authoritative raw URL through the one-shot configurator to creation', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, initialAccount: true, vendorId: 'openapi', resources: [
+      { urlPattern: BARE_MAIL, title: 'Mail', description: 'Mail.' },
+      { urlPattern: BARE_CALENDAR, title: 'Calendar', description: 'Calendar.' },
+    ] })
+    const capability = { [Symbol.dispose]() {} }
+    const newGatekeeper = vi.fn<(
+      accountId: number,
+      resourceUrl: string,
+    ) => Promise<typeof capability>>().mockResolvedValue(capability)
+    const onCreated = vi.fn<ComponentProps<typeof GatekeeperModal>['onCreated']>()
+      .mockResolvedValue(undefined)
+    const getOverseer = vi.fn<() => Promise<RpcStub<Overseer>>>()
+      .mockResolvedValue({ newGatekeeper } as unknown as RpcStub<Overseer>)
+    const rendered = await render(testApi.api, getOverseer, {
+      initialVendorId: 'openapi', initialResourceUrl: NARROWED_MAIL, initialResourceUrlPattern: BARE_MAIL,
+      onCreated,
+    })
+    expect(rendered.container.textContent).toContain('Mail')
+    expect(testApi.startResourceConfigurator).toHaveBeenCalledWith(42, BARE_MAIL)
+    expect(configuratorSessions).toEqual([{ initialResourceUrl: NARROWED_MAIL, resourceUrlPattern: BARE_MAIL }])
+    const add = [...rendered.container.querySelectorAll('button')].find(button => button.textContent === 'Add connection')
+    await act(async () => add!.click())
+    expect(newGatekeeper).toHaveBeenCalledWith(42, NARROWED_MAIL)
+    expect(onCreated).toHaveBeenCalledWith(capability)
   })
 })

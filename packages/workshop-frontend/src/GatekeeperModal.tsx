@@ -506,8 +506,15 @@ export default function GatekeeperModal({
   const prefilledResourceUrl = useMemo(() => {
     const pattern = selectedConnection?.resourceUrlPattern
     if (!pattern || pattern === 'https://*' || !initialResourceUrl) return null
+    if (initialResourceUrlPattern !== undefined) {
+      return pattern === initialResourceUrlPattern ? initialResourceUrl : null
+    }
     return matchesResourceUrlPattern(pattern, initialResourceUrl) ? initialResourceUrl : null
-  }, [selectedConnection?.resourceUrlPattern, initialResourceUrl])
+  }, [selectedConnection?.resourceUrlPattern, initialResourceUrl, initialResourceUrlPattern])
+
+  const configuratorSeedKey = prefilledResourceUrl === null
+    ? 'no-prefill'
+    : `prefill:${prefilledResourceUrl}`
 
   // Grantable resources the chosen connection needs that the selected account hasn't granted yet.
   // Until these are granted, the resource configurator can't load and the binding can't be created
@@ -864,6 +871,7 @@ export default function GatekeeperModal({
 
                 {selectedConnection.resourceUrlPattern && !hasMissingResourceGrants && (
                   <ResourceConfiguratorHost
+                    key={configuratorSeedKey}
                     frame={configuratorFrameState?.frame ?? null}
                     frameKey={configuratorFrameState?.key ?? null}
                     loading={configuratorLoading}

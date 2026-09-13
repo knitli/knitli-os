@@ -1,6 +1,6 @@
 import { RpcStub } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ConnectInitiator } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ConnectInitiator, type ResolveRequestedResourceResult } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -52,6 +52,7 @@ export type ProvidedAccountInfo = {
 // shape keeps the methods' declared return types (e.g. createAccount's Fetcher<GatekeeperUser>)
 // usable directly, the way the runtime stub actually behaves.
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
+type ResourceResolverStub = Required<Pick<GatekeeperVendor, "resolveResourceUrl">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
@@ -1137,6 +1138,45 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     return (await Promise.all(promises)).filter(value => value !== null);
+  }
+
+  async resolveGatekeeperResource(vendorId: string, resourceUrl: string)
+      : Promise<ResolveRequestedResourceResult | null> {
+    const canonicalVendorId = [...this.vendors.keys()].find(id => id === vendorId.toLowerCase());
+    const vendor = canonicalVendorId && this.vendors.get(canonicalVendorId);
+    const rejected = (): ResolveRequestedResourceResult => ({ ok: false, reason:
+      "the resourceUrl is not a currently available resource this vendor recognizes. " +
+      "Call listConnectableResources to see the available resource types, then retry." });
+    if (!vendor || !canonicalVendorId) return rejected();
+
+    type ResolutionFailureCode = "vendor-description" | "host-policy" | "connector-resolver" | "supported-resources";
+    let failureCode: ResolutionFailureCode = "vendor-description";
+    try {
+      const description = await vendor.describe();
+      if (description.resolvesResourceUrls !== true) return null;
+
+      failureCode = "host-policy";
+      let config = await readAdminConfig(this.env);
+      if (config.disabledGatekeepers.includes(canonicalVendorId)) return rejected();
+
+      failureCode = "connector-resolver";
+      const pattern = await (vendor as unknown as ResourceResolverStub).resolveResourceUrl(resourceUrl);
+      if (typeof pattern !== "string" || pattern.length === 0) return rejected();
+
+      failureCode = "supported-resources";
+      const resources = await vendor.getSupportedResources({ userId: this.storage.profile.get().id });
+      config = await readAdminConfig(this.env);
+      if (config.disabledGatekeepers.includes(canonicalVendorId)) return rejected();
+      const enabled = filterEnabledResources(
+          config, canonicalVendorId, resources, description.autoProvisionsAccount === true);
+      const resource = enabled.find(candidate => candidate.urlPattern === pattern);
+      return resource ? { ok: true, resource } : rejected();
+    } catch {
+      logger.warn("gatekeeper resource resolution failed", {
+        event: "gatekeeper.resource.resolve.failed", vendorId: canonicalVendorId, operation: failureCode,
+      });
+      return rejected();
+    }
   }
 
   async connectAccount(vendorId: string, resourceUrlPatterns?: string[], initiator?: ConnectInitiator): Promise<{url: string}> {

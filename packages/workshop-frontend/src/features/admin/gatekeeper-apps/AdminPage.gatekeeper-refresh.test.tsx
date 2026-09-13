@@ -46,6 +46,9 @@ function view(enabled: boolean, options: { vendorEnabled?: boolean; otherEnabled
   const resourceVendors: AdminResourceVendor[] = [{ vendorId: 'openapi', autoProvisions: false, enabled: options.vendorEnabled ?? true, displayName: 'OpenAPI', resources }]
   return { signupsEnabled: true, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [] }
 }
+function missingVendorView(): AdminSettingsView {
+  return { ...view(false), resourceVendors: [] }
+}
 function frame(): GatekeeperUiFrame { return { iframeHtml: '<!doctype html><title>OpenAPI</title>', ui: new RpcStub(new EmptyUi()) } }
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason?: unknown) => void; const promise = new Promise<T>((nextResolve, nextReject) => { resolve = nextResolve; reject = nextReject }); return { promise, resolve, reject } }
 function button(container: HTMLElement, text: string) { const result = [...container.querySelectorAll('button')].find((candidate) => candidate.textContent?.startsWith(text)); if (!result) throw new Error(`Missing button ${text}`); return result as HTMLButtonElement }
@@ -83,6 +86,41 @@ describe('AdminPage gatekeeper resource refresh', () => {
     expect(admin.getSettings).toHaveBeenCalledTimes(4)
     expect(container.querySelector('iframe')).toBe(iframe)
     await expect(client.getResourceEnabled(PATTERN)).resolves.toBe(true)
+  })
+
+  it.each([
+    ['confirmation read failed', () => { throw new Error('confirmation read failed') }, 'confirmation read failed'],
+    ['missing vendor', () => missingVendorView(), 'Resource availability was not confirmed.'],
+  ])('B-PARENT-006 refreshes after committed enable with %s', async (_name, confirmation, message) => {
+    let reads = 0
+    let authoritativeEnabled = false
+    const admin = {
+      getSettings: vi.fn<AdminApi['getSettings']>(async () => {
+        reads += 1
+        if (reads === 3) return confirmation()
+        return view(authoritativeEnabled)
+      }),
+      setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>(async (_vendor, _pattern, enabled) => { authoritativeEnabled = enabled }),
+      listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
+      getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()),
+    } as unknown as RpcStubType<AdminApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
+    await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click())
+    await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    const iframe = container.querySelector('iframe')!; const { port1, port2 } = new MessageChannel(); client = newMessagePortRpcSession<Host>(port1)
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
+    const write = (async () => {
+      await client!.setResourceEnabled(PATTERN, true)
+    })()
+    await act(async () => { await write.catch(() => undefined) })
+    expect(admin.setResourceEnabled).toHaveBeenCalledExactlyOnceWith('openapi', PATTERN, true)
+    expect(authoritativeEnabled).toBe(true)
+    expect(resourceSwitch(container).checked).toBe(true)
+    expect(admin.getSettings).toHaveBeenCalledTimes(4)
+    expect(container.querySelector('iframe')).toBe(iframe)
+    expect(state.toast).not.toHaveBeenCalled()
+    await expect(write).rejects.toThrow(message)
   })
 
   it('B-PARENT-003 ignores an obsolete API A refresh after API B replaces it', async () => {

@@ -21,8 +21,9 @@ export type RateLimitOptions = {
 }
 
 /**
- * Returns the rate-limited proxy plus a `dispose` that cancels any pending resume timer (otherwise it
- * could fire after the session is torn down). `dispose` is a no-op in `reject` mode (no timer).
+ * Returns the rate-limited proxy plus a `dispose` that closes the limiter, rejects work that has not
+ * reached the target, cancels a pending throttle resume timer, and leaves calls that have entered
+ * the target to settle.
  */
 export function createRateLimitedCapability(
   capability: any,
@@ -39,6 +40,8 @@ export function createRateLimitedCapability(
   const queue: QueuedCall[] = []
   let inFlight = 0
   let resumeTimer: ReturnType<typeof setTimeout> | null = null
+  let closed = false
+  const closedError = () => new Error(`${options.label} is no longer available.`)
 
   const pruneCallWindow = () => {
     const cutoff = Date.now() - 60_000
@@ -46,6 +49,7 @@ export function createRateLimitedCapability(
   }
 
   const drain = () => {
+    if (closed) return
     pruneCallWindow()
     while (inFlight < options.maxConcurrency && queue.length > 0) {
       if (startedCalls.length >= options.maxCallsPerMinute) {
@@ -69,7 +73,10 @@ export function createRateLimitedCapability(
       startedCalls.push(Date.now())
       inFlight++
       Promise.resolve()
-        .then(() => capability[call.method](...call.args))
+        .then(() => {
+          if (closed) throw closedError()
+          return capability[call.method](...call.args)
+        })
         .then(call.resolve, call.reject)
         .finally(() => {
           inFlight--
@@ -84,6 +91,10 @@ export function createRateLimitedCapability(
       if (property === Symbol.dispose) return undefined
       if (typeof property !== 'string') return undefined
       return (...args: unknown[]) => new Promise((resolve, reject) => {
+        if (closed) {
+          reject(closedError())
+          return
+        }
         if (queue.length + inFlight >= options.maxPendingCalls) {
           reject(new Error(`${options.label} has too many pending requests.`))
           return
@@ -97,10 +108,14 @@ export function createRateLimitedCapability(
   return {
     capability: proxy,
     dispose: () => {
+      if (closed) return
+      closed = true
       if (resumeTimer !== null) {
         clearTimeout(resumeTimer)
         resumeTimer = null
       }
+      const queued = queue.splice(0)
+      for (const call of queued) call.reject(closedError())
     },
   }
 }

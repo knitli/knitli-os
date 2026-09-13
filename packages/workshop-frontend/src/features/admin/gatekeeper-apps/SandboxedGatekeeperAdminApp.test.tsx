@@ -173,17 +173,39 @@ describe('Sandboxed gatekeeper admin resource control', () => {
   it('B-HOST-006 rejects false or absent post-enable confirmation', async () => {
     for (const confirmation of [false, undefined]) {
       let reads = 0
-      const getSettings = vi.fn<AdminApi['getSettings']>(async () => settings(reads++ === 0 ? false : confirmation))
-      const setResourceEnabled = vi.fn<AdminApi['setResourceEnabled']>(async () => undefined)
-      const onResourcesChanged = vi.fn<() => Promise<void>>(async () => undefined)
+      const order: string[] = []
+      const getSettings = vi.fn<AdminApi['getSettings']>(async () => { order.push(reads++ === 0 ? 'pre-read' : 'confirmation'); return settings(reads === 1 ? false : confirmation) })
+      const setResourceEnabled = vi.fn<AdminApi['setResourceEnabled']>(async () => { order.push('setter') })
+      const onResourcesChanged = vi.fn<() => Promise<void>>(async () => { order.push('parent-refresh') })
       const { host } = handshake(await render(adminControl(fakeAdmin({ getSettings, setResourceEnabled }), onResourcesChanged)))
       await expect(host.setResourceEnabled(PATTERN, true)).rejects.toThrow('Resource availability was not confirmed.')
       expect(getSettings).toHaveBeenCalledTimes(2)
       expect(setResourceEnabled).toHaveBeenCalledExactlyOnceWith('fixed', PATTERN, true)
-      expect(onResourcesChanged).not.toHaveBeenCalled()
+      expect(onResourcesChanged).toHaveBeenCalledOnce()
+      expect(order).toEqual(['pre-read', 'setter', 'confirmation', 'parent-refresh'])
       await act(async () => root?.unmount())
       root = undefined
     }
+  })
+
+  it('B-HOST-013 refreshes after a committed enable whose confirmation read rejects', async () => {
+    const confirmationError = new Error('confirmation read failed')
+    let reads = 0
+    const order: string[] = []
+    const getSettings = vi.fn<AdminApi['getSettings']>(async () => {
+      reads += 1
+      if (reads === 2) { order.push('confirmation'); throw confirmationError }
+      order.push('pre-read')
+      return settings(false)
+    })
+    const setResourceEnabled = vi.fn<AdminApi['setResourceEnabled']>(async () => { order.push('setter') })
+    const onResourcesChanged = vi.fn<() => Promise<void>>(async () => { order.push('parent-refresh') })
+    const { host } = handshake(await render(adminControl(fakeAdmin({ getSettings, setResourceEnabled }), onResourcesChanged)))
+    await expect(host.setResourceEnabled(PATTERN, true)).rejects.toThrow('confirmation read failed')
+    expect(getSettings).toHaveBeenCalledTimes(2)
+    expect(setResourceEnabled).toHaveBeenCalledExactlyOnceWith('fixed', PATTERN, true)
+    expect(onResourcesChanged).toHaveBeenCalledOnce()
+    expect(order).toEqual(['pre-read', 'setter', 'confirmation', 'parent-refresh'])
   })
 
   it('B-HOST-006 reads an absent exact resource as false', async () => {
@@ -257,6 +279,30 @@ describe('Sandboxed gatekeeper admin resource control', () => {
       setTimeoutSpy.mockRestore()
       clearTimeoutSpy.mockRestore()
     }
+  })
+
+  it('B-HOST-012 does not start queued disables after host teardown', async () => {
+    const pending = Array.from({ length: 8 }, () => deferred<void>())
+    let index = 0
+    const getSettings = vi.fn<AdminApi['getSettings']>()
+    const setResourceEnabled = vi.fn<AdminApi['setResourceEnabled']>(() => index < 8 ? pending[index++].promise : Promise.resolve())
+    const onResourcesChanged = vi.fn<() => Promise<void>>(async () => undefined)
+    const { host } = handshake(await render(adminControl(fakeAdmin({ getSettings, setResourceEnabled }), onResourcesChanged)))
+    const outcomes = Array.from({ length: 128 }, () => host.setResourceEnabled(PATTERN, false).then(() => undefined, () => undefined))
+    await vi.waitFor(() => expect(setResourceEnabled).toHaveBeenCalledTimes(8))
+    await expect(host.setResourceEnabled(PATTERN, false)).rejects.toThrow('Gatekeeper app has too many pending requests.')
+    expect(getSettings).not.toHaveBeenCalled()
+    expect(onResourcesChanged).not.toHaveBeenCalled()
+    await act(async () => root?.unmount())
+    root = undefined
+    pending.forEach((entry) => entry.resolve())
+    await Promise.all(outcomes)
+    // MessagePort closure settles remote outcomes before the local target/finally chain is done.
+    // Cross one task boundary so every microtask triggered by the active setter releases has run.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(setResourceEnabled).toHaveBeenCalledTimes(8)
+    expect(getSettings).not.toHaveBeenCalled()
+    expect(onResourcesChanged).toHaveBeenCalledTimes(8)
   })
 
   it('B-HOST-008 ignores wrong-source and non-null-origin handshakes', async () => {

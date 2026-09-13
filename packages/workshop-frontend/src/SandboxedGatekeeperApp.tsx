@@ -190,10 +190,13 @@ class GatekeeperAppHostImpl extends RpcTarget {
       throw new Error('Resource is not available.')
     }
     await control.admin.setResourceEnabled(control.vendorId, urlPattern, true)
-    if (!await this.#readResourceEnabled(urlPattern)) {
-      throw new Error('Resource availability was not confirmed.')
+    try {
+      if (!await this.#readResourceEnabled(urlPattern)) {
+        throw new Error('Resource availability was not confirmed.')
+      }
+    } finally {
+      await control.onResourcesChanged()
     }
-    await control.onResourcesChanged()
   }
 
   async #readResourceEnabled(urlPattern: string): Promise<boolean | undefined> {

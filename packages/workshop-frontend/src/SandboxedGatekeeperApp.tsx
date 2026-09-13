@@ -239,8 +239,11 @@ class GatekeeperAppHostImpl extends RpcTarget {
     }
   }
 
-  // Queue a presentation change; the latest requested state is applied on the next frame.
+  // Ordinary app frames may grow to the viewport. Admin resource-control frames acknowledge the
+  // request while staying in their trusted connector region.
   setPresenting(active: boolean): Promise<PresentAck> {
+    if (this.#adminResourceControl) return Promise.resolve({ rect: null, willResize: false })
+    // Queue a presentation change; the latest requested state is applied on the next frame.
     return new Promise((resolve) => {
       this.#pendingActive = active
       this.#pendingResolvers.push(resolve)

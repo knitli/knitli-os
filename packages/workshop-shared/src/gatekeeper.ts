@@ -80,6 +80,12 @@ export type VendorDescription = {
 
   /** If set, this vendor exposes a deployment-admin management UI. */
   providesAdminUi?: { title: string; icon?: AvatarImage };
+
+  /**
+   * True when the vendor can validate a concrete resource URL before an account exists and map it
+   * to one stable urlPattern returned by getSupportedResources().
+   */
+  resolvesResourceUrls?: true;
 }
 
 /**
@@ -468,6 +474,14 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
 
   /** Opens the vendor-owned administration UI for a deployment administrator. */
   startAdminUi?(context: AppUiContext): Promise<GatekeeperUiFrame | null>;
+
+  /**
+   * Validate a concrete resource URL and return the exact stable SupportedResource.urlPattern it
+   * belongs to. Return null, or reject, when the URL is invalid, stale, outside the provider,
+   * ambiguous, or otherwise not currently grantable. The Workshop exact-maps the returned string
+   * against its own enabled resource list; this method grants no capability by itself.
+   */
+  resolveResourceUrl?(resourceUrl: string): Promise<string | null>;
 
   /**
    * Start the auth flow to connect to the user's remote account. Returns the URL which the user

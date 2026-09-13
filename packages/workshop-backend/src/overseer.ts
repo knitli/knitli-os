@@ -8928,6 +8928,12 @@ class OverseerImpl implements AgentHooks {
     // uses. If it can't be resolved, REJECT the request: otherwise the user would get an accept
     // card that opens a blank "create new connection" picker. The agent is told what to fix.
     let resolved = resolveRequestedResource(vendor.supportedResources, input.resourceUrl);
+    if (input.resourceUrl) {
+      const resourceUrl = input.resourceUrl;
+      const connectorResolution = await retryOnDoReset(
+          async () => this.#ownerUserStub().resolveGatekeeperResource(input.vendorId, resourceUrl), this.logger);
+      if (connectorResolution !== null) resolved = connectorResolution;
+    }
     if (!resolved.ok) {
       return { requested: false, message:
           `Cannot request a connection for "${vendor.description.displayName}": ${resolved.reason}` };

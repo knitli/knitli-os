@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_ADMIN_CONFIG, defaultOutputFormatId, filterEnabledResources, isResourceDisabled, parseAdminConfig, reorderFormats, resolveFormatOutput, sanitizeOutputOverrides, serializeAdminConfig } from "../src/admin-config.js";
+import { DEFAULT_ADMIN_CONFIG, defaultOutputFormatId, enabledResourcePatterns, filterEnabledResources, isResourceDisabled, parseAdminConfig, reorderFormats, resolveFormatOutput, sanitizeOutputOverrides, serializeAdminConfig } from "../src/admin-config.js";
 
 describe("parseAdminConfig", () => {
   it("backfills fields missing from a config persisted before they existed", () => {
@@ -164,5 +164,16 @@ describe("resource allow-list", () => {
   it("round-trips the allow-list through serialize/parse", () => {
     let config = { ...DEFAULT_ADMIN_CONFIG, enabledResources: { msgraph: [MAIL.urlPattern] } };
     expect(parseAdminConfig(serializeAdminConfig(config)).enabledResources).toEqual({ msgraph: [MAIL.urlPattern] });
+  });
+
+  it("keeps special vendor keys as ordinary own entries", () => {
+    let config = parseAdminConfig('{"enabledResources":{"__proto__":["https://graph.microsoft.com/#segment=mail"],"constructor":["constructor"],"toString":["toString"]}}');
+    expect(Object.hasOwn(config.enabledResources, "__proto__")).toBe(true);
+    expect(enabledResourcePatterns(config, "__proto__")).toEqual([MAIL.urlPattern]);
+    expect(isResourceDisabled(config, "__proto__", MAIL.urlPattern)).toBe(false);
+    expect(enabledResourcePatterns(config, "constructor")).toEqual(["constructor"]);
+    expect(enabledResourcePatterns(config, "toString")).toEqual(["toString"]);
+    expect(enabledResourcePatterns(parseAdminConfig(null), "constructor")).toEqual([]);
+    expect(enabledResourcePatterns(parseAdminConfig(null), "toString")).toEqual([]);
   });
 });

@@ -11,6 +11,11 @@ const logger = createWorkshopLogger('workshop.admin.gatekeeper-apps');
 type AdminUiVendor = GatekeeperVendor &
   Required<Pick<GatekeeperVendor, 'startAdminUi'>>;
 
+function safeVendorAdminError(caught: unknown): { message: string } {
+  const kind = caught instanceof Error ? 'Error' : caught === null ? 'null' : typeof caught;
+  return { message: `Gatekeeper vendor call rejected (${kind}).` };
+}
+
 function advertisesAdminUi(
   vendor: Service<GatekeeperVendor>,
   description: VendorDescription,
@@ -25,8 +30,11 @@ export class AdminGatekeeperApps {
     const descriptions = await Promise.all([...this.vendors].map(async ([id, vendor]) => {
       try {
         return { id, vendor, description: await vendor.describe() };
-      } catch {
-        logger.warn('failed to describe admin gatekeeper app', { event: 'gatekeeper.admin.describe.failed', vendorId: id });
+      } catch (error) {
+        logger.warn('failed to describe admin gatekeeper app', {
+          event: 'gatekeeper.admin.describe.failed', vendorId: id, operation: 'describe',
+          error: safeVendorAdminError(error),
+        });
         return null;
       }
     }));
@@ -42,13 +50,24 @@ export class AdminGatekeeperApps {
   async open(id: string): Promise<GatekeeperUiFrame | null> {
     const vendor = this.vendors.get(id);
     if (!vendor) return null;
+    let description: VendorDescription;
     try {
-      const description = await vendor.describe();
-      return advertisesAdminUi(vendor, description)
-        ? await vendor.startAdminUi({ isAdmin: true })
-        : null;
-    } catch {
-      logger.warn('failed to open admin gatekeeper app', { event: 'gatekeeper.admin.open.failed', vendorId: id });
+      description = await vendor.describe();
+    } catch (error) {
+      logger.warn('failed to open admin gatekeeper app', {
+        event: 'gatekeeper.admin.open.failed', vendorId: id, operation: 'describe',
+        error: safeVendorAdminError(error),
+      });
+      return null;
+    }
+    if (!advertisesAdminUi(vendor, description)) return null;
+    try {
+      return await vendor.startAdminUi({ isAdmin: true });
+    } catch (error) {
+      logger.warn('failed to open admin gatekeeper app', {
+        event: 'gatekeeper.admin.open.failed', vendorId: id, operation: 'startAdminUi',
+        error: safeVendorAdminError(error),
+      });
       return null;
     }
   }

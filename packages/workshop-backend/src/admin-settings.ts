@@ -6,7 +6,7 @@ import { validateRpc } from 'capnweb-validate';
 import { collection, createTypedStorage } from '@gadgets/typed-storage';
 import { createWorkshopLogger } from "./observability";
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, readBlueprintKvRecord, sanitizeBlueprintOutput, serializeFeaturedBlueprints } from './blueprint-archive.js';
-import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defaultOutputFormatId, listPromotedFormats, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
+import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defaultOutputFormatId, enabledResourcePatterns, listPromotedFormats, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
 import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
@@ -18,6 +18,14 @@ import { AdminGatekeeperApps } from './fork/admin-gatekeeper-apps.js';
 const logger = createWorkshopLogger("workshop.admin.settings");
 
 const AI_EXECUTOR_PROTOCOL_VERSION = 1 as const;
+const adminSettingsEncoder = new TextEncoder();
+
+/** Maximum UTF-8 bytes accepted for one resource URLPattern. */
+export const MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES = 2 * 1024;
+/** Maximum enabled resources for one currently bound vendor. */
+export const MAX_ENABLED_RESOURCES_PER_VENDOR = 128;
+/** Maximum UTF-8 bytes for the serialized deployment admin config. */
+export const MAX_ADMIN_CONFIG_BYTES = 256 * 1024;
 
 /** Structural version-1 administrator capability duplicated at the private Worker boundary. */
 export interface InferenceAdmin extends WorkerEntrypoint {
@@ -460,12 +468,31 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   async setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void> {
     vendorId = vendorId.toLowerCase();
     await this.#mutateAdminConfig(config => {
-      let map = { ...config.enabledResources };
-      let on = new Set(map[vendorId] ?? []);
-      if (enabled) on.add(urlPattern); else on.delete(urlPattern);
-      if (on.size === 0) delete map[vendorId]; else map[vendorId] = [...on];
-      return { ...config, enabledResources: map };
+      let on = new Set(enabledResourcePatterns(config, vendorId));
+      if (!enabled) {
+        on.delete(urlPattern);
+        return this.#withEnabledResources(config, vendorId, on);
+      }
+      if (on.has(urlPattern)) return config;
+      if (!urlPattern || adminSettingsEncoder.encode(urlPattern).byteLength > MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES) {
+        throw new Error('Resource URL pattern is too long.');
+      }
+      try { void new URLPattern(urlPattern); } catch { throw new Error('Resource URL pattern is invalid.'); }
+      if (!this.vendors.has(vendorId)) throw new Error('Unknown gatekeeper vendor.');
+      if (on.size >= MAX_ENABLED_RESOURCES_PER_VENDOR) throw new Error('Too many enabled resources for gatekeeper vendor.');
+      on.add(urlPattern);
+      let next = this.#withEnabledResources(config, vendorId, on);
+      if (adminSettingsEncoder.encode(serializeAdminConfig(next)).byteLength > MAX_ADMIN_CONFIG_BYTES) {
+        throw new Error('Admin config is too large.');
+      }
+      return next;
     });
+  }
+
+  #withEnabledResources(config: AdminConfig, vendorId: string, patterns: Set<string>): AdminConfig {
+    let entries = Object.entries(config.enabledResources).filter(([id]) => id !== vendorId);
+    if (patterns.size > 0) entries.push([vendorId, [...patterns]]);
+    return { ...config, enabledResources: Object.fromEntries(entries) };
   }
 
   async setSiteLogo(data: Uint8Array | null): Promise<boolean> {
@@ -557,7 +584,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
             // Nothing to toggle for this gatekeeper.
             return null;
           }
-          let enabled = new Set(config.enabledResources[id.toLowerCase()] ?? []);
+          let enabled = new Set(enabledResourcePatterns(config, id));
           return {
             vendorId: id,
             displayName: description.displayName,

@@ -285,6 +285,21 @@ class GatekeeperAppHostImpl extends RpcTarget {
   }
 }
 
+class AdminGatekeeperAppRpcTarget extends RpcTarget {
+  readonly #host: GatekeeperAppHostImpl
+
+  constructor(host: GatekeeperAppHostImpl) {
+    super()
+    this.#host = host
+  }
+
+  get ui(): RpcStub<RpcTarget> { return this.#host.ui }
+  subscribeTheme(receiver: RpcStub<GatekeeperAppThemeReceiver>): GatekeeperAppTheme { return this.#host.subscribeTheme(receiver) }
+  setPresenting(active: boolean): Promise<PresentAck> { return this.#host.setPresenting(active) }
+  getResourceEnabled(urlPattern: string): Promise<boolean> { return this.#host.getResourceEnabled(urlPattern) }
+  setResourceEnabled(urlPattern: string, enabled: boolean): Promise<void> { return this.#host.setResourceEnabled(urlPattern, enabled) }
+}
+
 /**
  * Hosts a gatekeeper's full-page management SPA in a sandboxed, network-isolated iframe. The app
  * talks to the gatekeeper only through the `ui` capability carried over the MessagePort RPC session.
@@ -398,6 +413,9 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, titl
         port.close()
         return
       }
+      const adminResourceControl = adminResourceVendorId === undefined || adminResourceApi === undefined || onResourcesChanged === undefined
+        ? undefined
+        : { vendorId: adminResourceVendorId, admin: adminResourceApi, onResourcesChanged }
       const host = new GatekeeperAppHostImpl(
         capabilityRef.current,
         present,
@@ -405,12 +423,10 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, titl
         openTarget,
         openPrompt,
         resolveWorkspaceTitles,
-        adminResourceVendorId === undefined || adminResourceApi === undefined || onResourcesChanged === undefined
-          ? undefined
-          : { vendorId: adminResourceVendorId, admin: adminResourceApi, onResourcesChanged },
+        adminResourceControl,
       )
       hostRef.current = host
-      sessionRef.current = newMessagePortRpcSession(port, host)
+      sessionRef.current = newMessagePortRpcSession(port, adminResourceControl ? new AdminGatekeeperAppRpcTarget(host) : host)
       connectedRef.current = true
     }
 

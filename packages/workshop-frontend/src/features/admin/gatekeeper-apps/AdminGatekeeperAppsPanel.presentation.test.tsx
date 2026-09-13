@@ -101,4 +101,44 @@ describe('AdminGatekeeperAppsPanel presentation containment', () => {
     const manage = button(container, 'Manage OpenAPI segments')
     expect(document.activeElement).toBe(manage)
   })
+
+  it('B-HOST-016 gives an admin frame no workspace-title or navigation capability', async () => {
+    const privateWorkspaceId = 'a'.repeat(64)
+    state.authenticatedApi.listGadgets.mockResolvedValueOnce([{ id: privateWorkspaceId, title: 'Private workspace' }] as never)
+    frame = { iframeHtml: '<!doctype html><title>fixture</title>', ui: new RpcStub(new EmptyUi()) }
+    const admin = {
+      listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
+      getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame!),
+    } as unknown as RpcStubType<AdminApi>
+    container = document.body.appendChild(document.createElement('div'))
+    root = createRoot(container)
+    await act(async () => { root!.render(<AdminGatekeeperAppsPanel admin={admin} onResourcesChanged={async () => undefined} />) })
+    await vi.waitFor(() => expect(button(container!, 'Manage OpenAPI segments')).toBeTruthy())
+    await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    const iframe = await vi.waitFor(() => {
+      const element = container!.querySelector('iframe')
+      expect(element).not.toBeNull()
+      return element!
+    })
+    const { port1, port2 } = new MessageChannel()
+    host = newMessagePortRpcSession<Host>(port1)
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
+    await expect((async () => await host!.setPresenting(true))()).resolves.toEqual({ rect: null, willResize: false })
+    const ambient = host as unknown as {
+      resolveWorkspaceTitles(ids: string[]): unknown
+      openWorkspace(id: string, gadgetId?: number): unknown
+      openPrompt(prompt: string): unknown
+    }
+    const settle = async (call: () => unknown) => {
+      try { return { status: 'fulfilled', value: await Promise.resolve().then(call) } } catch { return { status: 'rejected' } }
+    }
+    const results = await Promise.all([
+      settle(() => ambient.resolveWorkspaceTitles([privateWorkspaceId])),
+      settle(() => ambient.openWorkspace(privateWorkspaceId, 2)),
+      settle(() => ambient.openPrompt('private prompt')),
+    ])
+    expect.soft(results).toEqual([{ status: 'rejected' }, { status: 'rejected' }, { status: 'rejected' }])
+    expect.soft(state.authenticatedApi.listGadgets).not.toHaveBeenCalled()
+    expect.soft(state.navigate).not.toHaveBeenCalled()
+  })
 })

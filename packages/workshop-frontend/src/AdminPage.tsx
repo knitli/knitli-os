@@ -3,7 +3,7 @@ import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { Hexagon, ShieldWarning, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
-import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
+import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, AuthenticatedApi, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
 import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
@@ -66,7 +66,7 @@ export default function AdminPage() {
 
   // The admin capability (minted once via getAdminApi; null until loaded / for non-admins). Wrapped
   // in an object so useState doesn't treat the (callable) RPC stub as a state updater function.
-  const [admin, setAdmin] = useState<{ api: RpcStub<AdminApi> } | null>(null)
+  const [adminState, setAdmin] = useState<{ authenticatedApi: RpcStub<AuthenticatedApi>; api: RpcStub<AdminApi> } | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
 
@@ -111,6 +111,7 @@ export default function AdminPage() {
   const resourceBusyRef = useRef<Set<string>>(new Set())
   const currentAdminApi = useRef<RpcStub<AdminApi> | null>(null)
   const resourceReloadGeneration = useRef(0)
+  const admin = adminState?.authenticatedApi === authenticatedApi ? adminState : null
   currentAdminApi.current = admin?.api ?? null
 
   const [activeTab, setActiveTab] = useState('general')
@@ -147,8 +148,10 @@ export default function AdminPage() {
 
   // Mint the admin capability once (the access check happens server-side) and load settings.
   useEffect(() => {
+    setAdmin(null)
+    setLoadError(false)
+    setLoading(isAdmin)
     if (!isAdmin) {
-      setLoading(false)
       return
     }
     let cancelled = false
@@ -165,8 +168,10 @@ export default function AdminPage() {
           return
         }
         stub = api
-        setAdmin({ api })
-        applySettings(await api.getSettings())
+        setAdmin({ authenticatedApi, api })
+        const settings = await api.getSettings()
+        if (cancelled) return
+        applySettings(settings)
       } catch (err) {
         if (!cancelled) {
           console.error('Failed to load admin settings:', err)

@@ -19,14 +19,19 @@ interface AuthProviderProps {
   onLogout: () => void
 }
 
+type ApiScoped<T> = {
+  authenticatedApi: RpcStub<AuthenticatedApi>
+  value: T
+}
+
 export function AuthProvider({ children, authenticatedApi, onLogout }: AuthProviderProps) {
-  const [currentUser, setCurrentUser] = useState<AiChatAuthorInfo | null>(null)
-  const [isAdmin, setIsAdmin] = useState(false)
+  const [currentUserResult, setCurrentUserResult] = useState<ApiScoped<AiChatAuthorInfo> | null>(null)
+  const [isAdminResult, setIsAdminResult] = useState<ApiScoped<boolean> | null>(null)
 
   useEffect(() => {
     let cancelled = false
     authenticatedApi.whoami().then((info) => {
-      if (!cancelled) setCurrentUser(info)
+      if (!cancelled) setCurrentUserResult({ authenticatedApi, value: info })
     }).catch(() => {})
     return () => { cancelled = true }
   }, [authenticatedApi])
@@ -34,10 +39,13 @@ export function AuthProvider({ children, authenticatedApi, onLogout }: AuthProvi
   useEffect(() => {
     let cancelled = false
     authenticatedApi.amIAdmin().then((admin) => {
-      if (!cancelled) setIsAdmin(admin)
+      if (!cancelled) setIsAdminResult({ authenticatedApi, value: admin })
     }).catch(() => {})
     return () => { cancelled = true }
   }, [authenticatedApi])
+
+  const currentUser = currentUserResult?.authenticatedApi === authenticatedApi ? currentUserResult.value : null
+  const isAdmin = isAdminResult?.authenticatedApi === authenticatedApi ? isAdminResult.value : false
 
   return (
     <AuthContext.Provider value={{ authenticatedApi, logout: onLogout, currentUser, isAdmin }}>

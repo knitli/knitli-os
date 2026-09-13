@@ -41,6 +41,9 @@ export default defineConfig({
             name: "fake-inference-admin",
             entrypoint: "InferenceAdmin",
           },
+          GATEKEEPER_ADMINFRAME: { name: "fake-admin-gatekeepers", entrypoint: "AdminFrameVendor" },
+          GATEKEEPER_PLAIN: { name: "fake-admin-gatekeepers", entrypoint: "PlainVendor" },
+          ADMIN_GATEKEEPER_CONTROL: { name: "fake-admin-gatekeepers", entrypoint: "AdminGatekeeperControl" },
         },
         workers: [{
           name: "fake-inference-admin",
@@ -139,6 +142,35 @@ export default defineConfig({
               async getCalls() {
                 return calls;
               }
+            }
+          `,
+        }, {
+          name: "fake-admin-gatekeepers",
+          modules: true,
+          compatibilityDate: "2026-02-02",
+          script: `
+            import { RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+            let calls = [];
+            function record(vendorId, method, args = []) { calls.push({ vendorId, method, args }); }
+            class AdminFrameUi extends RpcTarget { ping() { return "admin-frame-ready"; } }
+            function frame() { return { iframeHtml: "<!doctype html><title>Admin frame fixture</title>", ui: new AdminFrameUi() }; }
+            export class AdminFrameVendor extends WorkerEntrypoint {
+              async getSupportedResources() { return []; }
+              async describe() { record("adminframe", "describe"); return { displayName: "Admin frame fixture", url: "https://fixture.invalid/adminframe", providesAdminUi: { title: "OpenAPI segments" } }; }
+              async startAdminUi(context) { record("adminframe", "startAdminUi", [context]); return frame(); }
+              async connectAccount() { record("adminframe", "connectAccount"); return { url: "https://fixture.invalid/connect" }; }
+              async createAccount() { record("adminframe", "createAccount"); throw new Error("fixture createAccount must not be called"); }
+            }
+            export class PlainVendor extends WorkerEntrypoint {
+              async getSupportedResources() { return []; }
+              async describe() { record("plain", "describe"); return { displayName: "Plain fixture", url: "https://fixture.invalid/plain" }; }
+              async startAdminUi(context) { record("plain", "startAdminUi", [context]); return frame(); }
+              async connectAccount() { record("plain", "connectAccount"); return { url: "https://fixture.invalid/connect" }; }
+              async createAccount() { record("plain", "createAccount"); throw new Error("fixture createAccount must not be called"); }
+            }
+            export class AdminGatekeeperControl extends WorkerEntrypoint {
+              async reset() { calls = []; }
+              async getCalls() { return calls; }
             }
           `,
         }],

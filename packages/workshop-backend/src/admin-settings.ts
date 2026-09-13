@@ -6,17 +6,26 @@ import { validateRpc } from 'capnweb-validate';
 import { collection, createTypedStorage } from '@gadgets/typed-storage';
 import { createWorkshopLogger } from "./observability";
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, readBlueprintKvRecord, sanitizeBlueprintOutput, serializeFeaturedBlueprints } from './blueprint-archive.js';
-import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defaultOutputFormatId, listPromotedFormats, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
+import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defaultOutputFormatId, enabledResourcePatterns, listPromotedFormats, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
 import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
 import { formatBlueprintsManifestVersion, installFormatBlueprints } from './format-blueprints.js';
 import { FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
+import { AdminGatekeeperApps } from './fork/admin-gatekeeper-apps.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
 
 const AI_EXECUTOR_PROTOCOL_VERSION = 1 as const;
+const adminSettingsEncoder = new TextEncoder();
+
+/** Maximum UTF-8 bytes accepted for one resource URLPattern. */
+export const MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES = 2 * 1024;
+/** Maximum enabled resources for one currently bound vendor. */
+export const MAX_ENABLED_RESOURCES_PER_VENDOR = 128;
+/** Maximum UTF-8 bytes for the serialized deployment admin config. */
+export const MAX_ADMIN_CONFIG_BYTES = 256 * 1024;
 
 /** Structural version-1 administrator capability duplicated at the private Worker boundary. */
 export interface InferenceAdmin extends WorkerEntrypoint {
@@ -84,6 +93,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // Every bound gatekeeper, keyed by vendor id. Deployment-global (from env bindings), so admin
   // resource listing needs no user context.
   private vendors: Map<string, Service<GatekeeperVendor>>;
+  private adminGatekeeperApps: AdminGatekeeperApps;
   // Every config setter writes the same authoritative singleton and KV mirror. Serialize the full
   // read/modify/write operation so external KV I/O cannot let concurrent setters lose updates.
   private adminConfigMutationTail = Promise.resolve();
@@ -97,6 +107,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     this.storage = makeAdminSettingsStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.vendors = buildGatekeeperVendorMap(env);
+    this.adminGatekeeperApps = new AdminGatekeeperApps(this.vendors);
   }
 
   /**
@@ -346,6 +357,14 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     };
   }
 
+  listGatekeeperAdminApps() {
+    return this.adminGatekeeperApps.list();
+  }
+
+  getGatekeeperAdminApp(id: string) {
+    return this.adminGatekeeperApps.open(id);
+  }
+
   // --- Standard output formats ---
 
   // Admin view of the promoted formats: the deployment's curation joined with each blueprint, so
@@ -449,12 +468,31 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   async setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void> {
     vendorId = vendorId.toLowerCase();
     await this.#mutateAdminConfig(config => {
-      let map = { ...config.enabledResources };
-      let on = new Set(map[vendorId] ?? []);
-      if (enabled) on.add(urlPattern); else on.delete(urlPattern);
-      if (on.size === 0) delete map[vendorId]; else map[vendorId] = [...on];
-      return { ...config, enabledResources: map };
+      let on = new Set(enabledResourcePatterns(config, vendorId));
+      if (!enabled) {
+        on.delete(urlPattern);
+        return this.#withEnabledResources(config, vendorId, on);
+      }
+      if (on.has(urlPattern)) return config;
+      if (!urlPattern || adminSettingsEncoder.encode(urlPattern).byteLength > MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES) {
+        throw new Error('Resource URL pattern is too long.');
+      }
+      try { void new URLPattern(urlPattern); } catch { throw new Error('Resource URL pattern is invalid.'); }
+      if (!this.vendors.has(vendorId)) throw new Error('Unknown gatekeeper vendor.');
+      if (on.size >= MAX_ENABLED_RESOURCES_PER_VENDOR) throw new Error('Too many enabled resources for gatekeeper vendor.');
+      on.add(urlPattern);
+      let next = this.#withEnabledResources(config, vendorId, on);
+      if (adminSettingsEncoder.encode(serializeAdminConfig(next)).byteLength > MAX_ADMIN_CONFIG_BYTES) {
+        throw new Error('Admin config is too large.');
+      }
+      return next;
     });
+  }
+
+  #withEnabledResources(config: AdminConfig, vendorId: string, patterns: Set<string>): AdminConfig {
+    let entries = Object.entries(config.enabledResources).filter(([id]) => id !== vendorId);
+    if (patterns.size > 0) entries.push([vendorId, [...patterns]]);
+    return { ...config, enabledResources: Object.fromEntries(entries) };
   }
 
   async setSiteLogo(data: Uint8Array | null): Promise<boolean> {
@@ -546,7 +584,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
             // Nothing to toggle for this gatekeeper.
             return null;
           }
-          let enabled = new Set(config.enabledResources[id.toLowerCase()] ?? []);
+          let enabled = new Set(enabledResourcePatterns(config, id));
           return {
             vendorId: id,
             displayName: description.displayName,
@@ -582,8 +620,8 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 // when the capability is minted in server.ts, so these methods don't re-check. This is a thin
 // validation+forwarding facade over the AdminSettings DO — fully user-independent — so a disabled
 // gatekeeper/resource can't be re-enabled via a crafted request, and the client never receives a
-// stub to the DO's internal methods. Covers branding, agent instructions, signups, and gatekeeper
-// connector/resource availability; authentication config stays env-var driven.
+// stub to the DO's internal methods. Covers branding, agent instructions, signups, gatekeeper
+// resources and vendor administration frames; authentication config stays env-var driven.
 @validateRpc()
 export class AdminApiImpl extends RpcTarget implements AdminApi {
   /**
@@ -639,6 +677,14 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
   listAiExecutorProfiles(): Promise<AiExecutorProfile[]> {
     return this.#withInferenceAdmin(async (inferenceAdmin) =>
       await inferenceAdmin.listProfiles());
+  }
+
+  listGatekeeperAdminApps() {
+    return this.admin.listGatekeeperAdminApps();
+  }
+
+  getGatekeeperAdminApp(id: string) {
+    return this.admin.getGatekeeperAdminApp(id);
   }
 
   createAiExecutorProfile(input: AiExecutorProfileInput): Promise<AiExecutorProfile> {

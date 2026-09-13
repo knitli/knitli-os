@@ -81,6 +81,8 @@ export const FORK_OWNED_PREFIXES = [
   "patches/capnweb-validate@0.3.0.patch",
   "scripts/fork/capnweb-native-validation.test.ts",
   "packages/workshop-backend/src/fork/",
+  "packages/workshop-backend/__integration__/knitli-admin-gatekeeper-frame.test.ts",
+  "packages/workshop-frontend/src/features/admin/gatekeeper-apps/",
   "packages/workshop-backend/__tests__/knitli-approval-continuation.test.ts",
   "packages/mcp-shared/__tests__/fork/",
   "packages/backend-utils/src/access.ts",

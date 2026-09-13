@@ -6,7 +6,7 @@ import { RpcStub, RpcTarget, newMessagePortRpcSession, type RpcStub as RpcStubTy
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AdminApi, AdminResourceVendor, AdminSettingsView, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
-import SandboxedGatekeeperApp, { type AdminResourceControl } from '../SandboxedGatekeeperApp'
+import SandboxedGatekeeperApp, { type AdminResourceControl } from '../../../SandboxedGatekeeperApp'
 
 const mocks = vi.hoisted(() => {
   const listGadgets = vi.fn<AuthenticatedApi['listGadgets']>(async () => [])
@@ -15,10 +15,10 @@ const mocks = vi.hoisted(() => {
   return { navigate, listGadgets, getAdminApi, authenticatedApi: { listGadgets, getAdminApi } }
 })
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => mocks.navigate }))
-vi.mock('../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: mocks.authenticatedApi }) }))
-vi.mock('../ThemeContext', () => ({ useTheme: () => ({ resolvedThemeMode: 'light' }) }))
-vi.mock('../ServerConfigContext', () => ({ useServerConfig: () => null }))
-vi.mock('../errorReporting', () => ({ forwardTrustedFrameError: () => false }))
+vi.mock('../../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: mocks.authenticatedApi }) }))
+vi.mock('../../../ThemeContext', () => ({ useTheme: () => ({ resolvedThemeMode: 'light' }) }))
+vi.mock('../../../ServerConfigContext', () => ({ useServerConfig: () => null }))
+vi.mock('../../../errorReporting', () => ({ forwardTrustedFrameError: () => false }))
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const PATTERN = 'https://fixture.invalid/resource/*'

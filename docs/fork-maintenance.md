@@ -45,7 +45,7 @@ Upstream has no file there, so nothing in them can ever conflict. Today:
 - `packages/gatekeeper-ai-executor/` — the AI Executor gatekeeper, ~19k lines, zero conflict surface.
 - `packages/integration-tests/__tests__/fork/` — fork integration tests.
 - `packages/workshop-backend/src/fork/` — approval-turn continuation (approval-continuation.ts).
-- `packages/workshop-backend/__integration__/knitli-admin-gatekeeper-frame.test.ts` and `packages/workshop-frontend/src/fork/` — vendor-owned deployment-admin frames and regressions.
+- `packages/workshop-backend/__integration__/knitli-admin-gatekeeper-frame.test.ts` and `packages/workshop-frontend/src/features/admin/gatekeeper-apps/` — vendor-owned deployment-admin frames and regressions.
 - `packages/workshop-backend/__tests__/knitli-approval-continuation.test.ts` — approval-turn continuation regressions.
 - `packages/mcp-shared/__tests__/fork/` — named `$defs` aliases, read-before-dispatch authorization, and the caller-settable argument budget.
 - `scripts/fork/` — fork tooling.
@@ -216,7 +216,7 @@ Intentional, reviewed differences from upstream. Keep this current.
 
 ### Deployment-admin connector frames
 
-- **Where:** `packages/workshop-backend/src/fork/admin-gatekeeper-apps.ts` and `packages/workshop-frontend/src/fork/`.
+- **Where:** `packages/workshop-backend/src/fork/admin-gatekeeper-apps.ts` and `packages/workshop-frontend/src/features/admin/gatekeeper-apps/`.
 - **What:** Deployment admins can open connector-owned frames without creating or selecting a provider account. Shared/backend/frontend upstream files only carry the optional seam and host wiring; controllers and regressions are fork-owned.
 - **Why:** Connector publication is deployment administration, independent of a person’s OAuth account.
 

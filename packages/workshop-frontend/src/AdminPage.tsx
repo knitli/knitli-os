@@ -10,7 +10,7 @@ import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
 import AdminFormatsPanel from './components/format/AdminFormatsPanel'
 import AdminAiExecutorsPanel from './components/AdminAiExecutorsPanel'
-import { AdminGatekeeperAppsPanel } from './fork/AdminGatekeeperAppsPanel'
+import { AdminGatekeeperAppsPanel } from './features/admin/gatekeeper-apps/AdminGatekeeperAppsPanel'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [

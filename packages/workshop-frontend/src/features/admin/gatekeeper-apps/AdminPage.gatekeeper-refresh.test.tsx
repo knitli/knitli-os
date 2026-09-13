@@ -6,7 +6,7 @@ import { RpcStub, RpcTarget, newMessagePortRpcSession, type RpcStub as RpcStubTy
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AdminApi, AdminResourceVendor, AdminSettingsView, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
-import AdminPage from './AdminPage'
+import AdminPage from '../../../AdminPage'
 
 const state = vi.hoisted(() => {
   const toast = vi.fn<(toast: unknown) => void>()
@@ -23,16 +23,16 @@ vi.mock('@cloudflare/kumo', () => ({
   useKumoToastManager: () => ({ add: state.toast }),
 }))
 vi.mock('@phosphor-icons/react', () => ({ Hexagon: () => null, ShieldWarning: () => null, UserPlus: () => null }))
-vi.mock('./AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: state.authenticatedApi, isAdmin: true }) }))
-vi.mock('./ThemeContext', () => ({ useTheme: () => ({ resolvedThemeMode: 'light' }) }))
-vi.mock('./ServerConfigContext', () => ({ useServerConfig: () => null }))
-vi.mock('./errorReporting', () => ({ forwardTrustedFrameError: () => false }))
-vi.mock('./useDocumentTitle', () => ({ useDocumentTitle: () => {} }))
-vi.mock('./components/SiteLogo', () => ({ default: () => null }))
-vi.mock('./components/format/AdminFormatsPanel', () => ({ default: () => null }))
-vi.mock('./components/AdminAiExecutorsPanel', () => ({ default: () => null }))
-vi.mock('./theme', () => ({ applyAccentColor: () => {}, DEFAULT_ACCENT_COLOR: '' }))
-vi.mock('./siteLogoUtils', () => ({ cacheBustSiteLogoUrl: (url: string) => url, prepareSiteLogo: async () => null }))
+vi.mock('../../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: state.authenticatedApi, isAdmin: true }) }))
+vi.mock('../../../ThemeContext', () => ({ useTheme: () => ({ resolvedThemeMode: 'light' }) }))
+vi.mock('../../../ServerConfigContext', () => ({ useServerConfig: () => null }))
+vi.mock('../../../errorReporting', () => ({ forwardTrustedFrameError: () => false }))
+vi.mock('../../../useDocumentTitle', () => ({ useDocumentTitle: () => {} }))
+vi.mock('../../../components/SiteLogo', () => ({ default: () => null }))
+vi.mock('../../../components/format/AdminFormatsPanel', () => ({ default: () => null }))
+vi.mock('../../../components/AdminAiExecutorsPanel', () => ({ default: () => null }))
+vi.mock('../../../theme', () => ({ applyAccentColor: () => {}, DEFAULT_ACCENT_COLOR: '' }))
+vi.mock('../../../siteLogoUtils', () => ({ cacheBustSiteLogoUrl: (url: string) => url, prepareSiteLogo: async () => null }))
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => state.navigate }))
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true

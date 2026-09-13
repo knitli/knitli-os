@@ -15,7 +15,7 @@ type SandboxProps = {
 }
 
 const sandboxRender = vi.hoisted(() => vi.fn<(props: SandboxProps) => void>())
-vi.mock('../SandboxedGatekeeperApp', () => ({
+vi.mock('../../../SandboxedGatekeeperApp', () => ({
   default: (props: SandboxProps) => {
     sandboxRender(props)
     return <iframe sandbox="" title={props.title} />
@@ -24,7 +24,11 @@ vi.mock('../SandboxedGatekeeperApp', () => ({
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const app = { id: 'openapi', title: 'OpenAPI segments' }
+const app = {
+  id: 'openapi',
+  title: 'OpenAPI segments',
+  icon: { url: 'https://fixture.invalid/openapi.svg' },
+}
 const otherApp = { id: 'other', title: 'Other segments' }
 
 function deferred<T>() {
@@ -92,6 +96,10 @@ describe('AdminGatekeeperAppsPanel', () => {
     expect(second.disabled).toBe(false)
     opening.resolve(null)
     await vi.waitFor(() => expect(panel.querySelector('[role="alert"]')?.textContent).toBe("This connector's administration page is unavailable."))
+    const icon = panel.querySelector('img')
+    expect(icon?.getAttribute('src')).toBe('https://fixture.invalid/openapi.svg')
+    expect(icon?.getAttribute('alt')).toBe('')
+    expect(icon?.className).toBe('h-6 w-6 object-contain')
     expect(button(panel, 'Manage OpenAPI segments').disabled).toBe(false)
     expect(button(panel, 'Manage Other segments').disabled).toBe(false)
   })

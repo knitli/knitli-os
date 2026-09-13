@@ -285,11 +285,11 @@ export function parseAdminConfig(raw: string | null): AdminConfig {
   if (!raw) return { ...DEFAULT_ADMIN_CONFIG };
   try {
     let p = JSON.parse(raw) as Partial<AdminConfig>;
-    let enabledResources: Record<string, string[]> = {};
+    let enabledResourceEntries: Array<[string, string[]]> = [];
     if (p.enabledResources && typeof p.enabledResources === "object") {
       for (let [vendorId, patterns] of Object.entries(p.enabledResources)) {
         let list = strings(patterns);
-        if (list.length > 0) enabledResources[vendorId.toLowerCase()] = list;
+        if (list.length > 0) enabledResourceEntries.push([vendorId.toLowerCase(), list]);
       }
     }
     let ambientGatekeeperModes: Record<string, AmbientGatekeeperMode> = {};
@@ -309,7 +309,7 @@ export function parseAdminConfig(raw: string | null): AdminConfig {
         color: isBannerColor(p.banner?.color) ? p.banner!.color : DEFAULT_BANNER_COLOR,
       },
       accentColor: typeof p.accentColor === "string" ? p.accentColor : "",
-      enabledResources,
+      enabledResources: Object.fromEntries(enabledResourceEntries),
       disabledGatekeepers: strings(p.disabledGatekeepers).map(v => v.toLowerCase()),
       ambientGatekeeperModes,
       formats: parseFormats(p.formats),
@@ -321,6 +321,11 @@ export function parseAdminConfig(raw: string | null): AdminConfig {
 
 export function serializeAdminConfig(config: AdminConfig): string {
   return JSON.stringify(config);
+}
+
+export function enabledResourcePatterns(config: AdminConfig, vendorId: string): string[] {
+  let id = vendorId.toLowerCase();
+  return Object.hasOwn(config.enabledResources, id) ? config.enabledResources[id]! : [];
 }
 
 /** Read the admin config from the KV mirror. Cheap enough for the hot path (a single KV get). */
@@ -337,14 +342,14 @@ export async function readAdminConfig(env: Cloudflare.Env): Promise<AdminConfig>
 export function isResourceDisabled(
     config: AdminConfig, vendorId: string, urlPattern: string, ambient = false): boolean {
   if (ambient) return false;
-  return !(config.enabledResources[vendorId.toLowerCase()]?.includes(urlPattern) ?? false);
+  return !enabledResourcePatterns(config, vendorId).includes(urlPattern);
 }
 
 export function filterEnabledResources(
     config: AdminConfig, vendorId: string, resources: SupportedResource[],
     ambient = false): SupportedResource[] {
   if (ambient) return resources;
-  let enabled = config.enabledResources[vendorId.toLowerCase()];
+  let enabled = enabledResourcePatterns(config, vendorId);
   if (!enabled || enabled.length === 0) return [];
   return resources.filter(r => enabled.includes(r.urlPattern));
 }

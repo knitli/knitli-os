@@ -432,6 +432,7 @@ test("surviving fork trees are explicitly fork owned", () => {
     "packages/workshop-backend/__tests__/knitli-approval-continuation.test.ts",
     "packages/integration-tests/__tests__/fork/observer-privacy.test.ts",
     "scripts/fork/openapi-host-retired.test.ts",
+    "packages/workshop-frontend/src/features/admin/gatekeeper-apps/AdminGatekeeperAppsPanel.tsx",
     "packages/backend-utils/src/access.ts",
     "packages/backend-utils/src/fork/connect-initiator.ts",
     "packages/mcp-shared/__tests__/fork/connect-initiator.test.ts",

@@ -1674,8 +1674,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async #enforceGatekeeperResourcePolicy(accountVendorId: string, resource: SupportedResource,
       ambient = false) {
     const config = await this.#enforceGatekeeperVendorPolicy(accountVendorId);
-    const vendorId = accountVendorId.toLowerCase();
-    if (isResourceDisabled(config, vendorId, resource.urlPattern, ambient)) {
+    if (isResourceDisabled(config, accountVendorId, resource.urlPattern, ambient)) {
       throw new Error(
         `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
     }

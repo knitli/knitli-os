@@ -7,7 +7,7 @@ import type {
   GatekeeperAppTheme,
   GatekeeperAppThemeReceiver,
 } from '@gadgets/workshop-shared/theme'
-import { isHexColor } from '@gadgets/workshop-shared/api'
+import { isHexColor, type AdminApi, type AdminResourceVendor } from '@gadgets/workshop-shared/api'
 import { createRateLimitedCapability } from './rateLimitedCapability'
 import { useTheme } from './ThemeContext'
 import { useServerConfig } from './ServerConfigContext'
@@ -36,6 +36,12 @@ type OpenTarget = (target: GatekeeperAppWorkspaceTarget) => void
 type ResolveWorkspaceTitles = (ids: string[]) => Promise<(string | null)[]>
 type OpenPrompt = (prompt: string) => void
 
+export type AdminResourceControl = {
+  vendorId: string;
+  admin: RpcStub<AdminApi>;
+  onResourcesChanged: () => Promise<void>;
+}
+
 type OverlayState = 'full' | null
 
 // Upper bound on one workspace-title lookup, matching the app's page size.
@@ -47,6 +53,19 @@ const WORKSPACE_TITLES_TTL_MS = 10_000
 
 // Near the max int, so the full-viewport iframe sits above all Workshop chrome.
 const overlayZIndex = 2147483000
+
+const GATEKEEPER_APP_RATE_LIMIT_OPTIONS = {
+  maxConcurrency: 8,
+  maxCallsPerMinute: 600,
+  maxPendingCalls: 128,
+  onRateLimit: 'throttle',
+  label: 'Gatekeeper app',
+} as const
+
+type AdminResourceCapability = {
+  getResourceEnabled(urlPattern: string): Promise<boolean>
+  setResourceEnabled(urlPattern: string, enabled: boolean): Promise<void>
+}
 
 const baseIframeStyle: CSSProperties = {
   border: 0,
@@ -81,10 +100,13 @@ function iframeStyleForOverlay(overlay: OverlayState): CSSProperties {
 class GatekeeperAppHostImpl extends RpcTarget {
   readonly #ui: RpcStub<RpcTarget>
   readonly #disposeRateLimiter: () => void
+  readonly #adminResources: AdminResourceCapability
+  readonly #disposeAdminResourceRateLimiter: () => void
   readonly #present: PresentController
   readonly #openTarget: OpenTarget
   readonly #openPrompt: OpenPrompt
   readonly #resolveWorkspaceTitles: ResolveWorkspaceTitles
+  readonly #adminResourceControl?: AdminResourceControl
   #presenting = false
   #theme: GatekeeperAppTheme
   #themeReceiver: RpcStub<GatekeeperAppThemeReceiver> | null = null
@@ -100,22 +122,24 @@ class GatekeeperAppHostImpl extends RpcTarget {
     openTarget: OpenTarget,
     openPrompt: OpenPrompt,
     resolveWorkspaceTitles: ResolveWorkspaceTitles,
+    adminResourceControl?: AdminResourceControl,
   ) {
     super()
     this.#theme = theme
-    const { capability: ui, dispose } = createRateLimitedCapability(capability, {
-      maxConcurrency: 8,
-      maxCallsPerMinute: 600,
-      maxPendingCalls: 128,
-      onRateLimit: 'throttle',
-      label: 'Gatekeeper app',
-    })
+    const { capability: ui, dispose } = createRateLimitedCapability(capability, GATEKEEPER_APP_RATE_LIMIT_OPTIONS)
     this.#ui = ui
     this.#disposeRateLimiter = dispose
+    const { capability: adminResources, dispose: disposeAdminResourceRateLimiter } = createRateLimitedCapability({
+      getResourceEnabled: (urlPattern: string) => this.#getResourceEnabled(urlPattern),
+      setResourceEnabled: (urlPattern: string, enabled: boolean) => this.#setResourceEnabled(urlPattern, enabled),
+    }, GATEKEEPER_APP_RATE_LIMIT_OPTIONS)
+    this.#adminResources = adminResources
+    this.#disposeAdminResourceRateLimiter = disposeAdminResourceRateLimiter
     this.#present = present
     this.#openTarget = openTarget
     this.#openPrompt = openPrompt
     this.#resolveWorkspaceTitles = resolveWorkspaceTitles
+    this.#adminResourceControl = adminResourceControl
   }
 
   get ui(): RpcStub<RpcTarget> {
@@ -139,6 +163,52 @@ class GatekeeperAppHostImpl extends RpcTarget {
 
   openPrompt(prompt: string): void {
     this.#openPrompt(normalizeGatekeeperAppPrompt(prompt))
+  }
+
+  getResourceEnabled(urlPattern: string): Promise<boolean> {
+    return this.#adminResources.getResourceEnabled(urlPattern)
+  }
+
+  setResourceEnabled(urlPattern: string, enabled: boolean): Promise<void> {
+    return this.#adminResources.setResourceEnabled(urlPattern, enabled)
+  }
+
+  async #getResourceEnabled(urlPattern: string): Promise<boolean> {
+    return (await this.#readResourceEnabled(urlPattern)) ?? false
+  }
+
+  async #setResourceEnabled(urlPattern: string, enabled: boolean): Promise<void> {
+    if (typeof urlPattern !== 'string' || typeof enabled !== 'boolean') throw new TypeError('Invalid resource availability request.')
+    const control = this.#adminResourceControl
+    if (!control) throw new Error('Admin resource control is not available in this frame.')
+    if (!enabled) {
+      await control.admin.setResourceEnabled(control.vendorId, urlPattern, false)
+      await control.onResourcesChanged()
+      return
+    }
+    if (await this.#readResourceEnabled(urlPattern) === undefined) {
+      throw new Error('Resource is not available.')
+    }
+    await control.admin.setResourceEnabled(control.vendorId, urlPattern, true)
+    try {
+      if (!await this.#readResourceEnabled(urlPattern)) {
+        throw new Error('Resource availability was not confirmed.')
+      }
+    } finally {
+      await control.onResourcesChanged()
+    }
+  }
+
+  async #readResourceEnabled(urlPattern: string): Promise<boolean | undefined> {
+    if (typeof urlPattern !== 'string') throw new TypeError('Invalid resource availability request.')
+    const control = this.#adminResourceControl
+    if (!control) throw new Error('Admin resource control is not available in this frame.')
+    const vendor = (await control.admin.getSettings()).resourceVendors.find(
+      (entry): entry is Extract<AdminResourceVendor, { autoProvisions: false }> =>
+        entry.vendorId === control.vendorId && !entry.autoProvisions,
+    )
+    const resource = vendor?.resources.find(entry => entry.urlPattern === urlPattern)
+    return resource?.enabled
   }
 
   // The app calls this once to learn the current theme and register a receiver for later changes.
@@ -169,8 +239,11 @@ class GatekeeperAppHostImpl extends RpcTarget {
     }
   }
 
-  // Queue a presentation change; the latest requested state is applied on the next frame.
+  // Ordinary app frames may grow to the viewport. Admin resource-control frames acknowledge the
+  // request while staying in their trusted connector region.
   setPresenting(active: boolean): Promise<PresentAck> {
+    if (this.#adminResourceControl) return Promise.resolve({ rect: null, willResize: false })
+    // Queue a presentation change; the latest requested state is applied on the next frame.
     return new Promise((resolve) => {
       this.#pendingActive = active
       this.#pendingResolvers.push(resolve)
@@ -195,6 +268,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
   // Cancel the rate limiter's pending resume timer once this host is no longer in use.
   dispose() {
     this.#disposeRateLimiter()
+    this.#disposeAdminResourceRateLimiter()
     this.#themeReceiver?.[Symbol.dispose]?.()
     this.#themeReceiver = null
     if (this.#frameId !== null) {
@@ -216,10 +290,15 @@ class GatekeeperAppHostImpl extends RpcTarget {
  * talks to the gatekeeper only through the `ui` capability carried over the MessagePort RPC session.
  * The iframe fills its parent container.
  */
-export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
+export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, title = 'Gatekeeper app', adminResourceControl }: {
   frame: GatekeeperUiFrame,
   gatekeeperVendorId: string,
+  title?: string,
+  adminResourceControl?: AdminResourceControl,
 }) {
+  const adminResourceVendorId = adminResourceControl?.vendorId
+  const adminResourceApi = adminResourceControl?.admin
+  const onResourcesChanged = adminResourceControl?.onResourcesChanged
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
   const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -306,6 +385,7 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
       if (connectedRef.current) {
         // A second handshake (e.g. iframe reloaded) invalidates the session.
         invalidatedRef.current = true
+        port.postMessage(null)
         port.close()
         sessionRef.current?.[Symbol.dispose]?.()
         sessionRef.current = null
@@ -325,6 +405,9 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
         openTarget,
         openPrompt,
         resolveWorkspaceTitles,
+        adminResourceVendorId === undefined || adminResourceApi === undefined || onResourcesChanged === undefined
+          ? undefined
+          : { vendorId: adminResourceVendorId, admin: adminResourceApi, onResourcesChanged },
       )
       hostRef.current = host
       sessionRef.current = newMessagePortRpcSession(port, host)
@@ -357,7 +440,7 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
     }
     // Re-establish the session if either the HTML or the `ui` capability changes, so a new frame
     // carrying a fresh stub (even with identical HTML) never keeps talking through the stale one.
-  }, [frame.iframeHtml, frame.ui, gatekeeperVendorId, openPrompt, openTarget,
+  }, [frame.iframeHtml, frame.ui, gatekeeperVendorId, openPrompt, openTarget, adminResourceApi, adminResourceVendorId, onResourcesChanged,
       present, resolveWorkspaceTitles, setOverlayPhase])
 
   return (
@@ -368,7 +451,7 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
       // allow-same-origin (the frame stays an opaque origin), and the app's CSP keeps connect-src 'none'.
       sandbox="allow-scripts allow-modals"
       allow="clipboard-write"
-      title="Gatekeeper app"
+      title={title}
       style={iframeStyleForOverlay(overlay)}
     />
   )

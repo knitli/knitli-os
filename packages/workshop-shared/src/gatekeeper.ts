@@ -77,6 +77,9 @@ export type VendorDescription = {
    * management UI (see AccountDescription.singleton / .providesUi).
    */
   autoProvisionsAccount?: boolean;
+
+  /** If set, this vendor exposes a deployment-admin management UI. */
+  providesAdminUi?: { title: string; icon?: AvatarImage };
 }
 
 /**
@@ -417,7 +420,8 @@ export interface ResourceConfiguratorHost extends RpcTarget {
  * sandbox="allow-scripts" iframe, plus an arbitrary gatekeeper-defined capability exposed to the
  * iframe over a MessagePort RPC session. Used both for the small resource-configurator form
  * (startResourceConfigurator, hosted in the connect modal) and for full-page gatekeeper management
- * apps (startAppUi, e.g. the Context Library file manager, hosted on its own Workshop page).
+ * apps (startAppUi, e.g. the Context Library file manager, hosted on its own Workshop page), and
+ * vendor administration apps (startAdminUi, hosted in deployment administration).
  */
 export type GatekeeperUiFrame = {
   /** Complete HTML for the UI. Workshop hosts it in a sandboxed iframe. */
@@ -461,6 +465,9 @@ export type GatekeeperConnectOptions = {
 export interface GatekeeperVendor extends WorkerEntrypoint {
   /** Get display info for the service, suitable for display to a user. */
   describe(): Promise<VendorDescription>;
+
+  /** Opens the vendor-owned administration UI for a deployment administrator. */
+  startAdminUi?(context: AppUiContext): Promise<GatekeeperUiFrame | null>;
 
   /**
    * Start the auth flow to connect to the user's remote account. Returns the URL which the user

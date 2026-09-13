@@ -463,9 +463,11 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, titl
     <iframe
       ref={iframeRef}
       srcDoc={frame.iframeHtml}
-      // allow-scripts: run the app's JS. allow-modals: its beforeunload unsaved-changes guard. Not
-      // allow-same-origin (the frame stays an opaque origin), and the app's CSP keeps connect-src 'none'.
-      sandbox="allow-scripts allow-modals"
+      // Every frame needs allow-scripts. Only ordinary account frames retain allow-modals for their
+      // unsaved-changes beforeunload guard; admin frames stay within the trusted connector presentation
+      // surface and therefore do not receive native-modal authority. Not allow-same-origin (the frame
+      // stays an opaque origin), and the app's CSP keeps connect-src 'none'.
+      sandbox={adminResourceControl ? 'allow-scripts' : 'allow-scripts allow-modals'}
       allow="clipboard-write"
       title={title}
       style={iframeStyleForOverlay(overlay)}

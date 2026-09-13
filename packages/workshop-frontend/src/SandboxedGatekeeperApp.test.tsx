@@ -119,6 +119,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
       mode: "light",
       accentColor: "#7c3aed",
     });
+    expect(iframe.getAttribute("sandbox")).toBe("allow-scripts allow-modals");
 
     await act(async () => {
       await host!.setPresenting(true);

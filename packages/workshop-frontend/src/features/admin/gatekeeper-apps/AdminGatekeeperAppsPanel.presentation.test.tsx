@@ -64,6 +64,7 @@ describe('AdminGatekeeperAppsPanel presentation containment', () => {
       return element!
     })
     const iframe = region.querySelector('iframe')!
+    expect(admin.getGatekeeperAdminApp).toHaveBeenCalledTimes(1)
     const { port1, port2 } = new MessageChannel()
     host = newMessagePortRpcSession<Host>(port1)
     window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
@@ -84,6 +85,7 @@ describe('AdminGatekeeperAppsPanel presentation containment', () => {
     expect(iframe.style.width).toBe('100%')
     expect(iframe.style.height).toBe('100%')
     expect(ack).toEqual({ rect: null, willResize: false })
+    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts')
     const dismiss = (async () => await host!.setPresenting(false))()
     let dismissAck: typeof ack
     await act(async () => {

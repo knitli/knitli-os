@@ -351,6 +351,7 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, titl
       if (connectedRef.current) {
         // A second handshake (e.g. iframe reloaded) invalidates the session.
         invalidatedRef.current = true
+        port.postMessage(null)
         port.close()
         sessionRef.current?.[Symbol.dispose]?.()
         sessionRef.current = null

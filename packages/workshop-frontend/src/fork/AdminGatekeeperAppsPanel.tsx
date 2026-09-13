@@ -5,7 +5,7 @@ import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { Button } from '@cloudflare/kumo'
 import SandboxedGatekeeperApp from '../SandboxedGatekeeperApp'
 
-export const AdminGatekeeperAppsPanel = ({ admin }: { admin: RpcStub<AdminApi> }) => {
+export const AdminGatekeeperAppsPanel = ({ admin, onResourcesChanged }: { admin: RpcStub<AdminApi>; onResourcesChanged: () => Promise<void> }) => {
   const [apps, setApps] = useState<AdminGatekeeperAppInfo[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [opening, setOpening] = useState<string | null>(null)
@@ -56,7 +56,7 @@ export const AdminGatekeeperAppsPanel = ({ admin }: { admin: RpcStub<AdminApi> }
     } catch { if (generation.current === current) setError("This connector's administration page is unavailable.") }
     finally { if (generation.current === current) setOpening(null) }
   }
-  if (selected) return <section aria-label="Connector management"><h2>Connector management</h2><Button onClick={close}>Back to connectors</Button><div role="region" aria-label={`${selected.app.title} administration`} className="h-[75vh]"><SandboxedGatekeeperApp frame={selected.frame} gatekeeperVendorId={selected.app.id} title={`${selected.app.title} administration`} adminResourceControl={{ vendorId: selected.app.id, admin }} /></div></section>
+  if (selected) return <section aria-label="Connector management"><h2>Connector management</h2><Button onClick={close}>Back to connectors</Button><div role="region" aria-label={`${selected.app.title} administration`} className="h-[75vh]"><SandboxedGatekeeperApp frame={selected.frame} gatekeeperVendorId={selected.app.id} title={`${selected.app.title} administration`} adminResourceControl={{ vendorId: selected.app.id, admin, onResourcesChanged }} /></div></section>
   if (apps === null && !error) return <section aria-label="Connector management"><h2>Connector management</h2><p>Loading connector management…</p></section>
   return <section aria-label="Connector management" className="mb-6"><h2>Connector management</h2>{error && <><p role="alert">{error}</p><Button onClick={() => void reload()}>Retry</Button></>}{apps?.length === 0 && <p>No connector administration pages are installed.</p>}<div>{apps?.map(app => <div key={app.id}>{app.icon && <img src={app.icon.url} alt="" />}<Button disabled={opening === app.id} aria-busy={opening === app.id} onClick={() => void open(app)}>Manage {app.title}{opening === app.id ? ' Opening…' : ''}</Button></div>)}</div></section>
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type ChangeEvent } from 'react'
+import { useState, useEffect, useRef, useCallback, type ChangeEvent } from 'react'
 import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { Hexagon, ShieldWarning, UserPlus } from '@phosphor-icons/react'
@@ -81,6 +81,9 @@ export default function AdminPage() {
   // Gatekeeper resource config, and the set of resource keys ("vendorId\u0000urlPattern") busy toggling.
   const [resourceVendors, setResourceVendors] = useState<AdminResourceVendor[]>([])
   const [resourceBusy, setResourceBusy] = useState<Set<string>>(new Set())
+  const currentAdminApi = useRef<RpcStub<AdminApi> | null>(null)
+  const resourceReloadGeneration = useRef(0)
+  currentAdminApi.current = admin?.api ?? null
 
   const [activeTab, setActiveTab] = useState('general')
 
@@ -141,6 +144,8 @@ export default function AdminPage() {
     })()
     return () => {
       cancelled = true
+      resourceReloadGeneration.current += 1
+      if (currentAdminApi.current === stub) currentAdminApi.current = null
       stub?.[Symbol.dispose]?.()
     }
   }, [isAdmin, authenticatedApi])
@@ -154,11 +159,27 @@ export default function AdminPage() {
 
   // Re-fetch just the gatekeeper/resource state (used to revert an optimistic toggle on error).
   // Leaves the General-tab drafts untouched.
-  const reloadResources = async () => {
-    if (!admin) return
-    const view = await admin.api.getSettings()
-    setResourceVendors(view.resourceVendors)
-  }
+  const reloadResources = useCallback(async () => {
+    const api = currentAdminApi.current
+    if (!api) return
+    const request = ++resourceReloadGeneration.current
+    try {
+      const view = await api.getSettings()
+      if (currentAdminApi.current === api && resourceReloadGeneration.current === request) {
+        setResourceVendors(view.resourceVendors)
+      }
+    } catch (error) {
+      if (currentAdminApi.current === api && resourceReloadGeneration.current === request) throw error
+    }
+  }, [])
+  const refreshResourcesAfterFrameWrite = useCallback(async () => {
+    try {
+      await reloadResources()
+    } catch {
+      console.error('Failed to refresh Gatekeeper resources after connector update.')
+      toasts.add({ title: 'Connector setting saved, but the Gatekeepers list could not refresh.', variant: 'error' })
+    }
+  }, [reloadResources, toasts])
 
   const handleResourceToggle = async (vendorId: string, urlPattern: string, enabled: boolean) => {
     if (!admin) return
@@ -798,7 +819,7 @@ export default function AdminPage() {
       {/* Gatekeeper resources */}
       {activeTab === 'gatekeepers' && (
         <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
-          {admin && <AdminGatekeeperAppsPanel admin={admin.api} />}
+          {admin && <AdminGatekeeperAppsPanel admin={admin.api} onResourcesChanged={refreshResourcesAfterFrameWrite} />}
           <h2 className="text-lg font-semibold text-kumo-strong mb-1">Gatekeepers</h2>
           <p className="text-sm text-kumo-subtle mb-5">
             Turn connectors and resource types on or off for each service. Auto-provisioned

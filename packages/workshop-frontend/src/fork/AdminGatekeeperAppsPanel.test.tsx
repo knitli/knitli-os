@@ -11,7 +11,7 @@ type SandboxProps = {
   frame: GatekeeperUiFrame
   gatekeeperVendorId: string
   title?: string
-  adminResourceControl?: { vendorId: string; admin: RpcStub<AdminApi> }
+  adminResourceControl?: { vendorId: string; admin: RpcStub<AdminApi>; onResourcesChanged: () => Promise<void> }
 }
 
 const sandboxRender = vi.hoisted(() => vi.fn<(props: SandboxProps) => void>())
@@ -54,12 +54,13 @@ describe('AdminGatekeeperAppsPanel', () => {
   let root: Root | undefined
   let container: HTMLDivElement | undefined
 
+  const onResourcesChanged = vi.fn<() => Promise<void>>(async () => undefined)
   const render = async (admin: RpcStub<AdminApi>, strict = false) => {
     container = document.createElement('div'); document.body.append(container); root = createRoot(container)
-    await act(async () => root!.render(strict ? <React.StrictMode><AdminGatekeeperAppsPanel admin={admin} /></React.StrictMode> : <AdminGatekeeperAppsPanel admin={admin} />))
+    await act(async () => root!.render(strict ? <React.StrictMode><AdminGatekeeperAppsPanel admin={admin} onResourcesChanged={onResourcesChanged} /></React.StrictMode> : <AdminGatekeeperAppsPanel admin={admin} onResourcesChanged={onResourcesChanged} />))
     return container
   }
-  const rerender = async (admin: RpcStub<AdminApi>) => { await act(async () => root!.render(<AdminGatekeeperAppsPanel admin={admin} />)) }
+  const rerender = async (admin: RpcStub<AdminApi>) => { await act(async () => root!.render(<AdminGatekeeperAppsPanel admin={admin} onResourcesChanged={onResourcesChanged} />)) }
   const unmount = async () => { await act(async () => root?.unmount()); root = undefined }
 
   afterEach(async () => { await unmount(); container?.remove(); container = undefined; vi.restoreAllMocks(); sandboxRender.mockClear() })
@@ -104,7 +105,7 @@ describe('AdminGatekeeperAppsPanel', () => {
     await vi.waitFor(() => expect(panel.querySelector('[role="region"][aria-label="OpenAPI segments administration"]')).not.toBeNull())
     expect(button(panel, 'Back to connectors')).toBeInstanceOf(HTMLButtonElement)
     expect(panel.querySelector('iframe')?.title).toBe('OpenAPI segments administration')
-    expect(sandboxRender).toHaveBeenLastCalledWith(expect.objectContaining({ gatekeeperVendorId: 'openapi', title: 'OpenAPI segments administration', adminResourceControl: { vendorId: 'openapi', admin } }))
+    expect(sandboxRender).toHaveBeenLastCalledWith(expect.objectContaining({ gatekeeperVendorId: 'openapi', title: 'OpenAPI segments administration', adminResourceControl: { vendorId: 'openapi', admin, onResourcesChanged } }))
     await click(button(panel, 'Back to connectors'))
     expect(frame.dispose).toHaveBeenCalledOnce()
     await unmount()
@@ -152,7 +153,7 @@ describe('AdminGatekeeperAppsPanel', () => {
     await click(button(panel, 'Manage OpenAPI segments'))
     await vi.waitFor(() => expect(panel.querySelector('iframe')).not.toBe(oldIframe))
     expect(adminB.getGatekeeperAdminApp).toHaveBeenCalledWith('openapi')
-    expect(sandboxRender).toHaveBeenLastCalledWith(expect.objectContaining({ frame: newFrame, gatekeeperVendorId: 'openapi', adminResourceControl: { vendorId: 'openapi', admin: adminB } }))
+    expect(sandboxRender).toHaveBeenLastCalledWith(expect.objectContaining({ frame: newFrame, gatekeeperVendorId: 'openapi', adminResourceControl: { vendorId: 'openapi', admin: adminB, onResourcesChanged } }))
     expect(newFrame.dispose).not.toHaveBeenCalled()
   })
 

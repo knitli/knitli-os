@@ -39,6 +39,7 @@ type OpenPrompt = (prompt: string) => void
 export type AdminResourceControl = {
   vendorId: string;
   admin: RpcStub<AdminApi>;
+  onResourcesChanged: () => Promise<void>;
 }
 
 type OverlayState = 'full' | null
@@ -159,6 +160,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
     if (!control) throw new Error('Admin resource control is not available in this frame.')
     if (!enabled) {
       await control.admin.setResourceEnabled(control.vendorId, urlPattern, false)
+      await control.onResourcesChanged()
       return
     }
     if (await this.#readResourceEnabled(urlPattern) === undefined) {
@@ -168,6 +170,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
     if (!await this.#readResourceEnabled(urlPattern)) {
       throw new Error('Resource availability was not confirmed.')
     }
+    await control.onResourcesChanged()
   }
 
   async #readResourceEnabled(urlPattern: string): Promise<boolean | undefined> {
@@ -265,6 +268,7 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, titl
 }) {
   const adminResourceVendorId = adminResourceControl?.vendorId
   const adminResourceApi = adminResourceControl?.admin
+  const onResourcesChanged = adminResourceControl?.onResourcesChanged
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
   const iframeRef = useRef<HTMLIFrameElement>(null)
@@ -371,9 +375,9 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, titl
         openTarget,
         openPrompt,
         resolveWorkspaceTitles,
-        adminResourceVendorId === undefined || adminResourceApi === undefined
+        adminResourceVendorId === undefined || adminResourceApi === undefined || onResourcesChanged === undefined
           ? undefined
-          : { vendorId: adminResourceVendorId, admin: adminResourceApi },
+          : { vendorId: adminResourceVendorId, admin: adminResourceApi, onResourcesChanged },
       )
       hostRef.current = host
       sessionRef.current = newMessagePortRpcSession(port, host)
@@ -406,7 +410,7 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, titl
     }
     // Re-establish the session if either the HTML or the `ui` capability changes, so a new frame
     // carrying a fresh stub (even with identical HTML) never keeps talking through the stale one.
-  }, [frame.iframeHtml, frame.ui, gatekeeperVendorId, openPrompt, openTarget, adminResourceApi, adminResourceVendorId,
+  }, [frame.iframeHtml, frame.ui, gatekeeperVendorId, openPrompt, openTarget, adminResourceApi, adminResourceVendorId, onResourcesChanged,
       present, resolveWorkspaceTitles, setOverlayPhase])
 
   return (

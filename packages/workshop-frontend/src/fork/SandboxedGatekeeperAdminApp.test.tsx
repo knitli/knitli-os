@@ -47,7 +47,7 @@ function fakeAdmin(options: {
     setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>(options.setResourceEnabled ?? (async () => undefined)),
   } as unknown as RpcStubType<AdminApi>
 }
-function control(admin: RpcStubType<AdminApi>, onResourcesChanged = vi.fn<() => Promise<void>>(async () => undefined)): AdminResourceControl {
+function adminControl(admin: RpcStubType<AdminApi>, onResourcesChanged = vi.fn<() => Promise<void>>(async () => undefined)): AdminResourceControl {
   return { vendorId: 'fixed', admin, onResourcesChanged }
 }
 function deferred<T>() {
@@ -100,7 +100,7 @@ afterEach(async () => {
 describe('Sandboxed gatekeeper admin resource control', () => {
   it('B-HOST-006 refuses missing resources before mutation and confirms an enable freshly', async () => {
     const missing = fakeAdmin({ getSettings: async () => settings(undefined) })
-    const iframe = await render(control(missing))
+    const iframe = await render(adminControl(missing))
     await expect(handshake(iframe).host.setResourceEnabled(PATTERN, true)).rejects.toThrow('Resource is not available.')
     expect(missing.getSettings).toHaveBeenCalledOnce()
     expect(missing.setResourceEnabled).not.toHaveBeenCalled()
@@ -114,7 +114,7 @@ describe('Sandboxed gatekeeper admin resource control', () => {
       setResourceEnabled: async (vendorId, urlPattern, enabled) => { order.push({ set: [vendorId, urlPattern, enabled] }) },
     })
     const onResourcesChanged = vi.fn<() => Promise<void>>(async () => { order.push('parent-refresh') })
-    const second = await render(control(confirmed, onResourcesChanged))
+    const second = await render(adminControl(confirmed, onResourcesChanged))
     await expect(handshake(second).host.setResourceEnabled(PATTERN, true)).resolves.toBeUndefined()
     expect(order).toEqual(['read', { set: ['fixed', PATTERN, true] }, 'read', 'parent-refresh'])
     expect(onResourcesChanged).toHaveBeenCalledOnce()
@@ -126,7 +126,7 @@ describe('Sandboxed gatekeeper admin resource control', () => {
     const pending = deferred<void>()
     const capability = fakeAdmin({ getSettings: async () => settings(undefined), setResourceEnabled: () => pending.promise })
     const onResourcesChanged = vi.fn<() => Promise<void>>(async () => undefined)
-    const { host } = handshake(await render(control(capability, onResourcesChanged)))
+    const { host } = handshake(await render(adminControl(capability, onResourcesChanged)))
     const disable = host.setResourceEnabled(PATTERN, false)
     await vi.waitFor(() => expect(capability.setResourceEnabled).toHaveBeenCalledWith('fixed', PATTERN, false))
     expect(capability.getSettings).not.toHaveBeenCalled()
@@ -152,10 +152,10 @@ describe('Sandboxed gatekeeper admin resource control', () => {
   it('B-HOST-008 preserves the session across an equivalent control rerender', async () => {
     const capability = fakeAdmin({ getSettings: async () => settings(false) })
     const onResourcesChanged = vi.fn<() => Promise<void>>(async () => undefined)
-    const iframe = await render(control(capability, onResourcesChanged))
+    const iframe = await render(adminControl(capability, onResourcesChanged))
     const { host } = handshake(iframe)
     await expect(host.getResourceEnabled(PATTERN)).resolves.toBe(false)
-    await render(control(capability, onResourcesChanged))
+    await render(adminControl(capability, onResourcesChanged))
     await expect(host.getResourceEnabled(PATTERN)).resolves.toBe(false)
   })
 
@@ -163,7 +163,7 @@ describe('Sandboxed gatekeeper admin resource control', () => {
     const getSettings = vi.fn<AdminApi['getSettings']>(async () => settings(false))
     const setResourceEnabled = vi.fn<AdminApi['setResourceEnabled']>(async () => { throw new Error('setter failed') })
     const onResourcesChanged = vi.fn<() => Promise<void>>(async () => undefined)
-    const { host } = handshake(await render(control(fakeAdmin({ getSettings, setResourceEnabled }), onResourcesChanged)))
+    const { host } = handshake(await render(adminControl(fakeAdmin({ getSettings, setResourceEnabled }), onResourcesChanged)))
     await expect(host.setResourceEnabled(PATTERN, true)).rejects.toThrow('setter failed')
     expect(getSettings).toHaveBeenCalledOnce()
     expect(setResourceEnabled).toHaveBeenCalledExactlyOnceWith('fixed', PATTERN, true)
@@ -176,7 +176,7 @@ describe('Sandboxed gatekeeper admin resource control', () => {
       const getSettings = vi.fn<AdminApi['getSettings']>(async () => settings(reads++ === 0 ? false : confirmation))
       const setResourceEnabled = vi.fn<AdminApi['setResourceEnabled']>(async () => undefined)
       const onResourcesChanged = vi.fn<() => Promise<void>>(async () => undefined)
-      const { host } = handshake(await render(control(fakeAdmin({ getSettings, setResourceEnabled }), onResourcesChanged)))
+      const { host } = handshake(await render(adminControl(fakeAdmin({ getSettings, setResourceEnabled }), onResourcesChanged)))
       await expect(host.setResourceEnabled(PATTERN, true)).rejects.toThrow('Resource availability was not confirmed.')
       expect(getSettings).toHaveBeenCalledTimes(2)
       expect(setResourceEnabled).toHaveBeenCalledExactlyOnceWith('fixed', PATTERN, true)
@@ -188,7 +188,7 @@ describe('Sandboxed gatekeeper admin resource control', () => {
 
   it('B-HOST-006 reads an absent exact resource as false', async () => {
     const getSettings = vi.fn<AdminApi['getSettings']>(async () => settings(undefined))
-    const { host } = handshake(await render(control(fakeAdmin({ getSettings }))))
+    const { host } = handshake(await render(adminControl(fakeAdmin({ getSettings }))))
     await expect(host.getResourceEnabled(PATTERN)).resolves.toBe(false)
     expect(getSettings).toHaveBeenCalledOnce()
   })
@@ -197,7 +197,7 @@ describe('Sandboxed gatekeeper admin resource control', () => {
     interface UnsafeHost extends RpcTarget { setResourceEnabled(urlPattern: unknown, enabled: unknown): Promise<void> }
     const getSettings = vi.fn<AdminApi['getSettings']>()
     const setResourceEnabled = vi.fn<AdminApi['setResourceEnabled']>()
-    const { host } = handshake(await render({ vendorId: 'fixed', admin: fakeAdmin({ getSettings, setResourceEnabled }) }))
+    const { host } = handshake(await render(adminControl(fakeAdmin({ getSettings, setResourceEnabled }))))
     const unsafe = host as unknown as RpcStubType<UnsafeHost>
     await expect(unsafe.setResourceEnabled(42, true)).rejects.toThrow('Invalid resource availability request.')
     await expect(unsafe.setResourceEnabled(PATTERN, 'yes')).rejects.toThrow('Invalid resource availability request.')
@@ -206,7 +206,7 @@ describe('Sandboxed gatekeeper admin resource control', () => {
   })
 
   it('B-HOST-008 ignores wrong-source and non-null-origin handshakes', async () => {
-    const iframe = await render(control(fakeAdmin({ getSettings: async () => settings(false) })))
+    const iframe = await render(adminControl(fakeAdmin({ getSettings: async () => settings(false) })))
     const wrongSource = handshake(iframe, { source: window })
     wrongSource.peerPort.close()
     const wrongOrigin = handshake(iframe, { origin: 'https://evil.invalid' })
@@ -215,7 +215,7 @@ describe('Sandboxed gatekeeper admin resource control', () => {
   })
 
   it('B-HOST-008 invalidates both ports after a second valid handshake', async () => {
-    const iframe = await render(control(fakeAdmin({ getSettings: async () => settings(false) })))
+    const iframe = await render(adminControl(fakeAdmin({ getSettings: async () => settings(false) })))
     const first = handshake(iframe)
     await expect(first.host.getResourceEnabled(PATTERN)).resolves.toBe(false)
     await act(async () => { await first.host.setPresenting(true) })
@@ -227,7 +227,7 @@ describe('Sandboxed gatekeeper admin resource control', () => {
   })
 
   it('B-HOST-008 unmount disposes a live session', async () => {
-    const iframe = await render(control(fakeAdmin({ getSettings: async () => settings(false) })))
+    const iframe = await render(adminControl(fakeAdmin({ getSettings: async () => settings(false) })))
     const { host } = handshake(iframe)
     await expect(host.getResourceEnabled(PATTERN)).resolves.toBe(false)
     await act(async () => root?.unmount())

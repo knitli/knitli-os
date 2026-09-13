@@ -11,7 +11,8 @@ import AdminPage from './AdminPage'
 const state = vi.hoisted(() => {
   const toast = vi.fn<(toast: unknown) => void>()
   let authenticatedApi: RpcStubType<AuthenticatedApi>
-  return { toast, get authenticatedApi() { return authenticatedApi }, set authenticatedApi(value: RpcStubType<AuthenticatedApi>) { authenticatedApi = value } }
+  const navigate = vi.fn<(options: unknown) => void>()
+  return { toast, navigate, get authenticatedApi() { return authenticatedApi }, set authenticatedApi(value: RpcStubType<AuthenticatedApi>) { authenticatedApi = value } }
 })
 vi.mock('@cloudflare/kumo', () => ({
   Button: ({ children, ...props }: { children?: ReactNode } & React.ButtonHTMLAttributes<HTMLButtonElement>) => <button {...props}>{children}</button>,
@@ -32,12 +33,12 @@ vi.mock('./components/format/AdminFormatsPanel', () => ({ default: () => null })
 vi.mock('./components/AdminAiExecutorsPanel', () => ({ default: () => null }))
 vi.mock('./theme', () => ({ applyAccentColor: () => {}, DEFAULT_ACCENT_COLOR: '' }))
 vi.mock('./siteLogoUtils', () => ({ cacheBustSiteLogoUrl: (url: string) => url, prepareSiteLogo: async () => null }))
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => vi.fn<(options: unknown) => void>() }))
+vi.mock('@tanstack/react-router', () => ({ useNavigate: () => state.navigate }))
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 const PATTERN = 'https://fixture.invalid/resource/*'
 class EmptyUi extends RpcTarget {}
-interface Host extends RpcTarget { setResourceEnabled(pattern: string, enabled: boolean): Promise<void> }
+interface Host extends RpcTarget { getResourceEnabled(pattern: string): Promise<boolean>; setResourceEnabled(pattern: string, enabled: boolean): Promise<void> }
 function view(enabled: boolean): AdminSettingsView {
   const resourceVendors: AdminResourceVendor[] = [{ vendorId: 'openapi', autoProvisions: false, enabled: true, displayName: 'OpenAPI', resources: [{ urlPattern: PATTERN, title: 'Fixture resource', description: 'Fixture', enabled }] }]
   return { signupsEnabled: true, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [] }
@@ -76,7 +77,8 @@ describe('AdminPage gatekeeper resource refresh', () => {
     expect(resourceSwitch(container).checked).toBe(true)
     expect(admin.setResourceEnabled).toHaveBeenCalledExactlyOnceWith('openapi', PATTERN, true)
     expect(admin.getSettings).toHaveBeenCalledTimes(4)
-    expect(container.querySelector('iframe')).not.toBeNull()
+    expect(container.querySelector('iframe')).toBe(iframe)
+    await expect(client.getResourceEnabled(PATTERN)).resolves.toBe(true)
   })
 
   it('B-PARENT-003 ignores an obsolete API A refresh after API B replaces it', async () => {
@@ -112,6 +114,19 @@ describe('AdminPage gatekeeper resource refresh', () => {
     await act(async () => staleRefresh.reject(new Error('stale A failure')))
     expect(resourceSwitch(container).checked).toBe(true)
     expect(state.toast).not.toHaveBeenCalled()
+  })
+
+  it('B-PARENT-003 ignores an obsolete API A fulfilled refresh after API B replaces it', async () => {
+    let enabled = false; let reads = 0; const stale = deferred<AdminSettingsView>()
+    const adminA = { getSettings: vi.fn<AdminApi['getSettings']>(async () => { reads += 1; return reads === 4 ? stale.promise : view(enabled) }), setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>(async (_v, _p, next) => { enabled = next }), listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()) } as unknown as RpcStubType<AdminApi>
+    const adminB = { getSettings: vi.fn<AdminApi['getSettings']>(async () => view(true)), listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => []) } as unknown as RpcStubType<AdminApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => adminA), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
+    await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click()); await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'Manage OpenAPI segments').click()); await vi.waitFor(() => expect(container!.querySelector('iframe')).not.toBeNull())
+    const iframe = container.querySelector('iframe')!; const { port1, port2 } = new MessageChannel(); client = newMessagePortRpcSession<Host>(port1); window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
+    void client.setResourceEnabled(PATTERN, true); await vi.waitFor(() => expect(adminA.getSettings).toHaveBeenCalledTimes(4))
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => adminB), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>; await act(async () => root!.render(<AdminPage />)); await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(true))
+    await act(async () => stale.resolve(view(false))); expect(resourceSwitch(container).checked).toBe(true); expect(state.toast).not.toHaveBeenCalled()
   })
 
   it('B-PARENT-002 contains a parent refresh failure after a committed frame write', async () => {

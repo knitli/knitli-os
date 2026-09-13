@@ -35,6 +35,8 @@ const BANNER_SWATCH: Record<BannerColor, string> = {
 export default function AdminPage() {
   const { authenticatedApi, isAdmin } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
+  const toastsRef = useRef(toasts)
+  toastsRef.current = toasts
   useDocumentTitle('Admin')
 
   // The admin capability (minted once via getAdminApi; null until loaded / for non-admins). Wrapped
@@ -177,9 +179,9 @@ export default function AdminPage() {
       await reloadResources()
     } catch {
       console.error('Failed to refresh Gatekeeper resources after connector update.')
-      toasts.add({ title: 'Connector setting saved, but the Gatekeepers list could not refresh.', variant: 'error' })
+      toastsRef.current.add({ title: 'Connector setting saved, but the Gatekeepers list could not refresh.', variant: 'error' })
     }
-  }, [reloadResources, toasts])
+  }, [reloadResources])
 
   const handleResourceToggle = async (vendorId: string, urlPattern: string, enabled: boolean) => {
     if (!admin) return

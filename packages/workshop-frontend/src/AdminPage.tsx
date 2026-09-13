@@ -32,6 +32,31 @@ const BANNER_SWATCH: Record<BannerColor, string> = {
   brand: 'var(--color-accent-100)',
 }
 
+const resourceKey = (vendorId: string, urlPattern: string) => `${vendorId}\u0000${urlPattern}`
+const gatekeeperKey = (vendorId: string) => `gk\u0000${vendorId}`
+
+const mergeBusyResourceVendors = (
+  fresh: AdminResourceVendor[],
+  current: AdminResourceVendor[],
+  busy: ReadonlySet<string>,
+): AdminResourceVendor[] => fresh.map((vendor) => {
+  const previous = current.find((entry) => entry.vendorId === vendor.vendorId)
+  if (!previous || previous.autoProvisions !== vendor.autoProvisions) return vendor
+  if (busy.has(gatekeeperKey(vendor.vendorId))) return previous
+  if (vendor.autoProvisions || previous.autoProvisions) return vendor
+
+  return {
+    ...vendor,
+    resources: vendor.resources.map((resource) => {
+      if (!busy.has(resourceKey(vendor.vendorId, resource.urlPattern))) return resource
+      const previousResource = previous.resources.find(
+        (entry) => entry.urlPattern === resource.urlPattern,
+      )
+      return previousResource ? { ...resource, enabled: previousResource.enabled } : resource
+    }),
+  }
+})
+
 export default function AdminPage() {
   const { authenticatedApi, isAdmin } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
@@ -83,6 +108,7 @@ export default function AdminPage() {
   // Gatekeeper resource config, and the set of resource keys ("vendorId\u0000urlPattern") busy toggling.
   const [resourceVendors, setResourceVendors] = useState<AdminResourceVendor[]>([])
   const [resourceBusy, setResourceBusy] = useState<Set<string>>(new Set())
+  const resourceBusyRef = useRef<Set<string>>(new Set())
   const currentAdminApi = useRef<RpcStub<AdminApi> | null>(null)
   const resourceReloadGeneration = useRef(0)
   currentAdminApi.current = admin?.api ?? null
@@ -92,7 +118,13 @@ export default function AdminPage() {
   // Promoted output formats, in menu order (see AdminFormatsPanel).
   const [formats, setFormats] = useState<AdminFormat[]>([])
 
-  const resourceKey = (vendorId: string, urlPattern: string) => `${vendorId}\u0000${urlPattern}`
+  const setResourceOperationBusy = (key: string, busy: boolean) => {
+    const next = new Set(resourceBusyRef.current)
+    if (busy) next.add(key)
+    else next.delete(key)
+    resourceBusyRef.current = next
+    setResourceBusy(next)
+  }
 
   // Populate all editor state from a freshly-fetched settings view.
   const applySettings = (view: Awaited<ReturnType<RpcStub<AdminApi>['getSettings']>>) => {
@@ -168,7 +200,8 @@ export default function AdminPage() {
     try {
       const view = await api.getSettings()
       if (currentAdminApi.current === api && resourceReloadGeneration.current === request) {
-        setResourceVendors(view.resourceVendors)
+        const busy = resourceBusyRef.current
+        setResourceVendors((current) => mergeBusyResourceVendors(view.resourceVendors, current, busy))
       }
     } catch (error) {
       if (currentAdminApi.current === api && resourceReloadGeneration.current === request) throw error
@@ -186,7 +219,7 @@ export default function AdminPage() {
   const handleResourceToggle = async (vendorId: string, urlPattern: string, enabled: boolean) => {
     if (!admin) return
     const key = resourceKey(vendorId, urlPattern)
-    setResourceBusy((prev) => new Set(prev).add(key))
+    setResourceOperationBusy(key, true)
     // Optimistic update.
     setResourceVendors((prev) =>
       prev.map((v) =>
@@ -200,20 +233,16 @@ export default function AdminPage() {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Update failed'
       toasts.add({ title: message, variant: 'error' })
-      await reloadResources().catch(() => {})
     } finally {
-      setResourceBusy((prev) => {
-        const next = new Set(prev)
-        next.delete(key)
-        return next
-      })
+      setResourceOperationBusy(key, false)
+      await reloadResources().catch(() => {})
     }
   }
 
   const handleGatekeeperToggle = async (vendorId: string, enabled: boolean) => {
     if (!admin) return
-    const key = `gk\u0000${vendorId}`
-    setResourceBusy((prev) => new Set(prev).add(key))
+    const key = gatekeeperKey(vendorId)
+    setResourceOperationBusy(key, true)
     setResourceVendors((prev) =>
       prev.map((v) => (v.vendorId === vendorId && !v.autoProvisions ? { ...v, enabled } : v))
     )
@@ -222,20 +251,16 @@ export default function AdminPage() {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Update failed'
       toasts.add({ title: message, variant: 'error' })
-      await reloadResources().catch(() => {})
     } finally {
-      setResourceBusy((prev) => {
-        const next = new Set(prev)
-        next.delete(key)
-        return next
-      })
+      setResourceOperationBusy(key, false)
+      await reloadResources().catch(() => {})
     }
   }
 
   const handleGatekeeperMode = async (vendorId: string, mode: AmbientGatekeeperMode) => {
     if (!admin) return
-    const key = `gk\u0000${vendorId}`
-    setResourceBusy((prev) => new Set(prev).add(key))
+    const key = gatekeeperKey(vendorId)
+    setResourceOperationBusy(key, true)
     setResourceVendors((prev) =>
       prev.map((v) => (v.vendorId === vendorId && v.autoProvisions ? { ...v, ambientMode: mode } : v))
     )
@@ -244,13 +269,9 @@ export default function AdminPage() {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Update failed'
       toasts.add({ title: message, variant: 'error' })
-      await reloadResources().catch(() => {})
     } finally {
-      setResourceBusy((prev) => {
-        const next = new Set(prev)
-        next.delete(key)
-        return next
-      })
+      setResourceOperationBusy(key, false)
+      await reloadResources().catch(() => {})
     }
   }
 
@@ -838,7 +859,7 @@ export default function AdminPage() {
 
           <div className="space-y-6">
             {resourceVendors.map((vendor) => {
-              const gkKey = `gk\u0000${vendor.vendorId}`
+              const gkKey = gatekeeperKey(vendor.vendorId)
 
               // Auto-provisioned ("ambient") gatekeepers use a three-state mode and have no resources.
               if (vendor.autoProvisions) {

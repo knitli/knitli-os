@@ -37,16 +37,20 @@ vi.mock('@tanstack/react-router', () => ({ useNavigate: () => state.navigate }))
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 const PATTERN = 'https://fixture.invalid/resource/*'
+const OTHER_PATTERN = 'https://fixture.invalid/other/*'
 class EmptyUi extends RpcTarget {}
 interface Host extends RpcTarget { getResourceEnabled(pattern: string): Promise<boolean>; setResourceEnabled(pattern: string, enabled: boolean): Promise<void> }
-function view(enabled: boolean): AdminSettingsView {
-  const resourceVendors: AdminResourceVendor[] = [{ vendorId: 'openapi', autoProvisions: false, enabled: true, displayName: 'OpenAPI', resources: [{ urlPattern: PATTERN, title: 'Fixture resource', description: 'Fixture', enabled }] }]
+function view(enabled: boolean, options: { vendorEnabled?: boolean; otherEnabled?: boolean } = {}): AdminSettingsView {
+  const resources = [{ urlPattern: PATTERN, title: 'Fixture resource', description: 'Fixture', enabled }]
+  if (options.otherEnabled !== undefined) resources.push({ urlPattern: OTHER_PATTERN, title: 'Other resource', description: 'Other fixture', enabled: options.otherEnabled })
+  const resourceVendors: AdminResourceVendor[] = [{ vendorId: 'openapi', autoProvisions: false, enabled: options.vendorEnabled ?? true, displayName: 'OpenAPI', resources }]
   return { signupsEnabled: true, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [] }
 }
 function frame(): GatekeeperUiFrame { return { iframeHtml: '<!doctype html><title>OpenAPI</title>', ui: new RpcStub(new EmptyUi()) } }
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason?: unknown) => void; const promise = new Promise<T>((nextResolve, nextReject) => { resolve = nextResolve; reject = nextReject }); return { promise, resolve, reject } }
 function button(container: HTMLElement, text: string) { const result = [...container.querySelectorAll('button')].find((candidate) => candidate.textContent?.startsWith(text)); if (!result) throw new Error(`Missing button ${text}`); return result as HTMLButtonElement }
-function resourceSwitch(container: HTMLElement) { const heading = [...container.querySelectorAll('p')].find((candidate) => candidate.textContent === 'Fixture resource'); const result = heading?.parentElement?.parentElement?.querySelector('input[type="checkbox"]'); if (!result) throw new Error('Missing Fixture resource switch'); return result as HTMLInputElement }
+function resourceSwitch(container: HTMLElement, title = 'Fixture resource') { const heading = [...container.querySelectorAll('p')].find((candidate) => candidate.textContent === title); const result = heading?.parentElement?.parentElement?.querySelector('input[type="checkbox"]'); if (!result) throw new Error(`Missing ${title} switch`); return result as HTMLInputElement }
+function gatekeeperSwitch(container: HTMLElement) { const heading = [...container.querySelectorAll('h3')].find((candidate) => candidate.textContent?.startsWith('OpenAPI')); const result = heading?.parentElement?.querySelector('input[type="checkbox"]'); if (!result) throw new Error('Missing OpenAPI switch'); return result as HTMLInputElement }
 
 describe('AdminPage gatekeeper resource refresh', () => {
   let root: Root | undefined
@@ -156,5 +160,187 @@ describe('AdminPage gatekeeper resource refresh', () => {
     void client.setResourceEnabled(PATTERN, true); await vi.waitFor(() => expect(admin.getSettings).toHaveBeenCalledTimes(7))
     await act(async () => second.resolve(view(true))); await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(true)); await act(async () => first.resolve(view(false)))
     expect(resourceSwitch(container).checked).toBe(true)
+  })
+
+  it('B-PARENT-004 merges an earlier frame refresh around a pending standard resource toggle', async () => {
+    let authoritativeResourceEnabled = false
+    let authoritativeOtherEnabled = false
+    let reads = 0
+    const frameRefresh = deferred<AdminSettingsView>()
+    const otherWrite = deferred<void>()
+    const admin = {
+      getSettings: vi.fn<AdminApi['getSettings']>(async () => {
+        reads += 1
+        return reads === 4
+          ? frameRefresh.promise
+          : view(authoritativeResourceEnabled, { otherEnabled: authoritativeOtherEnabled })
+      }),
+      setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>((_vendor, pattern, enabled) => {
+        if (pattern === PATTERN) {
+          authoritativeResourceEnabled = enabled
+          return Promise.resolve()
+        }
+        return otherWrite.promise.then(() => { authoritativeOtherEnabled = enabled })
+      }),
+      listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
+      getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()),
+    } as unknown as RpcStubType<AdminApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    container = document.body.appendChild(document.createElement('div'))
+    root = createRoot(container)
+    await act(async () => root!.render(<AdminPage />))
+    await act(async () => button(container!, 'Gatekeepers').click())
+    await vi.waitFor(() => expect(resourceSwitch(container!, 'Other resource').checked).toBe(false))
+    await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    const iframe = container.querySelector('iframe')!
+    const { port1, port2 } = new MessageChannel()
+    client = newMessagePortRpcSession<Host>(port1)
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
+    const frameWrite = client.setResourceEnabled(PATTERN, true)
+    await vi.waitFor(() => expect(admin.getSettings).toHaveBeenCalledTimes(4))
+    expect(admin.setResourceEnabled).toHaveBeenCalledWith('openapi', PATTERN, true)
+    await act(async () => resourceSwitch(container!, 'Other resource').click())
+    expect(resourceSwitch(container!, 'Other resource').checked).toBe(true)
+    await act(async () => frameRefresh.resolve(view(true, { otherEnabled: false })))
+    await vi.waitFor(() => expect(resourceSwitch(container!, 'Fixture resource').checked).toBe(true))
+    expect(resourceSwitch(container!, 'Other resource').checked).toBe(true)
+    otherWrite.resolve()
+    await frameWrite
+    await vi.waitFor(() => expect(resourceSwitch(container!, 'Other resource').checked).toBe(true))
+    expect(admin.getSettings).toHaveBeenCalledTimes(5)
+  })
+
+  it('B-PARENT-004 preserves a whole-vendor optimistic toggle while a frame refresh resolves', async () => {
+    let authoritativeVendorEnabled = false
+    let authoritativeResourceEnabled = false
+    let reads = 0
+    const vendorWrite = deferred<void>()
+    const frameRefresh = deferred<AdminSettingsView>()
+    const admin = {
+      getSettings: vi.fn<AdminApi['getSettings']>(async () => {
+        reads += 1
+        return reads === 4
+          ? frameRefresh.promise
+          : view(authoritativeResourceEnabled, { vendorEnabled: authoritativeVendorEnabled })
+      }),
+      setGatekeeperMode: vi.fn<AdminApi['setGatekeeperMode']>((_vendorId, mode) => vendorWrite.promise.then(() => {
+        authoritativeVendorEnabled = mode === 'enabled'
+      })),
+      setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>(async (_vendor, _pattern, enabled) => { authoritativeResourceEnabled = enabled }),
+      listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
+      getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()),
+    } as unknown as RpcStubType<AdminApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    container = document.body.appendChild(document.createElement('div'))
+    root = createRoot(container)
+    await act(async () => root!.render(<AdminPage />))
+    await act(async () => button(container!, 'Gatekeepers').click())
+    await vi.waitFor(() => expect(gatekeeperSwitch(container!).checked).toBe(false))
+    await act(async () => gatekeeperSwitch(container!).click())
+    expect(gatekeeperSwitch(container!).checked).toBe(true)
+    await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    const iframe = container.querySelector('iframe')!
+    const { port1, port2 } = new MessageChannel()
+    client = newMessagePortRpcSession<Host>(port1)
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
+    const frameWrite = client.setResourceEnabled(PATTERN, true)
+    await vi.waitFor(() => expect(admin.getSettings).toHaveBeenCalledTimes(4))
+    expect(admin.setResourceEnabled).toHaveBeenCalledWith('openapi', PATTERN, true)
+    await act(async () => frameRefresh.resolve(view(true, { vendorEnabled: false })))
+    expect(gatekeeperSwitch(container!).checked).toBe(true)
+    vendorWrite.resolve()
+    await frameWrite
+    await vi.waitFor(() => expect(gatekeeperSwitch(container!).checked).toBe(true))
+    expect(resourceSwitch(container).checked).toBe(true)
+    expect(admin.setGatekeeperMode).toHaveBeenCalledWith('openapi', 'enabled')
+  })
+
+  it('B-PARENT-004 lets the completion reload supersede a frame refresh started during the write', async () => {
+    let authoritativeVendorEnabled = false
+    let authoritativeResourceEnabled = false
+    let reads = 0
+    const vendorWrite = deferred<void>()
+    const frameRefresh = deferred<AdminSettingsView>()
+    const completionRefresh = deferred<AdminSettingsView>()
+    const admin = {
+      getSettings: vi.fn<AdminApi['getSettings']>(async () => {
+        reads += 1
+        if (reads === 4) return frameRefresh.promise
+        if (reads === 5) return completionRefresh.promise
+        return view(authoritativeResourceEnabled, { vendorEnabled: authoritativeVendorEnabled })
+      }),
+      setGatekeeperMode: vi.fn<AdminApi['setGatekeeperMode']>((_vendorId, mode) => vendorWrite.promise.then(() => {
+        authoritativeVendorEnabled = mode === 'enabled'
+      })),
+      setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>(async (_vendor, _pattern, enabled) => { authoritativeResourceEnabled = enabled }),
+      listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
+      getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()),
+    } as unknown as RpcStubType<AdminApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    container = document.body.appendChild(document.createElement('div'))
+    root = createRoot(container)
+    await act(async () => root!.render(<AdminPage />))
+    await act(async () => button(container!, 'Gatekeepers').click())
+    await vi.waitFor(() => expect(gatekeeperSwitch(container!).checked).toBe(false))
+    await act(async () => gatekeeperSwitch(container!).click())
+    expect(gatekeeperSwitch(container!).checked).toBe(true)
+    await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    const iframe = container.querySelector('iframe')!
+    const { port1, port2 } = new MessageChannel()
+    client = newMessagePortRpcSession<Host>(port1)
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
+    const frameWrite = client.setResourceEnabled(PATTERN, true)
+    await vi.waitFor(() => expect(admin.getSettings).toHaveBeenCalledTimes(4))
+    expect(admin.setResourceEnabled).toHaveBeenCalledWith('openapi', PATTERN, true)
+    vendorWrite.resolve()
+    await vi.waitFor(() => expect(admin.getSettings).toHaveBeenCalledTimes(5))
+    await act(async () => frameRefresh.resolve(view(true, { vendorEnabled: false })))
+    expect(gatekeeperSwitch(container!).checked).toBe(true)
+    await act(async () => completionRefresh.resolve(view(true, { vendorEnabled: true })))
+    await frameWrite
+    await vi.waitFor(() => expect(gatekeeperSwitch(container!).checked).toBe(true))
+    expect(resourceSwitch(container).checked).toBe(true)
+    expect(admin.setGatekeeperMode).toHaveBeenCalledWith('openapi', 'enabled')
+  })
+
+  it('B-PARENT-004 rolls back one failed resource without clobbering a concurrent successful resource toggle', async () => {
+    let authoritativeResourceEnabled = false
+    let authoritativeOtherEnabled = false
+    let reads = 0
+    const firstWrite = deferred<void>()
+    const secondWrite = deferred<void>()
+    const firstRollback = deferred<AdminSettingsView>()
+    const admin = {
+      getSettings: vi.fn<AdminApi['getSettings']>(async () => {
+        reads += 1
+        if (reads === 2) return firstRollback.promise
+        return view(authoritativeResourceEnabled, { otherEnabled: authoritativeOtherEnabled })
+      }),
+      setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>((_vendor, pattern, enabled) => {
+        if (pattern === PATTERN) return firstWrite.promise.then(() => { authoritativeResourceEnabled = enabled })
+        return secondWrite.promise.then(() => { authoritativeOtherEnabled = enabled })
+      }),
+      listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
+      getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()),
+    } as unknown as RpcStubType<AdminApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    container = document.body.appendChild(document.createElement('div'))
+    root = createRoot(container)
+    await act(async () => root!.render(<AdminPage />))
+    await act(async () => button(container!, 'Gatekeepers').click())
+    await vi.waitFor(() => expect(resourceSwitch(container!, 'Fixture resource').checked).toBe(false))
+    await act(async () => resourceSwitch(container!, 'Fixture resource').click())
+    await act(async () => resourceSwitch(container!, 'Other resource').click())
+    expect(resourceSwitch(container!, 'Fixture resource').checked).toBe(true)
+    expect(resourceSwitch(container!, 'Other resource').checked).toBe(true)
+    await act(async () => firstWrite.reject(new Error('first failed')))
+    await vi.waitFor(() => expect(admin.getSettings).toHaveBeenCalledTimes(2))
+    await act(async () => firstRollback.resolve(view(false, { otherEnabled: false })))
+    await vi.waitFor(() => expect(resourceSwitch(container!, 'Fixture resource').checked).toBe(false))
+    expect(resourceSwitch(container!, 'Other resource').checked).toBe(true)
+    expect(state.toast).toHaveBeenCalledExactlyOnceWith({ title: 'first failed', variant: 'error' })
+    await act(async () => secondWrite.resolve())
+    await vi.waitFor(() => expect(admin.getSettings).toHaveBeenCalledTimes(3))
+    expect(resourceSwitch(container!, 'Other resource').checked).toBe(true)
   })
 })

@@ -120,6 +120,22 @@ describe('AdminGatekeeperAppsPanel', () => {
     expect(frame.dispose).toHaveBeenCalledOnce()
   })
 
+  it('B-HOST-010 moves focus into the selected view and restores its Manage trigger', async () => {
+    const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>().mockResolvedValue(testFrame()) })
+    const panel = await render(admin)
+    await vi.waitFor(() => expect(panel.textContent).toContain('Manage OpenAPI segments'))
+    const manage = button(panel, 'Manage OpenAPI segments')
+    manage.focus()
+    expect(document.activeElement).toBe(manage)
+    await click(manage)
+    const back = button(panel, 'Back to connectors')
+    await vi.waitFor(() => expect(document.activeElement).toBe(back))
+    await click(back)
+    const restoredManage = button(panel, 'Manage OpenAPI segments')
+    await vi.waitFor(() => expect(document.activeElement).toBe(restoredManage))
+    expect(restoredManage).not.toBe(manage)
+  })
+
   it('B-HOST-005 disposes a selected frame once on unmount', async () => {
     const frame = testFrame()
     const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>().mockResolvedValue([app]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>().mockResolvedValue(frame) })

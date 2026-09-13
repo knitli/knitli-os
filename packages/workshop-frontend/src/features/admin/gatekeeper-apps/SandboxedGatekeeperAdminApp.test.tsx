@@ -205,6 +205,60 @@ describe('Sandboxed gatekeeper admin resource control', () => {
     expect(setResourceEnabled).not.toHaveBeenCalled()
   })
 
+  it('B-HOST-009 bounds admin reads by the Gatekeeper-app concurrency and backlog limits', async () => {
+    const pending = deferred<AdminSettingsView>()
+    const getSettings = vi.fn<AdminApi['getSettings']>(() => pending.promise)
+    const { host } = handshake(await render(adminControl(fakeAdmin({ getSettings }))))
+    const accepted = Array.from({ length: 128 }, () => host.getResourceEnabled(PATTERN))
+    await vi.waitFor(() => expect(getSettings).toHaveBeenCalledTimes(8))
+    await expect(host.getResourceEnabled(PATTERN)).rejects.toThrow('Gatekeeper app has too many pending requests.')
+    pending.resolve(settings(false))
+    await expect(Promise.all(accepted)).resolves.toEqual(Array(128).fill(false))
+    expect(getSettings).toHaveBeenCalledTimes(128)
+  })
+
+  it('B-HOST-009 bounds admin disables by the same concurrency and backlog limits', async () => {
+    const pending = deferred<void>()
+    const getSettings = vi.fn<AdminApi['getSettings']>()
+    const setResourceEnabled = vi.fn<AdminApi['setResourceEnabled']>(() => pending.promise)
+    const onResourcesChanged = vi.fn<() => Promise<void>>(async () => undefined)
+    const { host } = handshake(await render(adminControl(fakeAdmin({ getSettings, setResourceEnabled }), onResourcesChanged)))
+    const accepted = Array.from({ length: 128 }, () => host.setResourceEnabled(PATTERN, false))
+    await vi.waitFor(() => expect(setResourceEnabled).toHaveBeenCalledTimes(8))
+    await expect(host.setResourceEnabled(PATTERN, false)).rejects.toThrow('Gatekeeper app has too many pending requests.')
+    pending.resolve()
+    await expect(Promise.all(accepted)).resolves.toEqual(Array(128).fill(undefined))
+    expect(setResourceEnabled).toHaveBeenCalledTimes(128)
+    expect(getSettings).not.toHaveBeenCalled()
+    expect(onResourcesChanged).toHaveBeenCalledTimes(128)
+  })
+
+  it('B-HOST-009 throttles the 601st admin call and clears its timer on host disposal', async () => {
+    const getSettings = vi.fn<AdminApi['getSettings']>(async () => settings(false))
+    const iframe = await render(adminControl(fakeAdmin({ getSettings })))
+    const { host } = handshake(iframe)
+    for (let call = 0; call < 600; call += 1) await host.getResourceEnabled(PATTERN)
+    const realSetTimeout = globalThis.setTimeout
+    const realClearTimeout = globalThis.clearTimeout
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((handler, timeout, ...args) => realSetTimeout(handler, timeout, ...args))
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation((handle) => realClearTimeout(handle))
+    void host.getResourceEnabled(PATTERN).catch(() => undefined)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await vi.waitFor(() => expect(setTimeoutSpy.mock.calls.some(([, delay]) => Number(delay) > 55_000)).toBe(true))
+      timer = setTimeoutSpy.mock.results.find((_, index) => Number(setTimeoutSpy.mock.calls[index]?.[1]) > 55_000)?.value as ReturnType<typeof setTimeout> | undefined
+      expect(timer).toBeDefined()
+      expect(getSettings).toHaveBeenCalledTimes(600)
+      await act(async () => root?.unmount())
+      root = undefined
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(timer)
+    } finally {
+      if (timer !== undefined) realClearTimeout(timer)
+      setTimeoutSpy.mockRestore()
+      clearTimeoutSpy.mockRestore()
+    }
+  })
+
   it('B-HOST-008 ignores wrong-source and non-null-origin handshakes', async () => {
     const iframe = await render(adminControl(fakeAdmin({ getSettings: async () => settings(false) })))
     const wrongSource = handshake(iframe, { source: window })

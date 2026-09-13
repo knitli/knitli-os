@@ -54,6 +54,19 @@ const WORKSPACE_TITLES_TTL_MS = 10_000
 // Near the max int, so the full-viewport iframe sits above all Workshop chrome.
 const overlayZIndex = 2147483000
 
+const GATEKEEPER_APP_RATE_LIMIT_OPTIONS = {
+  maxConcurrency: 8,
+  maxCallsPerMinute: 600,
+  maxPendingCalls: 128,
+  onRateLimit: 'throttle',
+  label: 'Gatekeeper app',
+} as const
+
+type AdminResourceCapability = {
+  getResourceEnabled(urlPattern: string): Promise<boolean>
+  setResourceEnabled(urlPattern: string, enabled: boolean): Promise<void>
+}
+
 const baseIframeStyle: CSSProperties = {
   border: 0,
   background: 'transparent',
@@ -87,6 +100,8 @@ function iframeStyleForOverlay(overlay: OverlayState): CSSProperties {
 class GatekeeperAppHostImpl extends RpcTarget {
   readonly #ui: RpcStub<RpcTarget>
   readonly #disposeRateLimiter: () => void
+  readonly #adminResources: AdminResourceCapability
+  readonly #disposeAdminResourceRateLimiter: () => void
   readonly #present: PresentController
   readonly #openTarget: OpenTarget
   readonly #openPrompt: OpenPrompt
@@ -111,15 +126,15 @@ class GatekeeperAppHostImpl extends RpcTarget {
   ) {
     super()
     this.#theme = theme
-    const { capability: ui, dispose } = createRateLimitedCapability(capability, {
-      maxConcurrency: 8,
-      maxCallsPerMinute: 600,
-      maxPendingCalls: 128,
-      onRateLimit: 'throttle',
-      label: 'Gatekeeper app',
-    })
+    const { capability: ui, dispose } = createRateLimitedCapability(capability, GATEKEEPER_APP_RATE_LIMIT_OPTIONS)
     this.#ui = ui
     this.#disposeRateLimiter = dispose
+    const { capability: adminResources, dispose: disposeAdminResourceRateLimiter } = createRateLimitedCapability({
+      getResourceEnabled: (urlPattern: string) => this.#getResourceEnabled(urlPattern),
+      setResourceEnabled: (urlPattern: string, enabled: boolean) => this.#setResourceEnabled(urlPattern, enabled),
+    }, GATEKEEPER_APP_RATE_LIMIT_OPTIONS)
+    this.#adminResources = adminResources
+    this.#disposeAdminResourceRateLimiter = disposeAdminResourceRateLimiter
     this.#present = present
     this.#openTarget = openTarget
     this.#openPrompt = openPrompt
@@ -150,11 +165,19 @@ class GatekeeperAppHostImpl extends RpcTarget {
     this.#openPrompt(normalizeGatekeeperAppPrompt(prompt))
   }
 
-  async getResourceEnabled(urlPattern: string): Promise<boolean> {
+  getResourceEnabled(urlPattern: string): Promise<boolean> {
+    return this.#adminResources.getResourceEnabled(urlPattern)
+  }
+
+  setResourceEnabled(urlPattern: string, enabled: boolean): Promise<void> {
+    return this.#adminResources.setResourceEnabled(urlPattern, enabled)
+  }
+
+  async #getResourceEnabled(urlPattern: string): Promise<boolean> {
     return (await this.#readResourceEnabled(urlPattern)) ?? false
   }
 
-  async setResourceEnabled(urlPattern: string, enabled: boolean): Promise<void> {
+  async #setResourceEnabled(urlPattern: string, enabled: boolean): Promise<void> {
     if (typeof urlPattern !== 'string' || typeof enabled !== 'boolean') throw new TypeError('Invalid resource availability request.')
     const control = this.#adminResourceControl
     if (!control) throw new Error('Admin resource control is not available in this frame.')
@@ -239,6 +262,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
   // Cancel the rate limiter's pending resume timer once this host is no longer in use.
   dispose() {
     this.#disposeRateLimiter()
+    this.#disposeAdminResourceRateLimiter()
     this.#themeReceiver?.[Symbol.dispose]?.()
     this.#themeReceiver = null
     if (this.#frameId !== null) {

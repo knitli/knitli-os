@@ -203,8 +203,18 @@ export default function AdminPage() {
         const busy = resourceBusyRef.current
         setResourceVendors((current) => mergeBusyResourceVendors(view.resourceVendors, current, busy))
       }
-    } catch (error) {
-      if (currentAdminApi.current === api && resourceReloadGeneration.current === request) throw error
+    } catch {
+      if (currentAdminApi.current !== api || resourceReloadGeneration.current !== request) return
+      const recovery = ++resourceReloadGeneration.current
+      try {
+        const view = await api.getSettings()
+        if (currentAdminApi.current === api && resourceReloadGeneration.current === recovery) {
+          const busy = resourceBusyRef.current
+          setResourceVendors((current) => mergeBusyResourceVendors(view.resourceVendors, current, busy))
+        }
+      } catch (recoveryError) {
+        if (currentAdminApi.current === api && resourceReloadGeneration.current === recovery) throw recoveryError
+      }
     }
   }, [])
   const refreshResourcesAfterFrameWrite = useCallback(async () => {

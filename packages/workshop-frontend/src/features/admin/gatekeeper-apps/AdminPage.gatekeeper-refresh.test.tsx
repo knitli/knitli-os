@@ -117,6 +117,8 @@ describe('AdminPage gatekeeper resource refresh', () => {
     await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(true))
     await act(async () => staleRefresh.reject(new Error('stale A failure')))
     expect(resourceSwitch(container).checked).toBe(true)
+    expect(adminA.getSettings).toHaveBeenCalledTimes(4)
+    expect(adminB.getSettings).toHaveBeenCalledOnce()
     expect(state.toast).not.toHaveBeenCalled()
   })
 
@@ -135,7 +137,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
 
   it('B-PARENT-002 contains a parent refresh failure after a committed frame write', async () => {
     let enabled = false; let reads = 0
-    const admin = { getSettings: vi.fn<AdminApi['getSettings']>(async () => { reads += 1; if (reads === 4) throw new Error('refresh failed'); return view(enabled) }), setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>(async (_vendor, _pattern, next) => { enabled = next }), listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()) } as unknown as RpcStubType<AdminApi>
+    const admin = { getSettings: vi.fn<AdminApi['getSettings']>(async () => { reads += 1; if (reads === 4 || reads === 5) throw new Error('refresh failed'); return view(enabled) }), setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>(async (_vendor, _pattern, next) => { enabled = next }), listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()) } as unknown as RpcStubType<AdminApi>
     state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
     await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click())
@@ -145,7 +147,59 @@ describe('AdminPage gatekeeper resource refresh', () => {
     window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
     await expect(client.setResourceEnabled(PATTERN, true)).resolves.toBeUndefined()
     expect(resourceSwitch(container).checked).toBe(false)
+    expect(admin.getSettings).toHaveBeenCalledTimes(5)
     expect(state.toast).toHaveBeenCalledExactlyOnceWith({ title: 'Connector setting saved, but the Gatekeepers list could not refresh.', variant: 'error' })
+  })
+
+  it('B-PARENT-005 recovers the newest failed rollback refresh without restoring an obsolete view', async () => {
+    let authoritativeResourceEnabled = false
+    let authoritativeOtherEnabled = false
+    let reads = 0
+    const firstWrite = deferred<void>()
+    const secondWrite = deferred<void>()
+    const rollbackRelease = deferred<void>()
+    const newestRefresh = deferred<AdminSettingsView>()
+    const admin = {
+      getSettings: vi.fn<AdminApi['getSettings']>(async () => {
+        reads += 1
+        if (reads === 2) {
+          const snapshot = view(authoritativeResourceEnabled, { otherEnabled: authoritativeOtherEnabled })
+          return rollbackRelease.promise.then(() => snapshot)
+        }
+        if (reads === 3) return newestRefresh.promise
+        return view(authoritativeResourceEnabled, { otherEnabled: authoritativeOtherEnabled })
+      }),
+      setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>((_vendor, pattern, enabled) =>
+        pattern === PATTERN
+          ? firstWrite.promise.then(() => { authoritativeResourceEnabled = enabled })
+          : secondWrite.promise.then(() => { authoritativeOtherEnabled = enabled })),
+      listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => []),
+    } as unknown as RpcStubType<AdminApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    container = document.body.appendChild(document.createElement('div'))
+    root = createRoot(container)
+    await act(async () => root!.render(<AdminPage />))
+    await act(async () => button(container!, 'Gatekeepers').click())
+    await vi.waitFor(() => expect(resourceSwitch(container!, 'Fixture resource').checked).toBe(false))
+    expect(resourceSwitch(container!, 'Other resource').checked).toBe(false)
+
+    await act(async () => resourceSwitch(container!, 'Fixture resource').click())
+    expect(resourceSwitch(container!, 'Fixture resource').checked).toBe(true)
+    await act(async () => firstWrite.reject(new Error('first setter failed')))
+    await vi.waitFor(() => expect(admin.getSettings).toHaveBeenCalledTimes(2))
+
+    await act(async () => resourceSwitch(container!, 'Other resource').click())
+    expect(resourceSwitch(container!, 'Other resource').checked).toBe(true)
+    await act(async () => secondWrite.resolve())
+    await vi.waitFor(() => expect(admin.getSettings).toHaveBeenCalledTimes(3))
+    await act(async () => rollbackRelease.resolve())
+    await act(async () => newestRefresh.reject(new Error('newest refresh failed')))
+    await vi.waitFor(() => expect(resourceSwitch(container!, 'Fixture resource').checked).toBe(false))
+    expect(resourceSwitch(container!, 'Other resource').checked).toBe(true)
+    expect(admin.setResourceEnabled).toHaveBeenNthCalledWith(1, 'openapi', PATTERN, true)
+    expect(admin.setResourceEnabled).toHaveBeenNthCalledWith(2, 'openapi', OTHER_PATTERN, true)
+    expect(admin.getSettings).toHaveBeenCalledTimes(4)
+    expect(state.toast).toHaveBeenCalledExactlyOnceWith({ title: 'first setter failed', variant: 'error' })
   })
 
   it('B-PARENT-003 applies only the newest overlapping refresh on one AdminApi', async () => {

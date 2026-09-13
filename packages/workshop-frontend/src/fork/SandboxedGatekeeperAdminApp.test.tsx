@@ -1,15 +1,18 @@
 // @vitest-environment jsdom
+/* eslint-disable react/react-in-jsx-scope */
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { RpcStub, RpcTarget, newMessagePortRpcSession, type RpcStub as RpcStubType } from 'capnweb'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { AdminApi, AdminResourceVendor, AdminSettingsView } from '@gadgets/workshop-shared/api'
+import type { AdminApi, AdminResourceVendor, AdminSettingsView, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import SandboxedGatekeeperApp, { type AdminResourceControl } from '../SandboxedGatekeeperApp'
 
 const mocks = vi.hoisted(() => {
-  const listGadgets = vi.fn(async () => [])
-  return { navigate: vi.fn(), listGadgets, authenticatedApi: { listGadgets } }
+  const listGadgets = vi.fn<AuthenticatedApi['listGadgets']>(async () => [])
+  const getAdminApi = vi.fn<AuthenticatedApi['getAdminApi']>()
+  const navigate = vi.fn<(options: unknown) => void>()
+  return { navigate, listGadgets, getAdminApi, authenticatedApi: { listGadgets, getAdminApi } }
 })
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => mocks.navigate }))
 vi.mock('../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: mocks.authenticatedApi }) }))
@@ -22,6 +25,7 @@ const PATTERN = 'https://fixture.invalid/resource/*'
 interface Host extends RpcTarget {
   getResourceEnabled(pattern: string): Promise<boolean>
   setResourceEnabled(pattern: string, enabled: boolean): Promise<void>
+  setPresenting(active: boolean): Promise<unknown>
 }
 class EmptyUi extends RpcTarget {}
 
@@ -39,8 +43,8 @@ function fakeAdmin(options: {
   setResourceEnabled?: AdminApi['setResourceEnabled']
 } = {}): RpcStubType<AdminApi> {
   return {
-    getSettings: vi.fn(options.getSettings ?? (async () => settings(undefined))),
-    setResourceEnabled: vi.fn(options.setResourceEnabled ?? (async () => undefined)),
+    getSettings: vi.fn<AdminApi['getSettings']>(options.getSettings ?? (async () => settings(undefined))),
+    setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>(options.setResourceEnabled ?? (async () => undefined)),
   } as unknown as RpcStubType<AdminApi>
 }
 function deferred<T>() {
@@ -127,12 +131,14 @@ describe('Sandboxed gatekeeper admin resource control', () => {
   it('B-HOST-007 gives ordinary frames no ambient admin power', async () => {
     const getSettings = vi.fn<AdminApi['getSettings']>()
     const setResourceEnabled = vi.fn<AdminApi['setResourceEnabled']>()
-    fakeAdmin({ getSettings, setResourceEnabled })
+    const ambientAdmin = fakeAdmin({ getSettings, setResourceEnabled })
+    mocks.getAdminApi.mockResolvedValue(ambientAdmin)
     const { host } = handshake(await render())
     await expect(host.getResourceEnabled(PATTERN)).rejects.toThrow('Admin resource control is not available in this frame.')
     await expect(host.setResourceEnabled(PATTERN, false)).rejects.toThrow('Admin resource control is not available in this frame.')
     expect(getSettings).not.toHaveBeenCalled()
     expect(setResourceEnabled).not.toHaveBeenCalled()
+    expect(mocks.getAdminApi).not.toHaveBeenCalled()
   })
 
   it('B-HOST-008 preserves the session across an equivalent control rerender', async () => {
@@ -199,7 +205,10 @@ describe('Sandboxed gatekeeper admin resource control', () => {
     const iframe = await render({ vendorId: 'fixed', admin: fakeAdmin({ getSettings: async () => settings(false) }) })
     const first = handshake(iframe)
     await expect(first.host.getResourceEnabled(PATTERN)).resolves.toBe(false)
+    await act(async () => { await first.host.setPresenting(true) })
+    expect(iframe.style.position).toBe('fixed')
     const second = handshake(iframe)
+    expect(iframe.style.position).toBe('')
     await expect(rejectsWithin(first.host.getResourceEnabled(PATTERN))).resolves.toBe(true)
     await expect(rejectsWithin(second.host.getResourceEnabled(PATTERN))).resolves.toBe(true)
   })

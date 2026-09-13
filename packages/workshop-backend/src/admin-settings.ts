@@ -594,8 +594,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 // validation+forwarding facade over the AdminSettings DO — fully user-independent — so a disabled
 // gatekeeper/resource can't be re-enabled via a crafted request, and the client never receives a
 // stub to the DO's internal methods. Covers branding, agent instructions, signups, gatekeeper
-// resources, and vendor administration frames.
-// connector/resource availability; authentication config stays env-var driven.
+// resources and vendor administration frames; authentication config stays env-var driven.
 @validateRpc()
 export class AdminApiImpl extends RpcTarget implements AdminApi {
   /**

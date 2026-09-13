@@ -409,16 +409,6 @@ setup and their fixtures were removed once knitli-site's native OpenAPI connecto
 `scripts/fork/openapi-host-retired.test.ts` fails if any of it comes back. DO storage rows those
 features wrote are left in place; typed-storage ignores undeclared collections.
 
-### Vendor-owned deployment administration frames
-
-- **Where:** the optional shared API seam, `packages/workshop-backend/src/fork/admin-gatekeeper-apps.ts`,
-  `packages/workshop-frontend/src/fork/`, and the fork-owned regression files.
-- **What:** deployment administrators may open a vendor-advertised `startAdminUi` frame without a
-  provider account. The shared/backend/frontend upstream files only carry the optional seam and
-  bounded host wiring; enumeration, opening, panel lifecycle, and regressions remain fork-owned.
-- **Why:** connector administration is deployment configuration, so requiring a personal provider
-  account would create unrelated authority and prevent first-use setup.
-
 ### Connect links are bound to the initiating Access identity in four of twelve hand-rolled gatekeepers
 
 - **Where:** `packages/backend-utils/src/fork/connect-initiator.ts` (fork-owned), called from the

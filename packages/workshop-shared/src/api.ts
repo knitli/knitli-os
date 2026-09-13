@@ -1065,10 +1065,9 @@ export const getAiExecutorAdminErrorCode = aiExecutorAdminErrors.getCode;
 /**
  * Capability for managing deployment-wide admin settings, obtained via
  * AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
- * capability is minted, so these methods don't re-check. Covers branding, agent instructions, vendor
- * administration frames, and
- * which gatekeeper connectors/resources are offered — NOT authentication config (that's env-var
- * driven). Each setter throws on invalid input.
+ * capability is minted, so these methods don't re-check. Covers branding, agent instructions,
+ * vendor administration frames, and which gatekeeper connectors/resources are offered — NOT
+ * authentication config (that's env-var driven). Each setter throws on invalid input.
  */
 export interface AdminApi {
   /** List vendor-owned administration frames available to this deployment administrator. */

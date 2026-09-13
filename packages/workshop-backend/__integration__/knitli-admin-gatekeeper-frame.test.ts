@@ -15,6 +15,7 @@ let admin: RpcStub<AdminApi>;
 
 async function connect() {
   const response = await exports.default.fetch(new Request('https://workshop.invalid/api', { headers: { Upgrade: 'websocket' } }));
+  expect(response.status).toBe(101);
   if (!response.webSocket) throw new Error('Expected WebSocket.');
   response.webSocket.accept();
   return newWebSocketRpcSession<PublicApi>(response.webSocket);
@@ -40,15 +41,28 @@ describe('admin gatekeeper frames', () => {
     await expect(admin.listGatekeeperAdminApps()).resolves.toEqual([{ id: 'adminframe', title: 'OpenAPI segments', icon: undefined }]);
     const frame = await admin.getGatekeeperAdminApp('adminframe');
     expect(frame).not.toBeNull();
-    const calls = await control.getCalls();
-    expect(calls).toContainEqual({ vendorId: 'adminframe', method: 'startAdminUi', args: [{ isAdmin: true }] });
-    expect(calls.filter((call) => call.method === 'connectAccount' || call.method === 'createAccount')).toEqual([]);
-    frame?.ui[Symbol.dispose]();
+    try {
+      const calls = await control.getCalls();
+      expect(calls).toContainEqual({ vendorId: 'adminframe', method: 'startAdminUi', args: [{ isAdmin: true }] });
+      expect(calls.filter((call) => call.method === 'connectAccount' || call.method === 'createAccount')).toEqual([]);
+    } finally {
+      frame?.ui[Symbol.dispose]();
+    }
   });
 
   it('B-HOST-002 mints no AdminApi for a normal authenticated user', async () => {
-    expect(await userSession.getAdminApi()).toBeNull();
-    expect(await control.getCalls()).toEqual([]);
+    const userAdmin = await userSession.getAdminApi();
+    try {
+      if (userAdmin) {
+        await userAdmin.listGatekeeperAdminApps();
+        const frame = await userAdmin.getGatekeeperAdminApp('adminframe');
+        frame?.ui[Symbol.dispose]();
+      }
+      expect(userAdmin).toBeNull();
+      expect(await control.getCalls()).toEqual([]);
+    } finally {
+      userAdmin?.[Symbol.dispose]();
+    }
   });
 
   it('B-HOST-003 honors the advertised discriminator and missing IDs', async () => {
@@ -61,7 +75,10 @@ describe('admin gatekeeper frames', () => {
   it('B-HOST-004 preserves the frame capability across the admin RPC hops', async () => {
     const frame = await admin.getGatekeeperAdminApp('adminframe');
     if (!frame) throw new Error('Expected frame.');
-    await expect((frame.ui as RpcStub<FrameUi>).ping()).resolves.toBe('admin-frame-ready');
-    frame.ui[Symbol.dispose]();
+    try {
+      await expect((frame.ui as RpcStub<FrameUi>).ping()).resolves.toBe('admin-frame-ready');
+    } finally {
+      frame.ui[Symbol.dispose]();
+    }
   });
 });

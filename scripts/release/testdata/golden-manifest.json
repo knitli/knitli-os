@@ -1088,6 +1088,36 @@
       "vars": {}
     },
     "workshop-backend": {
+      "assetsConfig": {
+        "not_found_handling": "single-page-application",
+        "run_worker_first": [
+          "/api",
+          "/api/*",
+          "/blueprint-screenshot/*"
+        ],
+        "variants": {
+          "access": {
+            "manifest": {
+              "/assets/app.js": {
+                "hash": "8d2e76555a7166d0e6b7da22cabfa055",
+                "size": 28
+              },
+              "/assets/print.css": {
+                "hash": "924064d945426fd30c24d0d24235610d",
+                "size": 19
+              },
+              "/assets/shared.css": {
+                "hash": "924064d945426fd30c24d0d24235610d",
+                "size": 19
+              },
+              "/index.html": {
+                "hash": "03a936d819bd1a6df9f9d9f16f1df3a5",
+                "size": 41
+              }
+            }
+          }
+        }
+      },
       "bindings": [
         {
           "name": "BLUEPRINTS",
@@ -1111,6 +1141,10 @@
         {
           "name": "LOADER",
           "type": "worker_loader"
+        },
+        {
+          "name": "ASSETS",
+          "type": "assets"
         },
         {
           "name": "WORKERS_AI",

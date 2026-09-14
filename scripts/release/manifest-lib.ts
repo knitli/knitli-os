@@ -116,6 +116,10 @@ export interface WranglerConfig {
   browser?: BindingDecl;
   /** Artifacts binding — closed beta, cut from customer manifests. */
   artifacts?: BindingDecl;
+  /** Worker limits. First-party deployment tuning; cut from customer manifests. */
+  limits?: { cpu_ms?: number };
+  /** Smart Placement mode. First-party deployment tuning; cut from customer manifests. */
+  placement?: { mode?: string };
   /** Static-asset serving config (the router). */
   assets?: {
     binding?: string;
@@ -251,6 +255,11 @@ const HANDLED_CONFIG_KEYS = new Set([
   // gatekeeper-context's Artifacts binding is closed-beta and cannot be provisioned in arbitrary
   // user accounts; it is dropped from customer manifests (the gatekeeper degrades gracefully).
   "artifacts",
+  // Worker limits (cpu_ms) and Smart Placement tune first-party deployments with long-running
+  // invocations. The v1 deploy contract has no field for them — the renderer would not know
+  // what to do with one — so customer instances get platform defaults. If it ever learns
+  // them, emit them from buildWorkerEntry and bump MANIFEST_VERSION.
+  "limits", "placement",
 ]);
 
 const ARTIFACTS_CUT_ALLOWED = new Set(["gatekeeper-context"]);

@@ -13,7 +13,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { collectAssets, collectModules, stableStringify } from "./hash-lib.ts";
 import {
-  generateManifest, readDeployablePackages, readDeployInputs, releaseShortName,
+  buildWorkerEntry, generateManifest, readDeployablePackages, readDeployInputs,
+  releaseShortName,
 } from "./manifest-lib.ts";
 
 const RELEASE = dirname(fileURLToPath(import.meta.url));
@@ -114,6 +115,10 @@ test("worker entries carry the deploy contract", () => {
   assert.deepEqual(
       backend.bindings.find((b) => b.name === "WORKERS_AI"),
       { type: "ai", name: "WORKERS_AI" });
+  // Gadget exports render in a real browser; the binding ships to customer instances.
+  assert.deepEqual(
+      backend.bindings.find((b) => b.name === "BROWSER"),
+      { type: "browser", name: "BROWSER" });
   assert.ok(backend.gatekeeperBindingExpansion);
   assert.equal(backend.gatekeeperBindingExpansion.entrypoint, "GatekeeperVendor");
   assert.equal(backend.vars.PUBLIC_BASE_URL, "$PUBLIC_BASE_URL");
@@ -204,6 +209,20 @@ test("worker entries carry the deploy contract", () => {
       assert.equal(mod.r2Key, `blobs/modules/${mod.sha256}`);
     }
   }
+});
+
+// `limits`/`placement` are first-party deployment tuning with no v1-contract field: the
+// generator accepts them on any worker and the entry carries neither (customer instances
+// get platform defaults).
+test("worker limits and placement are read and dropped", () => {
+  const entry = buildWorkerEntry({
+    pkgName: "workshop-backend",
+    config: { limits: { cpu_ms: 300000 }, placement: { mode: "smart" } },
+    mainModule: "server.js",
+    modules: [],
+  });
+  assert.ok(!("limits" in entry) && !("placement" in entry),
+      "limits/placement must not reach the deploy contract");
 });
 
 // The deploy wizard sends a gatekeeper's manifest shortName as the install slug verbatim, and

@@ -8,18 +8,17 @@ import { test } from "node:test";
 import {
   ancestry,
   auditFormatDrift,
+  auditOwnedPrefixCollisions,
   auditRemovedPaths,
   authoritativeUpstreamRef,
-  FORK_OWNED_PREFIXES,
-  FORMAT_EXCEPTIONS,
   isForkOwned,
   isShallowRepository,
   isSourceFile,
   locateMerge,
   normalizeForFormatComparison,
-  REMOVED_UPSTREAM_PATHS,
   UsageError,
 } from "./upstream-merge-audit.ts";
+import { forkBoundary } from "./fork-boundary.ts";
 
 test("reflow is normalised away, so a reformat reads as no change", () => {
   const upstreamStyle = `export function f(
@@ -57,15 +56,6 @@ test("fork-owned trees are exempt, upstream-owned files are not", () => {
   assert.equal(isForkOwned("packages/workshop-backend/src/overseer.ts"), false);
 });
 
-test("every declared fork-owned prefix is a path prefix, not a bare name", () => {
-  for (const prefix of FORK_OWNED_PREFIXES) {
-    assert.ok(
-      prefix.includes("/"),
-      `${prefix} must name a directory or file path so it cannot match unrelated packages`,
-    );
-  }
-});
-
 test("only files the normaliser can read are format-checked", () => {
   for (const path of ["src/a.ts", "src/a.tsx", "b.mjs", "c.js"]) {
     assert.equal(isSourceFile(path), true, path);
@@ -93,16 +83,6 @@ test("an explicit --merge that is not a merge is an error", () => {
     inRepo(dir, () => assert.throws(() => locateMerge("HEAD"), /not a merge commit/));
   } finally {
     rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("every deliberately-removed upstream path records why", () => {
-  const entries = Object.entries(REMOVED_UPSTREAM_PATHS);
-  assert.ok(entries.length > 0, "the list should not be silently emptied");
-  for (const [path, reason] of entries) {
-    assert.ok(path.includes("/"), `${path} must be a repository path`);
-    // The reason is the whole point: a bare list rots into "why is this here?" within a sync or two.
-    assert.ok(reason.length > 30, `${path} needs a reason someone can act on, got: ${reason}`);
   }
 });
 
@@ -218,7 +198,7 @@ for (const variation of ["upstream only", "fork reflow", "fork comment", "unavai
 
 for (const variation of ["exact pair", "changed fork", "changed upstream", "unrelated path"] as const) {
   test(`comment-only formatting exception: ${variation}`, () => {
-    const exception = FORMAT_EXCEPTIONS[0]!;
+    const exception = forkBoundary().formatExceptions[0]!;
     // Ordinary test jobs have shallow history. Reconstruct the reviewed comment-only
     // delta from checked-in content, verifying both blob IDs before exercising Git trees.
     const fork = readFileSync(new URL(`../../${exception.path}`, import.meta.url), "utf8");
@@ -439,7 +419,7 @@ test("surviving fork trees are explicitly fork owned", () => {
     "scripts/fork/connect-initiator-enforced.test.ts",
   ]) {
     assert.ok(
-      FORK_OWNED_PREFIXES.some((prefix) => path.startsWith(prefix)),
+      forkBoundary().forkOwned.some((entry) => path.startsWith(entry.path)),
       path,
     );
   }
@@ -448,6 +428,36 @@ test("surviving fork trees are explicitly fork owned", () => {
   assert.equal(isForkOwned("packages/workshop-shared/src/fork/openapi-host-binding.ts"), false);
   assert.equal(isForkOwned("packages/backend-utils/src/logger.ts"), false);
   assert.equal(isForkOwned("packages/gatekeeper-github/src/github.ts"), false);
+});
+
+test("a Tier-1 prefix present upstream is a collision", () => {
+  // The check reads the live boundary, so the fixture plants the first live Tier-1 prefix
+  // rather than hardcoding a path -- it follows config edits instead of breaking on them.
+  const { path: prefix } = forkBoundary().forkOwned[0]!;
+  const planted = prefix.endsWith("/") ? `${prefix}probe.ts` : prefix;
+  const dir = scratchRepo();
+  const run = (...args: string[]) =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+  try {
+    const file = join(dir, planted);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "export const probe = 1;\n");
+    run("add", planted);
+    run("commit", "-q", "-m", "upstream grows into Tier 1");
+    run("branch", "-f", "upstream", "HEAD");
+    inRepo(dir, () => {
+      assert.deepEqual(auditOwnedPrefixCollisions("upstream"), [{ prefix, paths: [planted] }]);
+    });
+    assert.equal(runAudit(dir, "--upstream", "upstream"), 1,
+      "the CLI must report the collision, not pass after skipping it");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("no collision when upstream lacks every Tier-1 path", () => {
+  const dir = scratchRepo();
+  try {
+    inRepo(dir, () => assert.deepEqual(auditOwnedPrefixCollisions("upstream"), []));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 /** A real sync whose ours-only resolution silently drops a clean upstream edit. */

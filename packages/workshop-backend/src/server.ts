@@ -1,14 +1,15 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
-import { PendingLogin, LoginConnectCallbackImpl } from "./auth/login-flow.js";
+import { PendingLogin, LoginConnectCallbackImpl, EXPIRED_MESSAGE } from "./auth/login-flow.js";
+import { hashPresentedSecret, newSecretToken } from "./connect-handoff.js";
 import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from "./admin-config.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
@@ -321,11 +322,16 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return retryOnDoReset(() => this.#user.listGatekeeperVendors(filter));
   }
 
-  connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<{url: string}> {
+  connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<ConnectFlowStart> {
     return this.#user.connectAccount(vendorId, resourceUrlPatterns, this.#initiator());
   }
 
-  ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
+  completeConnectHandoff(ticket: string, nonce: string): Promise<void> {
+    return this.#user.completeConnectHandoff(ticket, nonce);
+  }
+
+  ensureAccountResources(accountId: number, resourceUrlPatterns: string[])
+      : Promise<ConnectFlowStart | null> {
     return this.#user.ensureAccountResources(accountId, resourceUrlPatterns, this.#initiator());
   }
 
@@ -347,7 +353,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.disconnectAccount(accountId);
   }
 
-  reconnectAccount(accountId: number): Promise<{url: string}> {
+  reconnectAccount(accountId: number): Promise<ConnectFlowStart> {
     return this.#user.reconnectAccount(accountId, this.#initiator());
   }
 
@@ -628,18 +634,18 @@ async function serveBlueprintScreenshot(env: Env, blueprintId: string): Promise<
   });
 }
 
-// Returned by startGatekeeperLogin(). Wraps the PendingLogin DO so the client awaits the login
+// Returned by startGatekeeperLogin(). Wraps the PendingLogin DO so the client redeems the login
 // result through a capability (this stub) rather than a guessable id — no login id is ever exposed
-// to the client. Disposing the stub (e.g. when the pop-up closes or the component unmounts) cancels
-// the in-flight wait and lets the DO be evicted.
+// to the client. The stub alone is not enough: receive() yields the token only once the popup has
+// confirmed the attempt's ticket with the nonce (PublicApi.confirmLogin).
 @validateRpc()
 class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
   constructor(private pending: DurableObjectStub<PendingLogin>) {
     super();
   }
 
-  async wait(): Promise<string> {
-    return await this.pending.awaitResult();
+  async receive(): Promise<string | null> {
+    return await this.pending.receive();
   }
 }
 
@@ -660,7 +666,8 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     return getServerConfig(this.env);
   }
 
-  async startGatekeeperLogin(vendorId: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }> {
+  async startGatekeeperLogin(vendorId: string)
+      : Promise<{ url: string; nonce: string; attempt: RpcStub<LoginAttempt> }> {
     if (!getAuthGatekeeperAllowlist(this.env).includes(vendorId)) {
       throw new Error(`Sign-in via "${vendorId}" is not enabled on this deployment.`);
     }
@@ -669,10 +676,16 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     const desc = await vendor.describe();
     if (!desc.providesAuth) throw new Error(`"${vendorId}" does not provide authentication.`);
 
-    // The PendingLogin DO is the rendezvous between this request and the (separate) OAuth-callback
-    // invocation. The client never sees its id — we hand back an `attempt` stub instead.
-    const pendingId = this.ctx.exports.PendingLogin.newUniqueId();
+    // The PendingLogin DO is the rendezvous between this request, the (separate) OAuth-callback
+    // invocation, and the popup's confirmLogin(). Its name is the hash of a secret only the popup
+    // will hold, so confirmLogin can address it while the client side holds no id at all; the client
+    // redeems through the `attempt` capability.
+    const { secret, hash } = await newSecretToken();
+    const pendingId = this.ctx.exports.PendingLogin.idFromName(hash);
     const pending = this.ctx.exports.PendingLogin.get(pendingId);
+    // Mark the attempt as started before the gatekeeper can deliver to it, so receive() answers null
+    // while it is still running instead of reporting it expired.
+    await pending.begin();
     const callback = this.ctx.exports.LoginConnectCallbackImpl(
         { props: { pendingId: pendingId.toString(), vendorId } });
     // For most providers, sign-in needs only minimal scopes to verify the user's email (the grant is
@@ -688,7 +701,16 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     const { url } = await vendor.connectAccount(callback, options);
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
-    return { url, attempt: new LoginAttemptImpl(pending) };
+    return { url, nonce: secret.toHex(), attempt: new LoginAttemptImpl(pending) };
+  }
+
+  async confirmLogin(ticket: string, nonce: string): Promise<void> {
+    // A nonce naming a DO that never began finds no result there and is refused as expired; reading
+    // an empty DO creates nothing. The ticket is checked by confirm() itself.
+    const nonceHash = await hashPresentedSecret(nonce);
+    if (nonceHash === undefined) throw new Error(EXPIRED_MESSAGE);
+    const id = this.ctx.exports.PendingLogin.idFromName(nonceHash);
+    await this.ctx.exports.PendingLogin.get(id).confirm(ticket);
   }
 
   async authenticate(token: string): Promise<AuthenticatedApi> {

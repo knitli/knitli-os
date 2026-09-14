@@ -5,8 +5,9 @@
 // conflicted on each sync and none of it needed to be there. See docs/fork-maintenance.md.
 //
 // These cover the privacy-readiness work: an observer's admission must not be published while a
-// collaborator's scope is still in doubt, concurrent admissions must serialize, and a session whose
-// connection becomes bound mid-flight must be refused rather than quietly retained.
+// collaborator's scope is still in doubt, concurrent admissions must serialize, and a session live
+// across a scope widening is severed by the restart (upstream #382) rather than quietly retained:
+// every client re-opens and re-verifies against the new scope.
 //
 // Nothing is stubbed but the network. The real workshop-backend runs under wrangler, tests speak
 // Cap'n Web over a WebSocket to /api exactly as the browser does, and the gatekeeper is a real
@@ -118,18 +119,6 @@ async function observerIds(label: string): Promise<string[]> {
     throw new Error(`Reading observer IDs failed with ${res.status}: ${await res.text()}`);
   }
   return ((await res.json()) as { ids: string[] }).ids;
-}
-
-async function sessionCounts(resourceUrl: string): Promise<{ started: number; disposed: number }> {
-  const res = await harness.fetchWorker(
-    TEST_GATEKEEPER_WORKER,
-    "http://gatekeeper-test.test/control/session-counts",
-    { method: "POST", body: JSON.stringify({ resourceUrl }) },
-  );
-  if (res.status !== 200) {
-    throw new Error(`Reading session counts failed with ${res.status}: ${await res.text()}`);
-  }
-  return (await res.json()) as { started: number; disposed: number };
 }
 
 function barrierKey(kind: string, resourceUrl: string): string {
@@ -272,7 +261,7 @@ describe("observer readiness and privacy", () => {
     });
   });
 
-  it.concurrent("blocks a late connection until a previously admitted build collaborator reopens", async () => {
+  it.concurrent("leaves a late connection usable while the collaborator verifies on next open", async () => {
     await withSession(async (publicApi) => {
       const [alice, bob] = nextUsernames("latealice", "latebob");
       using aliceApi = await signUp(publicApi, alice);
@@ -285,17 +274,20 @@ describe("observer readiness and privacy", () => {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
 
-      // Bob is admitted while the workspace has no account-requiring connections. This must still
-      // persist his observer identity, otherwise a connection added later cannot see that a current
-      // collaborator has not verified it.
+      // Bob is admitted while the workspace has no account-requiring connections, then leaves. A
+      // restart severs live sessions, so with nobody connected the late connection disturbs no one.
       (await bobApi.openGadget(gadgetId))[Symbol.dispose]();
 
       const aliceAccount = await provisionAccount(aliceApi);
       using late = await ownerWorkspace.newGatekeeper(aliceAccount.id, thingUrl("late-build"));
       if (!late) throw new Error("Failed to create the late test connection");
+      const lateId = await late.getId();
 
-      await expect(late.openSession()).rejects.toThrow(/collaborators.*re-opened/i);
+      // The owner uses the new connection immediately: admission-time verification governs Bob's
+      // opens, never the owner's reads.
+      using _session = await late.openSession();
 
+      // Bob's next open is where the late connection gets verified: he is asked about exactly it.
       const recorder = new ObserverConfigRecorder().alwaysChoose(
         bobAccount.id,
         MAX_OBSERVER_PROMPTS,
@@ -306,13 +298,12 @@ describe("observer readiness and privacy", () => {
       } finally {
         callback[Symbol.dispose]();
       }
-
-      using _session = await late.openSession();
       expect(recorder.callCount).toBe(1);
+      expect(recorder.calls[0].map(need => need.gatekeeperId)).toEqual([lateId]);
     });
   });
 
-  it.concurrent("records zero-scope opens so a later connection requires reconfiguration", async () => {
+  it.concurrent("records zero-scope opens so a later connection is verified on next open", async () => {
     await withSession(async (publicApi) => {
       const [alice, bob] = nextUsernames("concurrentalice", "concurrentbob");
       using aliceApi = await signUp(publicApi, alice);
@@ -327,14 +318,16 @@ describe("observer readiness and privacy", () => {
 
       // These requests have no in-scope connection to configure. Their purpose is not an observer
       // identity race (the controlled in-scope test below owns that assertion), but to prove the
-      // zero-scope admission record survives repeated opens and is consulted when scope expands.
+      // zero-scope admission record survives repeated opens and the later connection is still
+      // verified at the next one.
       const opened = await Promise.all([bobApi.openGadget(gadgetId), bobApi.openGadget(gadgetId)]);
       for (const workspace of opened) workspace[Symbol.dispose]();
 
       const aliceAccount = await provisionAccount(aliceApi);
       using late = await ownerWorkspace.newGatekeeper(aliceAccount.id, thingUrl("stable-id"));
       if (!late) throw new Error("Failed to create the late test connection");
-      await expect(late.openSession()).rejects.toThrow(/collaborators.*re-opened/i);
+      const lateId = await late.getId();
+      using _session = await late.openSession();
 
       const recorder = new ObserverConfigRecorder().alwaysChoose(
         bobAccount.id,
@@ -348,6 +341,8 @@ describe("observer readiness and privacy", () => {
         callback[Symbol.dispose]();
       }
       bobWorkspace[Symbol.dispose]();
+      expect(recorder.callCount).toBe(1);
+      expect(recorder.calls[0].map(need => need.gatekeeperId)).toEqual([lateId]);
     });
   });
 
@@ -472,7 +467,7 @@ describe("observer readiness and privacy", () => {
     });
   });
 
-  it.concurrent("rejects a startSession that becomes unreadied and disposes its returned session", async () => {
+  it.concurrent("fails a session started across a scope widening, then re-opens clean", async () => {
     await withSession(async (publicApi) => {
       const [alice, bob] = nextUsernames("startalice", "startbob");
       using aliceApi = await signUp(publicApi, alice);
@@ -492,46 +487,64 @@ describe("observer readiness and privacy", () => {
       }
 
       // This unbound connection is outside Bob's initial use scope, so his open stores an empty
-      // observer choice. Binding it while startSession is paused makes the post-await readiness
-      // check mandatory rather than merely a duplicate of the initial check.
-      const recorder = new ObserverConfigRecorder().alwaysChoose(
-        bobAccount.id,
-        MAX_OBSERVER_PROMPTS,
-      );
-      const callback = stubFor(recorder);
-      try {
-        (await bobApi.openGadget(gadgetId, undefined, callback))[Symbol.dispose]();
-      } finally {
-        callback[Symbol.dispose]();
-      }
+      // observer choice. He stays connected: binding the connection while his use session is live
+      // is the widening that restarts the workspace, severing the session being opened mid-flight.
+      const bobHeld = await bobApi.openGadget(gadgetId);
+      const connId = await connection.getId();
       await controlBarrier("arm-barrier", key);
       const opening = connection.openSession();
       try {
         await waitForBarrier(key);
-        await gadget.bind("TEST_THING", await connection.getId());
+        await gadget.bind("TEST_THING", connId);
       } finally {
         await controlBarrier("release-barrier", key);
       }
-      await expect(opening).rejects.toThrow(/collaborators.*re-opened/i);
-      await waitFor("the post-readiness rejected session to be disposed", async () => {
-        const counts = await sessionCounts(resourceUrl);
-        return counts.started === 1 && counts.disposed === 1 ? true : null;
-      });
+      // Either the pending-restart guard or the abort itself fails the in-flight open; what matters
+      // is that no session quietly survives the widening it raced.
+      await expect(opening).rejects.toThrow(/restart|abort|closed|disconnect|dispos|not a function/i);
+      bobHeld[Symbol.dispose]();
 
-      // Bob now configures the newly in-scope connection; only then may the owner obtain a session.
+      // Everyone re-opens against the widened scope: the owner gets a working session, and Bob's
+      // re-open verifies exactly the newly in-scope connection. The session open is part of the
+      // probe: openGadget succeeding does not mean the abort landed yet.
+      const reopened = await waitFor("the owner to reconnect to the restarted workspace", async () => {
+        const freshPublicApi = connect(harness.url);
+        try {
+          const freshAliceApi = await logIn(freshPublicApi, alice);
+          const freshOwner = await freshAliceApi.openGadget(gadgetId);
+          const freshConnection = await freshOwner.getGatekeeperById(connId);
+          const freshSession = await freshConnection.openSession();
+          return { freshAliceApi, freshOwner, freshPublicApi, freshConnection, freshSession };
+        } catch {
+          freshPublicApi[Symbol.dispose]();
+          return null;
+        }
+      });
+      reopened.freshSession[Symbol.dispose]();
+      reopened.freshConnection[Symbol.dispose]();
+      reopened.freshOwner[Symbol.dispose]();
+      reopened.freshAliceApi[Symbol.dispose]();
+      reopened.freshPublicApi[Symbol.dispose]();
+
+      // Bob's pre-restart session died with the abort, so he re-opens over a fresh connection,
+      // where the newly in-scope connection gets verified.
       const reconfigureRecorder = new ObserverConfigRecorder().alwaysChoose(
         bobAccount.id,
         MAX_OBSERVER_PROMPTS,
       );
-      const reconfigureCallback = stubFor(reconfigureRecorder);
+      const bobFresh = connect(harness.url);
       try {
-        (await bobApi.openGadget(gadgetId, undefined, reconfigureCallback))[Symbol.dispose]();
+        const bobFreshApi = await logIn(bobFresh, bob);
+        const reconfigureCallback = stubFor(reconfigureRecorder);
+        try {
+          (await bobFreshApi.openGadget(gadgetId, undefined, reconfigureCallback))[Symbol.dispose]();
+        } finally {
+          reconfigureCallback[Symbol.dispose]();
+        }
       } finally {
-        reconfigureCallback[Symbol.dispose]();
+        bobFresh[Symbol.dispose]();
       }
-      using session = await connection.openSession();
       expect(reconfigureRecorder.callCount).toBe(1);
-      session[Symbol.dispose]();
     });
   });
 
@@ -662,7 +675,7 @@ describe("observer readiness and privacy", () => {
     });
   });
 
-  it.concurrent("blocks a retained use-scoped session after its connection becomes bound", async () => {
+  it.concurrent("severs retained sessions when binding widens use scope, then re-verifies", async () => {
     await withSession(async (publicApi) => {
       const [alice, bob] = nextUsernames("usealice", "usebob");
       using aliceApi = await signUp(publicApi, alice);
@@ -673,6 +686,7 @@ describe("observer readiness and privacy", () => {
       using ownerWorkspace = await aliceApi.newGadget();
       using connection = await ownerWorkspace.newGatekeeper(aliceAccount.id, thingUrl("use-bound"));
       if (!connection) throw new Error("Failed to create the test connection");
+      const connId = await connection.getId();
       using retainedSession = (await connection.openSession()) as RpcStub<TestSessionApi>;
       using gadget = await ownerWorkspace.createGadget("Test Gadget", undefined, "TEST_GADGET");
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
@@ -681,11 +695,12 @@ describe("observer readiness and privacy", () => {
       }
 
       // An unbound connection is outside a use collaborator's scope, so Bob is admitted with an
-      // empty choice set while the owner already holds a session to that connection.
-      (await bobApi.openGadget(gadgetId))[Symbol.dispose]();
+      // empty choice set while the owner already holds a session to that connection. He stays
+      // connected: binding it widens his live session's scope, which restarts the workspace.
+      const bobHeld = await bobApi.openGadget(gadgetId);
 
-      // Queue one action and enable one hook while the connection is still outside Bob's scope.
-      // Their later egress paths must re-check readiness rather than trusting submit/bind time.
+      // Queue one action and one (disabled) hook while the connection is still outside Bob's
+      // scope. Both records must survive the restart their widening causes.
       await retainedSession.act();
       const pendingAction = (await ownerWorkspace.listActions()).entries.find(
         (action) => action.description.title === "Test action",
@@ -696,39 +711,76 @@ describe("observer readiness and privacy", () => {
         (entry) => entry.description.title === "Test hook",
       );
       if (!hook) throw new Error("Fixture hook was not recorded");
-      await ownerWorkspace.enableHook(hook.id);
 
-      await gadget.bind("TEST_THING", await connection.getId());
+      await gadget.bind("TEST_THING", connId);
 
-      await expect(retainedSession.observe()).rejects.toThrow(/collaborators.*re-opened/i);
-      await expect(retainedSession.act()).rejects.toThrow(/collaborators.*re-opened/i);
-      await expect(retainedSession.bindHook()).rejects.toThrow(/collaborators.*re-opened/i);
-      await expect(ownerWorkspace.approveAction(pendingAction.id)).rejects.toThrow(
-        /collaborators.*re-opened/i,
-      );
-      await expect(startFixtureHook(thingUrl("use-bound"))).resolves.toMatchObject({
-        status: 409,
-        error: expect.stringMatching(/collaborators.*re-opened/i),
+      // The restart severs every live session: nothing retained from before the bind may work.
+      // The fell-check takes any rejection (a call racing the abort can still land); afterwards
+      // every retained stub is dead, although the exact shape depends on where the abort caught
+      // it -- a retryable, a WebSocket close, or a client-side dispatch TypeError.
+      await waitFor("the restart to fell the retained session", () =>
+        retainedSession.observe().then(() => null, () => true));
+      const severed = /restart|abort|closed|disconnect|dispos|not a function/i;
+      await expect(retainedSession.observe()).rejects.toThrow(severed);
+      await expect(retainedSession.act()).rejects.toThrow(severed);
+      await expect(retainedSession.bindHook()).rejects.toThrow(severed);
+      await expect(ownerWorkspace.approveAction(pendingAction.id)).rejects.toThrow(severed);
+      bobHeld[Symbol.dispose]();
+
+      // Everyone re-opens against the widened scope. The queued action and hook survived, the hook
+      // enables without a second restart (its connection is already in scope via the binding), and
+      // fresh sessions work. The session open is part of the probe: openGadget succeeding does not
+      // mean the abort landed yet.
+      const reopened = await waitFor("the owner to reconnect to the restarted workspace", async () => {
+        const freshPublicApi = connect(harness.url);
+        try {
+          const freshAliceApi = await logIn(freshPublicApi, alice);
+          const freshOwner = await freshAliceApi.openGadget(gadgetId);
+          const freshConnection = await freshOwner.getGatekeeperById(connId);
+          const freshSession = await freshConnection.openSession();
+          return { freshAliceApi, freshOwner, freshPublicApi, freshConnection, freshSession };
+        } catch {
+          freshPublicApi[Symbol.dispose]();
+          return null;
+        }
       });
+      try {
+        await reopened.freshOwner.enableHook(hook.id);
+        const freshSession = reopened.freshSession as RpcStub<TestSessionApi>;
+        await expect(freshSession.observe()).resolves.toBeUndefined();
+        await expect(freshSession.act()).resolves.toBeUndefined();
+        await expect(reopened.freshOwner.approveAction(pendingAction.id)).resolves.toBeUndefined();
+        await expect(startFixtureHook(thingUrl("use-bound"))).resolves.toEqual({
+          status: 204,
+        });
+      } finally {
+        reopened.freshSession[Symbol.dispose]();
+        reopened.freshConnection[Symbol.dispose]();
+        reopened.freshOwner[Symbol.dispose]();
+        reopened.freshAliceApi[Symbol.dispose]();
+        reopened.freshPublicApi[Symbol.dispose]();
+      }
 
+      // Bob's pre-restart session died with the abort, so his re-open goes over a fresh
+      // connection and verifies exactly the newly in-scope connection.
       const recorder = new ObserverConfigRecorder().alwaysChoose(
         bobAccount.id,
         MAX_OBSERVER_PROMPTS,
       );
-      const configure = stubFor(recorder);
+      const bobFresh = connect(harness.url);
       try {
-        (await bobApi.openGadget(gadgetId, undefined, configure))[Symbol.dispose]();
+        const bobFreshApi = await logIn(bobFresh, bob);
+        const configure = stubFor(recorder);
+        try {
+          (await bobFreshApi.openGadget(gadgetId, undefined, configure))[Symbol.dispose]();
+        } finally {
+          configure[Symbol.dispose]();
+        }
       } finally {
-        configure[Symbol.dispose]();
+        bobFresh[Symbol.dispose]();
       }
-
-      await expect(retainedSession.observe()).resolves.toBeUndefined();
-      await expect(retainedSession.act()).resolves.toBeUndefined();
-      await expect(ownerWorkspace.approveAction(pendingAction.id)).resolves.toBeUndefined();
-      await expect(startFixtureHook(thingUrl("use-bound"))).resolves.toEqual({
-        status: 204,
-      });
       expect(recorder.callCount).toBe(1);
+      expect(recorder.calls[0].map(need => need.gatekeeperId)).toEqual([connId]);
     });
   });
 

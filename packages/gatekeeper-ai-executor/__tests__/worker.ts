@@ -149,7 +149,7 @@ class TestApprovalQueue extends RpcTarget {
 
   async authorizeObservation(description: ObservationDescription): Promise<void> {
     this.state.observations.push(description);
-    if (description.prohibitAllSharing === true) {
+    if (description.containsRestrictedData === true) {
       this.state.locked = true;
     }
   }

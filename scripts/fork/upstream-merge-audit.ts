@@ -18,12 +18,20 @@
  * index) or already committed (resolutions in the merge commit) -- so it runs during a sync, on the
  * PR that carries it, and on any past merge by ref. Check 2 needs no merge at all and runs on every
  * branch, which is the point: reflow arrives through ordinary PRs, not through syncs.
+ *
+ * Check 3 verifies the Tier-1 premise itself: every fork-owned prefix must be absent upstream. A
+ * collision is not a conflict to resolve -- it means the boundary entry is wrong, and the path is
+ * Tier 2 (fork-modified upstream content, resolved by hand) until the config drops it. Like check
+ * 2 it needs no merge and runs everywhere, because either side can create one through an
+ * ordinary PR.
  */
 
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { forkBoundary } from "./fork-boundary.ts";
+import type { FormatException } from "./fork-boundary.ts";
 
 /** A file whose upstream changes went missing without a conflict being raised. */
 export interface DroppedFile {
@@ -39,21 +47,11 @@ export interface FormatChurnFile {
   rawChurn: number;
 }
 
-/** One reviewed comment-only divergence; changing either blob requires a fresh review. */
-export interface FormatException {
-  path: string;
-  upstreamBlob: string;
-  forkBlob: string;
-  reason: string;
-}
-
-/** Exact content pairs exempt only from the formatting check, never from merge auditing. */
-export const FORMAT_EXCEPTIONS: readonly FormatException[] = [{
-  path: "packages/workshop-backend/src/worktree-binding.d.ts",
-  upstreamBlob: "ff54d738edfe0880bf56120e091818c891a7bfb1",
-  forkBlob: "e7046837ca08f49c6dc657142e9402b2029fceb1",
-  reason: "Document the enforced full 40-hex commit capability boundary for Worktree.diff().",
-}];
+/**
+ * The Tier-1 boundary (fork-owned prefixes, removed upstream paths, format exceptions) lives in
+ * `fork-boundary.json`, read through `forkBoundary()`. It is a config rather than consts here so
+ * the sync script enforces the same boundary the audit checks.
+ */
 
 /** The merge being audited: who merged what, and where to read the resolved content from. */
 export interface MergeUnderAudit {
@@ -70,59 +68,6 @@ export interface MergeUnderAudit {
    */
   classification: "sync" | "unverified";
 }
-
-/**
- * Paths the fork owns outright. Upstream has no file here, so nothing in these trees can ever
- * conflict -- which is exactly why new work belongs in them. Keep in sync with
- * `docs/fork-maintenance.md`.
- */
-export const FORK_OWNED_PREFIXES = [
-  "packages/gatekeeper-kit/__tests__/workerd/credential-mutation.test.ts",
-  "patches/capnweb-validate@0.3.0.patch",
-  "scripts/fork/capnweb-native-validation.test.ts",
-  "packages/workshop-backend/src/fork/",
-  "packages/workshop-backend/__integration__/knitli-admin-gatekeeper-frame.test.ts",
-  "packages/workshop-frontend/src/features/admin/gatekeeper-apps/",
-  "packages/workshop-backend/__tests__/knitli-approval-continuation.test.ts",
-  "packages/mcp-shared/__tests__/fork/",
-  "packages/backend-utils/src/access.ts",
-  "packages/backend-utils/src/fork/",
-  "packages/gatekeeper-github/__tests__/workerd/knitli-connect-initiator.test.ts",
-  "packages/gatekeeper-linear/__tests__/workerd/knitli-connect-initiator.test.ts",
-  "packages/gatekeeper-cloudflare/__tests__/workerd/knitli-connect-initiator.test.ts",
-  "packages/workshop-backend/wrangler.jsonc",
-  "packages/gatekeeper-context/wrangler.jsonc",
-  "packages/gatekeeper-ai-executor/",
-  "packages/integration-tests/__tests__/fork/",
-  "scripts/fork/",
-  "packages/router/wrangler.jsonc",
-  "wrangler.jsonc",
-  ".github/workflows/fork-audit.yml",
-  "docs/fork-maintenance.md",
-];
-
-/**
- * Upstream files this fork deliberately does not have, and why. A sync raises a modify/delete
- * conflict when upstream touches one, which is visible -- but resolving that conflict by taking
- * upstream's side restores the file silently, which is not. Checked so each removal stays a
- * decision rather than something that quietly drifts back.
- */
-export const REMOVED_UPSTREAM_PATHS: Record<string, string> = {
-  ".github/workflows/cla.yml":
-    "Cloudflare's CLA assistant: signs against cloudflare.com/cla and stores signatures on a " +
-    "`cla-signatures` branch this fork does not have, so it only ever fails here.",
-  ".github/workflows/bonk.yml":
-    "Cloudflare's internal review bot, which needs a GitHub App installation this fork lacks.",
-  ".github/workflows/bonk-pr.yml":
-    "The PR half of the same bot; its break-glass path also assumes that App.",
-  ".github/workflows/contribution-policy.yml":
-    "Enforces Cloudflare's policy on Cloudflare's repository -- it closes outside PRs and points " +
-    "contributors at cloudflare/cloudflare-os. Whether this fork takes contributions is our call.",
-  "scripts/contribution-policy.ts":
-    "Only consumer was contribution-policy.yml, via actions/github-script.",
-  "scripts/contribution-policy.test.ts":
-    "Tests the above, and reads the workflow file, so it cannot outlive either.",
-};
 
 /** Extensions the formatting comparison understands. Anything else is left alone. */
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
@@ -195,9 +140,9 @@ export function normalizeForFormatComparison(source: string): string {
   return text.trim();
 }
 
-/** True for paths whose content is ours alone, where upstream can never conflict. */
+/** True for Tier-1 paths, whose content is ours alone -- see `fork-boundary.json`. */
 export function isForkOwned(path: string): boolean {
-  return FORK_OWNED_PREFIXES.some(prefix => path.startsWith(prefix));
+  return forkBoundary().forkOwned.some(entry => path.startsWith(entry.path));
 }
 
 /**
@@ -421,7 +366,7 @@ export function auditFormatDrift(opts: {
     // Upstream-only comment changes are not fork churn. Unavailable ancestry cannot grant a skip.
     if (baseRef && gitOrNull(["show", `${baseRef}:${path}`]) === ours) continue;
 
-    const exception = FORMAT_EXCEPTIONS.find(entry => entry.path === path &&
+    const exception = forkBoundary().formatExceptions.find(entry => entry.path === path &&
       entry.upstreamBlob === git(["rev-parse", `${upstreamRef}:${path}`]).trim() &&
       entry.forkBlob === git(["rev-parse", `${oursRef}:${path}`]).trim());
     if (exception) {
@@ -438,9 +383,32 @@ export function auditFormatDrift(opts: {
 
 /** Deliberately-removed upstream files that have come back. */
 export function auditRemovedPaths(oursRef: string): string[] {
-  return Object.keys(REMOVED_UPSTREAM_PATHS)
+  return Object.keys(forkBoundary().removedUpstreamPaths)
     .filter(path => blob(oursRef, path) !== null)
     .toSorted();
+}
+
+/** A Tier-1 fork-owned prefix that also exists upstream, breaking the Tier-1 claim. */
+export interface OwnedPrefixCollision {
+  prefix: string;
+  /** Upstream paths at or under the prefix. */
+  paths: string[];
+}
+
+/**
+ * Tier-1 prefixes upstream also has a file under. Either side can create one through an ordinary
+ * PR -- the fork by claiming a prefix upstream already has, upstream by growing into a claimed
+ * one -- so this needs no merge, like the formatting check.
+ */
+export function auditOwnedPrefixCollisions(upstreamRef: string): OwnedPrefixCollision[] {
+  const collisions: OwnedPrefixCollision[] = [];
+  for (const { path: prefix } of forkBoundary().forkOwned) {
+    const spec = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
+    const paths = git(["ls-tree", "-r", "--name-only", upstreamRef, "--", spec])
+      .split("\n").filter(Boolean);
+    if (paths.length > 0) collisions.push({ prefix, paths });
+  }
+  return collisions;
 }
 
 /** Bad invocation, as opposed to a finding. Exits 2 so callers can tell them apart. */
@@ -502,6 +470,7 @@ function main(argv: string[]): number {
       `Reviewed comment-only exception: ${exception.path}\n  ${exception.reason}`),
   }) : [];
   const restored = auditRemovedPaths(oursRef);
+  const collisions = upstreamRef ? auditOwnedPrefixCollisions(upstreamRef) : [];
 
   const shallow = isShallowRepository();
   const trustworthy = authoritative !== null && !shallow && merge?.classification !== "unverified";
@@ -552,13 +521,25 @@ function main(argv: string[]): number {
   if (restored.length > 0) {
     console.error("Upstream files this fork removed on purpose have come back:\n");
     for (const path of restored) {
-      console.error(`  ${path}\n     removed because: ${REMOVED_UPSTREAM_PATHS[path]}`);
+      console.error(`  ${path}\n     removed because: ${forkBoundary().removedUpstreamPaths[path]}`);
     }
-    console.error("\n  Remove again, or drop it from REMOVED_UPSTREAM_PATHS if the removal is " +
+    console.error("\n  Remove again, or drop it from fork-boundary.json if the removal is " +
       "no longer wanted.\n");
   }
 
-  if (dropped.length > 0 || formatChurn.length > 0 || restored.length > 0) return 1;
+  if (collisions.length > 0) {
+    console.error("Fork-owned (Tier-1) paths that also exist upstream:\n");
+    for (const { prefix, paths } of collisions) {
+      console.error(`  ${prefix}`);
+      for (const path of paths) console.error(`    upstream has: ${path}`);
+    }
+    console.error("\n  A Tier-1 entry asserts upstream has no file here. These paths are Tier 2 --\n" +
+      "  fork-modified upstream content, resolved by hand at each sync. Drop the entry from\n" +
+      "  fork-boundary.json and record the divergence in docs/fork-maintenance.md.\n");
+  }
+
+  if (dropped.length > 0 || formatChurn.length > 0 || restored.length > 0 ||
+    collisions.length > 0) return 1;
 
   // Nothing found -- but "found nothing" and "could not look" are different answers, and only one
   // of them is a pass. Exiting 0 here would let a shell script or a habit-formed developer read an
@@ -570,7 +551,7 @@ function main(argv: string[]): number {
   }
 
   console.log("Clean: no dropped upstream hunks, no formatting-only divergence, " +
-    "no removed files restored.");
+    "no removed files restored, no Tier-1 collisions.");
   return 0;
 }
 

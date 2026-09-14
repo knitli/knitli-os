@@ -452,7 +452,7 @@ describe("AI executor deferred session", () => {
     expect(returned).toBe(false);
     expect(events[0]).toContain("authorize:");
     expect(events[0]).toContain('"prohibitWorkspaceSharing":true');
-    expect(events[0]).not.toContain("prohibitAllSharing");
+    expect(events[0]).not.toContain("containsRestrictedData");
     expect(events[0]).not.toContain("answer");
     release();
     await expect(result).resolves.toMatchObject({ status: "completed" });
@@ -473,7 +473,7 @@ describe("AI executor deferred session", () => {
     await session.getResult(runId);
 
     expect(observation).toHaveProperty("prohibitWorkspaceSharing", true);
-    expect(observation).not.toHaveProperty("prohibitAllSharing");
+    expect(observation).not.toHaveProperty("containsRestrictedData");
   });
 
   it("retains only a sanitized failure and removes the staged request", async () => {

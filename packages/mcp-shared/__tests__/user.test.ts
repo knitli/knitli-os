@@ -15,6 +15,7 @@ const server = {
 
 class TestUser extends McpGatekeeperUserBase<object> {
   revoked = false;
+  committed: string | undefined;
   reconnectNonce: string | undefined;
   reconnectInitiator: { email: string } | undefined;
 
@@ -29,6 +30,7 @@ class TestUser extends McpGatekeeperUserBase<object> {
           this.reconnectNonce = nonce;
           this.reconnectInitiator = initiator;
         },
+        commitReconnect: async (stageId: string) => { this.committed = stageId; },
       },
     };
   }
@@ -57,6 +59,9 @@ it("provides the common MCP account lifecycle", async () => {
     `https://workshop.example/gatekeeper/mcp/account-id/${subject.reconnectNonce}`,
   );
   expect(subject.reconnectNonce).toHaveLength(64);
+
+  await subject.commitReconnect("5".repeat(64));
+  expect(subject.committed).toBe("5".repeat(64));
 });
 
 it("does not expose connector hooks as string-named methods", () => {

@@ -40,25 +40,17 @@ that silently drops an upstream guarantee.** Our commit `a811be9` replaced upstr
 
 ### 1. Put new work in fork-owned trees
 
-Upstream has no file there, so nothing in them can ever conflict. Today:
+Two tiers. **Tier 1** is paths the fork owns outright: upstream has no file there, so nothing in
+them can ever conflict -- which is exactly why new work belongs in them. **Tier 2** is everything
+else the fork touches: fork-modified upstream files, always resolved by hand at each sync, even
+when that ends at "take ours".
 
-- `packages/gatekeeper-ai-executor/` — the AI Executor gatekeeper, ~19k lines, zero conflict surface.
-- `packages/integration-tests/__tests__/fork/` — fork integration tests.
-- `packages/workshop-backend/src/fork/` — approval-turn continuation (approval-continuation.ts).
-- `packages/workshop-backend/__integration__/knitli-admin-gatekeeper-frame.test.ts` and `packages/workshop-frontend/src/features/admin/gatekeeper-apps/` — vendor-owned deployment-admin frames and regressions.
-- `packages/workshop-backend/__tests__/knitli-approval-continuation.test.ts` — approval-turn continuation regressions.
-- `packages/mcp-shared/__tests__/fork/` — named `$defs` aliases, read-before-dispatch authorization, and the caller-settable argument budget.
-- `scripts/fork/` — fork tooling.
-- `docs/fork-maintenance.md` — this file.
-- `packages/backend-utils/src/access.ts` — the Cloudflare Access assertion verifier (moved here from
-  `workshop-backend` so gatekeepers can share it).
-- `packages/backend-utils/src/fork/` — the shared connect-initiator guard
-  (`connect-initiator.ts`), used by every gatekeeper that owns its own account Durable Object.
-- `packages/gatekeeper-{github,linear,cloudflare}/__tests__/workerd/knitli-connect-initiator.test.ts`
-  — connect-initiator enforcement regressions.
-
-This list is also encoded as `FORK_OWNED_PREFIXES` in `scripts/fork/upstream-merge-audit.ts`. Add to
-both when you add a tree.
+Tier 1 is declared in `scripts/fork/fork-boundary.json` -- the AI Executor gatekeeper, the
+`__tests__/fork/` regression trees, the backend `src/fork/` policy modules, the connect-initiator
+guard and its tests, the sync tooling itself, and this file, each with its reason. The merge audit
+and the sync script both read it; nothing duplicates it. Add the entry when you add a tree, and
+the audit verifies the claim: a Tier-1 path that also exists upstream is a collision, and the
+path drops to Tier 2 until the config is fixed.
 
 ### 2. Never reformat an upstream-owned file
 
@@ -66,8 +58,8 @@ Turn off format-on-save for this repo, or scope it to the fork-owned trees. A di
 upstream file should contain only lines whose *meaning* you changed. `pnpm fork:audit` fails on any
 upstream file whose entire diff normalises away to nothing.
 
-An intentional comment-only contract correction can be recorded in `FORMAT_EXCEPTIONS` in
-`scripts/fork/upstream-merge-audit.ts`, with its exact path, upstream and fork Git blob IDs, and
+An intentional comment-only contract correction can be recorded in `formatExceptions` in
+`scripts/fork/fork-boundary.json`, with its exact path, upstream and fork Git blob IDs, and
 review reason. Only that content pair is exempt from the formatting check; changing either blob
 requires review again. The audit prints the reason when it applies. This does not change file
 ownership or exempt the file from dropped-hunk checking.
@@ -114,26 +106,49 @@ as a conflict.
 ## Syncing with upstream
 
 ```bash
-git fetch foundation
-git checkout -b sync/foundation-$(date +%Y-%m-%d)
-git merge foundation/main
+pnpm fork:sync --dry-run   # impact report, no branch, no merge: scope the sync first
+pnpm fork:sync              # fetch, branch, merge, policy resolutions
+# ... resolve the Tier-2 files by hand ...
+pnpm fork:sync --verify     # survivors, uncached typecheck, audit; exit 0 means commit
 ```
 
 Then, in order:
 
-1. **Resolve the marked conflicts.** For a file where upstream restructured and we added, start from
-   upstream's version and re-apply our addition on top — not the other way round. It keeps our diff
-   small and matches upstream's shape. Use `difft` rather than `git diff` while doing it; structural
-   diff hides reflow and shows the change.
+1. **Scope it.** `--dry-run` prints the impact report without touching anything: the upstream
+   commits, the files changed on both sides (the reconcile set -- review each, conflict or silent
+   auto-merge), the upstream modules Tier-1 files import, and fork-added files outside Tier 1.
+   Predicted review surface, not conflicts.
 
-2. **Audit for the silent failures.** This is the step that is easy to skip and expensive to skip:
+2. **Merge.** `pnpm fork:sync` fetches `foundation`, refuses shallow clones and dirty trees,
+   creates `sync/foundation-<date>`, and merges with `--no-commit` so even a clean merge waits
+   for verification. The only automatic resolutions are deliberately-removed files upstream
+   touched (kept deleted, recorded in the commit message). Everything else that conflicts stops
+   for hand resolution. Re-running mid-merge reports what is left instead of starting over.
 
-   ```bash
-   pnpm fork:audit
-   ```
+3. **Resolve the marked conflicts.** Tier 2, by hand: for a file where upstream restructured and
+   we added, start from upstream's version and re-apply our addition on top — not the other way
+   round. It keeps our diff small and matches upstream's shape. Use `difft` rather than `git diff`
+   while doing it; structural diff hides reflow and shows the change. A Tier-1 path here
+   contradicts the boundary claim -- resolve it, then drop the entry from `fork-boundary.json`.
 
-   It reports upstream hunks that vanished without a conflict, and upstream-owned files whose diff is
-   pure reflow. Run it *before* the checks below — a dropped hunk usually still typechecks.
+4. **Verify.** `pnpm fork:sync --verify` runs three stages: upstream-removed names the fork still
+   uses, each with the upstream commit that removed it (multi-segment names gone or nearly gone
+   from upstream -- renames land here before they land in confusing test failures, while renamed
+   single words surface through the typecheck below; a name the fork keeps on purpose is acked
+   per (token, path) in `reviewedSurvivors`, never by editing the detector); an uncached typecheck
+   of every package plus the repo scripts (a sync breaks packages it never touches, whose recorded
+   passes the task cache would otherwise replay);
+   and the merge audit below. It understands a merge in progress (worktree), a committed sync,
+   and -- with no merge anywhere -- a preview of HEAD against upstream. Exit 0 means commit; the
+   policy notes are pre-filled in the message. Run it *before* the checks below — a dropped hunk
+   usually still typechecks.
+
+### The merge audit
+
+`pnpm fork:audit` -- also the last `--verify` stage, and a CI job on every PR -- reports four
+things: upstream hunks that vanished without a conflict, upstream-owned files whose diff is pure
+reflow, deliberately-removed files that came back, and Tier-1 collisions (boundary entries gone
+wrong).
 
    It finds the merge on its own, whether one is in progress (resolutions in the index) or already
    committed (resolutions in the merge commit), so it works during the sync and afterwards on the PR.
@@ -187,10 +202,11 @@ Then, in order:
    something that was not a sync is recoverable; silently skipping a real one is the failure this
    tool exists to prevent.
 
-3. **Re-verify the divergence inventory.** For each entry, confirm it is still present and still
+5. **Re-verify the divergence inventory.** For each entry, confirm it is still present and still
    necessary; upstream may have adopted, moved, or obsoleted it.
 
-4. **Run the checks, on Node 24.** The repo targets Node 24; Node 26 ships a global `localStorage`
+6. **Run the checks, on Node 24.** `--verify` covered the typecheck; the linter and the full suite
+   still run here. The repo targets Node 24; Node 26 ships a global `localStorage`
    that shadows jsdom's and fails ~12 frontend tests for reasons that have nothing to do with your
    change.
 
@@ -255,12 +271,19 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **Where:** `OverseerDurableObject.open()` in `packages/workshop-backend/src/overseer.ts`, mirrored
   by `openFakeOverseer()` in `packages/workshop-backend/__tests__/fixtures.ts`
 - **Introduced:** `a811be9`
-- **What:** Upstream reads `this.impl.storage.prohibitAllSharing` directly. We added
-  `isWorkspaceSharingProhibited()` (which also covers `prohibitWorkspaceSharing` and owner-only
-  gatekeepers), plus `isRevocationPaused()` and `assertNoRevocationPending()`, and `open()` calls all
-  three.
-- **Why:** Gatekeeper privacy readiness and the revocation guards need more than the one flag, and
-  the checks belong next to the state they read.
+- **What:** Upstream latches `containsRestrictedData` (né `prohibitAllSharing`) and governs who sees
+  it by observer verification at admission, leaving the workspace shareable (upstream #381/#382).
+  We kept that model for restricted data, and kept `isWorkspaceSharingProhibited()` for the fork's
+  stricter owner-only tier only: a latched `prohibitWorkspaceSharing` observation or an owner-only
+  connection. The old per-read collaborator-coverage quarantine
+  (`assertGatekeeperObserverReadinessNow`) is gone — a widening restarts every live session instead,
+  so each client re-verifies at its own next open — while `isRevocationPaused()` and
+  `assertNoRevocationPending()` still gate the revocation window, and `open()` calls all three.
+  `SharingManager.hasAnyShares()` (deleted upstream by #382) and `GadgetMetadata.sharingProhibited`
+  (renamed upstream by #381) are re-added as fork-owned for the owner-only tier.
+- **Why:** Restricted data follows upstream's verified-sharing model; the AI executor's private
+  results (and any future owner-only source) need the absolute no-sharing tier upstream removed, and
+  the revocation window still needs a synchronous gate.
 - **Known cost:** `openFakeOverseer()` is upstream's fake `impl`, and a method we add to the real one
   is a method the fake silently lacks. That is what broke upstream's `action-log-pagination.test.ts`
   — an unhandled `TypeError` from a fake missing `isWorkspaceSharingProhibited`, which the task cache
@@ -284,10 +307,10 @@ Intentional, reviewed differences from upstream. Keep this current.
   that is now gone, so they are inert, and they point contributors at Cloudflare's issue tracker.
   Left in place deliberately: whether this fork accepts outside contributions is a call for the
   maintainers, not a cleanup.
-- **How it is kept:** listed in `REMOVED_UPSTREAM_PATHS` in `scripts/fork/upstream-merge-audit.ts`,
+- **How it is kept:** listed in `removedUpstreamPaths` in `scripts/fork/fork-boundary.json`,
   with the reason. When upstream touches one of these, a sync raises a modify/delete conflict, which
   is visible — but resolving that toward upstream restores the file silently, which is not. The
-  audit fails if one comes back.
+  audit fails if one comes back, and the sync script keeps them deleted automatically.
 - **Left alone deliberately:** `.github/dependabot.yml` still carries an `ignore` entry for
   `ask-bonk/ask-bonk`. It is inert once the workflows are gone, and removing it would add a
   divergence to an upstream-owned file to no benefit.
@@ -307,6 +330,19 @@ Intentional, reviewed differences from upstream. Keep this current.
   deployment-injected runtime binding, not OAuth credentials) and to `NOT_INSTALLABLE`.
 - **Why:** Both are data-only additions to existing upstream sets — the cheapest possible shape for
   an upstream edit, and the shape to aim for elsewhere.
+
+### Deployment wrangler files are fork-managed upstream files (Tier 2)
+
+- **Where:** `wrangler.jsonc`, `packages/workshop-backend/wrangler.jsonc`,
+  `packages/gatekeeper-context/wrangler.jsonc`, `packages/router/wrangler.jsonc`
+- **What:** deployment bindings, vars, and limits differ from upstream's (assets and AI bindings,
+  time limits, context artifacts).
+- **Why:** this deployment binds workers differently than upstream's; the files cannot be
+  byte-identical.
+- **How it is kept:** Tier 2, resolved by hand at each sync — usually take ours, but an upstream
+  feature (a new binding, a raised limit) is reconciled in, not dropped. These were briefly listed
+  as Tier 1 in `ae28b29b`, which only exempted take-ours resolutions from the dropped-hunk check
+  without avoiding any conflict; the collision check now fails that shape.
 
 ### Named `$defs` aliases in `generateSessionTypes`
 
@@ -398,7 +434,7 @@ Intentional, reviewed differences from upstream. Keep this current.
 ### Credential mutation transaction hook
 
 - **Where:** `packages/gatekeeper-kit/src/credentials.ts`, existing credential tests, and fork-owned `packages/gatekeeper-kit/__tests__/workerd/credential-mutation.test.ts`.
-- **What:** Optional synchronous `mutation(change, apply)` encloses complete connect, refresh/rotate, legacy publication, and clear writes once. The default calls `apply` directly; lazy identity/connection initialization and empty migration reads retain upstream behavior.
+- **What:** Optional synchronous `mutation(change, apply)` encloses complete connect, refresh/rotate, legacy publication, and clear writes once. The default calls `apply` directly; lazy identity/connection initialization and empty migration reads retain upstream behavior. Upstream #460's generation fencing and publish/commit split are preserved inside the hook rather than replaced by it.
 - **Why:** Hosted Account credential publication must share its real storage transaction with generation and enrollment receipts, including rollback after credential writes. Source and existing tests remain upstream-audited; only the exact new test path is fork-owned.
 
 ### OpenAPI host protocol (retired 2026-09-12)
@@ -458,3 +494,8 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   Standing a workerd project up for that package is the follow-up.
 - **`jwtVerify` algorithms are pinned** in `packages/backend-utils/src/access.ts`
   (`CF_ACCESS_JWT_ALGORITHMS`), read from the live certs endpoint on 2026-09-12.
+- **Coexists with upstream's token-bound handoff (adopted 2026-09-14):** upstream #464/#473 replaced
+  the bearer completion URL with a ticket the popup redeems over the initiator's own session plus a
+  browser-held nonce. The fork adopted that flow wholesale and kept this guard in front of it: the
+  HTTP route still 403s a foreign browser before any code exchange or staging happens, so a leaked
+  link fails at the gatekeeper instead of merely failing to redeem at the Workshop.

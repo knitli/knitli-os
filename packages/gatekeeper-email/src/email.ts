@@ -18,7 +18,9 @@ import {
   SupportedResource,
   ResourceConfiguratorFrame,
   stripTrailingSlashes,
+  type ConnectHandoff,
 } from '@gadgets/workshop-shared/gatekeeper';
+import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import { initiatorAllows, refuseForeignBrowser } from "@gadgets/backend-utils/fork/connect-initiator";
 import {
   EmailSession,
@@ -136,14 +138,6 @@ class EmailMailboxConfiguratorUI extends RpcTarget implements EmailMailboxConfig
 
 // =======================================================================================
 
-const SELF_CLOSING_HTML = `<!DOCTYPE html>
-<html lang="en">
-  <body>
-    <script type="text/javascript">window.close();</script>
-    <p>Authorization complete. You may close this tab and return to Cloudflare OS.
-  </body>
-</html>`;
-
 const INVALID_LINK_HTML = `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -179,16 +173,13 @@ export default {
       let stub: DurableObjectStub<UserAccount> = ctx.exports.UserAccount.get(userObjectId);
       let refused = await refuseForeignBrowser(req, env, stub, logger);
       if (refused) return refused;
-      if (!await stub.complete(path[1])) {
+      let handoff = await stub.complete(path[1]);
+      if (!handoff) {
         return new Response(INVALID_LINK_HTML, {
           headers: { "Content-Type": "text/html; charset=utf-8" }
         });
       }
-      return new Response(SELF_CLOSING_HTML, {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8"
-        }
-      });
+      return htmlResponse(connectHandoffPageHtml(handoff));
     } else {
       return new Response("Not Found", { status: 404 });
     }
@@ -330,29 +321,32 @@ export class UserAccount extends DurableObject<Env> {
     return initiatorAllows(stored?.initiator, accessEmail);
   }
 
-  /** Returns false if the nonce is invalid or expired. */
-  async complete(nonce: string): Promise<boolean> {
+  /**
+   * Returns the handoff for the page the browser lands on, or null if the nonce is invalid or
+   * expired.
+   */
+  async complete(nonce: string): Promise<ConnectHandoff | null> {
     let stored = this.ctx.storage.kv.get<{value: string, expiresAt: number, initiator?: ConnectInitiator}>("nonce");
     if (!stored || Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, nonce)) {
-      return false;
+      return null;
     }
     this.ctx.storage.kv.delete("nonce");
 
     let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback) {
-      return false;
+      return null;
     }
 
     let props: GatekeeperUserImplProps = {
       userAccountId: this.ctx.id.toString(),
     };
-    await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }));
+    let handoff = await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }));
 
     // Clean up the callback, but keep the DO alive to track claimed email addresses.
     this.ctx.storage.deleteAlarm();
     this.ctx.storage.kv.delete("callback");
 
-    return true;
+    return handoff;
   }
 
   async alarm(alarmInfo?: AlarmInvocationInfo): Promise<void> {
@@ -474,6 +468,11 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   async reconnect(): Promise<{url: string}> {
     // Email connections do not use OAuth and never expire.
     throw new Error("Email connections do not require re-authentication.");
+  }
+
+  async commitReconnect(_stageId: string): Promise<void> {
+    // reconnect() never starts a flow, so nothing can ever be staged.
+    throw new Error("No reconnect is awaiting confirmation. Please try again.");
   }
 
   async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {

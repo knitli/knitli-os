@@ -311,6 +311,13 @@ function routerGatekeeperServices(gatekeepers: string[]): PreviewService[] {
   }));
 }
 
+// `remote` is dev-only wrangler behavior (use the remote browser during `wrangler dev`);
+// a deployed preview binding is just { binding }. Rebuild it rather than passing the stanza
+// through, or a `remote: true` kept for local development leaks into every preview config.
+function previewBrowserBinding(browser: BindingDecl): BindingDecl {
+  return { binding: browser.binding };
+}
+
 function applyGatekeeper(
   pkgName: string,
   config: StagingConfig,
@@ -328,7 +335,7 @@ function applyGatekeeper(
     ...(config.unsafe ? { unsafe: config.unsafe } : {}),
     ...(config.artifacts ? { artifacts: config.artifacts } : {}),
     ...(config.ai ? { ai: config.ai } : {}),
-    ...(config.browser ? { browser: config.browser } : {}),
+    ...(config.browser ? { browser: previewBrowserBinding(config.browser) } : {}),
   };
 
   // KV namespaces and R2 buckets are auto-provisioned per preview: each preview gets its own,
@@ -365,7 +372,7 @@ function applyBackend(
     r2_buckets: previewResourceBindings(config.r2_buckets),
     worker_loaders: previewResourceBindings(config.worker_loaders),
     ai: config.ai,
-    ...(config.browser ? { browser: config.browser } : {}),
+    ...(config.browser ? { browser: previewBrowserBinding(config.browser) } : {}),
   };
 }
 

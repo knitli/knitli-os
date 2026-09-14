@@ -53,8 +53,8 @@ it.each([
 });
 
 it.concurrent("lists workspace metadata after activity and removes it after deletion", async () => {
-  using publicApi = connect(requireHarness().url);
   const owner = username();
+  using publicApi = connect(requireHarness().url);
   using authenticated = await signUp(publicApi, owner);
   using workspace = await authenticated.newGadget();
   const { id } = await workspace.getMetadata();

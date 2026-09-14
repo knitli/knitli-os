@@ -95,7 +95,7 @@ export async function openFakeOverseer(
       authorizeCollaborator: async () => role,
       getSharingManager: async () => ({ getEffectiveRole: () => role }),
       // Fork additions: open() routes the sharing and revocation guards through the impl rather
-      // than reading storage.prohibitAllSharing directly, so the fake has to answer them. All
+      // than reading storage.containsRestrictedData directly, so the fake has to answer them. All
       // three describe an idle, shareable workspace, matching that flag below.
       isWorkspaceSharingProhibited: () => false,
       isRevocationPaused: () => false,
@@ -115,7 +115,7 @@ export async function openFakeOverseer(
         }),
       },
       storage: Object.assign(storage, {
-        prohibitAllSharing: { get: () => false },
+        containsRestrictedData: { get: () => false },
         title: { get: () => "Test Workspace" },
       }),
       ...opts.impl,

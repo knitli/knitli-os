@@ -556,6 +556,15 @@ for (const gk of gatekeepers) {
     if (process.env[name] !== undefined) config.vars[name] = process.env[name];
   }
 
+  // Account connect flows post their completion ticket to the Workshop *origin* named here (see
+  // packages/workshop-backend/src/connect-handoff.ts), so the backend refuses to complete one without
+  // it. Default to wherever the frontend is served from: Vite in normal dev, the backend itself in
+  // run-local mode.
+  if (config.vars.PUBLIC_BASE_URL === undefined) {
+    config.vars.PUBLIC_BASE_URL =
+        serveFrontendAssets ? `http://${backendHost}` : "http://localhost:3000";
+  }
+
   for (const gk of gatekeepers) {
     const binding: ServiceBinding = {
       binding: bindingName(gk),
@@ -584,6 +593,11 @@ for (const gk of gatekeepers) {
       not_found_handling: "single-page-application",
       run_worker_first: ["/api", "/api/*", "/blueprint-screenshot/*"],
     };
+  } else {
+    // Normal dev serves the frontend from Vite (:3000), not from the backend worker: drop any
+    // assets stanza the checked-in config carries (production serves the pre-built bundle from
+    // the backend) so starting the dev server needs no `vite build`.
+    delete config.assets;
   }
 
   config.build = devBuildConfig(config.build, WORKSHOP_BACKEND_DIR);

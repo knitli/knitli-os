@@ -1,0 +1,92 @@
+{
+  "forkOwned": [
+    {
+      "path": "packages/gatekeeper-kit/__tests__/workerd/credential-mutation.test.ts",
+      "reason": "Exact new test path for the credential mutation transaction hook; the source and existing tests stay upstream-audited."
+    },
+    {
+      "path": "patches/capnweb-validate@0.3.0.patch",
+      "reason": "Fork-local pnpm patch so native Workers capabilities keep their runtime identity through validation; pinned by scripts/fork/capnweb-native-validation.test.ts."
+    },
+    {
+      "path": "scripts/fork/capnweb-native-validation.test.ts",
+      "reason": "Regression test for the fork-local capnweb-validate patch above."
+    },
+    {
+      "path": "packages/workshop-backend/src/fork/",
+      "reason": "Fork-owned backend modules (approval-turn continuation); policy lives here behind a one-line upstream seam."
+    },
+    {
+      "path": "packages/workshop-backend/__integration__/knitli-admin-gatekeeper-frame.test.ts",
+      "reason": "Regression test for deployment-admin gatekeeper frames, which upstream does not have."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/admin/gatekeeper-apps/",
+      "reason": "Deployment-admin connector frames UI; no upstream counterpart."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-approval-continuation.test.ts",
+      "reason": "Regression test for the fork-owned approval-turn continuation."
+    },
+    {
+      "path": "packages/mcp-shared/__tests__/fork/",
+      "reason": "Fork regression tests for named $defs aliases, read-before-dispatch authorization, and the caller-settable argument budget."
+    },
+    {
+      "path": "packages/backend-utils/src/access.ts",
+      "reason": "Cloudflare Access assertion verifier shared by the Workshop and gatekeepers; upstream has no Access integration."
+    },
+    {
+      "path": "packages/backend-utils/src/fork/",
+      "reason": "Shared connect-initiator guard used by every gatekeeper that owns its own account Durable Object."
+    },
+    {
+      "path": "packages/gatekeeper-github/__tests__/workerd/knitli-connect-initiator.test.ts",
+      "reason": "Connect-initiator enforcement regression for the hand-rolled GitHub account."
+    },
+    {
+      "path": "packages/gatekeeper-linear/__tests__/workerd/knitli-connect-initiator.test.ts",
+      "reason": "Connect-initiator enforcement regression for the hand-rolled Linear account."
+    },
+    {
+      "path": "packages/gatekeeper-cloudflare/__tests__/workerd/knitli-connect-initiator.test.ts",
+      "reason": "Connect-initiator enforcement regression for the hand-rolled Cloudflare account."
+    },
+    {
+      "path": "packages/gatekeeper-ai-executor/",
+      "reason": "The AI Executor gatekeeper, bound by the outer deployment rather than deployed as its own worker; zero conflict surface by construction."
+    },
+    {
+      "path": "packages/integration-tests/__tests__/fork/",
+      "reason": "Fork integration tests kept out of upstream-owned suites so those files stay byte-identical."
+    },
+    {
+      "path": "scripts/fork/",
+      "reason": "Fork tooling: this boundary, the merge audit, and the sync script. Upstream must never grow a file here."
+    },
+    {
+      "path": ".github/workflows/fork-audit.yml",
+      "reason": "Runs the fork audit in CI with full history and the upstream remote; deliberately not a step in upstream's ci.yml."
+    },
+    {
+      "path": "docs/fork-maintenance.md",
+      "reason": "The fork's maintenance playbook, documenting the divergence policy this file encodes."
+    }
+  ],
+  "removedUpstreamPaths": {
+    ".github/workflows/cla.yml": "Cloudflare's CLA assistant: signs against cloudflare.com/cla and stores signatures on a `cla-signatures` branch this fork does not have, so it only ever fails here.",
+    ".github/workflows/bonk.yml": "Cloudflare's internal review bot, which needs a GitHub App installation this fork lacks.",
+    ".github/workflows/bonk-pr.yml": "The PR half of the same bot; its break-glass path also assumes that App.",
+    ".github/workflows/contribution-policy.yml": "Enforces Cloudflare's policy on Cloudflare's repository -- it closes outside PRs and points contributors at cloudflare/cloudflare-os. Whether this fork takes contributions is our call.",
+    "scripts/contribution-policy.ts": "Only consumer was contribution-policy.yml, via actions/github-script.",
+    "scripts/contribution-policy.test.ts": "Tests the above, and reads the workflow file, so it cannot outlive either."
+  },
+  "formatExceptions": [
+    {
+      "path": "packages/workshop-backend/src/worktree-binding.d.ts",
+      "upstreamBlob": "ff54d738edfe0880bf56120e091818c891a7bfb1",
+      "forkBlob": "e7046837ca08f49c6dc657142e9402b2029fceb1",
+      "reason": "Document the enforced full 40-hex commit capability boundary for Worktree.diff()."
+    }
+  ]
+}

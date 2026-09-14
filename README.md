@@ -25,16 +25,18 @@ afterwards.
 `foundation` is the upstream remote (`cloudflare/cloudflare-os`); `origin` is ours. To sync:
 
 ```bash
-git fetch foundation
-git merge foundation/main
-pnpm fork:audit          # catches the failures git does NOT flag
+pnpm fork:sync --dry-run   # impact report, no branch, no merge
+pnpm fork:sync              # fetch, branch, merge; resolve Tier-2 files by hand
+pnpm fork:sync --verify     # exit 0 means commit
 mise x node@24 -- pnpm lint && mise x node@24 -- pnpm test
 ```
 
-`pnpm fork:audit` exists because the expensive problems in a sync are the silent ones. It reports
-upstream changes that vanished without ever raising a conflict (a file resolved as "take ours" drops
-every upstream hunk in it), and upstream-owned files whose entire diff is reformatting — churn that
-buys nothing and conflicts forever.
+`pnpm fork:sync` exists because the expensive problems in a sync are the silent ones: upstream
+changes that vanish without ever raising a conflict (a file resolved as "take ours" drops every
+upstream hunk in it), upstream-removed names the fork still uses (a rename surfaces here, with the
+removing commit, instead of as confusing test failures), and upstream-owned files whose entire diff
+is reformatting — churn that buys nothing and conflicts forever. `pnpm fork:audit` runs the
+post-hoc checks standalone (and in CI on every PR).
 
 Two environment notes that will otherwise cost you an afternoon:
 

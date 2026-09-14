@@ -31,8 +31,7 @@
   // Wrangler will launch a Chrome instance locally to emulate the Browser Run API during
   // local development. Add "remote": true to use a remote browser running on Cloudflare instead.
   "browser": {
-    "binding": "BROWSER",
-    "remote": true
+    "binding": "BROWSER"
   },
   // Gatekeeper service bindings and the Workers AI binding are dynamically
   // added by run-dev-server.ts (for dev) and generate-wrangler-prod.js (for

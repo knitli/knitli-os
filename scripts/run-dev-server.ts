@@ -593,6 +593,11 @@ for (const gk of gatekeepers) {
       not_found_handling: "single-page-application",
       run_worker_first: ["/api", "/api/*", "/blueprint-screenshot/*"],
     };
+  } else {
+    // Normal dev serves the frontend from Vite (:3000), not from the backend worker: drop any
+    // assets stanza the checked-in config carries (production serves the pre-built bundle from
+    // the backend) so starting the dev server needs no `vite build`.
+    delete config.assets;
   }
 
   config.build = devBuildConfig(config.build, WORKSHOP_BACKEND_DIR);

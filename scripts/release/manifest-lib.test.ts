@@ -115,6 +115,10 @@ test("worker entries carry the deploy contract", () => {
   assert.deepEqual(
       backend.bindings.find((b) => b.name === "WORKERS_AI"),
       { type: "ai", name: "WORKERS_AI" });
+  // Gadget exports render in a real browser; the binding ships to customer instances.
+  assert.deepEqual(
+      backend.bindings.find((b) => b.name === "BROWSER"),
+      { type: "browser", name: "BROWSER" });
   assert.ok(backend.gatekeeperBindingExpansion);
   assert.equal(backend.gatekeeperBindingExpansion.entrypoint, "GatekeeperVendor");
   assert.equal(backend.vars.PUBLIC_BASE_URL, "$PUBLIC_BASE_URL");

@@ -556,13 +556,14 @@ for (const gk of gatekeepers) {
     if (process.env[name] !== undefined) config.vars[name] = process.env[name];
   }
 
-  // The connect handoff targetOrigin must be the browser-facing workshop origin: the Vite dev
-  // server (fixed at :3000 in workshop-frontend/vite.config.ts) in normal dev mode, or this
-  // backend itself when it serves the pre-built bundle (--serve-frontend-assets). Without it
-  // every connect/redirect fails closed.
-  config.vars.PUBLIC_BASE_URL ??= serveFrontendAssets
-    ? `http://${backendHost}`
-    : "http://localhost:3000";
+  // Account connect flows post their completion ticket to the Workshop *origin* named here (see
+  // packages/workshop-backend/src/connect-handoff.ts), so the backend refuses to complete one without
+  // it. Default to wherever the frontend is served from: Vite in normal dev, the backend itself in
+  // run-local mode.
+  if (config.vars.PUBLIC_BASE_URL === undefined) {
+    config.vars.PUBLIC_BASE_URL =
+        serveFrontendAssets ? `http://${backendHost}` : "http://localhost:3000";
+  }
 
   for (const gk of gatekeepers) {
     const binding: ServiceBinding = {

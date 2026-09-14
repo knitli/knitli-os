@@ -4,6 +4,7 @@ import { handleMcpHttpRequest } from "../src/http.js";
 
 const DO_ID = "a".repeat(64);
 const NONCE = "b".repeat(64);
+const HANDOFF = { targetOrigin: "https://workshop.example", ticket: "c".repeat(64) };
 const log = { warn() {} } as never;
 
 function request(path: string, method = "GET") {
@@ -22,7 +23,7 @@ describe("handleMcpHttpRequest", () => {
         baseUrl: "https://workshop.example/gatekeeper/mcp",
         accountForId(id) {
           if (id !== DO_ID) throw new Error("invalid id");
-          return { acceptAuthCode: async () => true, initiatorMatches: async () => true };
+          return { acceptAuthCode: async () => HANDOFF, initiatorMatches: async () => true };
         },
         log,
         connect: async () => new Response("connected"),
@@ -35,7 +36,7 @@ describe("handleMcpHttpRequest", () => {
   it("delegates a valid connect link without imposing connector method policy", async () => {
     const response = await handleMcpHttpRequest(request(`/${DO_ID}/${NONCE}`, "POST"), {
       baseUrl: "https://workshop.example/gatekeeper/mcp",
-      accountForId: () => ({ acceptAuthCode: async () => true, initiatorMatches: async () => true }),
+      accountForId: () => ({ acceptAuthCode: async () => HANDOFF, initiatorMatches: async () => true }),
       log,
       connect: async (req, _account, nonce, path) =>
         Response.json({ method: req.method, nonce, path }),
@@ -53,13 +54,36 @@ describe("handleMcpHttpRequest", () => {
       request(`/oauth?code=code&state=${DO_ID}:${NONCE}`),
       {
         baseUrl: "https://workshop.example/gatekeeper/mcp",
-        accountForId: () => ({ acceptAuthCode: async () => true, initiatorMatches: async () => true }),
+        accountForId: () => ({ acceptAuthCode: async () => HANDOFF, initiatorMatches: async () => true }),
         log,
         connect: async () => new Response("unexpected"),
       },
     );
 
     expect(response.status).toBe(200);
+    // The page carries the ticket, so it must never be cached or framed.
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(response.headers.get("Content-Security-Policy")).toBe("frame-ancestors 'none'");
+    // The page sends the popup, ticket in the fragment, to the Workshop's own handoff page, and
+    // nowhere else.
+    const html = await response.text();
+    expect(html).toContain(HANDOFF.ticket);
+    expect(html).toContain(`window.location.replace(target + "/connect/handoff#"`);
+    expect(html).toContain(`"https://workshop.example"`);
+  });
+
+  it("treats a rejected OAuth callback as an expired link", async () => {
+    const response = await handleMcpHttpRequest(
+      request(`/oauth?code=code&state=${DO_ID}:${NONCE}`),
+      {
+        baseUrl: "https://workshop.example/gatekeeper/mcp",
+        accountForId: () => ({ acceptAuthCode: async () => null, initiatorMatches: async () => true }),
+        log,
+        connect: async () => new Response("unexpected"),
+      },
+    );
+
+    expect(response.status).toBe(400);
   });
 
   it("refuses the connect link and the callback for a browser that is not the initiator", async () => {
@@ -67,7 +91,7 @@ describe("handleMcpHttpRequest", () => {
     const options = {
       baseUrl: "https://workshop.example/gatekeeper/mcp",
       accountForId: () => ({
-        acceptAuthCode: async () => { calls.push("acceptAuthCode"); return true; },
+        acceptAuthCode: async () => { calls.push("acceptAuthCode"); return HANDOFF; },
         initiatorMatches: async (email: string | null) => email === "adam@example.com",
       }),
       log,
@@ -91,7 +115,7 @@ describe("handleMcpHttpRequest", () => {
   it("lets the initiator through and reports no identity when Access is not configured", async () => {
     const seen: Array<string | null> = [];
     const account = {
-      acceptAuthCode: async () => true,
+      acceptAuthCode: async () => HANDOFF,
       initiatorMatches: async (email: string | null) => { seen.push(email); return true; },
     };
     const withAccess = await handleMcpHttpRequest(

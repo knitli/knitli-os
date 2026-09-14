@@ -5,7 +5,7 @@ import { act, type ComponentProps, type ReactNode, useEffect, useState } from 'r
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { AuthenticatedApi, ConnectedAccountsSubscriber, Overseer } from '@gadgets/workshop-shared/api'
+import type { AuthenticatedApi, ConnectedAccountsSubscriber, ConnectFlowStart, Overseer } from '@gadgets/workshop-shared/api'
 import type { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -14,6 +14,26 @@ const PROFILE_URL = 'https://ai-executor.invalid/profiles/11111111-1111-1111-111
 const BARE_MAIL = 'https://graph.microsoft.com/#segment=mail'
 const NARROWED_MAIL = `${BARE_MAIL}&revision=${'a'.repeat(64)}&tool=me.ListMessages`
 const BARE_CALENDAR = 'https://graph.microsoft.com/#segment=calendar'
+const OAUTH_URL = 'https://accounts.example.test/oauth'
+const NONCE = 'b'.repeat(64)
+
+// A popup as window.open returns it: an opener pointing back at us, its own storage, and a
+// location to navigate. Mirrors connectHandoff.test.tsx's fake.
+function fakePopup() {
+  const store = new Map<string, string>()
+  const popup = {
+    opener: window as Window | null,
+    close: vi.fn<() => void>(),
+    sessionStorage: {
+      store,
+      setItem: vi.fn<(key: string, value: string) => void>((key, value) => { store.set(key, value) }),
+    },
+    location: {
+      replace: vi.fn<(url: string) => void>(),
+    },
+  }
+  return popup
+}
 const RESOURCE: SupportedResource = {
   urlPattern: PROFILE_URL,
   title: 'Production assistant',
@@ -109,8 +129,8 @@ function buildApi({
 }): TestApi {
   let accountSubscriber: ConnectedAccountsSubscriber | undefined
   const vendorDescription = vendor(autoProvisionsAccount, vendorId)
-  const connectAccount = vi.fn<(vendorId: string, resourceUrlPatterns?: string[]) => Promise<{ url: string }>>()
-    .mockResolvedValue({ url: 'https://accounts.example.test/oauth' })
+  const connectAccount = vi.fn<(vendorId: string, resourceUrlPatterns?: string[]) => Promise<ConnectFlowStart>>()
+    .mockResolvedValue({ url: OAUTH_URL, nonce: NONCE })
   const provisionAmbientAccount = provisionFailure
     ? vi.fn<(vendorId: string) => Promise<void>>().mockRejectedValue(provisionFailure)
     : vi.fn<(vendorId: string) => Promise<void>>().mockResolvedValue(undefined)
@@ -300,6 +320,8 @@ describe('GatekeeperModal ambient resource connections', () => {
     const testApi = buildApi({ autoProvisionsAccount: false, grantable: true })
     const rendered = await render(testApi.api)
     await chooseResource(rendered.container, 'Google')
+    const popup = fakePopup()
+    vi.mocked(window.open).mockReturnValue(popup as unknown as Window)
 
     const connect = [...rendered.container.querySelectorAll('button')]
       .find(button => button.textContent === 'Connect Google')
@@ -307,7 +329,16 @@ describe('GatekeeperModal ambient resource connections', () => {
 
     expect(testApi.connectAccount).toHaveBeenCalledWith('google', [PROFILE_URL])
     expect(testApi.provisionAmbientAccount).not.toHaveBeenCalled()
-    expect(window.open).toHaveBeenCalledWith('https://accounts.example.test/oauth', '_blank', 'noopener,noreferrer')
+    // The token-bound handoff popup: opened empty under a fresh name, given the flow's nonce,
+    // then navigated to the provider.
+    expect(window.open).toHaveBeenCalledExactlyOnceWith(
+      '', expect.stringMatching(/^gadgets-connect-/), 'popup,width=520,height=680')
+    expect(popup.sessionStorage.setItem).toHaveBeenCalledExactlyOnceWith(
+      'gadgets.handoff', JSON.stringify({ kind: 'connect', nonce: NONCE }))
+    expect(popup.location.replace).toHaveBeenCalledExactlyOnceWith(OAUTH_URL)
+    expect(popup.opener).toBeNull()
+    expect(toastAdd).toHaveBeenCalledWith(
+      { title: 'Complete the account connection in the pop-up window.', variant: 'success' })
   })
 
   it('keeps the second-account action for an existing OAuth account', async () => {

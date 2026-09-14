@@ -156,6 +156,11 @@ export class AiExecutorAccount
     throw new Error("Knitli AI is auto-provisioned and has no reconnect flow.");
   }
 
+  commitReconnect(_stageId: string): Promise<void> {
+    // reconnect() never starts a flow, so nothing can ever be staged.
+    throw new Error("No reconnect is awaiting confirmation. Please try again.");
+  }
+
   async getAuthenticatedEmail(): Promise<string | null> {
     return null;
   }

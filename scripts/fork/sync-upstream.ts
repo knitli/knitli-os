@@ -23,7 +23,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { forkBoundary } from "./fork-boundary.ts";
+import { forkBoundary, type ForkBoundary, type SurvivorException } from "./fork-boundary.ts";
 import {
   authoritativeUpstreamRef,
   isForkOwned,
@@ -592,6 +592,69 @@ export function printSurvivorReport(
   if (survivors.length > 25) console.log(`  ...and ${survivors.length - 25} more tokens.`);
 }
 
+/** A survivor split by the reviewedSurvivors allowlist: still failing, acked, and stale acks. */
+export interface PartitionedSurvivors {
+  unacked: SymbolSurvivor[];
+  acked: { token: string; files: { file: string; reason: string }[] }[];
+  stale: SurvivorException[];
+}
+
+/**
+ * Applies path-scoped reviewedSurvivors acks. A survivor token fails unless every file using it
+ * is acked; an ack whose (token, path) matches no survivor is stale (warned, not failed, so a
+ * cleanup never breaks a green verify).
+ */
+export function partitionSurvivors(
+  survivors: SymbolSurvivor[], exceptions: SurvivorException[],
+): PartitionedSurvivors {
+  const ackedByToken = new Map<string, { file: string; reason: string }[]>();
+  const used = new Set<SurvivorException>();
+  const unacked: SymbolSurvivor[] = [];
+  for (const { token, files } of survivors) {
+    const remaining = files.filter(file => {
+      const ack = exceptions.find(entry => entry.token === token && entry.path === file);
+      if (!ack) return true;
+      used.add(ack);
+      ackedByToken.set(token, [...(ackedByToken.get(token) ?? []), { file, reason: ack.reason }]);
+      return false;
+    });
+    if (remaining.length > 0) unacked.push({ token, files: remaining });
+  }
+  return {
+    unacked,
+    acked: [...ackedByToken.entries()].map(([token, files]) => ({ token, files })),
+    stale: exceptions.filter(entry => !used.has(entry)),
+  };
+}
+
+export function printReviewedSurvivors(acked: PartitionedSurvivors["acked"]): void {
+  if (acked.length === 0) return;
+  console.log(`Reviewed survivors (${acked.length}):`);
+  for (const { token, files } of acked) {
+    console.log(`  ${token}:`);
+    for (const { file, reason } of files) console.log(`    yours: ${file} -- ${reason}`);
+  }
+}
+
+export function printStaleSurvivorAcks(stale: SurvivorException[]): void {
+  for (const { token, path } of stale) {
+    console.log(`warning: reviewedSurvivors ack no longer matches a survivor: ${token} at ${path}`);
+  }
+}
+
+/**
+ * Paths the survivor grep reads: Tier 1 plus the sync's Tier 2, minus the boundary config
+ * itself -- its ack entries name the tokens they ack, so without the exclusion every ack would
+ * report itself as a new survivor.
+ */
+export function survivorScope(boundary: ForkBoundary, tier2: string[]): string[] {
+  return [
+    ...boundary.forkOwned.map(entry => entry.path),
+    ...tier2,
+    ":(exclude)scripts/fork/fork-boundary.json",
+  ];
+}
+
 /**
  * A verification gate. Tool paths resolve from this file -- the tooling travels together --
  * while `cwd` is the repository under sync, which may be any checkout.
@@ -666,15 +729,18 @@ function verify(explicitUpstream: string | undefined, skipTypecheck: boolean): n
       : "Preview: no merge yet, checking HEAD against upstream.\n");
   }
   const touched = forkTouchedFiles(ctx.base, ctx.oursRef, ctx.upstreamTip);
-  const scope = [...forkBoundary().forkOwned.map(entry => entry.path), ...touched.tier2];
+  const scope = survivorScope(forkBoundary(), touched.tier2);
   const scored = survivingTokens(ctx.base, ctx.upstreamTip);
   const counts = new Map<string, number>();
   for (const { token, tipCount } of scored) counts.set(token, tipCount);
   const survivors = findSurvivors([...counts.keys()], scope, ctx.grepRef)
     .toSorted((a, b) => (counts.get(a.token) ?? 0) - (counts.get(b.token) ?? 0) ||
       (a.token < b.token ? -1 : 1));
-  printSurvivorReport(survivors, counts, ctx.base, ctx.upstreamTip);
-  let failed = survivors.length > 0;
+  const partitioned = partitionSurvivors(survivors, forkBoundary().reviewedSurvivors);
+  printSurvivorReport(partitioned.unacked, counts, ctx.base, ctx.upstreamTip);
+  printReviewedSurvivors(partitioned.acked);
+  printStaleSurvivorAcks(partitioned.stale);
+  let failed = partitioned.unacked.length > 0;
   const root = repoRoot();
   if (!skipTypecheck) {
     for (const command of typecheckPlan(root)) {

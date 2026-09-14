@@ -99,3 +99,36 @@ test("malformed JSON names itself", () => {
   assert.throws(() => parseForkBoundary("{oops"), /not valid JSON/);
   assert.throws(() => parseForkBoundary("[]"), /must be an object at the top level/);
 });
+
+test("reviewedSurvivors default to none and parse when present", () => {
+  assert.deepEqual(parseForkBoundary(JSON.stringify(validBoundary())).reviewedSurvivors, []);
+  const withAck = validBoundary();
+  withAck["reviewedSurvivors"] = [{
+    token: "oldFlag",
+    path: "packages/some/file.ts",
+    reason: "The fork re-added the flag upstream deleted.",
+  }];
+  assert.deepEqual(parseForkBoundary(JSON.stringify(withAck)).reviewedSurvivors, [{
+    token: "oldFlag",
+    path: "packages/some/file.ts",
+    reason: "The fork re-added the flag upstream deleted.",
+  }]);
+});
+
+for (const [name, mutate, pattern] of [
+  ["survivor acks must be an array", (b: Record<string, unknown>) => {
+    b["reviewedSurvivors"] = {};
+  }, /reviewedSurvivors must be an array/],
+  ["survivor ack tokens must be identifiers", (b: Record<string, unknown>) => {
+    b["reviewedSurvivors"] = [{ token: "not an identifier", path: "a/b.ts", reason: "Why." }];
+  }, /reviewedSurvivors\[0\]\.token must be an identifier/],
+  ["survivor acks need a reason", (b: Record<string, unknown>) => {
+    b["reviewedSurvivors"] = [{ token: "oldFlag", path: "a/b.ts", reason: "" }];
+  }, /needs a reason someone can act on/],
+] as const) {
+  test(`malformed boundary is rejected: ${name}`, () => {
+    const boundary = validBoundary();
+    mutate(boundary);
+    assert.throws(() => parseForkBoundary(JSON.stringify(boundary)), pattern);
+  });
+}

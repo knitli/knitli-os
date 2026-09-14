@@ -31,10 +31,21 @@ export interface FormatException {
   reason: string;
 }
 
+/**
+ * One upstream-removed name the fork keeps using on purpose, at one path. Path-scoped so the
+ * ack cannot hide a new use elsewhere; verify warns when no survivor matches anymore.
+ */
+export interface SurvivorException {
+  token: string;
+  path: string;
+  reason: string;
+}
+
 export interface ForkBoundary {
   forkOwned: ForkOwnedPrefix[];
   removedUpstreamPaths: Record<string, string>;
   formatExceptions: FormatException[];
+  reviewedSurvivors: SurvivorException[];
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -73,7 +84,8 @@ export function parseForkBoundary(text: string): ForkBoundary {
     throw new Error(`not valid JSON: ${(error as Error).message}`, { cause: error });
   }
   if (!isObject(parsed)) throw new Error("must be an object at the top level");
-  checkKeys("boundary", parsed, ["forkOwned", "removedUpstreamPaths", "formatExceptions"]);
+  checkKeys("boundary", parsed,
+    ["forkOwned", "removedUpstreamPaths", "formatExceptions", "reviewedSurvivors"]);
 
   if (!Array.isArray(parsed["forkOwned"]) || parsed["forkOwned"].length === 0) {
     throw new Error("forkOwned must be a non-empty array: an absent Tier 1 is never a steady state");
@@ -115,7 +127,26 @@ export function parseForkBoundary(text: string): ForkBoundary {
     };
   });
 
-  return { forkOwned, removedUpstreamPaths, formatExceptions };
+  // Optional so older checkouts (and minimal test fixtures) without it still parse; absent
+  // means no reviewed survivors.
+  const rawSurvivors = parsed["reviewedSurvivors"] ?? [];
+  if (!Array.isArray(rawSurvivors)) {
+    throw new Error("reviewedSurvivors must be an array");
+  }
+  const reviewedSurvivors = rawSurvivors.map((entry: unknown, i: number): SurvivorException => {
+    if (!isObject(entry)) throw new Error(`reviewedSurvivors[${i}] must be an object`);
+    checkKeys(`reviewedSurvivors[${i}]`, entry, ["token", "path", "reason"]);
+    if (typeof entry["token"] !== "string" || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(entry["token"])) {
+      throw new Error(`reviewedSurvivors[${i}].token must be an identifier`);
+    }
+    return {
+      token: entry["token"],
+      path: checkPath(`reviewedSurvivors[${i}].path`, entry["path"]),
+      reason: checkReason(`reviewedSurvivors[${i}].reason`, entry["reason"]),
+    };
+  });
+
+  return { forkOwned, removedUpstreamPaths, formatExceptions, reviewedSurvivors };
 }
 
 const CONFIG_URL = new URL("./fork-boundary.json", import.meta.url);

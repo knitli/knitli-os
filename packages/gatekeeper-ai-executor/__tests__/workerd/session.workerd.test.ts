@@ -118,7 +118,7 @@ describe("AI executor real Worker RPC boundary", () => {
     expect(queue.observations).toHaveLength(2);
     for (const observation of queue.observations) {
       expect(observation).toHaveProperty("prohibitWorkspaceSharing", true);
-      expect(observation).not.toHaveProperty("prohibitAllSharing");
+      expect(observation).not.toHaveProperty("containsRestrictedData");
     }
   });
 

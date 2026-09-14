@@ -15,10 +15,12 @@ import {
   forkTouchedFiles,
   isCompoundName,
   mergeHeadPresent,
+  partitionSurvivors,
   planSync,
   preflightStart,
   removedIdentifiers,
   resolveVerifyContext,
+  survivorScope,
   survivingTokens,
   typecheckPlan,
   unmergedPaths,
@@ -450,4 +452,38 @@ test("a re-run mid-merge reports what is left", () => {
     assert.equal(runSync(dir, "--upstream", "upstream", "--branch", "sync/test"), 0,
       "with nothing left, re-entry points at --verify");
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("reviewed survivors ack (token, path) pairs and flag the rest", () => {
+  const survivors = [
+    { token: "oldFlag", files: ["a/kept.ts", "a/new.ts"] },
+    { token: "deadApi", files: ["a/kept.ts"] },
+  ];
+  const ack = { token: "oldFlag", path: "a/kept.ts", reason: "Re-added on purpose." };
+  const stale = { token: "gone", path: "a/kept.ts", reason: "Nothing uses this now." };
+  const partitioned = partitionSurvivors(survivors, [ack, stale]);
+  assert.deepEqual(partitioned.unacked, [
+    { token: "oldFlag", files: ["a/new.ts"] },
+    { token: "deadApi", files: ["a/kept.ts"] },
+  ]);
+  assert.deepEqual(partitioned.acked, [
+    { token: "oldFlag", files: [{ file: "a/kept.ts", reason: "Re-added on purpose." }] },
+  ]);
+  assert.deepEqual(partitioned.stale, [stale]);
+});
+
+test("fully acked survivors leave nothing failing", () => {
+  const survivors = [{ token: "oldFlag", files: ["a/kept.ts"] }];
+  const partitioned = partitionSurvivors(
+    survivors, [{ token: "oldFlag", path: "a/kept.ts", reason: "Re-added on purpose." }]);
+  assert.deepEqual(partitioned.unacked, []);
+  assert.deepEqual(partitioned.stale, []);
+  assert.equal(partitioned.acked.length, 1);
+});
+
+test("the survivor scope spares the boundary config that holds the acks", () => {
+  const scope = survivorScope(forkBoundary(), ["packages/touched/file.ts"]);
+  assert.ok(scope.includes("packages/touched/file.ts"));
+  assert.ok(scope.includes(":(exclude)scripts/fork/fork-boundary.json"),
+    "ack entries name their tokens, so grepping the config would re-flag every ack");
 });

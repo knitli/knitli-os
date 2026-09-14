@@ -134,9 +134,10 @@ Then, in order:
 4. **Verify.** `pnpm fork:sync --verify` runs three stages: upstream-removed names the fork still
    uses, each with the upstream commit that removed it (multi-segment names gone or nearly gone
    from upstream -- renames land here before they land in confusing test failures, while renamed
-   single words surface through the typecheck below); an uncached typecheck of every package plus
-   the repo scripts (a sync breaks packages it never touches, whose recorded passes the task
-   cache would otherwise replay);
+   single words surface through the typecheck below; a name the fork keeps on purpose is acked
+   per (token, path) in `reviewedSurvivors`, never by editing the detector); an uncached typecheck
+   of every package plus the repo scripts (a sync breaks packages it never touches, whose recorded
+   passes the task cache would otherwise replay);
    and the merge audit below. It understands a merge in progress (worktree), a committed sync,
    and -- with no merge anywhere -- a preview of HEAD against upstream. Exit 0 means commit; the
    policy notes are pre-filled in the message. Run it *before* the checks below — a dropped hunk
@@ -270,12 +271,19 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **Where:** `OverseerDurableObject.open()` in `packages/workshop-backend/src/overseer.ts`, mirrored
   by `openFakeOverseer()` in `packages/workshop-backend/__tests__/fixtures.ts`
 - **Introduced:** `a811be9`
-- **What:** Upstream reads `this.impl.storage.prohibitAllSharing` directly. We added
-  `isWorkspaceSharingProhibited()` (which also covers `prohibitWorkspaceSharing` and owner-only
-  gatekeepers), plus `isRevocationPaused()` and `assertNoRevocationPending()`, and `open()` calls all
-  three.
-- **Why:** Gatekeeper privacy readiness and the revocation guards need more than the one flag, and
-  the checks belong next to the state they read.
+- **What:** Upstream latches `containsRestrictedData` (né `prohibitAllSharing`) and governs who sees
+  it by observer verification at admission, leaving the workspace shareable (upstream #381/#382).
+  We kept that model for restricted data, and kept `isWorkspaceSharingProhibited()` for the fork's
+  stricter owner-only tier only: a latched `prohibitWorkspaceSharing` observation or an owner-only
+  connection. The old per-read collaborator-coverage quarantine
+  (`assertGatekeeperObserverReadinessNow`) is gone — a widening restarts every live session instead,
+  so each client re-verifies at its own next open — while `isRevocationPaused()` and
+  `assertNoRevocationPending()` still gate the revocation window, and `open()` calls all three.
+  `SharingManager.hasAnyShares()` (deleted upstream by #382) and `GadgetMetadata.sharingProhibited`
+  (renamed upstream by #381) are re-added as fork-owned for the owner-only tier.
+- **Why:** Restricted data follows upstream's verified-sharing model; the AI executor's private
+  results (and any future owner-only source) need the absolute no-sharing tier upstream removed, and
+  the revocation window still needs a synchronous gate.
 - **Known cost:** `openFakeOverseer()` is upstream's fake `impl`, and a method we add to the real one
   is a method the fake silently lacks. That is what broke upstream's `action-log-pagination.test.ts`
   — an unhandled `TypeError` from a fake missing `isWorkspaceSharingProhibited`, which the task cache
@@ -426,7 +434,7 @@ Intentional, reviewed differences from upstream. Keep this current.
 ### Credential mutation transaction hook
 
 - **Where:** `packages/gatekeeper-kit/src/credentials.ts`, existing credential tests, and fork-owned `packages/gatekeeper-kit/__tests__/workerd/credential-mutation.test.ts`.
-- **What:** Optional synchronous `mutation(change, apply)` encloses complete connect, refresh/rotate, legacy publication, and clear writes once. The default calls `apply` directly; lazy identity/connection initialization and empty migration reads retain upstream behavior.
+- **What:** Optional synchronous `mutation(change, apply)` encloses complete connect, refresh/rotate, legacy publication, and clear writes once. The default calls `apply` directly; lazy identity/connection initialization and empty migration reads retain upstream behavior. Upstream #460's generation fencing and publish/commit split are preserved inside the hook rather than replaced by it.
 - **Why:** Hosted Account credential publication must share its real storage transaction with generation and enrollment receipts, including rollback after credential writes. Source and existing tests remain upstream-audited; only the exact new test path is fork-owned.
 
 ### OpenAPI host protocol (retired 2026-09-12)
@@ -486,3 +494,8 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   Standing a workerd project up for that package is the follow-up.
 - **`jwtVerify` algorithms are pinned** in `packages/backend-utils/src/access.ts`
   (`CF_ACCESS_JWT_ALGORITHMS`), read from the live certs endpoint on 2026-09-12.
+- **Coexists with upstream's token-bound handoff (adopted 2026-09-14):** upstream #464/#473 replaced
+  the bearer completion URL with a ticket the popup redeems over the initiator's own session plus a
+  browser-held nonce. The fork adopted that flow wholesale and kept this guard in front of it: the
+  HTTP route still 403s a foreign browser before any code exchange or staging happens, so a leaked
+  link fails at the gatekeeper instead of merely failing to redeem at the Workshop.

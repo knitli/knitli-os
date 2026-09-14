@@ -5,10 +5,10 @@
 // that widening restarts the workspace: each client's next open re-verifies against the new scope.
 // The external-message gate's role scoping is covered by external-message-verification.test.ts.
 //
-// This lives in its own file -- with its own harness, like every suite here -- and stays small on
-// purpose: a DO reset makes the shared local harness briefly drop unrelated in-flight requests, so
-// the concurrent tests of any suite that restarts a workspace pass on their current timing, and
-// growing the file re-rolls those dice.
+// This lives in its own file -- with its own harness, like every suite here -- rather than in
+// sensitive-observations.test.ts, because both suites restart the workspace, and a DO reset makes
+// the shared local harness briefly drop unrelated in-flight requests; their concurrent tests pass
+// with their current timing, but growing either file re-rolls those dice.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { RpcStub } from "capnweb";
@@ -92,20 +92,22 @@ async function newWorkspace(publicApi: RpcStub<PublicApi>, thingName: string): P
 // the workspace, so `ws`'s stubs -- and the whole session they came from -- are dead afterwards.
 async function reopenAfterRestart(ws: Workspace): Promise<{
   publicApi: RpcStub<PublicApi>;
-  overseer: RpcStub<Overseer>;
+  session: RpcStub<TestSession>;
 }> {
   await waitFor("the restart to fell the old workspace instance", () =>
-      ws.overseer.getMetadata().then(() => null, () => true));
+      ws.session.readValue().then(() => null, () => true));
 
   return waitFor("the workspace to come back after the restart", async () => {
     const publicApi = connect(harness.url);
     try {
       const aliceApi = await logIn(publicApi, ws.alice);
       const overseer = await aliceApi.openGadget(ws.gadgetId);
-      // Workspace readiness is separate from connection admission: the fork quarantines the
-      // newly in-scope connection until every affected collaborator has re-opened.
-      await overseer.getMetadata();
-      return { publicApi, overseer };
+      const gatekeeper = await overseer.getGatekeeperById(ws.gatekeeperId);
+      const session = await gatekeeper.openSession() as RpcStub<TestSession>;
+      // Probe with a benign read, so a session felled by the reset retries here rather than
+      // failing an assertion below.
+      await session.readValue();
+      return { publicApi, session };
     } catch {
       publicApi[Symbol.dispose]();
       return null;
@@ -160,8 +162,9 @@ describe("role-scoped observer enforcement", () => {
       const carolSession = await holdSession(ws, carol);
       try {
         // Carol holds no coverage for the connection and never will while it stays unbound, but
-        // that is enforced against her open, not against the owner's own use of the connection.
-        await expect(ws.session.readValue()).resolves.toBe(42);
+        // that is enforced against her open, not against the owner's reads: this restricted read
+        // goes through.
+        await expect(ws.session.readValue(true)).resolves.toBe(42);
 
         // Binding the connection to a gadget (pure storage writes; no gadget code runs) brings it
         // into "use" scope. That widens what Carol's live session must be verified against, and a
@@ -174,15 +177,10 @@ describe("role-scoped observer enforcement", () => {
 
       const reopened = await reopenAfterRestart(ws);
       try {
-        // The owner can re-open the workspace, but connection use remains quarantined until
-        // Carol verifies the connection that just entered her scope.
-        using gatekeeper = await reopened.overseer.getGatekeeperById(ws.gatekeeperId);
-        await expect((async () => {
-          const session = await gatekeeper.openSession();
-          session[Symbol.dispose]();
-        })()).rejects.toThrow(
-            "This connection cannot be used until all current collaborators have re-opened " +
-            "the workspace.");
+        // The owner is back on the workspace with a working session, and their restricted read is
+        // undisturbed by the widening: the restart is a re-open for everyone, not a lockout, and
+        // nothing about Carol's coverage gates the owner's reads.
+        await expect(reopened.session.readValue(true)).resolves.toBe(42);
 
         // Carol's forced re-open is where the newly in-scope connection gets verified, and she is
         // asked about exactly it -- the one connection her role's scope just gained.
@@ -192,9 +190,6 @@ describe("role-scoped observer enforcement", () => {
         carolReopened.close();
         expect(recorder.callCount).toBe(1);
         expect(recorder.calls[0].map(need => need.gatekeeperId)).toEqual([ws.gatekeeperId]);
-
-        using session = await gatekeeper.openSession() as RpcStub<TestSession>;
-        await expect(session.readValue()).resolves.toBe(42);
       } finally {
         reopened.publicApi[Symbol.dispose]();
       }

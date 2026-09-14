@@ -49,6 +49,7 @@ const WORKER_CONFIG = z.looseObject({
   })).optional(),
   vars: z.record(z.string(), z.unknown()).optional(),
   worker_loaders: z.unknown().optional(),
+  assets: z.unknown().optional(),
 });
 
 /** A parsed wrangler.jsonc, typed on the fields the harness (or a `patch` callback) works with. */
@@ -114,6 +115,13 @@ function workshopConfig(
   // Most integration tests need no Gadget execution. Keep the loader only for tests that exercise
   // executeCode or a generated Gadget server.
   if (!enableGadgetExecution) delete config.worker_loaders;
+
+  // The backend serves the frontend bundle from its own assets binding in deployments, but an
+  // inline config has no file path of its own, so wrangler resolves the relative
+  // assets.directory against the harness root instead of the backend directory (the same trap
+  // readWorkerConfig pins `main` against) — and tests drive /api directly, never the served
+  // bundle. Drop it so the suite boots without a frontend build.
+  delete config.assets;
 
   patch?.(config);
   return config;

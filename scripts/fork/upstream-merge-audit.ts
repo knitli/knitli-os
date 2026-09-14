@@ -90,10 +90,13 @@ export const FORK_OWNED_PREFIXES = [
   "packages/gatekeeper-github/__tests__/workerd/knitli-connect-initiator.test.ts",
   "packages/gatekeeper-linear/__tests__/workerd/knitli-connect-initiator.test.ts",
   "packages/gatekeeper-cloudflare/__tests__/workerd/knitli-connect-initiator.test.ts",
-
+  "packages/workshop-backend/wrangler.jsonc",
+  "packages/gatekeeper-context/wrangler.jsonc",
   "packages/gatekeeper-ai-executor/",
   "packages/integration-tests/__tests__/fork/",
   "scripts/fork/",
+  "packages/router/wrangler.jsonc",
+  "wrangler.jsonc",
   ".github/workflows/fork-audit.yml",
   "docs/fork-maintenance.md",
 ];
@@ -441,7 +444,7 @@ export function auditRemovedPaths(oursRef: string): string[] {
 }
 
 /** Bad invocation, as opposed to a finding. Exits 2 so callers can tell them apart. */
-export class UsageError extends Error {}
+export class UsageError extends Error { }
 
 /** The remote-tracking ref for upstream, by convention. See docs/fork-maintenance.md. */
 const UPSTREAM_REF = "foundation/main";
@@ -505,9 +508,9 @@ function main(argv: string[]): number {
 
   console.log(merge
     ? `Merge audited: ${merge.description}` +
-      (merge.classification === "unverified" ? "  [UNVERIFIED: not confirmed to be an upstream sync]" : "")
+    (merge.classification === "unverified" ? "  [UNVERIFIED: not confirmed to be an upstream sync]" : "")
     : `No upstream sync to audit (${oursRef === "HEAD" ? "HEAD" : oursRef.slice(0, 12)} is not a ` +
-      "carrying an upstream sync in its ancestry).");
+    "carrying an upstream sync in its ancestry).");
   console.log(upstreamRef
     ? `Formatting checked against: ${shortRef(upstreamRef)}${authoritative ? "" : " (UNVERIFIED)"}`
     : "Formatting NOT checked: no upstream ref. Pass --upstream, or fetch the foundation remote.");

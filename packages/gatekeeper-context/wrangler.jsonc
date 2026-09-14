@@ -11,7 +11,6 @@
     "nodejs_compat",
     "allow_irrevocable_stub_storage"
   ],
-
   // DO classes are reached via ctx.exports; no durable_objects binding needed.
   "migrations": [
     {
@@ -24,7 +23,6 @@
       ]
     }
   ],
-
   // Public-collections snapshot KV. preview_id preserves existing dev data.
   "kv_namespaces": [
     {
@@ -32,12 +30,19 @@
       "preview_id": "gadgets-context-collections"
     }
   ],
-
+  "artifacts": [
+    {
+      "remote": true,
+      "binding": "ARTIFACTS",
+      "namespace": "knitli-os"
+    }
+  ],
   // Optional: add an Artifacts binding named ARTIFACTS to enable Git-backed collections.
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,
-    "logs": { "invocation_logs": false }
+    "logs": {
+      "invocation_logs": false
+    }
   }
-
 }

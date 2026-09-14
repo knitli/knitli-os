@@ -6,20 +6,32 @@
     "watch_dir": "src"
   },
   "compatibility_date": "2026-02-02",
-  "compatibility_flags": ["allow_irrevocable_stub_storage"],
+  "compatibility_flags": [
+    "allow_irrevocable_stub_storage"
+  ],
   "rules": [
     {
       "type": "Text",
-      "globs": ["**/*.txt"],
+      "globs": [
+        "**/*.txt"
+      ],
       "fallthrough": false
     }
   ],
   "migrations": [
     {
       "tag": "v0",
-      "new_sqlite_classes": ["AiExecutorGatekeeperImpl"]
+      "new_sqlite_classes": [
+        "AiExecutorGatekeeperImpl"
+      ]
     }
   ],
+  "limits": {
+    "cpu_ms": 300000
+  },
+  "placement": {
+    "mode": "smart"
+  },
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,

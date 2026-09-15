@@ -2,20 +2,23 @@ import { useState } from "react";
 import { Dialog, DropdownMenu } from "@cloudflare/kumo";
 import { CaretDown, Check } from "@phosphor-icons/react";
 import { X } from "@phosphor-icons/react";
+import type { PromptSelection } from "@gadgets/workshop-shared/api";
 import { WorkshopButton, WorkshopIconButton } from "../../../components/WorkshopControls";
 
 export type PromptPresetOption = {
+  kind: "admin" | "blueprint";
   id: string;
   name: string;
 };
 
 export type ComposerPromptSelectorProps = {
-  /** The deployment's presets (the built-in default is implicit, never listed). */
+  /** The selectable prompts: deployment presets plus the user's prompt-marked library
+   * blueprints. The built-in default is implicit, never listed. */
   presets: readonly PromptPresetOption[];
-  /** The chat's stored preset id, or null for the built-in default. An id absent from
-   * `presets` (deleted since) displays as the default, matching the fail-closed runtime. */
-  selectedPromptId: string | null;
-  onPromptChange: (promptId: string | null) => void;
+  /** The chat's effective selection, or null for the built-in default. A selection absent
+   * from `presets` (deleted since) displays as the default, matching the fail-closed runtime. */
+  selectedPrompt: PromptSelection | null;
+  onPromptChange: (prompt: PromptSelection | null) => void;
   /**
    * When true (an existing chat), switching asks for confirmation first: the swap busts the
    * Anthropic prefix cache. New chats switch silently -- nothing is cached yet.
@@ -26,38 +29,76 @@ export type ComposerPromptSelectorProps = {
 /** The built-in prompt's display name, shared by the trigger, menu, and dialog. */
 const BUILTIN_LABEL = "Gadget builder";
 
+const sameSelection = (a: PromptPresetOption | PromptSelection, b: PromptSelection): boolean =>
+  a.kind === b.kind && a.id === b.id;
+
 export const ComposerPromptSelector = ({
   presets,
-  selectedPromptId,
+  selectedPrompt,
   onPromptChange,
   requireConfirm,
 }: ComposerPromptSelectorProps) => {
-  const [pendingPromptId, setPendingPromptId] = useState<string | null | undefined>(undefined);
+  const [pendingPrompt, setPendingPrompt] =
+    useState<PromptSelection | null | undefined>(undefined);
 
   const selectedPreset =
-    selectedPromptId === null ? undefined : presets.find((preset) => preset.id === selectedPromptId);
+    selectedPrompt === null
+      ? undefined
+      : presets.find((preset) => sameSelection(preset, selectedPrompt));
   const selectedLabel = selectedPreset?.name ?? BUILTIN_LABEL;
   const pendingPreset =
-    pendingPromptId === undefined || pendingPromptId === null
+    pendingPrompt === undefined || pendingPrompt === null
       ? undefined
-      : presets.find((preset) => preset.id === pendingPromptId);
-  // A pending id that vanished mid-confirm resolves to the default label rather than blank.
+      : presets.find((preset) => sameSelection(preset, pendingPrompt));
+  // A pending selection that vanished mid-confirm resolves to the default label, not blank.
   const pendingLabel =
-    pendingPromptId === undefined ? "" : (pendingPreset?.name ?? BUILTIN_LABEL);
+    pendingPrompt === undefined ? "" : (pendingPreset?.name ?? BUILTIN_LABEL);
 
-  const requestChange = (promptId: string | null) => {
-    // Selecting what is already effective (including stale ids displaying as default) is a no-op.
-    const effectiveCurrent = selectedPreset === undefined ? null : selectedPromptId;
-    if (promptId === effectiveCurrent) return;
+  const requestChange = (prompt: PromptSelection | null) => {
+    // Selecting what is already effective (including stale selections displaying as
+    // default) is a no-op. Identity is kind plus id: an admin preset and a blueprint
+    // never collide even when their ids match.
+    const effectiveCurrent = selectedPreset === undefined ? null : selectedPrompt;
+    if (prompt === null ? effectiveCurrent === null
+        : effectiveCurrent !== null && sameSelection(prompt, effectiveCurrent)) {
+      return;
+    }
     if (requireConfirm) {
-      setPendingPromptId(promptId);
+      setPendingPrompt(prompt);
     } else {
-      onPromptChange(promptId);
+      onPromptChange(prompt);
     }
   };
 
   const itemClassName =
     "!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default";
+  const sectionLabelClassName =
+    "px-2 pt-1.5 pb-0.5 text-[11px] leading-4 font-medium tracking-[-0.1px] text-kumo-inactive";
+
+  const adminPresets = presets.filter((preset) => preset.kind === "admin");
+  const blueprintPresets = presets.filter((preset) => preset.kind === "blueprint");
+
+  const renderOptions = (options: readonly PromptPresetOption[]) =>
+    options.map((preset) => {
+      const active =
+        selectedPrompt !== null && sameSelection(preset, selectedPrompt);
+      const selection: PromptSelection =
+        preset.kind === "admin"
+          ? { kind: "admin", id: preset.id }
+          : { kind: "blueprint", id: preset.id };
+      return (
+        <DropdownMenu.Item
+          key={`${preset.kind}:${preset.id}`}
+          onClick={() => requestChange(selection)}
+          className={itemClassName}
+        >
+          <span className="min-w-0 flex-1 truncate">{preset.name}</span>
+          {active && (
+            <Check size={12} weight="bold" className="ml-3 flex-shrink-0 text-kumo-inactive" />
+          )}
+        </DropdownMenu.Item>
+      );
+    });
 
   return (
     <>
@@ -85,29 +126,27 @@ export const ComposerPromptSelector = ({
               <Check size={12} weight="bold" className="ml-3 flex-shrink-0 text-kumo-inactive" />
             )}
           </DropdownMenu.Item>
-          <div className="my-1 border-t border-kumo-line/70" />
-          {presets.map((preset) => {
-            const active = selectedPromptId === preset.id;
-            return (
-              <DropdownMenu.Item
-                key={preset.id}
-                onClick={() => requestChange(preset.id)}
-                className={itemClassName}
-              >
-                <span className="min-w-0 flex-1 truncate">{preset.name}</span>
-                {active && (
-                  <Check size={12} weight="bold" className="ml-3 flex-shrink-0 text-kumo-inactive" />
-                )}
-              </DropdownMenu.Item>
-            );
-          })}
+          {adminPresets.length > 0 && (
+            <>
+              <div className="my-1 border-t border-kumo-line/70" />
+              <div className={sectionLabelClassName}>Deployment presets</div>
+              {renderOptions(adminPresets)}
+            </>
+          )}
+          {blueprintPresets.length > 0 && (
+            <>
+              <div className="my-1 border-t border-kumo-line/70" />
+              <div className={sectionLabelClassName}>Prompt library</div>
+              {renderOptions(blueprintPresets)}
+            </>
+          )}
         </DropdownMenu.Content>
       </DropdownMenu>
 
       <Dialog.Root
-        open={pendingPromptId !== undefined}
+        open={pendingPrompt !== undefined}
         onOpenChange={(nextOpen) => {
-          if (!nextOpen) setPendingPromptId(undefined);
+          if (!nextOpen) setPendingPrompt(undefined);
         }}
       >
         <Dialog
@@ -144,8 +183,8 @@ export const ComposerPromptSelector = ({
             <WorkshopButton
               tone="primary"
               onClick={() => {
-                if (pendingPromptId !== undefined) onPromptChange(pendingPromptId);
-                setPendingPromptId(undefined);
+                if (pendingPrompt !== undefined) onPromptChange(pendingPrompt);
+                setPendingPrompt(undefined);
               }}
               className="!h-9 min-w-[64px]"
             >

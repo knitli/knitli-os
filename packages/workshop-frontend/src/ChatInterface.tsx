@@ -82,6 +82,8 @@ import {
   WorkpieceId,
   BlueprintOutput,
   MessageFormatRef,
+  PromptRef,
+  PromptSelection,
 } from "@gadgets/workshop-shared/api";
 import { composeCodeChange, type CodeChange } from "@gadgets/workshop-shared/code-change";
 import type { ChatChangeRow } from "./otClient";
@@ -110,6 +112,7 @@ import { copyToClipboard } from "./clipboard";
 import { isImeComposing } from "./keyboardEvent";
 import { formatAttachmentSize } from "./features/chat/attachmentFormatting";
 import { ChatComposer } from "./features/chat/composer/ChatComposer";
+import type { PromptPresetOption } from "./features/chat/controls/ComposerPromptSelector";
 import { composerDraftStorageKey } from "./features/chat/composer/draft/composerDraft";
 
 /**
@@ -2584,6 +2587,15 @@ function getOrCreateProvisionalToolCall(
   return toolCall;
 }
 
+// A stored prompt ref as the composer selector sees it: kind plus id, pins dropped. Gadget
+// refs (not selectable in the UI) display as the default.
+function selectionOfRef(ref: PromptRef | undefined): PromptSelection | null {
+  if (ref === undefined) return null;
+  if (ref.kind === "admin") return { kind: "admin", id: ref.id };
+  if (ref.kind === "blueprint") return { kind: "blueprint", id: ref.id };
+  return null;
+}
+
 function ChatInterface({
   workspaceId,
   overseer,
@@ -2743,10 +2755,11 @@ function ChatInterface({
   // In-flight setChatEffort write, awaited before sending so a selection always lands first.
   const effortWriteRef = useRef<Promise<void> | null>(null);
   // Pending prompt for the not-yet-created chat; in-chat composers read the chat's metadata.
-  const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
-  // The deployment's prompt presets, or null until loaded. Empty hides the prompt control.
-  const [promptPresets, setPromptPresets] =
-    useState<{ id: string; name: string }[] | null>(null);
+  const [pendingPrompt, setPendingPrompt] = useState<PromptSelection | null>(null);
+  // The selectable prompts (deployment presets plus the user's prompt-marked library
+  // blueprints), or null until loaded. Empty hides the prompt control.
+  const [promptOptions, setPromptOptions] =
+    useState<PromptPresetOption[] | null>(null);
   const promptWriteRef = useRef<Promise<void> | null>(null);
   const [sidebarActiveTab, setSidebarActiveTab] = useState<
     "chat" | "connections"
@@ -3743,10 +3756,11 @@ function ChatInterface({
 
           // After subscribing, load the list of chats and models
           // This is safe because subscription will catch any new activity
-          const [chats, models, presets] = await Promise.all([
+          const [chats, models, presets, library] = await Promise.all([
             overseer.listChats(),
             overseer.listModels(),
             overseer.listPromptPresets(),
+            authenticatedApi.listLibraryBlueprints(),
           ]);
 
           chats.forEach((chat) => {
@@ -3756,7 +3770,17 @@ function ChatInterface({
           setChatListReady(true);
 
           setAvailableModels(models);
-          setPromptPresets(presets);
+          // The prompt selector merges deployment presets with the user's prompt-marked
+          // library blueprints (filtered on the existing library, no new library system).
+          setPromptOptions([
+            ...presets.map((preset): PromptPresetOption =>
+                ({ kind: "admin", id: preset.id, name: preset.name })),
+            ...library
+              .filter((entry) => entry.metadata.prompt === true)
+              .map((entry): PromptPresetOption => ({
+                kind: "blueprint", id: entry.id, name: entry.metadata.title,
+              })),
+          ]);
 
           setSelectedModel(getStoredSelectedModel(models));
 
@@ -4029,34 +4053,37 @@ function ChatInterface({
       });
   };
 
-  // Handle prompt-preset change: staged for the new-chat composer, written immediately for
-  // an existing chat. The selector itself confirms mid-chat switches (cache break).
-  const handlePromptChange = (promptId: string | null) => {
+  // Handle prompt change: staged for the new-chat composer, written immediately for
+  // an existing chat. The selector itself confirms mid-chat switches (cache break). The
+  // RPC returns the stamped ref (null when cleared) for the cache.
+  const handlePromptChange = (prompt: PromptSelection | null) => {
     if (selectedChatId === null) {
-      setPendingPrompt(promptId);
+      setPendingPrompt(prompt);
       return;
     }
     const chatId = selectedChatId;
     promptWriteRef.current = overseer
-      .setChatPrompt(chatId, promptId)
-      .then(() => {
+      .setChatPrompt(chatId, prompt)
+      .then((stamped) => {
         const chat = cacheRef.current.chats.get(chatId);
         if (chat) {
           const next = { ...chat };
-          if (promptId === null) {
-            delete next.promptId;
+          if (stamped === null) {
+            delete next.promptRef;
           } else {
-            next.promptId = promptId;
+            next.promptRef = stamped;
           }
           cacheRef.current.chats.set(chatId, next);
           forceUpdate();
         }
       })
       .catch((err) => {
-        console.error("Failed to set prompt preset:", err);
-        toasts.add({ title: "Failed to set prompt preset", variant: "error" });
+        console.error("Failed to set prompt:", err);
+        toasts.add({ title: "Failed to set prompt", variant: "error" });
       });
   };
+
+
 
   // Handle stopping the agent
   const handleStop = async () => {
@@ -5354,9 +5381,9 @@ function ChatInterface({
               selectedEffort: pendingEffort,
               onEffortChange: handleEffortChange,
             }}
-            promptControl={promptPresets === null || promptPresets.length === 0 ? undefined : {
-              presets: promptPresets,
-              selectedPromptId: pendingPrompt,
+            promptControl={promptOptions === null || promptOptions.length === 0 ? undefined : {
+              presets: promptOptions,
+              selectedPrompt: pendingPrompt,
               onPromptChange: handlePromptChange,
               requireConfirm: false,
             }}
@@ -6338,9 +6365,9 @@ function ChatInterface({
                       selectedEffort: currentChatMetadata?.reasoningEffort ?? null,
                       onEffortChange: handleEffortChange,
                     }}
-                    promptControl={promptPresets === null || promptPresets.length === 0 ? undefined : {
-                      presets: promptPresets,
-                      selectedPromptId: currentChatMetadata?.promptId ?? null,
+                    promptControl={promptOptions === null || promptOptions.length === 0 ? undefined : {
+                      presets: promptOptions,
+                      selectedPrompt: selectionOfRef(currentChatMetadata?.promptRef),
                       onPromptChange: handlePromptChange,
                       requireConfirm: true,
                     }}

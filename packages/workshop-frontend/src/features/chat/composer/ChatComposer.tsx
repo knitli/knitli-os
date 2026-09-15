@@ -19,6 +19,7 @@ import type {
   MessageFormatRef,
   OutputFormatOffer,
   Overseer,
+  PromptSelection,
   SlashCommandChoice,
   SlashCommandRequest,
 } from "@gadgets/workshop-shared/api";
@@ -51,7 +52,9 @@ import { CapturedConsoleLogsPrompt } from "./CapturedConsoleLogsPrompt";
 import ComposerAddMenu from "./ComposerAddMenu";
 import { ComposerModelSelector } from "./ComposerModelSelector";
 import { ComposerEffortSelector } from "../controls/ComposerEffortSelector";
-import { ComposerPromptSelector } from "../controls/ComposerPromptSelector";
+import {
+  ComposerPromptSelector, type PromptPresetOption,
+} from "../controls/ComposerPromptSelector";
 import { useComposerDraft } from "./draft/useComposerDraft";
 import { buildComposerSubmission } from "./composerSubmission";
 import {
@@ -139,13 +142,13 @@ export const ChatComposer = ({
     onEffortChange: (effort: string | null) => void;
   };
   /**
-   * Per-chat prompt-preset control, rendered beside the effort selector. Absent while the
-   * deployment offers no presets, which hides the control.
+   * Per-chat prompt control, rendered beside the effort selector. Absent while neither the
+   * deployment nor the user's library offers a prompt, which hides the control.
    */
   promptControl?: {
-    presets: readonly { id: string; name: string }[];
-    selectedPromptId: string | null;
-    onPromptChange: (promptId: string | null) => void;
+    presets: readonly PromptPresetOption[];
+    selectedPrompt: PromptSelection | null;
+    onPromptChange: (prompt: PromptSelection | null) => void;
     requireConfirm: boolean;
   };
   pendingConsoleLogCount?: number;
@@ -992,7 +995,7 @@ export const ChatComposer = ({
               {promptControl !== undefined && (
                 <ComposerPromptSelector
                   presets={promptControl.presets}
-                  selectedPromptId={promptControl.selectedPromptId}
+                  selectedPrompt={promptControl.selectedPrompt}
                   onPromptChange={promptControl.onPromptChange}
                   requireConfirm={promptControl.requireConfirm}
                 />

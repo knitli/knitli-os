@@ -195,6 +195,51 @@
       "token": "SELF_CLOSING_HTML",
       "path": "scripts/fork/sync-upstream.ts",
       "reason": "This tool's own calibration notes; the product copy was deleted with the handoff adoption."
+    },
+    {
+      "token": "NativeStub",
+      "path": "scripts/fork/capnweb-native-validation.test.ts",
+      "reason": "Test-local alias imported from cloudflare:workers, not from upstream source; upstream #492 removing TransientStubLoopback is unrelated."
+    },
+    {
+      "token": "DeepSeek",
+      "path": "packages/workshop-backend/__tests__/knitli-reasoning-levels.test.ts",
+      "reason": "Fork reasoning-level coverage for the shared catalog's DeepSeek entry; upstream #495 only changed eval defaults, not the catalog."
+    },
+    {
+      "token": "DeepSeek",
+      "path": "packages/workshop-shared/src/api.ts",
+      "reason": "Shared Workers AI model catalog entry, untouched by this sync."
+    },
+    {
+      "token": "SYSTEM_PROMPT",
+      "path": "packages/workshop-backend/__tests__/knitli-chat-prompt.test.ts",
+      "reason": "Fork test asserting the default slot against the live constant; updated for upstream #489's restructured slot."
+    },
+    {
+      "token": "SYSTEM_PROMPT",
+      "path": "packages/workshop-backend/__tests__/knitli-turn-start.test.ts",
+      "reason": "Fork turn-start test asserting preset resolution; default path unchanged in shape."
+    },
+    {
+      "token": "SYSTEM_PROMPT",
+      "path": "packages/workshop-backend/src/agent.ts",
+      "reason": "Fork export + prompt-swap re-applied on upstream #489's rewritten prompt text."
+    },
+    {
+      "token": "dummyMethodToWorkAroundValidatorBug",
+      "path": "packages/workshop-backend/src/overseer.ts",
+      "reason": "Retained empty validator-workaround methods; capnweb-validate unchanged by this sync, still compiled."
+    },
+    {
+      "token": "getLiveChat",
+      "path": "packages/workshop-backend/src/overseer.ts",
+      "reason": "Shared live-chat accessor with surviving definition and callers; upstream #492 only removed some call sites."
+    },
+    {
+      "token": "resolveUserId",
+      "path": "packages/workshop-backend/src/overseer.ts",
+      "reason": "Ordinary local variable, self-contained; unaffected by upstream renames."
     }
   ]
 }

@@ -11,7 +11,9 @@ import {
 } from "../src/admin-config.js";
 import type { AdminSettings } from "../src/admin-settings.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
-import { runAgent, SYSTEM_PROMPT, type AgentHooks } from "../src/agent.js";
+import {
+  runAgent, COMMUNICATION_GUIDANCE, SYSTEM_PROMPT, type AgentHooks,
+} from "../src/agent.js";
 import type { ModelHandle } from "../src/ai-models.js";
 import type {
   Api, AssistantMessageEventStream, Model,
@@ -256,7 +258,7 @@ async function runTurn(captured: {options?: unknown, systemPrompt?: string}[],
                        hooks: AgentHooks, options: {promptRef?: PromptRef}): Promise<void> {
   await runAgent(
       hooks, capturingHandle(captured), 1, AGENT, [userMessage("hi")],
-      new AbortController().signal, USER, false,
+      new AbortController().signal, USER,
       {
         modelConfig: { provider: "cloudflare", model: GLM_FLASH, apiToken: "" },
         measuredTokens: 0,
@@ -275,7 +277,8 @@ describe("runAgent prompt swap", () => {
     expect(captured.length).toBe(1);
     expect(presetCalls).toEqual([ref]);
     expect(captured[0].systemPrompt!.startsWith(
-        `${PRESET_TEXT}\n\n${formatInstanceInstructions(INSTRUCTIONS)}`)).toBe(true);
+        `${PRESET_TEXT}\n\n${COMMUNICATION_GUIDANCE}\n\n` +
+        formatInstanceInstructions(INSTRUCTIONS))).toBe(true);
   }, 30000);
 
   it("keeps the built-in prompt byte-identical when unset", async () => {
@@ -287,7 +290,8 @@ describe("runAgent prompt swap", () => {
     // The hook is never read for default chats: no KV lookup on the common path.
     expect(presetCalls).toEqual([]);
     expect(captured[0].systemPrompt!.startsWith(
-        `${SYSTEM_PROMPT}\n\n${formatInstanceInstructions(INSTRUCTIONS)}`)).toBe(true);
+        `${SYSTEM_PROMPT}\n\n${COMMUNICATION_GUIDANCE}\n\n` +
+        formatInstanceInstructions(INSTRUCTIONS))).toBe(true);
   }, 30000);
 
   it("falls back to the built-in prompt when the preset is gone", async () => {

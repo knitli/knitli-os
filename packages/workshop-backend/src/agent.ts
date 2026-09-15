@@ -1107,6 +1107,19 @@ function defineTool<TParameters extends TSchema>(def: AgentTool<TParameters>): A
 }
 
 /**
+ * Per-turn overrides for runAgent(), read by the caller (the overseer) from the chat's metadata
+ * at turn start. Every field is optional; absent fields reproduce legacy behavior exactly.
+ */
+export type RunAgentOptions = {
+  /**
+   * Explicit reasoning effort for this turn (one of pi's ThinkingLevel names), threaded into
+   * the agent loop config. When undefined the model's default applies: nothing is sent, except
+   * makeHandle's openai-responses medium default.
+   */
+  reasoningEffort?: string;
+};
+
+/**
  * Runs one agent turn against the chat's history. Returns a checkpoint when the turn compacted
  * instead of prompting the model: the caller commits it, then reruns for a normal turn or stops for
  * `/compact`. Returns undefined when the turn ran.
@@ -1120,7 +1133,8 @@ export async function runAgent(
     abortSignal: AbortSignal,
     initiator: AiChatAuthorInfo,
     callbackInitiated: boolean,
-    compaction: CompactionContext): Promise<CompactionCheckpoint | undefined> {
+    compaction: CompactionContext,
+    options: RunAgentOptions = {}): Promise<CompactionCheckpoint | undefined> {
   let checkpoint = compaction.checkpoint;
 
   // The workspace's gadget registry, snapshotted at the start of the turn (gadgets provisional
@@ -3479,6 +3493,12 @@ export async function runAgent(
     convertToLlm: (messages) => messages as Message[],
     toolExecution: "sequential",
     maxTokens: maxOutputTokens,
+    // pi's loop spreads this config into every stream call, so an explicit effort reaches the
+    // model (AgentLoopConfig doesn't declare the field; the spread carries it untyped). The key
+    // must be absent -- not undefined -- when unset: an explicit undefined would clobber
+    // makeHandle's per-API defaults in its options merge (notably openai-responses' medium).
+    ...(options.reasoningEffort !== undefined
+        ? {reasoningEffort: options.reasoningEffort} : {}),
     shouldStopAfterTurn: () =>
         // Cancelled during tool execution: the completed turn was persisted by the turn_end
         // barrier just above; don't start another (doomed) model request.

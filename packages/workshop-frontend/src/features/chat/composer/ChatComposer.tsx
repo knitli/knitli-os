@@ -50,6 +50,7 @@ import {
 import { CapturedConsoleLogsPrompt } from "./CapturedConsoleLogsPrompt";
 import ComposerAddMenu from "./ComposerAddMenu";
 import { ComposerModelSelector } from "./ComposerModelSelector";
+import { ComposerEffortSelector } from "../controls/ComposerEffortSelector";
 import { useComposerDraft } from "./draft/useComposerDraft";
 import { buildComposerSubmission } from "./composerSubmission";
 import {
@@ -103,6 +104,7 @@ export const ChatComposer = ({
   onStop,
   showThinkingTraces = true,
   onToggleThinkingTraces,
+  effortControl,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -124,6 +126,16 @@ export const ChatComposer = ({
   models: AiChatAuthorInfo[];
   selectedModel: string | null;
   onModelChange: (modelId: string | null) => void;
+  /**
+   * Per-turn reasoning-effort control, rendered beside the model selector. Absent while the
+   * selected model offers no levels (or none is selected), which hides the control.
+   */
+  effortControl?: {
+    levels: readonly string[];
+    defaultLevel: string;
+    selectedEffort: string | null;
+    onEffortChange: (effort: string | null) => void;
+  };
   pendingConsoleLogCount?: number;
   consoleLogPreview?: string;
   consoleLogSeverity?: "error" | "warn" | "info";
@@ -957,6 +969,14 @@ export const ChatComposer = ({
                 selectedModel={selectedModel}
                 onModelChange={onModelChange}
               />
+              {effortControl !== undefined && (
+                <ComposerEffortSelector
+                  levels={effortControl.levels}
+                  defaultLevel={effortControl.defaultLevel}
+                  selectedEffort={effortControl.selectedEffort}
+                  onEffortChange={effortControl.onEffortChange}
+                />
+              )}
               {isAgentActive && onStop ? (
                 <WorkshopIconButton
                   onClick={onStop}

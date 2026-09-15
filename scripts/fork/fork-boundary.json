@@ -25,12 +25,20 @@
       "reason": "Deployment-admin connector frames UI; no upstream counterpart."
     },
     {
+      "path": "packages/workshop-frontend/src/features/chat/controls/",
+      "reason": "Fork-owned composer reasoning-effort control; no upstream counterpart."
+    },
+    {
       "path": "packages/workshop-backend/__tests__/knitli-approval-continuation.test.ts",
       "reason": "Regression test for the fork-owned approval-turn continuation."
     },
     {
       "path": "packages/workshop-backend/__tests__/knitli-reasoning-levels.test.ts",
       "reason": "Regression test for the fork-owned reasoning-effort resolver and its makeHandle wiring."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-chat-effort.test.ts",
+      "reason": "Regression test for the fork-owned per-chat effort override and its turn threading."
     },
     {
       "path": "packages/mcp-shared/__tests__/fork/",

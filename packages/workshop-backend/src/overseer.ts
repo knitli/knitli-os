@@ -1,4 +1,5 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
+import { isReasoningLevel } from "./fork/reasoning-levels";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
@@ -6614,6 +6615,7 @@ class OverseerImpl implements AgentHooks {
     responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
     externalChatKey?: string,
     formats?: MessageFormatRef[],
+    effort?: string | null,
   ): Promise<number> {
     if (responseTargetRegistration) {
       responseTargetRegistration.commitGuard();
@@ -6622,6 +6624,9 @@ class OverseerImpl implements AgentHooks {
     }
     if (typeof initialMessage !== "string" && (capsules?.length || attachments?.length)) {
       throw new Error("Slash commands cannot include resources or attachments.");
+    }
+    if (effort !== undefined && effort !== null && !isReasoningLevel(effort)) {
+      throw new Error(`Invalid reasoning effort: ${JSON.stringify(effort)}.`);
     }
     let canonicalAttachments = this.canonicalizeChatAttachmentRefs(
         attachments, userMeta.aiModel?.config.provider);
@@ -6648,6 +6653,9 @@ class OverseerImpl implements AgentHooks {
       };
       if (prepared.message !== undefined && userMeta.aiModel) {
         meta.activeAgent = userMeta.aiModel.profile;
+      }
+      if (effort) {
+        meta.reasoningEffort = effort;
       }
       this.storage.chatMeta.put(meta);
 
@@ -7155,6 +7163,9 @@ class OverseerImpl implements AgentHooks {
             userGateway: byokRouting,
             metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
           });
+      // The chat's per-turn effort override, if set; read here so a selection made before the
+      // turn (or seeded by newChat) governs the whole turn.
+      let turnEffort = this.getChatMetaOrThrow(chatId).reasoningEffort;
 
       let controller = liveChat.cancelController;
       controller.signal.throwIfAborted();
@@ -7173,6 +7184,8 @@ class OverseerImpl implements AgentHooks {
               checkpoint,
               modelConfig: aiModel.config,
               measuredTokens: this.getChatMetaOrThrow(chatId).totalTokens ?? 0,
+            }, {
+              reasoningEffort: turnEffort,
             });
         if (newCheckpoint) this.#commitChatCompaction(chatId, newCheckpoint);
         // `/compact` is done once it has compacted. An automatic compaction returned before
@@ -12005,11 +12018,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-                formats?: MessageFormatRef[]): Promise<number> {
+                formats?: MessageFormatRef[], effort?: string | null): Promise<number> {
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
     return this.impl.newChat(this.#clientUser, userMeta, initialMessage, capsules, attachments,
-                             undefined, undefined, formats);
+                             undefined, undefined, formats, effort);
   }
 
   async sendChatMessage(
@@ -12029,6 +12042,23 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
     meta.lastActive = this.impl.getChatTimestamp();
     meta.title = title;
+    this.impl.storage.chatMeta.put(meta);
+  }
+
+  async setChatEffort(chatId: number, effort: string | null): Promise<void> {
+    if (effort !== null && !isReasoningLevel(effort)) {
+      throw new Error(`Invalid reasoning effort: ${JSON.stringify(effort)}.`);
+    }
+    let meta = this.impl.storage.chatMeta.get(chatId);
+    if (!meta) {
+      throw new Error("No such chatId: " + chatId);
+    }
+    meta.lastActive = this.impl.getChatTimestamp();
+    if (effort === null) {
+      delete meta.reasoningEffort;
+    } else {
+      meta.reasoningEffort = effort;
+    }
     this.impl.storage.chatMeta.put(meta);
   }
 
@@ -12677,7 +12707,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     this.#deny();
   }
   async newChat(_initialMessage: string | SlashCommandRequest, _modelId: string | null,
-                 _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<number> {
+                 _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[],
+                 _formats?: MessageFormatRef[], _effort?: string | null): Promise<number> {
     this.#deny();
   }
   async sendChatMessage(_chatId: number, _message: string | SlashCommandRequest,
@@ -12692,6 +12723,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async getChatAttachmentContent(_chatId: number, _id: string): Promise<Uint8Array> { this.#deny(); }
   async deleteChatAttachment(_id: string): Promise<void> { this.#deny(); }
   async setChatTitle(_chatId: number, _title: string): Promise<void> { this.#deny(); }
+  async setChatEffort(_chatId: number, _effort: string | null): Promise<void> { this.#deny(); }
   async mergeChanges(_chatId: number): Promise<MergeChangesResult> {
     this.#deny();
   }

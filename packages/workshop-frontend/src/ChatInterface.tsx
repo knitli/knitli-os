@@ -2613,7 +2613,7 @@ function ChatInterface({
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
-  const { currentUser } = useAuthenticatedApi();
+  const { currentUser, authenticatedApi } = useAuthenticatedApi();
   const getOverseer = useCallback(() => overseer, [overseer]);
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -2713,6 +2713,35 @@ function ChatInterface({
     [],
   );
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  // Pending effort for the not-yet-created chat (new-chat composer). In-chat composers read
+  // the value from the chat's cached metadata instead; see handleEffortChange.
+  const [pendingEffort, setPendingEffort] = useState<string | null>(null);
+  // The selected model's reasoning levels, or null while none offers any (or none loads).
+  const [effortLevels, setEffortLevels] =
+    useState<{ levels: string[]; default: string } | null>(null);
+  useEffect(() => {
+    if (selectedModel === null) {
+      setEffortLevels(null);
+      return;
+    }
+    let cancelled = false;
+    setEffortLevels(null);
+    authenticatedApi.getModelReasoning(selectedModel).then(
+      (info) => {
+        if (!cancelled) setEffortLevels(info);
+      },
+      (err) => {
+        if (cancelled) return;
+        console.error("Failed to load reasoning levels:", err);
+        setEffortLevels(null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticatedApi, selectedModel]);
+  // In-flight setChatEffort write, awaited before sending so a selection always lands first.
+  const effortWriteRef = useRef<Promise<void> | null>(null);
   const [sidebarActiveTab, setSidebarActiveTab] = useState<
     "chat" | "connections"
   >("chat");
@@ -3904,10 +3933,13 @@ function ChatInterface({
     const model = modelId !== undefined ? modelId : selectedModel;
 
     try {
+      // A selection made just before sending must land before the turn starts.
+      await effortWriteRef.current;
       if (selectedChatId === null) {
         // Create a new chat (with optional capsules).
         const newChatId = await overseer.newChat(
-            message, model, capsules, attachments, formats);
+            message, model, capsules, attachments, formats, pendingEffort);
+        setPendingEffort(null);
         onNavigateToChatRef.current(newChatId);
       } else {
         // Send message to existing chat.
@@ -3941,7 +3973,8 @@ function ChatInterface({
     const model = modelId !== undefined ? modelId : selectedModel;
     try {
       const newChatId = await overseer.newChat(
-          message, model, capsules, attachments, formats);
+          message, model, capsules, attachments, formats, pendingEffort);
+      setPendingEffort(null);
       onNavigateToChatRef.current(newChatId);
     } catch (err) {
       if (!logRpcFailure("Failed to create new chat:", err, { reportSite: "chat.new" })) {
@@ -3955,6 +3988,35 @@ function ChatInterface({
   const handleModelChange = (modelId: string | null) => {
     setSelectedModel(modelId);
     persistSelectedModel(modelId);
+  };
+
+  // Handle reasoning-effort change: staged for the new-chat composer, written immediately
+  // (like the title) for an existing chat so the next turn starts under it.
+  const handleEffortChange = (effort: string | null) => {
+    if (selectedChatId === null) {
+      setPendingEffort(effort);
+      return;
+    }
+    const chatId = selectedChatId;
+    effortWriteRef.current = overseer
+      .setChatEffort(chatId, effort)
+      .then(() => {
+        const chat = cacheRef.current.chats.get(chatId);
+        if (chat) {
+          const next = { ...chat };
+          if (effort === null) {
+            delete next.reasoningEffort;
+          } else {
+            next.reasoningEffort = effort;
+          }
+          cacheRef.current.chats.set(chatId, next);
+          forceUpdate();
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to set reasoning effort:", err);
+        toasts.add({ title: "Failed to set reasoning effort", variant: "error" });
+      });
   };
 
   // Handle stopping the agent
@@ -5247,6 +5309,12 @@ function ChatInterface({
             models={availableModels}
             selectedModel={selectedModel}
             onModelChange={handleModelChange}
+            effortControl={effortLevels === null ? undefined : {
+              levels: effortLevels.levels,
+              defaultLevel: effortLevels.default,
+              selectedEffort: pendingEffort,
+              onEffortChange: handleEffortChange,
+            }}
             showThinkingTraces={showThinkingTraces}
             onToggleThinkingTraces={toggleShowThinkingTraces}
             minRows={2}
@@ -6219,6 +6287,12 @@ function ChatInterface({
                     models={availableModels}
                     selectedModel={selectedModel}
                     onModelChange={handleModelChange}
+                    effortControl={effortLevels === null ? undefined : {
+                      levels: effortLevels.levels,
+                      defaultLevel: effortLevels.default,
+                      selectedEffort: currentChatMetadata?.reasoningEffort ?? null,
+                      onEffortChange: handleEffortChange,
+                    }}
                     pendingConsoleLogCount={pendingConsoleLogCount}
                     consoleLogPreview={consoleLogPreview}
                     consoleLogSeverity={consoleLogSeverity}

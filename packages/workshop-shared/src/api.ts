@@ -2212,10 +2212,13 @@ export interface Overseer extends RpcTarget {
    * `formats` records where the message names one of the deployment's standard output formats, so
    * the transcript can draw it as a chip. Display only -- what the agent reads is the noun, which
    * is already in the text.
+   *
+   * `effort` seeds the new chat's reasoning-effort override (as if setChatEffort() had been
+   * called first), so the first turn already runs under it. Absent or null runs the default.
    */
   newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
           capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-          formats?: MessageFormatRef[]): Promise<number>;
+          formats?: MessageFormatRef[], effort?: string | null): Promise<number>;
 
   /**
    * Send a message to the chat from this client. Sending a message causes the LLM to start
@@ -2256,6 +2259,15 @@ export interface Overseer extends RpcTarget {
    * the first message.
    */
   setChatTitle(chatId: number, title: string): Promise<void>;
+
+  /**
+   * Set the chat's reasoning-effort override for upcoming turns: one of pi's ThinkingLevel
+   * names (see ModelReasoningInfo.levels for what the chat's model offers). Pass null to clear
+   * it back to the model's default. Rejects names outside the level vocabulary. Takes effect
+   * at the next turn start; a request parameter, not prompt content, so it never invalidates
+   * the Anthropic prefix cache.
+   */
+  setChatEffort(chatId: number, effort: string | null): Promise<void>;
 
   /**
    * Indicates that the user has requested that the chat's proposed changes be merged into the
@@ -2533,6 +2545,13 @@ export type AiChatMetadata = {
 
   /** If this was started from an agent spawner, the spawner's display name. */
   spawnerName?: string;
+
+  /**
+   * The chat's reasoning-effort override for upcoming turns (one of pi's ThinkingLevel
+   * names), set via setChatEffort() or newChat(). Absent when the chat runs the model's
+   * default. Read at turn start; per-chat, so it persists across reloads and clients.
+   */
+  reasoningEffort?: string;
 
   /**
    * Tokens the model reported for this conversation's last step, if known. Cleared when compaction

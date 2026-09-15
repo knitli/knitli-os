@@ -49,6 +49,10 @@
       "reason": "Regression test for the fork-owned prompt presets and the static-slot swap."
     },
     {
+      "path": "packages/workshop-backend/__tests__/knitli-turn-start.test.ts",
+      "reason": "Regression test for the fork-owned turn-start threading of effort and prompt selections."
+    },
+    {
       "path": "packages/mcp-shared/__tests__/fork/",
       "reason": "Fork regression tests for named $defs aliases, read-before-dispatch authorization, and the caller-settable argument budget."
     },

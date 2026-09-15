@@ -32,6 +32,7 @@ import {
 } from "./git-cache";
 import { commitIdentityForAuthor, type GitStore } from "./git-store";
 import { formatUnifiedDiff, type WorktreeTurnAccess } from "./agent";
+import { isPromptFileAnywhere } from "./fork/prompt-files";
 
 /**
  * What the session needs from the overseer: the git plumbing and the worktree's registry record
@@ -107,6 +108,9 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     if (baseScope !== undefined) {
       let listing = await this.host.gitCache.listCommitTreePaths(
           base, scope === "" ? undefined : scope, { recursive: recursive || removedInScope });
+      // Blindfold: prompt files are listed nowhere (base or overlay), so a directory
+      // containing only one reads as hollow, like a removal.
+      listing = listing.filter(entry => !isPromptFileAnywhere(entry.path));
       for (let entry of listing) {
         if (!recursive && entry.path.slice(prefix.length).includes("/")) continue;
         if ((entry.kind === "file" || entry.kind === "executable") &&
@@ -130,6 +134,7 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
       }
     }
     for (let overlayPath of overlay.keys()) {
+      if (isPromptFileAnywhere(overlayPath)) continue;
       if (prefix !== "" && !overlayPath.startsWith(prefix)) continue;
       let segments = overlayPath.slice(prefix.length).split("/");
       let depth = recursive ? segments.length : Math.min(segments.length, 2);
@@ -153,6 +158,8 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
 
   async readFile(path: string): Promise<string> {
     this.#pinBase();
+    // Blindfold: prompt files fail exactly like missing files.
+    if (isPromptFileAnywhere(path)) throw new Error(`${path}: no such file`);
     let text = await this.turn.readFile(this.worktreeId, path);
     if (text === undefined) throw new Error(`${path}: no such file`);
     return text;
@@ -160,6 +167,9 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
 
   async writeFile(path: string, text: string): Promise<void> {
     let base = this.#pinBase();
+    // Blindfold: prompt files are unwritable (same missing-file error), so prompts can
+    // neither be overwritten nor confirmed by writing.
+    if (isPromptFileAnywhere(path)) throw new Error(`${path}: no such file`);
     let overlay = this.turn.getOverlayFiles(this.worktreeId);
     let before: string | undefined;
     if (overlay.has(path)) {
@@ -191,6 +201,8 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
 
   async deleteFile(path: string): Promise<void> {
     let base = this.#pinBase();
+    // Blindfold: prompt files are undeletable (same missing-file error).
+    if (isPromptFileAnywhere(path)) throw new Error(`${path}: no such file`);
     if (!this.turn.getOverlayFiles(this.worktreeId).has(path)) {
       if (this.turn.getRemovedPaths(this.worktreeId).has(path)) {
         throw new Error(`${path}: no such file`);
@@ -261,6 +273,12 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     let single = false;
 
     for (let scope of scopes) {
+      // Blindfold: a directly-named prompt file fails exactly like a missing path -- the same
+      // "no such file or directory" outcome the directory-scope fallthrough reports below.
+      if (scope !== "" && isPromptFileAnywhere(scope)) {
+        failedScopes.set(scope, `${scope}: no such file or directory`);
+        continue;
+      }
       let overlayText = overlay.get(scope);
       if (scope !== "" && overlayText !== undefined) {
         candidates.set(scope, { path: scope });
@@ -288,6 +306,9 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
         found = true;
         for (let treeEntry of await this.host.gitCache.listCommitTreePaths(
             base, scope === "" ? undefined : scope, { recursive: true })) {
+          // Blindfold: prompt files are never searched, so neither their names nor their
+          // content can leak through matches (not even a symlink/submodule shape note).
+          if (isPromptFileAnywhere(treeEntry.path)) continue;
           if (treeEntry.kind === "dir") continue;
           if (treeEntry.kind === "symlink" || treeEntry.kind === "submodule") {
             errorByFile.set(treeEntry.path, `${treeEntry.path} is a ${treeEntry.kind}`);
@@ -298,6 +319,9 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
         }
       }
       for (let overlayPath of overlay.keys()) {
+        // Blindfold: prompt files are never searched (unreachable via the write guard, but
+        // fail closed here too).
+        if (isPromptFileAnywhere(overlayPath)) continue;
         if (prefix === "" || overlayPath.startsWith(prefix)) {
           candidates.set(overlayPath, { path: overlayPath });
           found = true;
@@ -427,6 +451,8 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     let paths = await this.host.gitCache.changedFilePathsBetween(target, base);
     for (let path of overlay.keys()) paths.add(path);
     for (let path of removed) paths.add(path);
+    // Blindfold: prompt files never render into the diff, whichever side changed them.
+    paths = new Set([...paths].filter(path => !isPromptFileAnywhere(path)));
 
     // A side that cannot be rendered as text -- a symlink or submodule entry, or unreadable
     // (oversized/binary) content -- contributes a note carrying its descriptive error instead

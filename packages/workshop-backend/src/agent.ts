@@ -15,6 +15,7 @@ import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
 import { AgentCatalogSnapshot, formatAlwaysAvailableResourcesPrompt } from "./agent-catalog";
+import { isPromptFileAnywhere } from "./fork/prompt-files";
 import { formatInstanceInstructions } from "./admin-config";
 import type { AiGatewayLogRoute } from "./ai-gateway";
 import { AgentTurnError, completeText, httpStatusFromError, zeroUsage } from "./ai-invoke";
@@ -1327,6 +1328,9 @@ export async function runAgent(
 
       let gadgetDiffParts: string[] = [];
       for (let [filename] of [...entries].toSorted((a, b) => a[0] < b[0] ? -1 : 1)) {
+        // Blindfold: prompt-file edits apply to session state (reverts stay correct) but
+        // never render into the model-visible diff.
+        if (isPromptFileAnywhere(filename)) continue;
         let oldContent = before.get(info.id)?.get(filename);
         let newContent = sessionContent.get(info.id)?.get(filename);
         if (oldContent === newContent) continue;
@@ -1758,6 +1762,13 @@ export async function runAgent(
                 // Note that if we get here, we know the tool succeeded originally, so for many
                 // branches below we can just return success unconditionally.
                 case "readFile": {
+                  // Blindfold: a recorded read of a prompt file elides exactly like a
+                  // missing file, before any storage is touched. Covers pre-blindfold
+                  // reads in old chats (the file was ordinary when the agent read it).
+                  if (isPromptFileAnywhere(toolCall.input.filename)) {
+                    toolOutput = {text: "File does not exist.", isError: true};
+                    break;
+                  }
                   if (chatMessageStatus.get(msg.sequence) === "reverted") {
                     // It would be a total waste of tokens to actually include this file
                     // content in the chat history since it contains changes that were later
@@ -2436,6 +2447,8 @@ export async function runAgent(
         } else {
           files = [...(sessionContent.get(info.id)?.keys() ?? [])];
         }
+        // Blindfold: prompt files are listed nowhere the agent looks.
+        files = files.filter(file => !isPromptFileAnywhere(file));
         let envName = chatNameFor(info.id);
         let lines = [envName !== undefined
             ? `## Gadget ${envName}: ${JSON.stringify(info.title)}`
@@ -2641,6 +2654,12 @@ export async function runAgent(
         try {
           let resolved =
               hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId);
+          // Blindfold: prompt files fail exactly like missing files, whichever
+          // workpiece (or worktree) they are read from. Path-based, so session
+          // copies from blueprint instantiation are covered too.
+          if (isPromptFileAnywhere(filename)) {
+            throw new Error("File does not exist.");
+          }
 
           // An unpinned gadget with committed code is read live at its head (fixed for the
           // turn; see observeHead), stamping the commit so replay can detect staleness and
@@ -2691,6 +2710,11 @@ export async function runAgent(
         try {
           let resolved =
               hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId);
+          // Blindfold: prompt files are unwritable (same missing-file error), so the
+          // agent can neither overwrite a prompt nor confirm one exists by writing.
+          if (isPromptFileAnywhere(filename)) {
+            throw new Error("File does not exist.");
+          }
 
           // Writing over a worktree's symlink or submodule entry is rejected with the same
           // descriptive error reading one gets, and a base *directory* path too -- such a
@@ -2757,6 +2781,12 @@ export async function runAgent(
         try {
           let resolved =
               hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId);
+          // Blindfold: prompt files fail with the missing-file error ahead of the
+          // read gate, so a stale filesRead entry from a pre-blindfold replay can
+          // never let an edit through to prompt content.
+          if (isPromptFileAnywhere(filename)) {
+            throw new Error("File does not exist.");
+          }
           let readFiles = filesRead.get(resolved.workpieceId);
           if (readFiles === undefined || !readFiles.has(filename)) {
             throw new Error("You must read a file before you can edit it.");

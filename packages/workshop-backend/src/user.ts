@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, ModelReasoningInfo, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ConnectInitiator, type ResolveRequestedResourceResult } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -7,6 +7,7 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { createWorkshopLogger } from "./observability";
 import { getAiGatewayConfig } from "./ai-gateway.js";
+import { modelReasoningForConfig } from "./fork/reasoning-levels.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
@@ -600,6 +601,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.aiModels.delete(id);
   }
 
+  async getModelReasoning(modelId: string): Promise<ModelReasoningInfo | null> {
+    // Same resolution as getChatContext(): gateway built-ins first, then stored customs. Pure
+    // read returning level names only -- no credentials -- so it is safe to expose over RPC.
+    let gwConfig = getAiGatewayConfig(this.env);
+    let record = gwConfig?.resolveModel(modelId) ?? this.storage.aiModels.get(modelId);
+    if (!record) return null;
+    return modelReasoningForConfig(record.config.provider, record.config.model);
+  }
+
   async setQuickModel(id: string | null): Promise<void> {
     this.storage.quickModel.put(id);
   }
@@ -1092,6 +1102,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       version: record.metadata.version,
       lastUpdated: record.metadata.lastUpdated,
       pinned: pinnedBlueprintIds.has(record.id) || undefined,
+      prompt: record.metadata.prompt,
     };
   }
 

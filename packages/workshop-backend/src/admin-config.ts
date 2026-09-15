@@ -8,7 +8,7 @@
 // changed by a compromised admin session. Everything here is enabled by default; the admin UI opts
 // things *out*.
 
-import { AmbientGatekeeperMode, BannerConfig, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, OutputFormatOffer, isAmbientGatekeeperMode, isBannerColor, isOutputIcon } from "@gadgets/workshop-shared/api";
+import { AmbientGatekeeperMode, BannerConfig, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, OutputFormatOffer, PromptPreset, isAmbientGatekeeperMode, isBannerColor, isOutputIcon } from "@gadgets/workshop-shared/api";
 import { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { ADMIN_CONFIG_KEY, BlueprintKvEnv, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive.js";
 
@@ -28,6 +28,11 @@ export type AdminConfig = {
   siteLogoConfigured: boolean;
   /** Extra instructions appended to the agent system prompt. */
   instanceInstructions: string;
+  /**
+   * Deployment-wide prompt presets: named system-prompt base texts users select per chat.
+   * The built-in `gadget builder` prompt is the implicit default and is never stored here.
+   */
+  promptPresets: PromptPreset[];
   /** Centered top-bar notice. Markdown. */
   announcement: string;
   /** Full-width banner (text + accent color). */
@@ -84,6 +89,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   siteName: "",
   siteLogoConfigured: false,
   instanceInstructions: "",
+  promptPresets: [],
   announcement: "",
   banner: { text: "", color: DEFAULT_BANNER_COLOR },
   accentColor: "",
@@ -99,6 +105,25 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
  * two is what the panel asks for.
  */
 export const MAX_AGENT_HINT = 400;
+
+// Accept a stored preset only if it is well-formed (non-blank id, name, and text), dropping
+// duplicates by id: a hand-edited KV mirror must never wedge the prompt path.
+function parsePromptPresets(value: unknown): PromptPreset[] {
+  if (!Array.isArray(value)) return [];
+  let presets: PromptPreset[] = [];
+  let seen = new Set<string>();
+  for (let raw of value) {
+    if (!raw || typeof raw !== "object") continue;
+    let {id, name, text} = raw as Partial<PromptPreset>;
+    if (typeof id !== "string" || !id.trim()) continue;
+    if (typeof name !== "string" || !name.trim()) continue;
+    if (typeof text !== "string" || !text.trim()) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    presets.push({id, name, text});
+  }
+  return presets;
+}
 
 // Accept a stored format entry only if it is well-formed.
 function parseFormats(value: unknown): FormatCuration[] {
@@ -303,6 +328,7 @@ export function parseAdminConfig(raw: string | null): AdminConfig {
       siteName: typeof p.siteName === "string" ? p.siteName : "",
       siteLogoConfigured: typeof p.siteLogoConfigured === "boolean" ? p.siteLogoConfigured : false,
       instanceInstructions: typeof p.instanceInstructions === "string" ? p.instanceInstructions : "",
+      promptPresets: parsePromptPresets(p.promptPresets),
       announcement: typeof p.announcement === "string" ? p.announcement : "",
       banner: {
         text: typeof p.banner?.text === "string" ? p.banner.text : "",

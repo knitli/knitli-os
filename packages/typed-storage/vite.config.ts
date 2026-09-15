@@ -15,14 +15,19 @@ export default withVitestTask(
          * `dist/index.js` -- which is why `workshop-backend`'s `build:integration-worker` and
          * `run-local.ts` both name `@gadgets/typed-storage#build` as an explicit prerequisite.
          *
-         * `dist/**` is excluded from `input` because vp declines to cache a task that reads a path
-         * it also writes. Package-relative, not workspace-wide: this package's output is a real
-         * input to the packages that bundle it.
+         * `cache: false`: this task must never replay a cached `dist`. The fingerprint provably
+         * ignores `src` changes (an entry built before `singleton` existed kept replaying its
+         * stale `dist` over current sources, and appending a comment to `src/index.ts` still
+         * reports a cache hit), so any caching here lets `dist` silently regress behind `src`
+         * and breaks every consumer that bundles the real `dist/index.js` (notably the backend
+         * unit suite under workerd). `tsc` on this tiny package costs seconds; correctness wins.
+         * No `input`/`output`: those belong to the cached-task schema variant, which this task
+         * no longer uses. Dependents (`build:integration-worker`, `run-local.ts`) still order
+         * after this task via `dependsOn` and always see a freshly built `dist`.
          */
         build: {
           command: 'tsc',
-          input: [{ auto: true }, { pattern: '!dist/**', base: 'package' } as const],
-          output: ['dist/**'],
+          cache: false,
         },
       },
     },

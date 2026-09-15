@@ -427,6 +427,14 @@ export interface AuthenticatedApi extends RpcTarget {
   deleteModel(id: string): Promise<void>;
 
   /**
+   * Describe one model's reasoning-effort control for the chat UI: which effort levels the
+   * model offers and which one to present as the default. Resolves exactly the model ids
+   * listModels() returns (gateway built-ins plus stored customs). Returns null for unknown
+   * ids and for models whose API ignores reasoning effort.
+   */
+  getModelReasoning(modelId: string): Promise<ModelReasoningInfo | null>;
+
+  /**
    * Set the model to use for simple quick tasks, like generating chat titles. Set null to
    * disable quick model use (e.g. chats will be titled "New Chat").
    */
@@ -913,6 +921,66 @@ export const MAX_SITE_LOGO_BYTES = 256 * 1024;
 /** Maximum width or height of an admin-uploaded site logo in pixels. */
 export const MAX_SITE_LOGO_DIMENSION = 512;
 
+/**
+ * One deployment-wide prompt preset: a named system-prompt base text users can select per
+ * chat. The built-in `gadget builder` prompt is the implicit default and is never stored here.
+ */
+export type PromptPreset = {
+  /** Server-generated id (opaque to clients). */
+  id: string;
+  /** Admin-chosen display name. */
+  name: string;
+  /** The system-prompt base text, used as the static slot in place of the built-in prompt. */
+  text: string;
+};
+
+/** A partial edit to one prompt preset. Absent fields are left alone. */
+export type PromptPresetPatch = {
+  /** Replacement display name (ignored when blank). */
+  name?: string;
+  /** Replacement prompt text (ignored when blank). */
+  text?: string;
+};
+
+/**
+ * One prompt preset as chat users see it: id plus name. The text stays admin-only; selection
+ * needs only the name, and the agent's live behavior already reveals the rest.
+ */
+export type PromptPresetSummary = {
+  /** The preset's id, selected via setChatPrompt() as `{kind: "admin", id}`. */
+  id: string;
+  /** The preset's display name. */
+  name: string;
+};
+
+/**
+ * A chat's system-prompt source, as chosen in the UI and passed to setChatPrompt()/newChat().
+ * Gadget and blueprint selections pin at set time (see PromptRef); the UI never supplies pins,
+ * so there is no read-then-set race between choosing and stamping.
+ */
+export type PromptSelection =
+    /** A deployment preset from listPromptPresets(). Live: admin edits take effect promptly. */
+    { kind: "admin", id: string }
+    /** A workspace gadget: its head commit's root `PROMPT.md`, pinned to that commit. */
+  | { kind: "gadget", id: number }
+    /** A prompt-marked blueprint (own, library, or featured), pinned to its version. */
+  | { kind: "blueprint", id: string };
+
+/**
+ * A chat's pinned system-prompt source, stored on AiChatMetadata.promptRef. Stamped from a
+ * PromptSelection at set time; gadget and blueprint pins freeze the exact content (commit /
+ * blueprint version) so later edits never move an old chat's prefix. Whatever a ref names,
+ * resolution failures (deleted preset, removed file, missing content) fall back to the
+ * built-in `gadget builder` default.
+ */
+export type PromptRef =
+    { kind: "admin", id: string }
+  | { kind: "gadget", id: number, version: string }
+  | { kind: "blueprint", id: string, version: number };
+
+/** Longest prompt-preset display name the admin API accepts. */
+export const MAX_PROMPT_PRESET_NAME_LENGTH = 80;
+
 /** All admin-managed deployment settings, returned by AdminApi.getSettings() for the admin UI. */
 export type AdminSettingsView = {
   /** Whether new account signups are allowed. */
@@ -923,6 +991,8 @@ export type AdminSettingsView = {
   siteLogo?: AvatarImage;
   /** Agent system-prompt instructions ("" when unset). */
   instanceInstructions: string;
+  /** Deployment-wide prompt presets (the built-in default is implicit, never listed). */
+  promptPresets: PromptPreset[];
   /** Top-bar notice text ("" when unset). */
   announcement: string;
   /** Full-width banner (text + accent color). */
@@ -1168,6 +1238,22 @@ export interface AdminApi {
   setInstanceInstructions(text: string): Promise<void>;
 
   /**
+   * Create a deployment-wide prompt preset with a server-generated id. Rejects a blank name
+   * or text, or a name over MAX_PROMPT_PRESET_NAME_LENGTH. The text is unbounded
+   * (admin-trusted) and is stored trimmed.
+   */
+  createPromptPreset(name: string, text: string): Promise<PromptPreset>;
+
+  /**
+   * Update one prompt preset. Only the provided patch fields change; blank values are
+   * ignored. Throws for an unknown id.
+   */
+  updatePromptPreset(id: string, patch: PromptPresetPatch): Promise<void>;
+
+  /** Delete one prompt preset. Chats using it fall back to the built-in default. */
+  deletePromptPreset(id: string): Promise<void>;
+
+  /**
    * Enable or disable a single gatekeeper resource type, keyed by vendor id + resource urlPattern.
    * Soft enforcement: disabling hides the resource from the connect UI, the resource picker, and the
    * agent; it doesn't revoke a capability a gadget already holds.
@@ -1391,6 +1477,19 @@ export type AiModelConfig = {
    * alternative provider that provides a compatible API.
    */
   apiUrl?: string;
+};
+
+/**
+ * One model's reasoning-effort control, as AuthenticatedApi.getModelReasoning() describes it
+ * for the chat UI. Level names are pi's ThinkingLevel vocabulary
+ * ("minimal" | "low" | "medium" | "high" | "xhigh" | "max"); plain strings here so this
+ * package stays free of pi-ai types.
+ */
+export type ModelReasoningInfo = {
+  /** The effort levels the model offers, in increasing order. Never empty. */
+  levels: string[];
+  /** The level the UI presents as the default. Always one of `levels`. */
+  default: string;
 };
 
 /**
@@ -2191,10 +2290,17 @@ export interface Overseer extends RpcTarget {
    * `formats` records where the message names one of the deployment's standard output formats, so
    * the transcript can draw it as a chip. Display only -- what the agent reads is the noun, which
    * is already in the text.
+   *
+   * `effort` seeds the new chat's reasoning-effort override (as if setChatEffort() had been
+   * called first), so the first turn already runs under it. Absent or null runs the default.
+   *
+   * `prompt` seeds the new chat's system prompt the same way (as if setChatPrompt() had
+   * been called first). Absent or null runs the built-in default.
    */
   newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
           capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-          formats?: MessageFormatRef[]): Promise<number>;
+          formats?: MessageFormatRef[], effort?: string | null,
+          prompt?: PromptSelection | null): Promise<number>;
 
   /**
    * Send a message to the chat from this client. Sending a message causes the LLM to start
@@ -2235,6 +2341,29 @@ export interface Overseer extends RpcTarget {
    * the first message.
    */
   setChatTitle(chatId: number, title: string): Promise<void>;
+
+  /**
+   * Set the chat's reasoning-effort override for upcoming turns: one of pi's ThinkingLevel
+   * names (see ModelReasoningInfo.levels for what the chat's model offers). Pass null to clear
+   * it back to the model's default. Rejects names outside the level vocabulary. Takes effect
+   * at the next turn start; a request parameter, not prompt content, so it never invalidates
+   * the Anthropic prefix cache.
+   */
+  setChatEffort(chatId: number, effort: string | null): Promise<void>;
+
+  /**
+   * Set the chat's system prompt for upcoming turns: a deployment preset, a workspace
+   * gadget's prompt file, or a prompt-marked blueprint -- or null for the built-in `gadget
+   * builder` default. Gadget and blueprint selections pin their current content (commit /
+   * version) at set time. Rejects unknown ids and sources with no prompt to select. Takes
+   * effect at the next turn start; swapping prompts changes the static prompt slot and busts
+   * the Anthropic prefix cache, so the UI confirms the switch mid-chat. Returns the stamped
+   * ref (null when cleared) so the caller can cache exactly what was stored.
+   */
+  setChatPrompt(chatId: number, prompt: PromptSelection | null): Promise<PromptRef | null>;
+
+  /** List the deployment's prompt presets (id plus name) for the chat prompt selector. */
+  listPromptPresets(): Promise<PromptPresetSummary[]>;
 
   /**
    * Indicates that the user has requested that the chat's proposed changes be merged into the
@@ -2512,6 +2641,21 @@ export type AiChatMetadata = {
 
   /** If this was started from an agent spawner, the spawner's display name. */
   spawnerName?: string;
+
+  /**
+   * The chat's reasoning-effort override for upcoming turns (one of pi's ThinkingLevel
+   * names), set via setChatEffort() or newChat(). Absent when the chat runs the model's
+   * default. Read at turn start; per-chat, so it persists across reloads and clients.
+   */
+  reasoningEffort?: string;
+
+  /**
+   * The chat's pinned system-prompt source, set via setChatPrompt() or newChat(). Absent
+   * when the chat runs the built-in `gadget builder` default; a ref whose source is gone
+   * (deleted preset, removed file, missing content) also falls back to the default. Read
+   * at turn start.
+   */
+  promptRef?: PromptRef;
 
   /**
    * Tokens the model reported for this conversation's last step, if known. Cleared when compaction
@@ -4084,6 +4228,15 @@ export type BlueprintMetadata = {
    */
   output?: BlueprintOutput;
 
+  /**
+   * Present when the blueprint's code carries a prompt file (`PROMPT.md`) at its root: the
+   * blueprint is a reusable system prompt, selectable as a chat's prompt preset. Set at publish
+   * time from the source gadget's committed head, and re-derived whenever the code updates. The
+   * agent never sees prompt-marked blueprints in its blueprint list (it must not know prompts
+   * exist as instantiable code), though instantiated copies still blindfold their prompt files.
+   */
+  prompt?: true;
+
   /** Key = binding name. */
   bindings: Record<string, BlueprintBinding>;
 };
@@ -4132,6 +4285,8 @@ export type BlueprintUserSummary = {
   version: number;
   lastUpdated: Date;
   pinned?: boolean;
+  /** Present when the blueprint is prompt-marked (see BlueprintMetadata.prompt). */
+  prompt?: true;
 };
 
 /** User-side library summary (returned by AuthenticatedApi.listLibraryBlueprints). */

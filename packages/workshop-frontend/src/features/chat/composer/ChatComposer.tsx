@@ -19,6 +19,7 @@ import type {
   MessageFormatRef,
   OutputFormatOffer,
   Overseer,
+  PromptSelection,
   SlashCommandChoice,
   SlashCommandRequest,
 } from "@gadgets/workshop-shared/api";
@@ -50,6 +51,10 @@ import {
 import { CapturedConsoleLogsPrompt } from "./CapturedConsoleLogsPrompt";
 import ComposerAddMenu from "./ComposerAddMenu";
 import { ComposerModelSelector } from "./ComposerModelSelector";
+import { ComposerEffortSelector } from "../controls/ComposerEffortSelector";
+import {
+  ComposerPromptSelector, type PromptPresetOption,
+} from "../controls/ComposerPromptSelector";
 import { useComposerDraft } from "./draft/useComposerDraft";
 import { buildComposerSubmission } from "./composerSubmission";
 import {
@@ -103,6 +108,8 @@ export const ChatComposer = ({
   onStop,
   showThinkingTraces = true,
   onToggleThinkingTraces,
+  effortControl,
+  promptControl,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -124,6 +131,26 @@ export const ChatComposer = ({
   models: AiChatAuthorInfo[];
   selectedModel: string | null;
   onModelChange: (modelId: string | null) => void;
+  /**
+   * Per-turn reasoning-effort control, rendered beside the model selector. Absent while the
+   * selected model offers no levels (or none is selected), which hides the control.
+   */
+  effortControl?: {
+    levels: readonly string[];
+    defaultLevel: string;
+    selectedEffort: string | null;
+    onEffortChange: (effort: string | null) => void;
+  };
+  /**
+   * Per-chat prompt control, rendered beside the effort selector. Absent while neither the
+   * deployment nor the user's library offers a prompt, which hides the control.
+   */
+  promptControl?: {
+    presets: readonly PromptPresetOption[];
+    selectedPrompt: PromptSelection | null;
+    onPromptChange: (prompt: PromptSelection | null) => void;
+    requireConfirm: boolean;
+  };
   pendingConsoleLogCount?: number;
   consoleLogPreview?: string;
   consoleLogSeverity?: "error" | "warn" | "info";
@@ -957,6 +984,22 @@ export const ChatComposer = ({
                 selectedModel={selectedModel}
                 onModelChange={onModelChange}
               />
+              {effortControl !== undefined && (
+                <ComposerEffortSelector
+                  levels={effortControl.levels}
+                  defaultLevel={effortControl.defaultLevel}
+                  selectedEffort={effortControl.selectedEffort}
+                  onEffortChange={effortControl.onEffortChange}
+                />
+              )}
+              {promptControl !== undefined && (
+                <ComposerPromptSelector
+                  presets={promptControl.presets}
+                  selectedPrompt={promptControl.selectedPrompt}
+                  onPromptChange={promptControl.onPromptChange}
+                  requireConfirm={promptControl.requireConfirm}
+                />
+              )}
               {isAgentActive && onStop ? (
                 <WorkshopIconButton
                   onClick={onStop}

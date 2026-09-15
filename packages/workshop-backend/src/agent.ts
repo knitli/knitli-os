@@ -1,4 +1,4 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, ChatCodeBase, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, ChatCodeBase, WorkpieceId, type AiModelConfig, type PromptRef, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type CodeContent,
   type CodeChange, type FileChange } from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
@@ -15,6 +15,7 @@ import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
 import { AgentCatalogSnapshot, formatAlwaysAvailableResourcesPrompt } from "./agent-catalog";
+import { isPromptFileAnywhere } from "./fork/prompt-files";
 import { formatInstanceInstructions } from "./admin-config";
 import type { AiGatewayLogRoute } from "./ai-gateway";
 import { AgentTurnError, completeText, httpStatusFromError, zeroUsage } from "./ai-invoke";
@@ -597,6 +598,13 @@ export interface AgentHooks {
   getInstanceInstructions(): Promise<string>;
 
   /**
+   * A pinned prompt source's text, or undefined when its source is gone or unreadable --
+   * both fail closed onto the built-in default. Read on each turn a ref is set, so admin
+   * preset edits take effect promptly (gadget and blueprint pins still freeze content).
+   */
+  getPromptRefText(ref: PromptRef): Promise<string | undefined>;
+
+  /**
    * Connection-request hooks for the agent.
    *
    * List the gatekeeper vendors the user could connect (id + display name). Used to populate the
@@ -664,7 +672,8 @@ export interface AgentHooks {
 // =======================================================================================
 // Agent system prompt and tool descriptions
 
-let SYSTEM_PROMPT = `
+/** Exported so tests assert the default slot against the live constant, not a copy. */
+export let SYSTEM_PROMPT = `
 You are a helpful coding assistant tasked with helping users write small personal applications known as "Gadgets". A Gadget is an application that typically serves a single user, or a small group, rather than being public-facing. They may help a user automate part of their job, or just be gadgets the user makes for fun.
 
 # Workspaces
@@ -1107,6 +1116,25 @@ function defineTool<TParameters extends TSchema>(def: AgentTool<TParameters>): A
 }
 
 /**
+ * Per-turn overrides for runAgent(), read by the caller (the overseer) from the chat's metadata
+ * at turn start. Every field is optional; absent fields reproduce legacy behavior exactly.
+ */
+export type RunAgentOptions = {
+  /**
+   * Explicit reasoning effort for this turn (one of pi's ThinkingLevel names), threaded into
+   * the agent loop config. When undefined the model's default applies: nothing is sent, except
+   * makeHandle's openai-responses medium default.
+   */
+  reasoningEffort?: string;
+  /**
+   * The chat's pinned prompt source, resolved to text for the static system slot. When
+   * undefined the built-in gadget-builder prompt applies byte-identical; a ref whose source
+   * is gone resolves the same way.
+   */
+  promptRef?: PromptRef;
+};
+
+/**
  * Runs one agent turn against the chat's history. Returns a checkpoint when the turn compacted
  * instead of prompting the model: the caller commits it, then reruns for a normal turn or stops for
  * `/compact`. Returns undefined when the turn ran.
@@ -1120,7 +1148,8 @@ export async function runAgent(
     abortSignal: AbortSignal,
     initiator: AiChatAuthorInfo,
     callbackInitiated: boolean,
-    compaction: CompactionContext): Promise<CompactionCheckpoint | undefined> {
+    compaction: CompactionContext,
+    options: RunAgentOptions = {}): Promise<CompactionCheckpoint | undefined> {
   let checkpoint = compaction.checkpoint;
 
   // The workspace's gadget registry, snapshotted at the start of the turn (gadgets provisional
@@ -1299,6 +1328,9 @@ export async function runAgent(
 
       let gadgetDiffParts: string[] = [];
       for (let [filename] of [...entries].toSorted((a, b) => a[0] < b[0] ? -1 : 1)) {
+        // Blindfold: prompt-file edits apply to session state (reverts stay correct) but
+        // never render into the model-visible diff.
+        if (isPromptFileAnywhere(filename)) continue;
         let oldContent = before.get(info.id)?.get(filename);
         let newContent = sessionContent.get(info.id)?.get(filename);
         if (oldContent === newContent) continue;
@@ -1730,6 +1762,13 @@ export async function runAgent(
                 // Note that if we get here, we know the tool succeeded originally, so for many
                 // branches below we can just return success unconditionally.
                 case "readFile": {
+                  // Blindfold: a recorded read of a prompt file elides exactly like a
+                  // missing file, before any storage is touched. Covers pre-blindfold
+                  // reads in old chats (the file was ordinary when the agent read it).
+                  if (isPromptFileAnywhere(toolCall.input.filename)) {
+                    toolOutput = {text: "File does not exist.", isError: true};
+                    break;
+                  }
                   if (chatMessageStatus.get(msg.sequence) === "reverted") {
                     // It would be a total waste of tokens to actually include this file
                     // content in the chat history since it contains changes that were later
@@ -2408,6 +2447,8 @@ export async function runAgent(
         } else {
           files = [...(sessionContent.get(info.id)?.keys() ?? [])];
         }
+        // Blindfold: prompt files are listed nowhere the agent looks.
+        files = files.filter(file => !isPromptFileAnywhere(file));
         let envName = chatNameFor(info.id);
         let lines = [envName !== undefined
             ? `## Gadget ${envName}: ${JSON.stringify(info.title)}`
@@ -2480,11 +2521,18 @@ export async function runAgent(
           `${connectableVendors.map(v => `* ${v.id}: ${v.displayName}`).join("\n")}`;
     }
 
+    // The selected prompt source replaces the static slot's base text; unset chats -- and
+    // chats whose source is gone -- keep the built-in prompt byte-identical. The spawner path
+    // above is untouched, and static-slot-first ordering is preserved for caching.
+    let promptBase = options.promptRef !== undefined
+        ? (await hooks.getPromptRefText(options.promptRef)) ?? SYSTEM_PROMPT
+        : SYSTEM_PROMPT;
+
     // Split the system prompt into static and dynamic parts for better caching.
     systemPromptSlots = [
       instanceInstructions
-          ? `${SYSTEM_PROMPT}\n\n${instanceInstructions}`
-          : SYSTEM_PROMPT,
+          ? `${promptBase}\n\n${instanceInstructions}`
+          : promptBase,
       (standardFormats ? `${standardFormats}\n\n` : "") +
           `${systemPromptWorkspace}${systemPromptConnections}` +
           (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : ""),
@@ -2606,6 +2654,12 @@ export async function runAgent(
         try {
           let resolved =
               hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId);
+          // Blindfold: prompt files fail exactly like missing files, whichever
+          // workpiece (or worktree) they are read from. Path-based, so session
+          // copies from blueprint instantiation are covered too.
+          if (isPromptFileAnywhere(filename)) {
+            throw new Error("File does not exist.");
+          }
 
           // An unpinned gadget with committed code is read live at its head (fixed for the
           // turn; see observeHead), stamping the commit so replay can detect staleness and
@@ -2656,6 +2710,11 @@ export async function runAgent(
         try {
           let resolved =
               hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId);
+          // Blindfold: prompt files are unwritable (same missing-file error), so the
+          // agent can neither overwrite a prompt nor confirm one exists by writing.
+          if (isPromptFileAnywhere(filename)) {
+            throw new Error("File does not exist.");
+          }
 
           // Writing over a worktree's symlink or submodule entry is rejected with the same
           // descriptive error reading one gets, and a base *directory* path too -- such a
@@ -2722,6 +2781,12 @@ export async function runAgent(
         try {
           let resolved =
               hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId);
+          // Blindfold: prompt files fail with the missing-file error ahead of the
+          // read gate, so a stale filesRead entry from a pre-blindfold replay can
+          // never let an edit through to prompt content.
+          if (isPromptFileAnywhere(filename)) {
+            throw new Error("File does not exist.");
+          }
           let readFiles = filesRead.get(resolved.workpieceId);
           if (readFiles === undefined || !readFiles.has(filename)) {
             throw new Error("You must read a file before you can edit it.");
@@ -3479,6 +3544,12 @@ export async function runAgent(
     convertToLlm: (messages) => messages as Message[],
     toolExecution: "sequential",
     maxTokens: maxOutputTokens,
+    // pi's loop spreads this config into every stream call, so an explicit effort reaches the
+    // model (AgentLoopConfig doesn't declare the field; the spread carries it untyped). The key
+    // must be absent -- not undefined -- when unset: an explicit undefined would clobber
+    // makeHandle's per-API defaults in its options merge (notably openai-responses' medium).
+    ...(options.reasoningEffort !== undefined
+        ? {reasoningEffort: options.reasoningEffort} : {}),
     shouldStopAfterTurn: () =>
         // Cancelled during tool execution: the completed turn was persisted by the turn_end
         // barrier just above; don't start another (doomed) model request.

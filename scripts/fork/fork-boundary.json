@@ -25,8 +25,44 @@
       "reason": "Deployment-admin connector frames UI; no upstream counterpart."
     },
     {
+      "path": "packages/workshop-frontend/src/features/chat/controls/",
+      "reason": "Fork-owned composer controls (reasoning-effort and prompt-preset selectors); no upstream counterpart."
+    },
+    {
+      "path": "packages/workshop-frontend/src/AdminPage.presets.test.tsx",
+      "reason": "Regression test for the fork-owned prompt-preset admin section."
+    },
+    {
       "path": "packages/workshop-backend/__tests__/knitli-approval-continuation.test.ts",
       "reason": "Regression test for the fork-owned approval-turn continuation."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-reasoning-levels.test.ts",
+      "reason": "Regression test for the fork-owned reasoning-effort resolver and its makeHandle wiring."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-chat-effort.test.ts",
+      "reason": "Regression test for the fork-owned per-chat effort override and its turn threading."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-chat-prompt.test.ts",
+      "reason": "Regression test for the fork-owned prompt presets and the static-slot swap."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-turn-start.test.ts",
+      "reason": "Regression test for the fork-owned turn-start threading of effort and prompt selections."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-blindfold.test.ts",
+      "reason": "Regression test for the fork-owned agent blindfold over prompt files."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-prompt-blueprints.test.ts",
+      "reason": "Regression test for fork-owned prompt-blueprint marking and the agent list blindfold."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-prompt-refs.test.ts",
+      "reason": "Regression test for fork-owned pinned prompt refs and their resolution."
     },
     {
       "path": "packages/mcp-shared/__tests__/fork/",

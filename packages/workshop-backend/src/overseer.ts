@@ -1,7 +1,11 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
+import { isReasoningLevel } from "./fork/reasoning-levels";
+import {
+  PROMPT_FILENAME, hasRootPromptFile, isPromptFileAnywhere,
+} from "./fork/prompt-files";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, PromptPresetSummary, PromptSelection, PromptRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -1558,6 +1562,19 @@ export function sanitizeMessageFormatRefs(
 // session is a "build" capability but never an observer's, so it is counted apart from the
 // collaborator roles.
 type SessionKind = CollaboratorRole | "owner";
+
+// Decode a blueprint code snapshot (see readBlueprintContent) into filename -> text. Archives
+// always use the doc's unnamed root "" (see snapshotCode).
+function decodeBlueprintFiles(code: Uint8Array): Record<string, string> {
+  let archiveDoc = new Y.Doc();
+  Y.applyUpdateV2(archiveDoc, code);
+  // Null prototype so a hostile filename like "__proto__" is an ordinary key.
+  let files: Record<string, string> = Object.create(null);
+  for (let [file, content] of archiveDoc.getMap<Y.Text>()) {
+    files[file] = content.toString();
+  }
+  return files;
+}
 
 class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
@@ -6614,6 +6631,8 @@ class OverseerImpl implements AgentHooks {
     responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
     externalChatKey?: string,
     formats?: MessageFormatRef[],
+    effort?: string | null,
+    prompt?: PromptSelection | null,
   ): Promise<number> {
     if (responseTargetRegistration) {
       responseTargetRegistration.commitGuard();
@@ -6623,6 +6642,12 @@ class OverseerImpl implements AgentHooks {
     if (typeof initialMessage !== "string" && (capsules?.length || attachments?.length)) {
       throw new Error("Slash commands cannot include resources or attachments.");
     }
+    if (effort !== undefined && effort !== null && !isReasoningLevel(effort)) {
+      throw new Error(`Invalid reasoning effort: ${JSON.stringify(effort)}.`);
+    }
+    // Validate and stamp the prompt selection before the transaction, like effort above.
+    let promptRef = prompt !== undefined && prompt !== null
+        ? await this.stampPromptRef(prompt) : undefined;
     let canonicalAttachments = this.canonicalizeChatAttachmentRefs(
         attachments, userMeta.aiModel?.config.provider);
     let prepared = await prepareAuthorizedChatCommit(
@@ -6648,6 +6673,12 @@ class OverseerImpl implements AgentHooks {
       };
       if (prepared.message !== undefined && userMeta.aiModel) {
         meta.activeAgent = userMeta.aiModel.profile;
+      }
+      if (effort) {
+        meta.reasoningEffort = effort;
+      }
+      if (promptRef !== undefined) {
+        meta.promptRef = promptRef;
       }
       this.storage.chatMeta.put(meta);
 
@@ -7155,6 +7186,12 @@ class OverseerImpl implements AgentHooks {
             userGateway: byokRouting,
             metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
           });
+      // The chat's per-turn effort override, if set; read here so a selection made before the
+      // turn (or seeded by newChat) governs the whole turn.
+      let turnEffort = this.getChatMetaOrThrow(chatId).reasoningEffort;
+      // The chat's pinned prompt source, if not the built-in default; resolved to text inside
+      // the turn.
+      let turnPromptRef = this.getChatMetaOrThrow(chatId).promptRef;
 
       let controller = liveChat.cancelController;
       controller.signal.throwIfAborted();
@@ -7173,6 +7210,9 @@ class OverseerImpl implements AgentHooks {
               checkpoint,
               modelConfig: aiModel.config,
               measuredTokens: this.getChatMetaOrThrow(chatId).totalTokens ?? 0,
+            }, {
+              reasoningEffort: turnEffort,
+              promptRef: turnPromptRef,
             });
         if (newCheckpoint) this.#commitChatCompaction(chatId, newCheckpoint);
         // `/compact` is done once it has compacted. An automatic compaction returned before
@@ -8321,6 +8361,17 @@ class OverseerImpl implements AgentHooks {
   ): Promise<void> {
     if (!this.ownerId) throw new Error("Workspace not initialized.");
 
+    // Re-derive the prompt marker whenever code is (re)published: a blueprint whose exported
+    // head carries a root prompt file is a reusable system prompt (selectable as a chat
+    // preset, hidden from the agent's list). Metadata-only updates pass no snapshot and leave
+    // the marker alone. Single hook for create, code-update, and publish-retry alike.
+    if (codeSnapshot !== undefined && record.commitId !== undefined &&
+        hasRootPromptFile((await this.gitStore.readCommitFiles(record.commitId)).keys())) {
+      record.metadata.prompt = true;
+    } else if (codeSnapshot !== undefined) {
+      delete record.metadata.prompt;
+    }
+
     // Mark dirty.
     record.dirty = true;
     this.storage.blueprints.put(record);
@@ -8880,6 +8931,64 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  // Validate a UI prompt selection and stamp it into a stored ref, pinning gadget and
+  // blueprint selections to their current content (head commit / blueprint version). Throws
+  // user-readable errors for unknown ids and sources with no prompt to select.
+  async stampPromptRef(prompt: PromptSelection): Promise<PromptRef> {
+    switch (prompt.kind) {
+      case "admin": {
+        if ((await this.getPromptRefText({kind: "admin", id: prompt.id})) === undefined) {
+          throw new Error(`No such prompt preset: ${JSON.stringify(prompt.id)}.`);
+        }
+        return {kind: "admin", id: prompt.id};
+      }
+      case "gadget": {
+        let commit = this.getGadgetRecord(prompt.id).commitId;
+        if (commit === undefined ||
+            !hasRootPromptFile((await this.gitStore.readCommitFiles(commit)).keys())) {
+          throw new Error(`Gadget ${prompt.id} has no prompt file to select.`);
+        }
+        return {kind: "gadget", id: prompt.id, version: commit};
+      }
+      case "blueprint": {
+        // Every selectable blueprint (own, library, or featured) has a KV record carrying its
+        // current metadata; the marker and version pin come from there, atomically with the
+        // selection, so no read-then-set race can pin a version that no longer applies.
+        let kvRecord = await readBlueprintKvRecord(this.env, prompt.id);
+        if (kvRecord?.metadata.prompt !== true) {
+          throw new Error(`No such prompt blueprint: ${JSON.stringify(prompt.id)}.`);
+        }
+        return {kind: "blueprint", id: prompt.id, version: kvRecord.metadata.version};
+      }
+    }
+  }
+
+  // A pinned prompt source's text, or undefined when its source is gone (deleted preset,
+  // removed file, missing content) or unreadable -- all fail closed onto the built-in
+  // default. Gadget and blueprint refs read their pinned content, never the latest, so
+  // edits after selection never move an old chat's prefix.
+  async getPromptRefText(ref: PromptRef): Promise<string | undefined> {
+    try {
+      switch (ref.kind) {
+        case "admin":
+          return (await readAdminConfig(this.env)).promptPresets.find(
+              preset => preset.id === ref.id)?.text;
+        case "gadget":
+          return await this.readFileAtCommit(ref.version, PROMPT_FILENAME);
+        case "blueprint": {
+          let code = await readBlueprintContent(this.env, ref.id, ref.version);
+          if (code === null) return undefined;
+          return decodeBlueprintFiles(code)[PROMPT_FILENAME];
+        }
+      }
+    } catch (err) {
+      this.logger.warn("failed to read chat prompt source", {
+        event: "prompt.ref.read.failed", error: err,
+      });
+      return undefined;
+    }
+  }
+
   async listConnectableVendors(): Promise<{id: string, displayName: string}[]> {
     try {
       let vendors = await this.#listGatekeeperVendorsCached();
@@ -9036,16 +9145,22 @@ class OverseerImpl implements AgentHooks {
       add(format.blueprintId, format.output.noun, source, format.description, format.bindings);
     }
 
+    // Blindfold: prompt-marked blueprints are never listed to the agent -- it must not see
+    // prompts as instantiable code. (Standard formats above carry no marker; they are the
+    // deployment's admin-curated output blueprints, never prompts.)
     for (let blueprint of own) {
+      if (blueprint.prompt) continue;
       // BlueprintUserSummary carries no binding metadata; createGadget's output describes the
       // bindings after instantiation.
       add(blueprint.id, blueprint.title, `published by you`, blueprint.description);
     }
     for (let blueprint of library) {
+      if (blueprint.metadata.prompt) continue;
       add(blueprint.id, blueprint.metadata.title, `in your library`,
           blueprint.metadata.description, blueprint.metadata.bindings);
     }
     for (let blueprint of featured) {
+      if (blueprint.metadata.prompt) continue;
       add(blueprint.id, blueprint.metadata.title, `featured on this deployment`,
           blueprint.metadata.description, blueprint.metadata.bindings);
     }
@@ -9111,14 +9226,7 @@ class OverseerImpl implements AgentHooks {
           `instantiated.`);
     }
 
-    // Decode the snapshot. Archives always use the doc's unnamed root "" (see snapshotCode).
-    let archiveDoc = new Y.Doc();
-    Y.applyUpdateV2(archiveDoc, code);
-    // Null prototype so a hostile filename like "__proto__" is an ordinary key.
-    let files: Record<string, string> = Object.create(null);
-    for (let [file, content] of archiveDoc.getMap<Y.Text>()) {
-      files[file] = content.toString();
-    }
+    let files = decodeBlueprintFiles(code);
 
     // Apply the deployment's overrides, so a gadget the agent builds is labelled the same as one
     // the user makes from the New menu (see newGadgetFromBlueprint, which does the same).
@@ -9132,7 +9240,10 @@ class OverseerImpl implements AgentHooks {
           `UI.`);
     }
 
-    let filenames = Object.keys(files);
+    // Blindfold: the copy keeps prompt files (genuinely part of the gadget), but the
+    // agent-visible notes omit their names -- reads fail anyway, so naming them would only
+    // confirm they exist.
+    let filenames = Object.keys(files).filter(file => !isPromptFileAnywhere(file));
     lines.push("", filenames.length > 0
         ? `Files copied into the new gadget: ${filenames.join(", ")}. Use readFile to inspect ` +
           `them before editing.`
@@ -12005,11 +12116,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-                formats?: MessageFormatRef[]): Promise<number> {
+                formats?: MessageFormatRef[], effort?: string | null,
+                prompt?: PromptSelection | null): Promise<number> {
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
     return this.impl.newChat(this.#clientUser, userMeta, initialMessage, capsules, attachments,
-                             undefined, undefined, formats);
+                             undefined, undefined, formats, effort, prompt);
   }
 
   async sendChatMessage(
@@ -12030,6 +12142,44 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     meta.lastActive = this.impl.getChatTimestamp();
     meta.title = title;
     this.impl.storage.chatMeta.put(meta);
+  }
+
+  async setChatEffort(chatId: number, effort: string | null): Promise<void> {
+    if (effort !== null && !isReasoningLevel(effort)) {
+      throw new Error(`Invalid reasoning effort: ${JSON.stringify(effort)}.`);
+    }
+    let meta = this.impl.storage.chatMeta.get(chatId);
+    if (!meta) {
+      throw new Error("No such chatId: " + chatId);
+    }
+    meta.lastActive = this.impl.getChatTimestamp();
+    if (effort === null) {
+      delete meta.reasoningEffort;
+    } else {
+      meta.reasoningEffort = effort;
+    }
+    this.impl.storage.chatMeta.put(meta);
+  }
+
+  async setChatPrompt(chatId: number, prompt: PromptSelection | null): Promise<PromptRef | null> {
+    let promptRef = prompt !== null ? await this.impl.stampPromptRef(prompt) : undefined;
+    let meta = this.impl.storage.chatMeta.get(chatId);
+    if (!meta) {
+      throw new Error("No such chatId: " + chatId);
+    }
+    meta.lastActive = this.impl.getChatTimestamp();
+    if (promptRef === undefined) {
+      delete meta.promptRef;
+    } else {
+      meta.promptRef = promptRef;
+    }
+    this.impl.storage.chatMeta.put(meta);
+    return promptRef ?? null;
+  }
+
+  async listPromptPresets(): Promise<PromptPresetSummary[]> {
+    return (await readAdminConfig(this.impl.env)).promptPresets.map(
+        ({id, name}) => ({id, name}));
   }
 
   async mergeChanges(chatId: number): Promise<MergeChangesResult> {
@@ -12677,7 +12827,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     this.#deny();
   }
   async newChat(_initialMessage: string | SlashCommandRequest, _modelId: string | null,
-                 _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<number> {
+                 _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[],
+                 _formats?: MessageFormatRef[], _effort?: string | null,
+                 _prompt?: PromptSelection | null): Promise<number> {
     this.#deny();
   }
   async sendChatMessage(_chatId: number, _message: string | SlashCommandRequest,
@@ -12692,6 +12844,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async getChatAttachmentContent(_chatId: number, _id: string): Promise<Uint8Array> { this.#deny(); }
   async deleteChatAttachment(_id: string): Promise<void> { this.#deny(); }
   async setChatTitle(_chatId: number, _title: string): Promise<void> { this.#deny(); }
+  async setChatEffort(_chatId: number, _effort: string | null): Promise<void> { this.#deny(); }
+  async setChatPrompt(_chatId: number, _prompt: PromptSelection | null): Promise<PromptRef | null> { this.#deny(); }
+  async listPromptPresets(): Promise<PromptPresetSummary[]> { this.#deny(); }
   async mergeChanges(_chatId: number): Promise<MergeChangesResult> {
     this.#deny();
   }
@@ -12750,7 +12905,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
 // the parent interface while retaining this one, and a retained capability that escaped the count
 // would let a scope widening find no session to sever.
 @validateRpc()
-class GadgetClientImpl extends RpcTarget implements GadgetClient {
+/** Exported for tests (the blueprint publish path is facet-only). */
+export class GadgetClientImpl extends RpcTarget implements GadgetClient {
   #leaveSession?: () => void;
 
   constructor(private impl: OverseerImpl, private id: WorkpieceId,

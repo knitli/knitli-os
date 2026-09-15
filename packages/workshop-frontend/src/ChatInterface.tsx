@@ -82,6 +82,8 @@ import {
   WorkpieceId,
   BlueprintOutput,
   MessageFormatRef,
+  PromptRef,
+  PromptSelection,
 } from "@gadgets/workshop-shared/api";
 import { composeCodeChange, type CodeChange } from "@gadgets/workshop-shared/code-change";
 import type { ChatChangeRow } from "./otClient";
@@ -110,6 +112,7 @@ import { copyToClipboard } from "./clipboard";
 import { isImeComposing } from "./keyboardEvent";
 import { formatAttachmentSize } from "./features/chat/attachmentFormatting";
 import { ChatComposer } from "./features/chat/composer/ChatComposer";
+import type { PromptPresetOption } from "./features/chat/controls/ComposerPromptSelector";
 import { composerDraftStorageKey } from "./features/chat/composer/draft/composerDraft";
 
 /**
@@ -2584,6 +2587,15 @@ function getOrCreateProvisionalToolCall(
   return toolCall;
 }
 
+// A stored prompt ref as the composer selector sees it: kind plus id, pins dropped. Gadget
+// refs (not selectable in the UI) display as the default.
+function selectionOfRef(ref: PromptRef | undefined): PromptSelection | null {
+  if (ref === undefined) return null;
+  if (ref.kind === "admin") return { kind: "admin", id: ref.id };
+  if (ref.kind === "blueprint") return { kind: "blueprint", id: ref.id };
+  return null;
+}
+
 function ChatInterface({
   workspaceId,
   overseer,
@@ -2613,7 +2625,7 @@ function ChatInterface({
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
-  const { currentUser } = useAuthenticatedApi();
+  const { currentUser, authenticatedApi } = useAuthenticatedApi();
   const getOverseer = useCallback(() => overseer, [overseer]);
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -2713,6 +2725,42 @@ function ChatInterface({
     [],
   );
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  // Pending effort for the not-yet-created chat (new-chat composer). In-chat composers read
+  // the value from the chat's cached metadata instead; see handleEffortChange.
+  const [pendingEffort, setPendingEffort] = useState<string | null>(null);
+  // The selected model's reasoning levels, or null while none offers any (or none loads).
+  const [effortLevels, setEffortLevels] =
+    useState<{ levels: string[]; default: string } | null>(null);
+  useEffect(() => {
+    if (selectedModel === null) {
+      setEffortLevels(null);
+      return;
+    }
+    let cancelled = false;
+    setEffortLevels(null);
+    authenticatedApi.getModelReasoning(selectedModel).then(
+      (info) => {
+        if (!cancelled) setEffortLevels(info);
+      },
+      (err) => {
+        if (cancelled) return;
+        console.error("Failed to load reasoning levels:", err);
+        setEffortLevels(null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticatedApi, selectedModel]);
+  // In-flight setChatEffort write, awaited before sending so a selection always lands first.
+  const effortWriteRef = useRef<Promise<void> | null>(null);
+  // Pending prompt for the not-yet-created chat; in-chat composers read the chat's metadata.
+  const [pendingPrompt, setPendingPrompt] = useState<PromptSelection | null>(null);
+  // The selectable prompts (deployment presets plus the user's prompt-marked library
+  // blueprints), or null until loaded. Empty hides the prompt control.
+  const [promptOptions, setPromptOptions] =
+    useState<PromptPresetOption[] | null>(null);
+  const promptWriteRef = useRef<Promise<void> | null>(null);
   const [sidebarActiveTab, setSidebarActiveTab] = useState<
     "chat" | "connections"
   >("chat");
@@ -3708,9 +3756,11 @@ function ChatInterface({
 
           // After subscribing, load the list of chats and models
           // This is safe because subscription will catch any new activity
-          const [chats, models] = await Promise.all([
+          const [chats, models, presets, library] = await Promise.all([
             overseer.listChats(),
             overseer.listModels(),
+            overseer.listPromptPresets(),
+            authenticatedApi.listLibraryBlueprints(),
           ]);
 
           chats.forEach((chat) => {
@@ -3720,6 +3770,17 @@ function ChatInterface({
           setChatListReady(true);
 
           setAvailableModels(models);
+          // The prompt selector merges deployment presets with the user's prompt-marked
+          // library blueprints (filtered on the existing library, no new library system).
+          setPromptOptions([
+            ...presets.map((preset): PromptPresetOption =>
+                ({ kind: "admin", id: preset.id, name: preset.name })),
+            ...library
+              .filter((entry) => entry.metadata.prompt === true)
+              .map((entry): PromptPresetOption => ({
+                kind: "blueprint", id: entry.id, name: entry.metadata.title,
+              })),
+          ]);
 
           setSelectedModel(getStoredSelectedModel(models));
 
@@ -3904,10 +3965,14 @@ function ChatInterface({
     const model = modelId !== undefined ? modelId : selectedModel;
 
     try {
+      // Selections made just before sending must land before the turn starts.
+      await Promise.all([effortWriteRef.current, promptWriteRef.current]);
       if (selectedChatId === null) {
         // Create a new chat (with optional capsules).
         const newChatId = await overseer.newChat(
-            message, model, capsules, attachments, formats);
+            message, model, capsules, attachments, formats, pendingEffort, pendingPrompt);
+        setPendingEffort(null);
+        setPendingPrompt(null);
         onNavigateToChatRef.current(newChatId);
       } else {
         // Send message to existing chat.
@@ -3941,7 +4006,9 @@ function ChatInterface({
     const model = modelId !== undefined ? modelId : selectedModel;
     try {
       const newChatId = await overseer.newChat(
-          message, model, capsules, attachments, formats);
+          message, model, capsules, attachments, formats, pendingEffort, pendingPrompt);
+      setPendingEffort(null);
+      setPendingPrompt(null);
       onNavigateToChatRef.current(newChatId);
     } catch (err) {
       if (!logRpcFailure("Failed to create new chat:", err, { reportSite: "chat.new" })) {
@@ -3956,6 +4023,67 @@ function ChatInterface({
     setSelectedModel(modelId);
     persistSelectedModel(modelId);
   };
+
+  // Handle reasoning-effort change: staged for the new-chat composer, written immediately
+  // (like the title) for an existing chat so the next turn starts under it.
+  const handleEffortChange = (effort: string | null) => {
+    if (selectedChatId === null) {
+      setPendingEffort(effort);
+      return;
+    }
+    const chatId = selectedChatId;
+    effortWriteRef.current = overseer
+      .setChatEffort(chatId, effort)
+      .then(() => {
+        const chat = cacheRef.current.chats.get(chatId);
+        if (chat) {
+          const next = { ...chat };
+          if (effort === null) {
+            delete next.reasoningEffort;
+          } else {
+            next.reasoningEffort = effort;
+          }
+          cacheRef.current.chats.set(chatId, next);
+          forceUpdate();
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to set reasoning effort:", err);
+        toasts.add({ title: "Failed to set reasoning effort", variant: "error" });
+      });
+  };
+
+  // Handle prompt change: staged for the new-chat composer, written immediately for
+  // an existing chat. The selector itself confirms mid-chat switches (cache break). The
+  // RPC returns the stamped ref (null when cleared) for the cache.
+  const handlePromptChange = (prompt: PromptSelection | null) => {
+    if (selectedChatId === null) {
+      setPendingPrompt(prompt);
+      return;
+    }
+    const chatId = selectedChatId;
+    promptWriteRef.current = overseer
+      .setChatPrompt(chatId, prompt)
+      .then((stamped) => {
+        const chat = cacheRef.current.chats.get(chatId);
+        if (chat) {
+          const next = { ...chat };
+          if (stamped === null) {
+            delete next.promptRef;
+          } else {
+            next.promptRef = stamped;
+          }
+          cacheRef.current.chats.set(chatId, next);
+          forceUpdate();
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to set prompt:", err);
+        toasts.add({ title: "Failed to set prompt", variant: "error" });
+      });
+  };
+
+
 
   // Handle stopping the agent
   const handleStop = async () => {
@@ -5247,6 +5375,18 @@ function ChatInterface({
             models={availableModels}
             selectedModel={selectedModel}
             onModelChange={handleModelChange}
+            effortControl={effortLevels === null ? undefined : {
+              levels: effortLevels.levels,
+              defaultLevel: effortLevels.default,
+              selectedEffort: pendingEffort,
+              onEffortChange: handleEffortChange,
+            }}
+            promptControl={promptOptions === null || promptOptions.length === 0 ? undefined : {
+              presets: promptOptions,
+              selectedPrompt: pendingPrompt,
+              onPromptChange: handlePromptChange,
+              requireConfirm: false,
+            }}
             showThinkingTraces={showThinkingTraces}
             onToggleThinkingTraces={toggleShowThinkingTraces}
             minRows={2}
@@ -6219,6 +6359,18 @@ function ChatInterface({
                     models={availableModels}
                     selectedModel={selectedModel}
                     onModelChange={handleModelChange}
+                    effortControl={effortLevels === null ? undefined : {
+                      levels: effortLevels.levels,
+                      defaultLevel: effortLevels.default,
+                      selectedEffort: currentChatMetadata?.reasoningEffort ?? null,
+                      onEffortChange: handleEffortChange,
+                    }}
+                    promptControl={promptOptions === null || promptOptions.length === 0 ? undefined : {
+                      presets: promptOptions,
+                      selectedPrompt: selectionOfRef(currentChatMetadata?.promptRef),
+                      onPromptChange: handlePromptChange,
+                      requireConfirm: true,
+                    }}
                     pendingConsoleLogCount={pendingConsoleLogCount}
                     consoleLogPreview={consoleLogPreview}
                     consoleLogSeverity={consoleLogSeverity}

@@ -522,6 +522,24 @@ describe("worktree-binding blindfold", () => {
         .rejects.toThrow("missing.js: no such file or directory");
   });
 
+  it("a directly-named prompt scope fails listFiles exactly like a missing path", async () => {
+    // Base-resident: without the guard this throws "is not a directory", confirming the file.
+    let session = sessionWithBase();
+    await expect(session.listFiles("PROMPT.md"))
+        .rejects.toThrow("PROMPT.md: no such directory");
+    await expect(session.listFiles("missing"))
+        .rejects.toThrow("missing: no such directory");
+  });
+
+  it("an overlay-only prompt scope fails listFiles exactly like a missing path", async () => {
+    // The overlay branch leaks the same way: overlay.has(scope) would throw "is not a
+    // directory" for an overlay-only prompt file. Unreachable via the guarded writeFile,
+    // but the scope guard fails closed regardless of which side holds the path.
+    let session = sessionWithBase({overlay: {"PROMPT.md": "overlay secret\n"}});
+    await expect(session.listFiles("PROMPT.md"))
+        .rejects.toThrow("PROMPT.md: no such directory");
+  });
+
   it("listFiles omits prompt files from both the base listing and the overlay", async () => {
     // The overlay prompt path is unreachable via the guarded writeFile, but the listing skips
     // it anyway; without the skips it would be named like the ordinary overlay file.

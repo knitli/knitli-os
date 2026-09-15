@@ -88,6 +88,12 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     let overlay = this.turn.getOverlayFiles(this.worktreeId);
     let removed = this.turn.getRemovedPaths(this.worktreeId);
 
+    // Blindfold: a directly-named prompt scope fails exactly like a missing path -- the same
+    // "no such directory" outcome the empty-entries check below reports. Without this, the
+    // "is not a directory" branches would confirm a prompt file exists at any guessed path.
+    if (scope !== "" && isPromptFileAnywhere(scope)) {
+      throw new Error(`${scope}: no such directory`);
+    }
     if (overlay.has(scope)) throw new Error(`${scope} is not a directory`);
     let baseScope = scope === "" || !removed.has(scope)
         ? await this.host.gitCache.pathEntryAtCommit(base, scope) : undefined;

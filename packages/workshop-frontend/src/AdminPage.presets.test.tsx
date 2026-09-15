@@ -12,9 +12,34 @@ import AdminPage from './AdminPage'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
+const dialogState = vi.hoisted(() => ({
+  onOpenChange: null as null | ((open: boolean) => void),
+}))
+
 vi.mock('@cloudflare/kumo', async () => {
   const React = await import('react')
+  // Minimal Dialog: Root gates on `open` and captures the closer so the mocked Close can
+  // drive cancel; DeleteConfirmationDialog's own buttons render through the Button mock.
+  const Dialog = Object.assign(
+    ({ children }: Record<string, any>) =>
+      React.createElement('div', null, children),
+    {
+      Root: ({ children, open, onOpenChange }: Record<string, any>) => {
+        dialogState.onOpenChange = onOpenChange ?? null
+        return open
+          ? React.createElement('div', { 'data-testid': 'confirm-dialog' }, children)
+          : null
+      },
+      Title: ({ children }: Record<string, any>) =>
+        React.createElement('h1', null, children),
+      Description: ({ children }: Record<string, any>) =>
+        React.createElement('p', null, children),
+      Close: ({ render }: Record<string, any>) =>
+        render({ onClick: () => dialogState.onOpenChange?.(false) }),
+    },
+  )
   return {
+    Dialog,
     Button: ({ children, ...props }: Record<string, any>) =>
       React.createElement('button', props, children),
     // Map Kumo's onValueChange onto change events so tests can drive the fields.
@@ -169,7 +194,7 @@ describe('AdminPage prompt presets', () => {
     expect(button(host, 'Add preset').disabled).toBe(false)
   })
 
-  it('edits and deletes a preset', async () => {
+  it('edits a preset', async () => {
     const host = await mount()
     await act(async () => button(host, 'Edit').click())
     await setFieldValue(field(host, 'Preset name'), 'Senior reviewer')
@@ -177,10 +202,33 @@ describe('AdminPage prompt presets', () => {
     expect(api.updatePromptPreset).toHaveBeenCalledWith(
       'preset-1', { name: 'Senior reviewer', text: 'Review the code.' })
     expect(host.textContent).toContain('Senior reviewer')
+  })
 
+  it('deletes a preset only after confirming', async () => {
+    const host = await mount()
     await act(async () => button(host, 'Edit').click())
     await act(async () => button(host, 'Delete').click())
+    const dialog = host.querySelector('[data-testid="confirm-dialog"]')
+    expect(dialog?.textContent).toContain('Reviewer')
+    expect(api.deletePromptPreset).not.toHaveBeenCalled()
+
+    await act(async () => button(dialog!, 'Delete').click())
     expect(api.deletePromptPreset).toHaveBeenCalledWith('preset-1')
-    expect(host.textContent).not.toContain('Senior reviewer')
+    expect(host.querySelector('[data-testid="confirm-dialog"]')).toBeNull()
+    expect(host.textContent).not.toContain('Reviewer')
+  })
+
+  it('keeps the preset when the delete dialog is cancelled', async () => {
+    const host = await mount()
+    await act(async () => button(host, 'Edit').click())
+    await act(async () => button(host, 'Delete').click())
+    const dialog = host.querySelector('[data-testid="confirm-dialog"]')
+    expect(dialog?.textContent).toContain('Reviewer')
+
+    await act(async () => button(dialog!, 'Cancel').click())
+    expect(api.deletePromptPreset).not.toHaveBeenCalled()
+    expect(host.querySelector('[data-testid="confirm-dialog"]')).toBeNull()
+    // The editor is untouched: the name draft still holds the preset's name.
+    expect((field(host, 'Preset name') as HTMLInputElement).value).toBe('Reviewer')
   })
 })

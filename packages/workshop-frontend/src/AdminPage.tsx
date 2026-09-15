@@ -11,6 +11,7 @@ import { useDocumentTitle } from './useDocumentTitle'
 import AdminFormatsPanel from './components/format/AdminFormatsPanel'
 import AdminAiExecutorsPanel from './components/AdminAiExecutorsPanel'
 import { AdminGatekeeperAppsPanel } from './features/admin/gatekeeper-apps/AdminGatekeeperAppsPanel'
+import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [
@@ -76,9 +77,11 @@ export default function AdminPage() {
   const [savingInstructions, setSavingInstructions] = useState(false)
 
   // Deployment-wide prompt presets. `editingPresetId` is the preset (or 'new') whose form is
-  // open; drafts live in the form fields until saved.
+  // open; drafts live in the form fields until saved. `deletingPresetId` is the preset whose
+  // delete confirmation dialog is open.
   const [promptPresets, setPromptPresets] = useState<PromptPreset[]>([])
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null)
+  const [deletingPresetId, setDeletingPresetId] = useState<string | null>(null)
   const [presetNameDraft, setPresetNameDraft] = useState('')
   const [presetTextDraft, setPresetTextDraft] = useState('')
   const [savingPreset, setSavingPreset] = useState(false)
@@ -473,6 +476,7 @@ export default function AdminPage() {
       await admin.api.deletePromptPreset(id)
       setPromptPresets((prev) => prev.filter((preset) => preset.id !== id))
       if (editingPresetId === id) setEditingPresetId(null)
+      setDeletingPresetId(null)
       toasts.add({ title: 'Prompt preset deleted', variant: 'success' })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to delete preset'
@@ -957,7 +961,7 @@ export default function AdminPage() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => handleDeletePreset(preset.id)}
+                      onClick={() => setDeletingPresetId(preset.id)}
                       disabled={savingPreset}
                     >
                       Delete
@@ -1050,6 +1054,18 @@ export default function AdminPage() {
             Add preset
           </Button>
         )}
+
+        <DeleteConfirmationDialog
+          open={deletingPresetId !== null}
+          onOpenChange={(open) => { if (!open) setDeletingPresetId(null) }}
+          isDeleting={savingPreset}
+          title="Delete preset"
+          description={
+            `Delete "${promptPresets.find((preset) => preset.id === deletingPresetId)?.name ?? 'this preset'}"? ` +
+            `Chats using it fall back to the built-in default. This cannot be undone.`
+          }
+          onConfirm={() => { if (deletingPresetId) void handleDeletePreset(deletingPresetId) }}
+        />
       </div>
       )}
 

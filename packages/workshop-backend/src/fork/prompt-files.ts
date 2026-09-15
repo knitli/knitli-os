@@ -31,3 +31,16 @@ export function isPromptFileAnywhere(path: string): boolean {
   let base = slash < 0 ? path : path.slice(slash + 1);
   return base === PROMPT_FILENAME;
 }
+
+/**
+ * Whether a committed file set marks its gadget as a prompt: the prompt file is present at the
+ * canonical root location. Nested same-named files never mark (an innocent `docs/PROMPT.md`
+ * must not hide a blueprint from the agent or offer it as a preset); the blindfold guards
+ * still hide those via {@link isPromptFileAnywhere}.
+ */
+export function hasRootPromptFile(paths: Iterable<string>): boolean {
+  for (let path of paths) {
+    if (path === PROMPT_FILENAME) return true;
+  }
+  return false;
+}

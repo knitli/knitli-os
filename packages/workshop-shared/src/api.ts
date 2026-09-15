@@ -4199,6 +4199,15 @@ export type BlueprintMetadata = {
    */
   output?: BlueprintOutput;
 
+  /**
+   * Present when the blueprint's code carries a prompt file (`PROMPT.md`) at its root: the
+   * blueprint is a reusable system prompt, selectable as a chat's prompt preset. Set at publish
+   * time from the source gadget's committed head, and re-derived whenever the code updates. The
+   * agent never sees prompt-marked blueprints in its blueprint list (it must not know prompts
+   * exist as instantiable code), though instantiated copies still blindfold their prompt files.
+   */
+  prompt?: true;
+
   /** Key = binding name. */
   bindings: Record<string, BlueprintBinding>;
 };
@@ -4247,6 +4256,8 @@ export type BlueprintUserSummary = {
   version: number;
   lastUpdated: Date;
   pinned?: boolean;
+  /** Present when the blueprint is prompt-marked (see BlueprintMetadata.prompt). */
+  prompt?: true;
 };
 
 /** User-side library summary (returned by AuthenticatedApi.listLibraryBlueprints). */

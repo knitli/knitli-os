@@ -1,6 +1,6 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { isReasoningLevel } from "./fork/reasoning-levels";
-import { isPromptFileAnywhere } from "./fork/prompt-files";
+import { hasRootPromptFile, isPromptFileAnywhere } from "./fork/prompt-files";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, PromptPresetSummary, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime } from '@gadgets/workshop-shared/api';
@@ -8346,6 +8346,17 @@ class OverseerImpl implements AgentHooks {
   ): Promise<void> {
     if (!this.ownerId) throw new Error("Workspace not initialized.");
 
+    // Re-derive the prompt marker whenever code is (re)published: a blueprint whose exported
+    // head carries a root prompt file is a reusable system prompt (selectable as a chat
+    // preset, hidden from the agent's list). Metadata-only updates pass no snapshot and leave
+    // the marker alone. Single hook for create, code-update, and publish-retry alike.
+    if (codeSnapshot !== undefined && record.commitId !== undefined &&
+        hasRootPromptFile((await this.gitStore.readCommitFiles(record.commitId)).keys())) {
+      record.metadata.prompt = true;
+    } else if (codeSnapshot !== undefined) {
+      delete record.metadata.prompt;
+    }
+
     // Mark dirty.
     record.dirty = true;
     this.storage.blueprints.put(record);
@@ -9075,16 +9086,22 @@ class OverseerImpl implements AgentHooks {
       add(format.blueprintId, format.output.noun, source, format.description, format.bindings);
     }
 
+    // Blindfold: prompt-marked blueprints are never listed to the agent -- it must not see
+    // prompts as instantiable code. (Standard formats above carry no marker; they are the
+    // deployment's admin-curated output blueprints, never prompts.)
     for (let blueprint of own) {
+      if (blueprint.prompt) continue;
       // BlueprintUserSummary carries no binding metadata; createGadget's output describes the
       // bindings after instantiation.
       add(blueprint.id, blueprint.title, `published by you`, blueprint.description);
     }
     for (let blueprint of library) {
+      if (blueprint.metadata.prompt) continue;
       add(blueprint.id, blueprint.metadata.title, `in your library`,
           blueprint.metadata.description, blueprint.metadata.bindings);
     }
     for (let blueprint of featured) {
+      if (blueprint.metadata.prompt) continue;
       add(blueprint.id, blueprint.metadata.title, `featured on this deployment`,
           blueprint.metadata.description, blueprint.metadata.bindings);
     }
@@ -12838,7 +12855,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
 // the parent interface while retaining this one, and a retained capability that escaped the count
 // would let a scope widening find no session to sever.
 @validateRpc()
-class GadgetClientImpl extends RpcTarget implements GadgetClient {
+/** Exported for tests (the blueprint publish path is facet-only). */
+export class GadgetClientImpl extends RpcTarget implements GadgetClient {
   #leaveSession?: () => void;
 
   constructor(private impl: OverseerImpl, private id: WorkpieceId,

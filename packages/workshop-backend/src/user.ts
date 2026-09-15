@@ -1102,6 +1102,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       version: record.metadata.version,
       lastUpdated: record.metadata.lastUpdated,
       pinned: pinnedBlueprintIds.has(record.id) || undefined,
+      prompt: record.metadata.prompt,
     };
   }
 

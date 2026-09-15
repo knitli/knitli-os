@@ -59,7 +59,7 @@ async function runTurn(
     messages: AiChatMessage[]): Promise<void> {
   await runAgent(
       hooks, capturingHandle(captured), 1, AGENT, messages,
-      new AbortController().signal, USER, false,
+      new AbortController().signal, USER,
       {
         modelConfig: {
           provider: "cloudflare", model: "@cf/zai-org/glm-5.3-flash", apiToken: "",

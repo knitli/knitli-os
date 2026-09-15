@@ -147,7 +147,7 @@ describe("runAgent effort threading", () => {
     let captured: unknown[] = [];
     await runAgent(
         fakeHooks(), capturingHandle(captured), 1, AGENT, [userMessage("hi")],
-        new AbortController().signal, USER, false,
+        new AbortController().signal, USER,
         {
           modelConfig: { provider: "cloudflare", model: GLM_FLASH, apiToken: "" },
           measuredTokens: 0,
@@ -161,7 +161,7 @@ describe("runAgent effort threading", () => {
     let captured: unknown[] = [];
     await runAgent(
         fakeHooks(), capturingHandle(captured), 1, AGENT, [userMessage("hi")],
-        new AbortController().signal, USER, false,
+        new AbortController().signal, USER,
         {
           modelConfig: { provider: "cloudflare", model: GLM_FLASH, apiToken: "" },
           measuredTokens: 0,

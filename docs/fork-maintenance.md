@@ -499,3 +499,31 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   browser-held nonce. The fork adopted that flow wholesale and kept this guard in front of it: the
   HTTP route still 403s a foreign browser before any code exchange or staging happens, so a leaked
   link fails at the gatekeeper instead of merely failing to redeem at the Workshop.
+
+### Prompt presets + reasoning controls
+
+- **Where:** `packages/workshop-backend/src/fork/reasoning-levels.ts` and
+  `packages/workshop-backend/src/fork/prompt-files.ts` (fork-owned policy), seam-scale Tier-2
+  hooks in `workshop-backend` (`agent.ts`, `overseer.ts`, `worktree-session.ts`, `user.ts`,
+  `admin-config.ts`, `admin-settings.ts`), additive RPC in `workshop-shared/src/api.ts`, and
+  `packages/workshop-frontend/src/features/chat/controls/` (Tier-1) plus `ChatComposer`/
+  `ChatInterface`/`AdminPage` wiring.
+- **Introduced:** `9e6a3a6f` (slice 0: reasoning resolver), `754e19c5` (slice 1: per-chat
+  effort), `6e40c955` (slice 2: admin presets + swap), `119df7fe`/`d68f699a`/`5163d1d1`/
+  `8e0c3cc7` (slice 3: prompt files, marking, pins, selector).
+- **What:** per-chat reasoning-effort override threaded into the stream options (fixing the two
+  cloudflare `makeHandle` branches that dropped `thinkingLevelMap`); deployment prompt presets
+  (admin CRUD, mirrored to KV) that swap the static system slot with a cache-break warning;
+  and the `PROMPT.md` convention: a gadget whose head carries a root `PROMPT.md` publishes a
+  prompt-marked blueprint, hidden from the agent's blueprint list, selectable as a chat prompt
+  pinned to its commit/version. The agent is blindfolded to prompt files everywhere it could
+  see them (file tools with missing-file error parity, listings, replay, user-change diffs,
+  blueprint notes, worktree grep/diff) while the author-visible copies keep working.
+- **Why:** the gadget-assuming system prompt confuses workspace models asked to do anything
+  else, there was no prompt selection UI, and the parameter-sensitive Workers AI models need
+  per-turn effort control. Unset chats run the legacy prompt byte-identical; unmarked content
+  behaves exactly as upstream.
+- **Known cost:** none observed; the blindfold is covered by sabotage-proven tests
+  (`knitli-blindfold`, `knitli-prompt-blueprints`, `knitli-prompt-refs`), and the gadget-kind
+  prompt pin has no selection UI yet (backend-ready; the selector offers admin presets and
+  library prompt blueprints).

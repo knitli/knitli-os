@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import React, { act } from 'react'
+import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { RpcStub, RpcTarget, newMessagePortRpcSession, type RpcStub as RpcStubType } from 'capnweb'
 import type { AdminApi, AdminSettingsView, AiChatAuthorInfo, AuthenticatedApi } from '@gadgets/workshop-shared/api'

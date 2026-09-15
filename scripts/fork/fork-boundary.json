@@ -53,6 +53,18 @@
       "reason": "Regression test for the fork-owned turn-start threading of effort and prompt selections."
     },
     {
+      "path": "packages/workshop-backend/__tests__/knitli-blindfold.test.ts",
+      "reason": "Regression test for the fork-owned agent blindfold over prompt files."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-prompt-blueprints.test.ts",
+      "reason": "Regression test for fork-owned prompt-blueprint marking and the agent list blindfold."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-prompt-refs.test.ts",
+      "reason": "Regression test for fork-owned pinned prompt refs and their resolution."
+    },
+    {
       "path": "packages/mcp-shared/__tests__/fork/",
       "reason": "Fork regression tests for named $defs aliases, read-before-dispatch authorization, and the caller-settable argument budget."
     },

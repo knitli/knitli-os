@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import React, { act, type ChangeEvent, type ReactNode } from 'react'
+import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { RpcStub, RpcTarget, newMessagePortRpcSession, type RpcStub as RpcStubType } from 'capnweb'
 import type { AdminApi, AdminSettingsView, AiChatAuthorInfo, AuthenticatedApi } from '@gadgets/workshop-shared/api'
@@ -9,14 +9,10 @@ import { AuthProvider, useAuthenticatedApi } from '../../../AuthContext'
 import AdminPage from '../../../AdminPage'
 
 const state = vi.hoisted(() => ({ toast: vi.fn<(value: unknown) => void>(), navigate: vi.fn<(value: unknown) => void>() }))
-vi.mock('@cloudflare/kumo', () => ({
-  Button: ({ children, ...props }: { children?: ReactNode } & React.ButtonHTMLAttributes<HTMLButtonElement>) => <button {...props}>{children}</button>,
-  Input: (props: React.InputHTMLAttributes<HTMLInputElement>) => <input {...props} />,
-  Textarea: (props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) => <textarea {...props} />,
-  Switch: ({ checked, onCheckedChange, ...props }: { checked: boolean; onCheckedChange(value: boolean): void } & Omit<React.InputHTMLAttributes<HTMLInputElement>, 'checked' | 'onChange'>) => <input type="checkbox" checked={checked} onChange={(event: ChangeEvent<HTMLInputElement>) => onCheckedChange(event.currentTarget.checked)} {...props} />,
-  Tabs: ({ tabs, onValueChange }: { tabs: { value: string; label: string }[]; onValueChange(value: string): void }) => <>{tabs.map((tab) => <button key={tab.value} onClick={() => onValueChange(tab.value)}>{tab.label}</button>)}</>,
-  useKumoToastManager: () => ({ add: state.toast }),
-}))
+vi.mock('@cloudflare/kumo', async () => {
+  const { mockKumoAdminPage } = await import('./mock-kumo-admin-page')
+  return mockKumoAdminPage(state.toast)
+})
 vi.mock('@phosphor-icons/react', () => ({ Hexagon: () => null, ShieldWarning: () => null, UserPlus: () => null }))
 vi.mock('../../../ThemeContext', () => ({ useTheme: () => ({ resolvedThemeMode: 'light' }) }))
 vi.mock('../../../ServerConfigContext', () => ({ useServerConfig: () => null }))

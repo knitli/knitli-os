@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type {
-  AiChatAuthorInfo, AiChatMessage,
+  AiChatAuthorInfo, AiChatMessage, PromptRef,
 } from "@gadgets/workshop-shared/api";
 import { ADMIN_CONFIG_KEY } from "../src/blueprint-archive.js";
 import {
@@ -145,14 +145,17 @@ describe("prompt chat metadata", () => {
   it("newChat seeds the prompt preset", async () => {
     await withOwnerOverseer(FIXTURES, async (overseer, impl) => {
       let chatId = await overseer.newChat(
-          "hello", null, undefined, undefined, undefined, undefined, "preset-1");
-      expect(impl.storage.chatMeta.get(chatId).promptId).toBe("preset-1");
+          "hello", null, undefined, undefined, undefined, undefined,
+          {kind: "admin", id: "preset-1"});
+      expect(impl.storage.chatMeta.get(chatId).promptRef)
+          .toEqual({kind: "admin", id: "preset-1"});
 
       let plainId = await overseer.newChat("hello", null);
-      expect("promptId" in impl.storage.chatMeta.get(plainId)).toBe(false);
+      expect("promptRef" in impl.storage.chatMeta.get(plainId)).toBe(false);
 
       await expect(overseer.newChat(
-          "hello", null, undefined, undefined, undefined, undefined, "missing"))
+          "hello", null, undefined, undefined, undefined, undefined,
+          {kind: "admin", id: "missing"}))
           .rejects.toThrow("No such prompt preset");
     });
   }, 30000);
@@ -160,14 +163,18 @@ describe("prompt chat metadata", () => {
   it("setChatPrompt round-trips and null clears", async () => {
     await withOwnerOverseer(FIXTURES, async (overseer, impl) => {
       let chatId = await overseer.newChat("hello", null);
-      await overseer.setChatPrompt(chatId, "preset-1");
-      expect(impl.storage.chatMeta.get(chatId).promptId).toBe("preset-1");
-      await overseer.setChatPrompt(chatId, null);
-      expect("promptId" in impl.storage.chatMeta.get(chatId)).toBe(false);
+      // The call returns the stamped ref (null when cleared) for the client's cache.
+      expect(await overseer.setChatPrompt(chatId, {kind: "admin", id: "preset-1"}))
+          .toEqual({kind: "admin", id: "preset-1"});
+      expect(impl.storage.chatMeta.get(chatId).promptRef)
+          .toEqual({kind: "admin", id: "preset-1"});
+      expect(await overseer.setChatPrompt(chatId, null)).toBeNull();
+      expect("promptRef" in impl.storage.chatMeta.get(chatId)).toBe(false);
 
-      await expect(overseer.setChatPrompt(chatId, "missing"))
+      await expect(overseer.setChatPrompt(chatId, {kind: "admin", id: "missing"}))
           .rejects.toThrow("No such prompt preset");
-      await expect(overseer.setChatPrompt(999, "preset-1")).rejects.toThrow("No such chatId");
+      await expect(overseer.setChatPrompt(999, {kind: "admin", id: "preset-1"}))
+          .rejects.toThrow("No such chatId");
     });
   }, 30000);
 
@@ -180,10 +187,10 @@ describe("prompt chat metadata", () => {
     });
   }, 30000);
 
-  it("getPromptPresetText resolves text and undefined for missing ids", async () => {
+  it("getPromptRefText resolves admin text and undefined for missing ids", async () => {
     await withOwnerOverseer(FIXTURES, async (overseer, impl) => {
-      expect(await impl.getPromptPresetText("preset-1")).toBe(PRESET_TEXT);
-      expect(await impl.getPromptPresetText("missing")).toBeUndefined();
+      expect(await impl.getPromptRefText({kind: "admin", id: "preset-1"})).toBe(PRESET_TEXT);
+      expect(await impl.getPromptRefText({kind: "admin", id: "missing"})).toBeUndefined();
     });
   }, 30000);
 });
@@ -223,7 +230,7 @@ function capturingHandle(captured: {options?: unknown, systemPrompt?: string}[])
 function fakeHooks(overrides: {
   instructions?: string,
   presetText?: string | undefined,
-  presetCalls?: string[],
+  presetCalls?: PromptRef[],
 }): AgentHooks {
   return {
     getChatAgentContext: () => ({ chatId: 1 }),
@@ -238,15 +245,15 @@ function fakeHooks(overrides: {
     commitAgentStep: async () => false,
     getChatModelData: () => undefined,
     emitChatStreamEvent: () => {},
-    getPromptPresetText: async (promptId: string) => {
-      overrides.presetCalls?.push(promptId);
+    getPromptRefText: async (ref: PromptRef) => {
+      overrides.presetCalls?.push(ref);
       return overrides.presetText;
     },
   } as unknown as AgentHooks;
 }
 
 async function runTurn(captured: {options?: unknown, systemPrompt?: string}[],
-                       hooks: AgentHooks, options: {promptId?: string}): Promise<void> {
+                       hooks: AgentHooks, options: {promptRef?: PromptRef}): Promise<void> {
   await runAgent(
       hooks, capturingHandle(captured), 1, AGENT, [userMessage("hi")],
       new AbortController().signal, USER, false,
@@ -260,19 +267,20 @@ async function runTurn(captured: {options?: unknown, systemPrompt?: string}[],
 describe("runAgent prompt swap", () => {
   it("swaps the static slot to the preset text, instructions still appended", async () => {
     let captured: {options?: unknown, systemPrompt?: string}[] = [];
-    let presetCalls: string[] = [];
+    let presetCalls: PromptRef[] = [];
+    let ref: PromptRef = {kind: "admin", id: "preset-1"};
     await runTurn(captured,
         fakeHooks({instructions: INSTRUCTIONS, presetText: PRESET_TEXT, presetCalls}),
-        {promptId: "preset-1"});
+        {promptRef: ref});
     expect(captured.length).toBe(1);
-    expect(presetCalls).toEqual(["preset-1"]);
+    expect(presetCalls).toEqual([ref]);
     expect(captured[0].systemPrompt!.startsWith(
         `${PRESET_TEXT}\n\n${formatInstanceInstructions(INSTRUCTIONS)}`)).toBe(true);
   }, 30000);
 
   it("keeps the built-in prompt byte-identical when unset", async () => {
     let captured: {options?: unknown, systemPrompt?: string}[] = [];
-    let presetCalls: string[] = [];
+    let presetCalls: PromptRef[] = [];
     await runTurn(captured,
         fakeHooks({instructions: INSTRUCTIONS, presetCalls}), {});
     expect(captured.length).toBe(1);
@@ -284,7 +292,8 @@ describe("runAgent prompt swap", () => {
 
   it("falls back to the built-in prompt when the preset is gone", async () => {
     let captured: {options?: unknown, systemPrompt?: string}[] = [];
-    await runTurn(captured, fakeHooks({presetText: undefined}), {promptId: "preset-gone"});
+    await runTurn(captured, fakeHooks({presetText: undefined}),
+        {promptRef: {kind: "admin", id: "preset-gone"}});
     expect(captured.length).toBe(1);
     expect(captured[0].systemPrompt!.startsWith(`${SYSTEM_PROMPT}\n\n`)).toBe(true);
     expect(captured[0].systemPrompt).not.toContain(PRESET_TEXT);

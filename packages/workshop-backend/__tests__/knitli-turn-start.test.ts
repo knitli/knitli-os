@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type {
-  AiChatAuthorInfo, AiModelConfig,
+  AiChatAuthorInfo, AiModelConfig, PromptSelection,
 } from "@gadgets/workshop-shared/api";
 import {
   DEFAULT_ADMIN_CONFIG, serializeAdminConfig,
@@ -20,8 +20,8 @@ declare module "cloudflare:workers" {
 // from metadata when a turn starts, and the selections reach the provider request -- run end
 // to end through a real Overseer turn (impl.newChat seeds the metadata and starts the turn)
 // with the network stubbed, asserting on the captured request bodies. The agent-level halves
-// (options -> stream config, id -> static slot) are pinned in knitli-chat-effort/prompt; this
-// file pins the overseer's half: metadata -> options.
+// (options -> stream config, ref -> static slot) are pinned in knitli-chat-effort/prompt;
+// this file pins the overseer's half: metadata -> options.
 
 const USER: AiChatAuthorInfo = { type: "user", id: "turn-owner", name: "Owner" };
 const AGENT: AiChatAuthorInfo =
@@ -52,7 +52,7 @@ const COMPLETION_SSE = [
 type CapturedRequest = { url: string; body: string };
 
 async function withTurn(
-    effort: string | null, promptId: string | null,
+    effort: string | null, prompt: PromptSelection | null,
     fn: (captured: CapturedRequest[]) => Promise<void>): Promise<void> {
   let stub = env.TEST_OVERSEER.getByName(`turn-start-${crypto.randomUUID()}`);
   await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
@@ -94,7 +94,7 @@ async function withTurn(
       let chatId = await impl.newChat(
           userStub, { profile: USER, aiModel: { profile: AGENT, config: CONFIG } },
           "hi", undefined, undefined, undefined, undefined, undefined,
-          effort, promptId);
+          effort, prompt);
       // The turn runs detached (startAgent returns void); wait for its teardown.
       let deadline = Date.now() + 20000;
       while (impl.storage.activeAgents.get(chatId) !== undefined) {
@@ -132,7 +132,7 @@ describe("turn-start threading", () => {
   }, 30000);
 
   it("resolves the seeded prompt preset into the static slot", async () => {
-    await withTurn(null, "preset-1", async (captured) => {
+    await withTurn(null, {kind: "admin", id: "preset-1"}, async (captured) => {
       expect(captured.length).toBe(1);
       let body = JSON.parse(captured[0].body);
       expect("reasoning_effort" in body).toBe(false);

@@ -947,11 +947,36 @@ export type PromptPresetPatch = {
  * needs only the name, and the agent's live behavior already reveals the rest.
  */
 export type PromptPresetSummary = {
-  /** The preset's id, as passed to setChatPrompt(). */
+  /** The preset's id, selected via setChatPrompt() as `{kind: "admin", id}`. */
   id: string;
   /** The preset's display name. */
   name: string;
 };
+
+/**
+ * A chat's system-prompt source, as chosen in the UI and passed to setChatPrompt()/newChat().
+ * Gadget and blueprint selections pin at set time (see PromptRef); the UI never supplies pins,
+ * so there is no read-then-set race between choosing and stamping.
+ */
+export type PromptSelection =
+    /** A deployment preset from listPromptPresets(). Live: admin edits take effect promptly. */
+    { kind: "admin", id: string }
+    /** A workspace gadget: its head commit's root `PROMPT.md`, pinned to that commit. */
+  | { kind: "gadget", id: number }
+    /** A prompt-marked blueprint (own, library, or featured), pinned to its version. */
+  | { kind: "blueprint", id: string };
+
+/**
+ * A chat's pinned system-prompt source, stored on AiChatMetadata.promptRef. Stamped from a
+ * PromptSelection at set time; gadget and blueprint pins freeze the exact content (commit /
+ * blueprint version) so later edits never move an old chat's prefix. Whatever a ref names,
+ * resolution failures (deleted preset, removed file, missing content) fall back to the
+ * built-in `gadget builder` default.
+ */
+export type PromptRef =
+    { kind: "admin", id: string }
+  | { kind: "gadget", id: number, version: string }
+  | { kind: "blueprint", id: string, version: number };
 
 /** Longest prompt-preset display name the admin API accepts. */
 export const MAX_PROMPT_PRESET_NAME_LENGTH = 80;
@@ -2269,13 +2294,13 @@ export interface Overseer extends RpcTarget {
    * `effort` seeds the new chat's reasoning-effort override (as if setChatEffort() had been
    * called first), so the first turn already runs under it. Absent or null runs the default.
    *
-   * `promptId` seeds the new chat's prompt preset the same way (as if setChatPrompt() had
+   * `prompt` seeds the new chat's system prompt the same way (as if setChatPrompt() had
    * been called first). Absent or null runs the built-in default.
    */
   newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
           capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
           formats?: MessageFormatRef[], effort?: string | null,
-          promptId?: string | null): Promise<number>;
+          prompt?: PromptSelection | null): Promise<number>;
 
   /**
    * Send a message to the chat from this client. Sending a message causes the LLM to start
@@ -2327,12 +2352,15 @@ export interface Overseer extends RpcTarget {
   setChatEffort(chatId: number, effort: string | null): Promise<void>;
 
   /**
-   * Set the chat's system-prompt preset for upcoming turns: one of the ids from
-   * listPromptPresets(), or null for the built-in `gadget builder` default. Rejects unknown
-   * ids. Takes effect at the next turn start; swapping presets changes the static prompt slot
-   * and busts the Anthropic prefix cache, so the UI confirms the switch mid-chat.
+   * Set the chat's system prompt for upcoming turns: a deployment preset, a workspace
+   * gadget's prompt file, or a prompt-marked blueprint -- or null for the built-in `gadget
+   * builder` default. Gadget and blueprint selections pin their current content (commit /
+   * version) at set time. Rejects unknown ids and sources with no prompt to select. Takes
+   * effect at the next turn start; swapping prompts changes the static prompt slot and busts
+   * the Anthropic prefix cache, so the UI confirms the switch mid-chat. Returns the stamped
+   * ref (null when cleared) so the caller can cache exactly what was stored.
    */
-  setChatPrompt(chatId: number, promptId: string | null): Promise<void>;
+  setChatPrompt(chatId: number, prompt: PromptSelection | null): Promise<PromptRef | null>;
 
   /** List the deployment's prompt presets (id plus name) for the chat prompt selector. */
   listPromptPresets(): Promise<PromptPresetSummary[]>;
@@ -2622,11 +2650,12 @@ export type AiChatMetadata = {
   reasoningEffort?: string;
 
   /**
-   * The chat's system-prompt preset id (see listPromptPresets()), set via setChatPrompt()
-   * or newChat(). Absent when the chat runs the built-in `gadget builder` default; an id
-   * whose preset was since deleted also falls back to the default. Read at turn start.
+   * The chat's pinned system-prompt source, set via setChatPrompt() or newChat(). Absent
+   * when the chat runs the built-in `gadget builder` default; a ref whose source is gone
+   * (deleted preset, removed file, missing content) also falls back to the default. Read
+   * at turn start.
    */
-  promptId?: string;
+  promptRef?: PromptRef;
 
   /**
    * Tokens the model reported for this conversation's last step, if known. Cleared when compaction

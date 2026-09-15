@@ -84,7 +84,7 @@ function baseHooks(overrides: Record<string, any> = {}): AgentHooks {
     getChatModelData: () => undefined,
     getGadgetHead: () => undefined,
     emitChatStreamEvent: () => {},
-    getPromptPresetText: async () => undefined,
+    getPromptRefText: async () => undefined,
     ...overrides,
   } as unknown as AgentHooks;
 }

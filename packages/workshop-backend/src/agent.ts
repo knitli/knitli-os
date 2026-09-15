@@ -1,4 +1,4 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, ChatCodeBase, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, ChatCodeBase, WorkpieceId, type AiModelConfig, type PromptRef, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type CodeContent,
   type CodeChange, type FileChange } from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
@@ -598,11 +598,11 @@ export interface AgentHooks {
   getInstanceInstructions(): Promise<string>;
 
   /**
-   * One prompt preset's text by id, or undefined when no such preset exists (deleted since the
-   * chat chose it, or the admin mirror is unreadable -- both fail closed onto the built-in
-   * default). Read on each turn a preset is set, so admin edits take effect promptly.
+   * A pinned prompt source's text, or undefined when its source is gone or unreadable --
+   * both fail closed onto the built-in default. Read on each turn a ref is set, so admin
+   * preset edits take effect promptly (gadget and blueprint pins still freeze content).
    */
-  getPromptPresetText(promptId: string): Promise<string | undefined>;
+  getPromptRefText(ref: PromptRef): Promise<string | undefined>;
 
   /**
    * Connection-request hooks for the agent.
@@ -1127,11 +1127,11 @@ export type RunAgentOptions = {
    */
   reasoningEffort?: string;
   /**
-   * The chat's prompt preset id (see listPromptPresets), resolved to text for the static
-   * system slot. When undefined the built-in gadget-builder prompt applies byte-identical; an
-   * id whose preset is gone resolves the same way.
+   * The chat's pinned prompt source, resolved to text for the static system slot. When
+   * undefined the built-in gadget-builder prompt applies byte-identical; a ref whose source
+   * is gone resolves the same way.
    */
-  promptId?: string;
+  promptRef?: PromptRef;
 };
 
 /**
@@ -2521,11 +2521,11 @@ export async function runAgent(
           `${connectableVendors.map(v => `* ${v.id}: ${v.displayName}`).join("\n")}`;
     }
 
-    // The selected preset replaces the static slot's base text; unset chats -- and chats
-    // whose preset is gone -- keep the built-in prompt byte-identical. The spawner path above
-    // is untouched, and static-slot-first ordering is preserved for caching.
-    let promptBase = options.promptId !== undefined
-        ? (await hooks.getPromptPresetText(options.promptId)) ?? SYSTEM_PROMPT
+    // The selected prompt source replaces the static slot's base text; unset chats -- and
+    // chats whose source is gone -- keep the built-in prompt byte-identical. The spawner path
+    // above is untouched, and static-slot-first ordering is preserved for caching.
+    let promptBase = options.promptRef !== undefined
+        ? (await hooks.getPromptRefText(options.promptRef)) ?? SYSTEM_PROMPT
         : SYSTEM_PROMPT;
 
     // Split the system prompt into static and dynamic parts for better caching.

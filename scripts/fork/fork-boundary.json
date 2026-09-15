@@ -29,6 +29,10 @@
       "reason": "Regression test for the fork-owned approval-turn continuation."
     },
     {
+      "path": "packages/workshop-backend/__tests__/knitli-reasoning-levels.test.ts",
+      "reason": "Regression test for the fork-owned reasoning-effort resolver and its makeHandle wiring."
+    },
+    {
       "path": "packages/mcp-shared/__tests__/fork/",
       "reason": "Fork regression tests for named $defs aliases, read-before-dispatch authorization, and the caller-settable argument budget."
     },

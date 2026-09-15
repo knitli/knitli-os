@@ -20,6 +20,7 @@ import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LI
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
+import { resolveThinkingLevelMap } from "./fork/reasoning-levels.js";
 
  /**
   * Routing to bill a user's own Cloudflare account for inference (BYOK path once the free tier is
@@ -67,6 +68,13 @@ export type ModelStreamOptions = SimpleStreamOptions & {
    * quick, and none of them benefit from cross-step reasoning. Default: true.
    */
   thinking?: boolean;
+  /**
+   * Explicit per-call reasoning effort (one of pi's ThinkingLevel names), mapped through the
+   * model's thinkingLevelMap by the pi API impl. Wins over the handle's per-API defaults when
+   * set; when unset the defaults (or the provider default) apply. Never pass an explicit
+   * undefined: it would clobber the openai-responses medium default in the merge below.
+   */
+  reasoningEffort?: string;
 };
 
 /**
@@ -159,6 +167,12 @@ function workersAiCompat(catalog: Model<Api> | undefined): OpenAICompletionsComp
     supportsStore: false,
     supportsDeveloperRole: false,
     supportsLongCacheRetention: false,
+    // The workers-ai route is Workers AI's native OpenAI-compatible endpoint (not the gateway's
+    // cross-provider /compat translation), so reasoning_effort passes through on every transport.
+    // Stated explicitly because pi's URL detection disables it for gateway.ai.cloudflare.com
+    // hosts (correct for pi's own /compat usage, wrong for this native route); an explicit
+    // per-model catalog value still wins via the spread below.
+    supportsReasoningEffort: true,
     ...(catalog?.compat as OpenAICompletionsCompat | undefined),
     sendSessionAffinityHeaders: true,
   };
@@ -299,8 +313,15 @@ function makeHandle(args: HandleArgs): ModelHandle {
           ? (anthropicCompat?.forceAdaptiveThinking === true ? { thinkingEnabled: true } : {}) :
       args.model.api === "openai-responses" ? { reasoningEffort: "medium" } : {};
 
+  // The merged thinking-level map (fork corrections over pi's catalog), attached here so every
+  // construction path -- including the Workers AI ones, whose descriptors don't carry it -- maps
+  // effort levels correctly. Attaching a map sends nothing on its own: with no reasoningEffort
+  // the impls behave exactly as with no map (covered by the knitli-reasoning-levels tests).
+  const thinkingLevelMap = resolveThinkingLevelMap(
+      args.model.provider, args.model.id, args.model.thinkingLevelMap);
+
   const handle: ModelHandle = {
-    model: args.model,
+    model: thinkingLevelMap === undefined ? args.model : {...args.model, thinkingLevelMap},
     aiGatewayLogRoute: args.aiGatewayLogRoute,
     stream: (model, context, { thinking = true, ...options } = {}) => {
       // Never let a failed request read a previous request's response metadata.

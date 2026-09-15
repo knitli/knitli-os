@@ -427,6 +427,14 @@ export interface AuthenticatedApi extends RpcTarget {
   deleteModel(id: string): Promise<void>;
 
   /**
+   * Describe one model's reasoning-effort control for the chat UI: which effort levels the
+   * model offers and which one to present as the default. Resolves exactly the model ids
+   * listModels() returns (gateway built-ins plus stored customs). Returns null for unknown
+   * ids and for models whose API ignores reasoning effort.
+   */
+  getModelReasoning(modelId: string): Promise<ModelReasoningInfo | null>;
+
+  /**
    * Set the model to use for simple quick tasks, like generating chat titles. Set null to
    * disable quick model use (e.g. chats will be titled "New Chat").
    */
@@ -1391,6 +1399,19 @@ export type AiModelConfig = {
    * alternative provider that provides a compatible API.
    */
   apiUrl?: string;
+};
+
+/**
+ * One model's reasoning-effort control, as AuthenticatedApi.getModelReasoning() describes it
+ * for the chat UI. Level names are pi's ThinkingLevel vocabulary
+ * ("minimal" | "low" | "medium" | "high" | "xhigh" | "max"); plain strings here so this
+ * package stays free of pi-ai types.
+ */
+export type ModelReasoningInfo = {
+  /** The effort levels the model offers, in increasing order. Never empty. */
+  levels: string[];
+  /** The level the UI presents as the default. Always one of `levels`. */
+  default: string;
 };
 
 /**

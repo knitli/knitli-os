@@ -597,6 +597,13 @@ export interface AgentHooks {
   getInstanceInstructions(): Promise<string>;
 
   /**
+   * One prompt preset's text by id, or undefined when no such preset exists (deleted since the
+   * chat chose it, or the admin mirror is unreadable -- both fail closed onto the built-in
+   * default). Read on each turn a preset is set, so admin edits take effect promptly.
+   */
+  getPromptPresetText(promptId: string): Promise<string | undefined>;
+
+  /**
    * Connection-request hooks for the agent.
    *
    * List the gatekeeper vendors the user could connect (id + display name). Used to populate the
@@ -664,7 +671,8 @@ export interface AgentHooks {
 // =======================================================================================
 // Agent system prompt and tool descriptions
 
-let SYSTEM_PROMPT = `
+/** Exported so tests assert the default slot against the live constant, not a copy. */
+export let SYSTEM_PROMPT = `
 You are a helpful coding assistant tasked with helping users write small personal applications known as "Gadgets". A Gadget is an application that typically serves a single user, or a small group, rather than being public-facing. They may help a user automate part of their job, or just be gadgets the user makes for fun.
 
 # Workspaces
@@ -1117,6 +1125,12 @@ export type RunAgentOptions = {
    * makeHandle's openai-responses medium default.
    */
   reasoningEffort?: string;
+  /**
+   * The chat's prompt preset id (see listPromptPresets), resolved to text for the static
+   * system slot. When undefined the built-in gadget-builder prompt applies byte-identical; an
+   * id whose preset is gone resolves the same way.
+   */
+  promptId?: string;
 };
 
 /**
@@ -2494,11 +2508,18 @@ export async function runAgent(
           `${connectableVendors.map(v => `* ${v.id}: ${v.displayName}`).join("\n")}`;
     }
 
+    // The selected preset replaces the static slot's base text; unset chats -- and chats
+    // whose preset is gone -- keep the built-in prompt byte-identical. The spawner path above
+    // is untouched, and static-slot-first ordering is preserved for caching.
+    let promptBase = options.promptId !== undefined
+        ? (await hooks.getPromptPresetText(options.promptId)) ?? SYSTEM_PROMPT
+        : SYSTEM_PROMPT;
+
     // Split the system prompt into static and dynamic parts for better caching.
     systemPromptSlots = [
       instanceInstructions
-          ? `${SYSTEM_PROMPT}\n\n${instanceInstructions}`
-          : SYSTEM_PROMPT,
+          ? `${promptBase}\n\n${instanceInstructions}`
+          : promptBase,
       (standardFormats ? `${standardFormats}\n\n` : "") +
           `${systemPromptWorkspace}${systemPromptConnections}` +
           (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : ""),

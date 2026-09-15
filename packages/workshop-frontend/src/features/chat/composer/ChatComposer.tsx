@@ -51,6 +51,7 @@ import { CapturedConsoleLogsPrompt } from "./CapturedConsoleLogsPrompt";
 import ComposerAddMenu from "./ComposerAddMenu";
 import { ComposerModelSelector } from "./ComposerModelSelector";
 import { ComposerEffortSelector } from "../controls/ComposerEffortSelector";
+import { ComposerPromptSelector } from "../controls/ComposerPromptSelector";
 import { useComposerDraft } from "./draft/useComposerDraft";
 import { buildComposerSubmission } from "./composerSubmission";
 import {
@@ -105,6 +106,7 @@ export const ChatComposer = ({
   showThinkingTraces = true,
   onToggleThinkingTraces,
   effortControl,
+  promptControl,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -135,6 +137,16 @@ export const ChatComposer = ({
     defaultLevel: string;
     selectedEffort: string | null;
     onEffortChange: (effort: string | null) => void;
+  };
+  /**
+   * Per-chat prompt-preset control, rendered beside the effort selector. Absent while the
+   * deployment offers no presets, which hides the control.
+   */
+  promptControl?: {
+    presets: readonly { id: string; name: string }[];
+    selectedPromptId: string | null;
+    onPromptChange: (promptId: string | null) => void;
+    requireConfirm: boolean;
   };
   pendingConsoleLogCount?: number;
   consoleLogPreview?: string;
@@ -975,6 +987,14 @@ export const ChatComposer = ({
                   defaultLevel={effortControl.defaultLevel}
                   selectedEffort={effortControl.selectedEffort}
                   onEffortChange={effortControl.onEffortChange}
+                />
+              )}
+              {promptControl !== undefined && (
+                <ComposerPromptSelector
+                  presets={promptControl.presets}
+                  selectedPromptId={promptControl.selectedPromptId}
+                  onPromptChange={promptControl.onPromptChange}
+                  requireConfirm={promptControl.requireConfirm}
                 />
               )}
               {isAgentActive && onStop ? (

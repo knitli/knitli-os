@@ -3,7 +3,7 @@ import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { Hexagon, ShieldWarning, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
-import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, AuthenticatedApi, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
+import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, AuthenticatedApi, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR, PromptPreset } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
 import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
@@ -75,6 +75,14 @@ export default function AdminPage() {
   const [instructionsDraft, setInstructionsDraft] = useState('')
   const [savingInstructions, setSavingInstructions] = useState(false)
 
+  // Deployment-wide prompt presets. `editingPresetId` is the preset (or 'new') whose form is
+  // open; drafts live in the form fields until saved.
+  const [promptPresets, setPromptPresets] = useState<PromptPreset[]>([])
+  const [editingPresetId, setEditingPresetId] = useState<string | null>(null)
+  const [presetNameDraft, setPresetNameDraft] = useState('')
+  const [presetTextDraft, setPresetTextDraft] = useState('')
+  const [savingPreset, setSavingPreset] = useState(false)
+
   // Top-bar notice: last-saved value + current editor draft.
   const [savedAnnouncement, setSavedAnnouncement] = useState('')
   const [announcementDraft, setAnnouncementDraft] = useState('')
@@ -136,6 +144,8 @@ export default function AdminPage() {
     setResourceVendors(view.resourceVendors)
     setSavedInstructions(view.instanceInstructions)
     setInstructionsDraft(view.instanceInstructions)
+    setPromptPresets(view.promptPresets)
+    setEditingPresetId(null)
     setSavedAnnouncement(view.announcement)
     setAnnouncementDraft(view.announcement)
     setSavedBanner(view.banner)
@@ -416,6 +426,59 @@ export default function AdminPage() {
       toasts.add({ title: message, variant: 'error' })
     } finally {
       setSavingInstructions(false)
+    }
+  }
+
+  const openPresetEditor = (preset: PromptPreset | null) => {
+    setEditingPresetId(preset ? preset.id : 'new')
+    setPresetNameDraft(preset ? preset.name : '')
+    setPresetTextDraft(preset ? preset.text : '')
+  }
+
+  const handleSavePreset = async () => {
+    if (!admin || !editingPresetId) return
+    setSavingPreset(true)
+    try {
+      if (editingPresetId === 'new') {
+        const created = await admin.api.createPromptPreset(presetNameDraft, presetTextDraft)
+        setPromptPresets((prev) => [...prev, created])
+        toasts.add({ title: 'Prompt preset created', variant: 'success' })
+      } else {
+        await admin.api.updatePromptPreset(editingPresetId, {
+          name: presetNameDraft,
+          text: presetTextDraft,
+        })
+        // Blank drafts are ignored server-side, so only non-blank values apply locally.
+        const name = presetNameDraft.trim()
+        const text = presetTextDraft.trim()
+        setPromptPresets((prev) => prev.map((preset) =>
+          preset.id !== editingPresetId
+            ? preset
+            : { ...preset, ...(name ? { name } : {}), ...(text ? { text } : {}) }))
+        toasts.add({ title: 'Prompt preset saved', variant: 'success' })
+      }
+      setEditingPresetId(null)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to save preset'
+      toasts.add({ title: message, variant: 'error' })
+    } finally {
+      setSavingPreset(false)
+    }
+  }
+
+  const handleDeletePreset = async (id: string) => {
+    if (!admin) return
+    setSavingPreset(true)
+    try {
+      await admin.api.deletePromptPreset(id)
+      setPromptPresets((prev) => prev.filter((preset) => preset.id !== id))
+      if (editingPresetId === id) setEditingPresetId(null)
+      toasts.add({ title: 'Prompt preset deleted', variant: 'success' })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to delete preset'
+      toasts.add({ title: message, variant: 'error' })
+    } finally {
+      setSavingPreset(false)
     }
   }
 
@@ -851,6 +914,142 @@ export default function AdminPage() {
             </Button>
           </div>
         </div>
+      </div>
+      )}
+
+      {/* Prompt presets */}
+      {activeTab === 'general' && (
+      <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
+        <h2 className="text-lg font-semibold text-kumo-strong mb-1">Prompt presets</h2>
+        <p className="text-sm text-kumo-subtle mb-5">
+          Named system prompts users can select per chat. The built-in Gadget builder prompt is
+          always available as the default and isn&rsquo;t listed here.
+        </p>
+
+        {promptPresets.length === 0 && editingPresetId !== 'new' && (
+          <p className="text-sm text-kumo-subtle mb-4">
+            No presets yet. Add one to offer an alternative to the default prompt.
+          </p>
+        )}
+
+        <div className="space-y-3 mb-4">
+          {promptPresets.map((preset) => (
+            <div key={preset.id} className="rounded-lg border border-kumo-line px-4 py-3">
+              {editingPresetId === preset.id ? (
+                <div className="space-y-3">
+                  <Input
+                    className="w-full"
+                    value={presetNameDraft}
+                    onValueChange={setPresetNameDraft}
+                    placeholder="Preset name"
+                    maxLength={MAX_PROMPT_PRESET_NAME_LENGTH}
+                    aria-label="Preset name"
+                  />
+                  <Textarea
+                    className="w-full"
+                    value={presetTextDraft}
+                    onValueChange={setPresetTextDraft}
+                    rows={6}
+                    placeholder="System prompt text"
+                    aria-label="Preset text"
+                  />
+                  <div className="flex items-center justify-between">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleDeletePreset(preset.id)}
+                      disabled={savingPreset}
+                    >
+                      Delete
+                    </Button>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setEditingPresetId(null)}
+                        disabled={savingPreset}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={handleSavePreset}
+                        loading={savingPreset}
+                        disabled={!presetNameDraft.trim() || !presetTextDraft.trim()}
+                      >
+                        Save preset
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3">
+                  <span className="flex-1 text-sm font-medium text-kumo-default">
+                    {preset.name}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => openPresetEditor(preset)}
+                    disabled={savingPreset}
+                  >
+                    Edit
+                  </Button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {editingPresetId === 'new' ? (
+          <div className="space-y-3 rounded-lg border border-kumo-line px-4 py-3">
+            <Input
+              className="w-full"
+              value={presetNameDraft}
+              onValueChange={setPresetNameDraft}
+              placeholder="Preset name"
+              maxLength={MAX_PROMPT_PRESET_NAME_LENGTH}
+              aria-label="Preset name"
+            />
+            <Textarea
+              className="w-full"
+              value={presetTextDraft}
+              onValueChange={setPresetTextDraft}
+              rows={6}
+              placeholder="System prompt text"
+              aria-label="Preset text"
+            />
+            <div className="flex items-center justify-end gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setEditingPresetId(null)}
+                disabled={savingPreset}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleSavePreset}
+                loading={savingPreset}
+                disabled={!presetNameDraft.trim() || !presetTextDraft.trim()}
+              >
+                Add preset
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => openPresetEditor(null)}
+            disabled={savingPreset || editingPresetId !== null}
+          >
+            Add preset
+          </Button>
+        )}
       </div>
       )}
 

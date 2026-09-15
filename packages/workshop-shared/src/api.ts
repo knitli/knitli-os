@@ -921,6 +921,41 @@ export const MAX_SITE_LOGO_BYTES = 256 * 1024;
 /** Maximum width or height of an admin-uploaded site logo in pixels. */
 export const MAX_SITE_LOGO_DIMENSION = 512;
 
+/**
+ * One deployment-wide prompt preset: a named system-prompt base text users can select per
+ * chat. The built-in `gadget builder` prompt is the implicit default and is never stored here.
+ */
+export type PromptPreset = {
+  /** Server-generated id (opaque to clients). */
+  id: string;
+  /** Admin-chosen display name. */
+  name: string;
+  /** The system-prompt base text, used as the static slot in place of the built-in prompt. */
+  text: string;
+};
+
+/** A partial edit to one prompt preset. Absent fields are left alone. */
+export type PromptPresetPatch = {
+  /** Replacement display name (ignored when blank). */
+  name?: string;
+  /** Replacement prompt text (ignored when blank). */
+  text?: string;
+};
+
+/**
+ * One prompt preset as chat users see it: id plus name. The text stays admin-only; selection
+ * needs only the name, and the agent's live behavior already reveals the rest.
+ */
+export type PromptPresetSummary = {
+  /** The preset's id, as passed to setChatPrompt(). */
+  id: string;
+  /** The preset's display name. */
+  name: string;
+};
+
+/** Longest prompt-preset display name the admin API accepts. */
+export const MAX_PROMPT_PRESET_NAME_LENGTH = 80;
+
 /** All admin-managed deployment settings, returned by AdminApi.getSettings() for the admin UI. */
 export type AdminSettingsView = {
   /** Whether new account signups are allowed. */
@@ -931,6 +966,8 @@ export type AdminSettingsView = {
   siteLogo?: AvatarImage;
   /** Agent system-prompt instructions ("" when unset). */
   instanceInstructions: string;
+  /** Deployment-wide prompt presets (the built-in default is implicit, never listed). */
+  promptPresets: PromptPreset[];
   /** Top-bar notice text ("" when unset). */
   announcement: string;
   /** Full-width banner (text + accent color). */
@@ -1174,6 +1211,22 @@ export interface AdminApi {
 
   /** Replace the agent system-prompt instructions. Pass "" to clear. Rejects over MAX_INSTANCE_INSTRUCTIONS_LENGTH. */
   setInstanceInstructions(text: string): Promise<void>;
+
+  /**
+   * Create a deployment-wide prompt preset with a server-generated id. Rejects a blank name
+   * or text, or a name over MAX_PROMPT_PRESET_NAME_LENGTH. The text is unbounded
+   * (admin-trusted) and is stored trimmed.
+   */
+  createPromptPreset(name: string, text: string): Promise<PromptPreset>;
+
+  /**
+   * Update one prompt preset. Only the provided patch fields change; blank values are
+   * ignored. Throws for an unknown id.
+   */
+  updatePromptPreset(id: string, patch: PromptPresetPatch): Promise<void>;
+
+  /** Delete one prompt preset. Chats using it fall back to the built-in default. */
+  deletePromptPreset(id: string): Promise<void>;
 
   /**
    * Enable or disable a single gatekeeper resource type, keyed by vendor id + resource urlPattern.
@@ -2215,10 +2268,14 @@ export interface Overseer extends RpcTarget {
    *
    * `effort` seeds the new chat's reasoning-effort override (as if setChatEffort() had been
    * called first), so the first turn already runs under it. Absent or null runs the default.
+   *
+   * `promptId` seeds the new chat's prompt preset the same way (as if setChatPrompt() had
+   * been called first). Absent or null runs the built-in default.
    */
   newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
           capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-          formats?: MessageFormatRef[], effort?: string | null): Promise<number>;
+          formats?: MessageFormatRef[], effort?: string | null,
+          promptId?: string | null): Promise<number>;
 
   /**
    * Send a message to the chat from this client. Sending a message causes the LLM to start
@@ -2268,6 +2325,17 @@ export interface Overseer extends RpcTarget {
    * the Anthropic prefix cache.
    */
   setChatEffort(chatId: number, effort: string | null): Promise<void>;
+
+  /**
+   * Set the chat's system-prompt preset for upcoming turns: one of the ids from
+   * listPromptPresets(), or null for the built-in `gadget builder` default. Rejects unknown
+   * ids. Takes effect at the next turn start; swapping presets changes the static prompt slot
+   * and busts the Anthropic prefix cache, so the UI confirms the switch mid-chat.
+   */
+  setChatPrompt(chatId: number, promptId: string | null): Promise<void>;
+
+  /** List the deployment's prompt presets (id plus name) for the chat prompt selector. */
+  listPromptPresets(): Promise<PromptPresetSummary[]>;
 
   /**
    * Indicates that the user has requested that the chat's proposed changes be merged into the
@@ -2552,6 +2620,13 @@ export type AiChatMetadata = {
    * default. Read at turn start; per-chat, so it persists across reloads and clients.
    */
   reasoningEffort?: string;
+
+  /**
+   * The chat's system-prompt preset id (see listPromptPresets()), set via setChatPrompt()
+   * or newChat(). Absent when the chat runs the built-in `gadget builder` default; an id
+   * whose preset was since deleted also falls back to the default. Read at turn start.
+   */
+  promptId?: string;
 
   /**
    * Tokens the model reported for this conversation's last step, if known. Cleared when compaction

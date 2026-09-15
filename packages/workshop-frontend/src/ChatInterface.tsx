@@ -2742,6 +2742,12 @@ function ChatInterface({
   }, [authenticatedApi, selectedModel]);
   // In-flight setChatEffort write, awaited before sending so a selection always lands first.
   const effortWriteRef = useRef<Promise<void> | null>(null);
+  // Pending prompt for the not-yet-created chat; in-chat composers read the chat's metadata.
+  const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
+  // The deployment's prompt presets, or null until loaded. Empty hides the prompt control.
+  const [promptPresets, setPromptPresets] =
+    useState<{ id: string; name: string }[] | null>(null);
+  const promptWriteRef = useRef<Promise<void> | null>(null);
   const [sidebarActiveTab, setSidebarActiveTab] = useState<
     "chat" | "connections"
   >("chat");
@@ -3737,9 +3743,10 @@ function ChatInterface({
 
           // After subscribing, load the list of chats and models
           // This is safe because subscription will catch any new activity
-          const [chats, models] = await Promise.all([
+          const [chats, models, presets] = await Promise.all([
             overseer.listChats(),
             overseer.listModels(),
+            overseer.listPromptPresets(),
           ]);
 
           chats.forEach((chat) => {
@@ -3749,6 +3756,7 @@ function ChatInterface({
           setChatListReady(true);
 
           setAvailableModels(models);
+          setPromptPresets(presets);
 
           setSelectedModel(getStoredSelectedModel(models));
 
@@ -3933,13 +3941,14 @@ function ChatInterface({
     const model = modelId !== undefined ? modelId : selectedModel;
 
     try {
-      // A selection made just before sending must land before the turn starts.
-      await effortWriteRef.current;
+      // Selections made just before sending must land before the turn starts.
+      await Promise.all([effortWriteRef.current, promptWriteRef.current]);
       if (selectedChatId === null) {
         // Create a new chat (with optional capsules).
         const newChatId = await overseer.newChat(
-            message, model, capsules, attachments, formats, pendingEffort);
+            message, model, capsules, attachments, formats, pendingEffort, pendingPrompt);
         setPendingEffort(null);
+        setPendingPrompt(null);
         onNavigateToChatRef.current(newChatId);
       } else {
         // Send message to existing chat.
@@ -3973,8 +3982,9 @@ function ChatInterface({
     const model = modelId !== undefined ? modelId : selectedModel;
     try {
       const newChatId = await overseer.newChat(
-          message, model, capsules, attachments, formats, pendingEffort);
+          message, model, capsules, attachments, formats, pendingEffort, pendingPrompt);
       setPendingEffort(null);
+      setPendingPrompt(null);
       onNavigateToChatRef.current(newChatId);
     } catch (err) {
       if (!logRpcFailure("Failed to create new chat:", err, { reportSite: "chat.new" })) {
@@ -4016,6 +4026,35 @@ function ChatInterface({
       .catch((err) => {
         console.error("Failed to set reasoning effort:", err);
         toasts.add({ title: "Failed to set reasoning effort", variant: "error" });
+      });
+  };
+
+  // Handle prompt-preset change: staged for the new-chat composer, written immediately for
+  // an existing chat. The selector itself confirms mid-chat switches (cache break).
+  const handlePromptChange = (promptId: string | null) => {
+    if (selectedChatId === null) {
+      setPendingPrompt(promptId);
+      return;
+    }
+    const chatId = selectedChatId;
+    promptWriteRef.current = overseer
+      .setChatPrompt(chatId, promptId)
+      .then(() => {
+        const chat = cacheRef.current.chats.get(chatId);
+        if (chat) {
+          const next = { ...chat };
+          if (promptId === null) {
+            delete next.promptId;
+          } else {
+            next.promptId = promptId;
+          }
+          cacheRef.current.chats.set(chatId, next);
+          forceUpdate();
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to set prompt preset:", err);
+        toasts.add({ title: "Failed to set prompt preset", variant: "error" });
       });
   };
 
@@ -5315,6 +5354,12 @@ function ChatInterface({
               selectedEffort: pendingEffort,
               onEffortChange: handleEffortChange,
             }}
+            promptControl={promptPresets === null || promptPresets.length === 0 ? undefined : {
+              presets: promptPresets,
+              selectedPromptId: pendingPrompt,
+              onPromptChange: handlePromptChange,
+              requireConfirm: false,
+            }}
             showThinkingTraces={showThinkingTraces}
             onToggleThinkingTraces={toggleShowThinkingTraces}
             minRows={2}
@@ -6292,6 +6337,12 @@ function ChatInterface({
                       defaultLevel: effortLevels.default,
                       selectedEffort: currentChatMetadata?.reasoningEffort ?? null,
                       onEffortChange: handleEffortChange,
+                    }}
+                    promptControl={promptPresets === null || promptPresets.length === 0 ? undefined : {
+                      presets: promptPresets,
+                      selectedPromptId: currentChatMetadata?.promptId ?? null,
+                      onPromptChange: handlePromptChange,
+                      requireConfirm: true,
                     }}
                     pendingConsoleLogCount={pendingConsoleLogCount}
                     consoleLogPreview={consoleLogPreview}

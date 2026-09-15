@@ -1,4 +1,4 @@
-import { AI_EXECUTOR_ADMIN_ERROR_CODES, AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AiExecutorProfile, AiExecutorProfileInput, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, createAiExecutorAdminError, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
+import { AI_EXECUTOR_ADMIN_ERROR_CODES, AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AiExecutorProfile, AiExecutorProfileInput, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, PromptPreset, PromptPresetPatch, createAiExecutorAdminError, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject, type WorkerEntrypoint } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
@@ -349,6 +349,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       siteName: config.siteName,
       siteLogo: siteLogoImage(config.siteLogoConfigured),
       instanceInstructions: config.instanceInstructions,
+      promptPresets: config.promptPresets,
       announcement: config.announcement,
       banner: config.banner,
       accentColor: config.accentColor,
@@ -462,6 +463,58 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 
   async setFormatOrder(blueprintIds: string[]): Promise<void> {
     await this.#mutateFormats(formats => reorderFormats(formats, blueprintIds));
+  }
+
+  // --- Prompt presets ---
+
+  // Read-modify-write the preset list within the DO, so concurrent admin edits can't clobber
+  // each other (see #mutateFormats).
+  async #mutatePresets(mutate: (presets: PromptPreset[]) => PromptPreset[] | null)
+      : Promise<void> {
+    await this.#mutateAdminConfig(config => {
+      let next = mutate(config.promptPresets);
+      return next ? {...config, promptPresets: next} : config;
+    });
+  }
+
+  async createPromptPreset(name: string, text: string): Promise<PromptPreset> {
+    name = name.trim();
+    text = text.trim();
+    if (!name) throw new Error("Preset name must not be blank.");
+    if (!text) throw new Error("Preset text must not be blank.");
+    if (name.length > MAX_PROMPT_PRESET_NAME_LENGTH) {
+      throw new Error(
+          `Preset name too long (max ${MAX_PROMPT_PRESET_NAME_LENGTH} characters).`);
+    }
+    let preset: PromptPreset = {id: crypto.randomUUID(), name, text};
+    await this.#mutatePresets(presets => [...presets, preset]);
+    return preset;
+  }
+
+  async updatePromptPreset(id: string, patch: PromptPresetPatch): Promise<void> {
+    let name = patch.name?.trim();
+    let text = patch.text?.trim();
+    if (name && name.length > MAX_PROMPT_PRESET_NAME_LENGTH) {
+      throw new Error(
+          `Preset name too long (max ${MAX_PROMPT_PRESET_NAME_LENGTH} characters).`);
+    }
+    await this.#mutatePresets(presets => {
+      if (!presets.some(preset => preset.id === id)) {
+        throw new Error("No such prompt preset.");
+      }
+      return presets.map(preset => preset.id !== id ? preset : {
+        ...preset,
+        ...(name ? {name} : {}),
+        ...(text ? {text} : {}),
+      });
+    });
+  }
+
+  async deletePromptPreset(id: string): Promise<void> {
+    await this.#mutatePresets(presets => {
+      let next = presets.filter(preset => preset.id !== id);
+      return next.length === presets.length ? null : next;
+    });
   }
 
   /** Enable/disable a single gatekeeper resource type atomically (read-modify-write within the DO). */
@@ -741,6 +794,18 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
       throw new Error(`Instructions too long (max ${MAX_INSTANCE_INSTRUCTIONS_LENGTH} characters).`);
     }
     await this.admin.updateAdminConfig({ instanceInstructions: text });
+  }
+
+  createPromptPreset(name: string, text: string): Promise<PromptPreset> {
+    return this.admin.createPromptPreset(name, text);
+  }
+
+  updatePromptPreset(id: string, patch: PromptPresetPatch): Promise<void> {
+    return this.admin.updatePromptPreset(id, patch);
+  }
+
+  deletePromptPreset(id: string): Promise<void> {
+    return this.admin.deletePromptPreset(id);
   }
 
   setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void> {

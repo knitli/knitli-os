@@ -57,6 +57,33 @@ describe('AdminPage gatekeeper resource refresh', () => {
   let client: RpcStubType<Host> | undefined
   afterEach(async () => { client?.[Symbol.dispose](); await act(async () => root?.unmount()); container?.remove(); root = undefined; container = undefined; client = undefined; state.toast.mockClear(); vi.restoreAllMocks() })
 
+  it('opens provider management in its own OpenAPI tab and keeps the frame when checking Gatekeepers', async () => {
+    const admin = {
+      getSettings: async () => view(false),
+      listGatekeeperAdminApps: async () => [{ id: 'openapi', title: 'Segments and catalog' }],
+      getGatekeeperAdminApp: async () => frame(),
+    } as unknown as RpcStubType<AdminApi>
+    state.authenticatedApi = { getAdminApi: async () => admin, listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
+    await act(async () => root!.render(<AdminPage />))
+    await act(async () => button(container!, 'Gatekeepers').click())
+    expect(container.querySelector('[aria-label="Connector management"]')).toBeNull()
+    await act(async () => button(container!, 'OpenAPI').click())
+    expect(resourceSwitch(container).closest('[hidden]')).not.toBeNull()
+    const manage = container.querySelector<HTMLButtonElement>('button[aria-label="Manage OpenAPI: Segments and catalog"]')
+    expect(manage).not.toBeNull()
+    await act(async () => manage!.click())
+    const iframe = container.querySelector('iframe')!
+    expect(iframe).not.toBeNull()
+    expect(iframe.closest('[hidden]')).toBeNull()
+    await act(async () => button(container!, 'Gatekeepers').click())
+    expect(iframe.closest('[hidden]')).not.toBeNull()
+    expect(resourceSwitch(container).closest('[hidden]')).toBeNull()
+    await act(async () => button(container!, 'OpenAPI').click())
+    expect(container.querySelector('iframe')).toBe(iframe)
+    expect(iframe.closest('[hidden]')).toBeNull()
+  })
+
   it('B-PARENT-001 refreshes the rendered standard resource switch through the real frame path', async () => {
     let enabled = false
     const admin = {
@@ -71,7 +98,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
     await vi.waitFor(() => expect(button(container!, 'Gatekeepers')).toBeTruthy())
     await act(async () => button(container!, 'Gatekeepers').click())
     await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false))
-    await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click())
     await vi.waitFor(() => expect(container!.querySelector('iframe')).not.toBeNull())
     const iframe = container.querySelector('iframe')!
     const { port1, port2 } = new MessageChannel(); client = newMessagePortRpcSession<Host>(port1)
@@ -103,7 +130,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
     state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
     await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click())
-    await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click())
     const iframe = container.querySelector('iframe')!; const { port1, port2 } = new MessageChannel(); client = newMessagePortRpcSession<Host>(port1)
     window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
     const write = (async () => {
@@ -138,7 +165,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
     await act(async () => root!.render(<AdminPage />))
     await act(async () => button(container!, 'Gatekeepers').click())
     await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false))
-    await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click())
     await vi.waitFor(() => expect(container!.querySelector('iframe')).not.toBeNull())
     const iframe = container.querySelector('iframe')!
     const { port1, port2 } = new MessageChannel(); client = newMessagePortRpcSession<Host>(port1)
@@ -162,7 +189,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
     const adminB = { getSettings: vi.fn<AdminApi['getSettings']>(async () => view(true)), listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => []) } as unknown as RpcStubType<AdminApi>
     state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => adminA), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
-    await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click()); await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'Manage OpenAPI segments').click()); await vi.waitFor(() => expect(container!.querySelector('iframe')).not.toBeNull())
+    await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click()); await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click()); await vi.waitFor(() => expect(container!.querySelector('iframe')).not.toBeNull())
     const iframe = container.querySelector('iframe')!; const { port1, port2 } = new MessageChannel(); client = newMessagePortRpcSession<Host>(port1); window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
     void client.setResourceEnabled(PATTERN, true); await vi.waitFor(() => expect(adminA.getSettings).toHaveBeenCalledTimes(4))
     state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => adminB), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>; await act(async () => root!.render(<AdminPage />)); await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(true))
@@ -175,7 +202,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
     state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
     await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click())
-    await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click())
     await vi.waitFor(() => expect(container!.querySelector('iframe')).not.toBeNull())
     const { port1, port2 } = new MessageChannel(); client = newMessagePortRpcSession<Host>(port1); const iframe = container.querySelector('iframe')!
     window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
@@ -241,7 +268,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
     const admin = { getSettings: vi.fn<AdminApi['getSettings']>(async () => { reads += 1; if (reads === 4) return first.promise; if (reads === 7) return second.promise; return view(enabled) }), setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>(async (_vendor, _pattern, next) => { enabled = next }), listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()) } as unknown as RpcStubType<AdminApi>
     state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
-    await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click()); await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'Manage OpenAPI segments').click()); await vi.waitFor(() => expect(container!.querySelector('iframe')).not.toBeNull())
+    await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click()); await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click()); await vi.waitFor(() => expect(container!.querySelector('iframe')).not.toBeNull())
     const { port1, port2 } = new MessageChannel(); client = newMessagePortRpcSession<Host>(port1); const iframe = container.querySelector('iframe')!
     window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
     void client.setResourceEnabled(PATTERN, true); await vi.waitFor(() => expect(admin.getSettings).toHaveBeenCalledTimes(4))
@@ -279,7 +306,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
     await act(async () => root!.render(<AdminPage />))
     await act(async () => button(container!, 'Gatekeepers').click())
     await vi.waitFor(() => expect(resourceSwitch(container!, 'Other resource').checked).toBe(false))
-    await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click())
     const iframe = container.querySelector('iframe')!
     const { port1, port2 } = new MessageChannel()
     client = newMessagePortRpcSession<Host>(port1)
@@ -326,7 +353,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
     await vi.waitFor(() => expect(gatekeeperSwitch(container!).checked).toBe(false))
     await act(async () => gatekeeperSwitch(container!).click())
     expect(gatekeeperSwitch(container!).checked).toBe(true)
-    await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click())
     const iframe = container.querySelector('iframe')!
     const { port1, port2 } = new MessageChannel()
     client = newMessagePortRpcSession<Host>(port1)
@@ -372,7 +399,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
     await vi.waitFor(() => expect(gatekeeperSwitch(container!).checked).toBe(false))
     await act(async () => gatekeeperSwitch(container!).click())
     expect(gatekeeperSwitch(container!).checked).toBe(true)
-    await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click())
     const iframe = container.querySelector('iframe')!
     const { port1, port2 } = new MessageChannel()
     client = newMessagePortRpcSession<Host>(port1)

@@ -1,6 +1,7 @@
 // A native form cannot represent this deployment-wide, revisioned executor catalog lifecycle;
 // this component owns its isolated load, validation, mutation, and authoritative-reload boundary.
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Button, Input, Select } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import {
   AI_EXECUTOR_ADMIN_ERROR_CODES,
@@ -163,7 +164,7 @@ export default function AdminAiExecutorsPanel({admin}: {admin: RpcStub<AdminApi>
       <section aria-label="AI executors">
         <h2>AI executors</h2>
         <p>Couldn&apos;t load executor profiles.</p>
-        <button type="button" onClick={() => { void reload() }}>Retry</button>
+        <Button className="text-sm" type="button" onClick={() => { void reload() }}>Retry</Button>
       </section>
     )
   }
@@ -176,7 +177,7 @@ export default function AdminAiExecutorsPanel({admin}: {admin: RpcStub<AdminApi>
   const loadedProfiles = profiles ?? []
 
   return (
-    <section aria-label="AI executors" className="rounded-xl border border-kumo-line bg-kumo-elevated p-6">
+    <section aria-label="AI executors" className="min-w-0 rounded-xl border border-kumo-line bg-kumo-elevated px-4 py-4 text-sm text-kumo-default sm:px-6 sm:py-5">
       <h2 className="mb-1 text-lg font-semibold text-kumo-strong">AI executors</h2>
       <p className="mb-5 text-sm text-kumo-subtle">
         Configure the verified external AI executors available to this deployment.
@@ -192,8 +193,8 @@ export default function AdminAiExecutorsPanel({admin}: {admin: RpcStub<AdminApi>
             const busy = busyIds.has(profile.id)
             const rowLocked = busy || confirmation?.profile.id === profile.id
             return (
-              <article key={profile.id} className="rounded-lg border border-kumo-line p-4">
-                <h3>{profile.label}</h3>
+              <article key={profile.id} className="min-w-0 space-y-1 break-words rounded-lg border border-kumo-line px-4 py-3 [overflow-wrap:anywhere]">
+                <h3 className="font-semibold text-kumo-strong">{profile.label}</h3>
                 <p>{profile.provider} · {profile.model} · {profile.lifecycle}</p>
                 <p>Revision {profile.revision}</p>
               {profile.verifiedAt && <p>Verified at {profile.verifiedAt}</p>}
@@ -207,23 +208,25 @@ export default function AdminAiExecutorsPanel({admin}: {admin: RpcStub<AdminApi>
                   {profile.verification.message && <p>{profile.verification.message}</p>}
                 </div>
               )}
-                <div className="mt-3 flex gap-2">
-                <button type="button" disabled={rowLocked} onClick={() => {
+                <div className="mt-3 flex flex-wrap gap-2">
+                <Button className="text-sm" type="button" disabled={rowLocked} onClick={() => {
                     setNotice(null)
                     setEditing(profile)
                     setCreating(false)
-                  }}>Edit</button>
+                  }}>Edit</Button>
                   {lifecycleControls(profile).map(control => (
-                  <button key={control} type="button" disabled={rowLocked} onClick={() => {
+                  <Button className="text-sm" key={control} type="button" disabled={rowLocked} onClick={() => {
                     beginLifecycleConfirmation(profile, control)
-                  }}>{lifecycleActionLabel(control)}</button>
+                  }}>{lifecycleActionLabel(control)}</Button>
                 ))}
               </div>
               {confirmation?.profile.id === profile.id && (
-                <div role="group" aria-live="polite" aria-label={`Confirm ${lifecycleActionLabel(confirmation.action)} for ${profile.label}`}>
+                <div className="mt-3 space-y-2" role="group" aria-live="polite" aria-label={`Confirm ${lifecycleActionLabel(confirmation.action)} for ${profile.label}`}>
                   <p>Confirm {lifecycleActionLabel(confirmation.action)} for {profile.label}?</p>
-                  <button type="button" onClick={confirmLifecycle}>Confirm</button>
-                  <button type="button" onClick={() => setConfirmation(null)}>Cancel</button>
+                  <div className="flex flex-wrap gap-2">
+                    <Button className="text-sm" type="button" variant="primary" onClick={confirmLifecycle}>Confirm</Button>
+                    <Button className="text-sm" type="button" variant="secondary" onClick={() => setConfirmation(null)}>Cancel</Button>
+                  </div>
                 </div>
               )}
             </article>
@@ -233,10 +236,10 @@ export default function AdminAiExecutorsPanel({admin}: {admin: RpcStub<AdminApi>
       )}
 
       {!creating && !editing && (
-        <button className="mt-4" type="button" onClick={() => {
+        <Button className="mt-4 text-sm" variant="primary" type="button" onClick={() => {
           setNotice(null)
           setCreating(true)
-        }}>Create profile</button>
+        }}>Create profile</Button>
       )}
 
       {(creating || editing) && (
@@ -318,10 +321,12 @@ function ExecutorForm({
     const errorId = `${inputId}-error`
     const error = errors[field]
     return (
-    <label className="block">
-      <span>{label}</span>
-      <input
+    <div className="min-w-0 space-y-1.5">
+      <label className="block font-medium" id={`${inputId}-label`} htmlFor={inputId}>{label}</label>
+      <Input
+        className={`w-full text-sm${error ? ' ring-kumo-danger' : ''}`}
         id={inputId}
+        aria-labelledby={`${inputId}-label`}
         name={field}
         type={type}
         value={draft[field]}
@@ -329,22 +334,23 @@ function ExecutorForm({
         aria-invalid={error ? true : undefined}
         aria-describedby={error ? errorId : undefined}
       />
-      {error && <span id={errorId} role="alert">{error}</span>}
-    </label>
+      {error && <p className="text-kumo-danger" id={errorId} role="alert">{error}</p>}
+    </div>
     )
   }
 
   return (
-    <form className="mt-4 space-y-3" onSubmit={event => { event.preventDefault(); void save() }}>
-      <h3>{formTitle(profile)}</h3>
-      <label className="block">
-        <span>Provider</span>
-        <select name="provider" value={draft.provider} onChange={event => setProvider(event.currentTarget.value as AiExecutorProvider)}>
-          <option value="aws-bedrock">Amazon Bedrock</option>
-          <option value="azure-openai">Azure OpenAI</option>
-          <option value="openrouter">OpenRouter</option>
-        </select>
-      </label>
+    <form className="mt-5 space-y-4 border-t border-kumo-line pt-4" onSubmit={event => { event.preventDefault(); void save() }}>
+      <h3 className="font-semibold text-kumo-strong">{formTitle(profile)}</h3>
+      <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2">
+      <div className="min-w-0 space-y-1.5">
+      <label className="block font-medium" id="ai-executor-provider-label" htmlFor="ai-executor-provider">Provider</label>
+      <Select id="ai-executor-provider" aria-labelledby="ai-executor-provider-label" name="provider" className="w-full text-sm" value={draft.provider} onValueChange={value => { if (value) setProvider(value as AiExecutorProvider) }}>
+        <Select.Option value="aws-bedrock">Amazon Bedrock</Select.Option>
+        <Select.Option value="azure-openai">Azure OpenAI</Select.Option>
+        <Select.Option value="openrouter">OpenRouter</Select.Option>
+      </Select>
+      </div>
       {textField('label', 'Label')}
       {textField('model', 'Model')}
       {textField('maxInputBytes', 'Maximum input bytes', 'number')}
@@ -357,10 +363,11 @@ function ExecutorForm({
         {textField('apiVersion', 'Azure API version')}
       </>}
       {draft.provider !== 'aws-bedrock' && textField('byokAlias', 'Cloudflare BYOK alias (existing reference, optional)')}
-      {saveError && <p role="alert">{saveError}</p>}
-      <div className="flex gap-2">
-        <button type="submit" disabled={saving}>{profile ? 'Save changes' : 'Save draft'}</button>
-        <button type="button" disabled={saving} onClick={onCancel}>Cancel</button>
+      </div>
+      {saveError && <p className="text-kumo-danger" role="alert">{saveError}</p>}
+      <div className="flex flex-wrap gap-2">
+        <Button className="text-sm" type="submit" variant="primary" disabled={saving}>{profile ? 'Save changes' : 'Save draft'}</Button>
+        <Button className="text-sm" type="button" variant="secondary" disabled={saving} onClick={onCancel}>Cancel</Button>
       </div>
     </form>
   )

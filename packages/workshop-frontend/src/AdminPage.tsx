@@ -126,6 +126,7 @@ export default function AdminPage() {
   currentAdminApi.current = admin?.api ?? null
 
   const [activeTab, setActiveTab] = useState('general')
+  const [openedConnectorManagement, setOpenedConnectorManagement] = useState(false)
 
   // Promoted output formats, in menu order (see AdminFormatsPanel).
   const [formats, setFormats] = useState<AdminFormat[]>([])
@@ -526,10 +527,14 @@ export default function AdminPage() {
       <Tabs
         variant="underline"
         value={activeTab}
-        onValueChange={setActiveTab}
+        onValueChange={(tab) => {
+          setActiveTab(tab)
+          setOpenedConnectorManagement(tab === 'openapi' || (tab === 'gatekeepers' && openedConnectorManagement))
+        }}
         tabs={[
           { value: 'general', label: 'General' },
         { value: 'gatekeepers', label: 'Gatekeepers' },
+        { value: 'openapi', label: 'OpenAPI' },
         { value: 'executors', label: 'Executors' },
         { value: 'formats', label: 'Formats' },
           { value: 'access', label: 'Access' },
@@ -537,6 +542,8 @@ export default function AdminPage() {
       />
 
       {activeTab === 'executors' && admin && <AdminAiExecutorsPanel admin={admin.api} />}
+
+      {openedConnectorManagement && admin && <div hidden={activeTab !== 'openapi'}><AdminGatekeeperAppsPanel admin={admin.api} vendors={resourceVendors} onResourcesChanged={refreshResourcesAfterFrameWrite} /></div>}
 
       {/* Standard output formats */}
       {activeTab === 'formats' && admin && (
@@ -1070,9 +1077,8 @@ export default function AdminPage() {
       )}
 
       {/* Gatekeeper resources */}
-      {activeTab === 'gatekeepers' && (
-        <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
-          {admin && <AdminGatekeeperAppsPanel admin={admin.api} onResourcesChanged={refreshResourcesAfterFrameWrite} />}
+      {(activeTab === 'gatekeepers' || activeTab === 'openapi') && (
+        <div hidden={activeTab !== 'gatekeepers'} className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
           <h2 className="text-lg font-semibold text-kumo-strong mb-1">Gatekeepers</h2>
           <p className="text-sm text-kumo-subtle mb-5">
             Turn connectors and resource types on or off for each service. Auto-provisioned

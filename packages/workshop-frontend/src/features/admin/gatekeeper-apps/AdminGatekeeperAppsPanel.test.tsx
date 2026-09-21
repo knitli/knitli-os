@@ -69,6 +69,30 @@ describe('AdminGatekeeperAppsPanel', () => {
 
   afterEach(async () => { await unmount(); container?.remove(); container = undefined; vi.restoreAllMocks(); sandboxRender.mockClear() })
 
+  it('distinguishes providers sharing an admin title and opens each provider capability', async () => {
+    const firstFrame = testFrame()
+    const secondFrame = testFrame()
+    const admin = fakeAdmin({
+      listGatekeeperAdminApps: async () => [{ id: 'alpha', title: 'Segments and catalog' }, { id: 'beta', title: 'Segments and catalog' }],
+      getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>().mockResolvedValueOnce(firstFrame).mockResolvedValueOnce(secondFrame),
+    })
+    const panel = await render(admin)
+    await vi.waitFor(() => expect(panel.textContent).toContain('Manage Segments and catalog'))
+    const manage = (id: string) => {
+      const result = panel.querySelector<HTMLButtonElement>(`button[aria-label="Manage ${id}: Segments and catalog"]`)
+      expect(result).not.toBeNull()
+      return result!
+    }
+    await click(manage('alpha'))
+    expect(admin.getGatekeeperAdminApp).toHaveBeenLastCalledWith('alpha')
+    expect(sandboxRender).toHaveBeenLastCalledWith(expect.objectContaining({ gatekeeperVendorId: 'alpha' }))
+    await click(button(panel, 'Back to connectors'))
+    expect(firstFrame.dispose).toHaveBeenCalledOnce()
+    await click(manage('beta'))
+    expect(admin.getGatekeeperAdminApp).toHaveBeenLastCalledWith('beta')
+    expect(sandboxRender).toHaveBeenLastCalledWith(expect.objectContaining({ gatekeeperVendorId: 'beta' }))
+  })
+
   it('B-HOST-005 shows loading, retryable error, and empty state', async () => {
     const listing = deferred<typeof app[]>()
     const admin = fakeAdmin({ listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>().mockImplementationOnce(() => listing.promise).mockResolvedValueOnce([]) })

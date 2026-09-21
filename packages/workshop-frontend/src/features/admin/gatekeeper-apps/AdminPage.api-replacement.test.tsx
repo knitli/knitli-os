@@ -110,7 +110,7 @@ describe('AuthProvider API replacement', () => {
     await act(async () => { aUser.resolve(user('A')); aCheck.resolve(true) })
     await vi.waitFor(() => expect(container!.querySelector('output')!.textContent).toBe('A:true'))
     await act(async () => button(container!, 'Gatekeepers').click())
-    await act(async () => button(container!, 'Manage OpenAPI segments').click())
+    await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click())
     const iframe = await vi.waitFor(() => {
       const element = container!.querySelector('iframe')
       expect(element).not.toBeNull()

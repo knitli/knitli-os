@@ -265,6 +265,12 @@ Intentional, reviewed differences from upstream. Keep this current.
   a failure to the owner who asked for it. Dropping the await fixes it with no change to the gate.
   Worth remembering when the next upstream test fails after a fork change: check for our own bug
   before writing down a divergence.
+- **Upstream #523's `ownerInvitesOnly` latch joins the gated path (2026-09-22 sync).**
+  `authorizeObservation` severs link-joined sessions when the latch first sets; upstream does it
+  via the ungated `scheduleAccessRestart()`, the fork routes it through `runRevocationCleanup()`
+  like every other revocation (reason threaded through a new optional parameter). The latch
+  itself is adopted wholesale — it complements the owner-only tier (owner-added collaborators
+  keep access) rather than replacing it.
 
 ### `open()` routes sharing and revocation guards through the impl
 
@@ -527,3 +533,35 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   (`knitli-blindfold`, `knitli-prompt-blueprints`, `knitli-prompt-refs`), and the gadget-kind
   prompt pin has no selection UI yet (backend-ready; the selector offers admin presets and
   library prompt blueprints).
+- **2026-09-22 sync:** upstream #493 moved the compaction loop inside `runAgent`
+  (`runAgentPass` + `loadChatHistory`/`commitChatCompaction` hooks), so the turn options now
+  thread through a trailing `RunAgentOptions` parameter on both; upstream #513's unpinned-read
+  rewrite moved the replay-diff blindfold onto the new loop and renamed the pin-base
+  `WorktreeTurnAccess` hook the tests fake. The `knitli-*` turn harnesses now supply
+  history via `loadChatHistory`.
+
+### Gatekeeper resources are opt-in (`enabledResources`)
+
+- **Where:** `AdminConfig` in `packages/workshop-backend/src/admin-config.ts`,
+  `normalizeAdminConfig`/`parseAdminConfig`, the `AdminSettings` resource toggles, and the
+  `isResourceDisabled`/`filterEnabledResources` readers
+- **Introduced:** #24
+- **What:** upstream's `disabledResources` (opt-out: unlisted is on) is replaced by
+  `enabledResources` (opt-in: unlisted is off). Vendor ids lowercase on the way in.
+- **Why:** this deployment starts every gatekeeper resource off until an admin enables it.
+- **2026-09-22 sync:** upstream #474 extracted `normalizeAdminConfig` around the opt-out field;
+  the fork re-pointed it at `enabledResources` (plus `promptPresets`, which the shared normalize
+  would otherwise drop for both the KV-mirror and AdminSettings read paths).
+
+### Worktree commits require full 40-hex SHAs
+
+- **Where:** `GitCache.resolveCommitRef()` in `packages/workshop-backend/src/git-cache.ts`,
+  enforced for `createWorktree` and `Worktree.diff()` (see the `formatExceptions` entry for
+  `worktree-binding.d.ts`)
+- **What:** upstream resolves unambiguous prefixes (≥4 hex digits) against workspace-global
+  objects and metadata; the fork refuses anything but a full OID: prefix lookup would disclose
+  another chat's commit capabilities to a caller that was never given them.
+- **Why:** a commit id is a bearer capability, and the object store is shared across chats.
+- **Known cost:** the agent must look a commit up through an authorized connection first
+  (the thrown error says so); upstream phrasing that assumes prefixes ("the input may be a
+  prefix") is corrected to the fork rule where it lands.

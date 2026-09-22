@@ -347,6 +347,7 @@ function codedErrorFamily<Code extends string>(messages: Record<Code, string>) {
 export const OPEN_GADGET_ERROR_CODES = {
   workspaceNotFound: "WORKSPACE_NOT_FOUND",
   workspaceAccessDenied: "WORKSPACE_ACCESS_DENIED",
+  shareLinksDisabled: "SHARE_LINKS_DISABLED",
 } as const;
 
 /** An expected failure code from `AuthenticatedApi.openGadget()`. */
@@ -356,6 +357,9 @@ export type OpenGadgetErrorCode =
 const openGadgetErrors = codedErrorFamily<OpenGadgetErrorCode>({
   [OPEN_GADGET_ERROR_CODES.workspaceNotFound]: "Workspace not found.",
   [OPEN_GADGET_ERROR_CODES.workspaceAccessDenied]: "You don't have access to this workspace.",
+  [OPEN_GADGET_ERROR_CODES.shareLinksDisabled]:
+      "Share links are disabled for this workspace because it contains sensitive data. " +
+      "The owner must add each person directly.",
 });
 
 /** Creates an expected `openGadget()` error with a machine-readable code. */
@@ -388,6 +392,21 @@ export const createAuthError = authErrors.create;
 /** Reads the machine-readable code from an authentication failure. */
 export const getAuthErrorCode = authErrors.getCode;
 
+/**
+ * One user as listed in the deployment-wide user directory (see
+ * `AuthenticatedApi.searchUsers`).
+ */
+export type UserDirectoryRecord = {
+  /**
+   * Canonical user identifier: email for Access / sign-in accounts, username
+   * for password accounts.
+   */
+  id: string;
+
+  /** The user's current display name. */
+  name: string;
+};
+
 /** Top-level API exposed to the user after they have authenticated. */
 export interface AuthenticatedApi extends RpcTarget {
   /** Get profile info for the user who is logged in. */
@@ -395,6 +414,21 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /** Set the user's own display name, seen in chats, etc. */
   setOwnDisplayName(name: string): Promise<void>;
+
+  /**
+   * Find other users of this deployment by a case-insensitive substring of
+   * their display name or id, for inviting collaborators. Excludes the caller
+   * and every user named by `excludeIds`. Returns at most 10 records, earliest
+   * substring match first.
+   *
+   * Rejects a `query` longer than 1000 characters or containing a line break,
+   * and more than 1000 distinct ids to exclude, the caller's own included.
+   *
+   * Returns no records while the admin has user search turned off
+   * (`ServerConfig.userSearchEnabled`); inviting by exact username/email via
+   * `Overseer.addCollaborator()` still works then.
+   */
+  searchUsers(query: string, excludeIds: string[]): Promise<UserDirectoryRecord[]>;
 
   /**
    * Change the user's password, if using password-based authentication.
@@ -501,7 +535,9 @@ export interface AuthenticatedApi extends RpcTarget {
    * Open an existing gadget.
    *
    * If `shareKey` is provided, the server redeems it before opening, adding the caller as a
-   * collaborator. If the key is invalid or expired, the call throws an exception. This design
+   * collaborator. If the key is invalid or expired, the call throws an exception. If the gadget has
+   * `ownerInvitesOnly` set (see `GadgetMetadata`), a caller the owner has not added directly
+   * is refused with a `shareLinksDisabled` coded exception. This design
    * allows share-key redemption and gadget opening in a single round trip, and further calls
    * can be pipelined on the returned Overseer.
    *
@@ -985,6 +1021,8 @@ export const MAX_PROMPT_PRESET_NAME_LENGTH = 80;
 export type AdminSettingsView = {
   /** Whether new account signups are allowed. */
   signupsEnabled: boolean;
+  /** Whether users may search the user directory to find collaborators. */
+  userSearchEnabled: boolean;
   /** Site name shown next to the top-bar logo ("" falls back to DEFAULT_SITE_NAME). */
   siteName: string;
   /** Custom deployment logo, or undefined to use the default Cloudflare OS mark. */
@@ -1041,8 +1079,8 @@ export type AdminFormat = {
   missing: boolean;
 
   /**
-   * The blueprint ships with the deployment (see format-blueprints/ and the FORMAT_BLUEPRINTS the
-   * build generates from it), so an upgrade can replace its contents. Curation stays the admin's: an upgrade never re-promotes something they
+   * The blueprint ships with the deployment (see packages/bundled-blueprints and the
+   * BUNDLED_BLUEPRINTS the backend's build generates from it), so an upgrade can replace its contents. Curation stays the admin's: an upgrade never re-promotes something they
    * removed, nor resets their overrides.
    */
   bundled: boolean;
@@ -1224,6 +1262,12 @@ export interface AdminApi {
   setSignupsEnabled(enabled: boolean): Promise<void>;
 
   /**
+   * Enable or disable user directory search. The directory itself is maintained
+   * either way, and this switch just controls user access.
+   */
+  setUserSearchEnabled(enabled: boolean): Promise<void>;
+
+  /**
    * Set the site name shown next to the top-bar logo. Pass "" to reset to DEFAULT_SITE_NAME.
    * Rejects over MAX_SITE_NAME_LENGTH.
    */
@@ -1385,6 +1429,13 @@ export type ServerConfig = {
   signupsEnabled: boolean;
 
   /**
+   * Whether users may search the user directory to find collaborators. When not explicitly
+   * configured, this defaults to the opposite of `signupsEnabled`. When false the share UI offers
+   * only an exact username/email field.
+   */
+  userSearchEnabled: boolean;
+
+  /**
    * Site name shown next to the top-bar logo (admin-configurable). Empty falls back to
    * DEFAULT_SITE_NAME.
    */
@@ -1498,6 +1549,25 @@ export type ModelReasoningInfo = {
  */
 export const WORKERS_AI_OUTPUT_LIMIT = 32768;
 
+/** One entry of SUGGESTED_MODELS. */
+type SuggestedModel = {
+  name: string;
+
+  /** The maximum tokens one request may total. */
+  contextWindow: number;
+
+  /** When present, both the requested response cap and the space reserved for it. */
+  outputLimit?: number;
+
+  /**
+   * When present, the prompt size compaction keeps the chat under. Set below the window for models
+   * whose input is priced higher past a threshold (GPT-5.6 doubles above 272K), so ordinary use
+   * stays in the cheaper tier while the window remains the hard limit.
+   */
+  compactionInputBudget?: number;
+};
+
+// The literal is kept apart from the export so SuggestedModelId can derive the model ids from it.
 const SUGGESTED_MODEL_CATALOG = {
   "cloudflare": {
     "@cf/moonshotai/kimi-k2.7-code": {
@@ -1524,29 +1594,29 @@ const SUGGESTED_MODEL_CATALOG = {
     "claude-haiku-4-5": {name: "Claude Haiku 4.5", contextWindow: 200000},
   },
   "openai": {
-    "gpt-5.6-sol": {name: "GPT 5.6 Sol", contextWindow: 1050000, outputLimit: 128000},
-    "gpt-5.6-luna": {name: "GPT 5.6 Luna", contextWindow: 1050000, outputLimit: 128000},
-    "gpt-5.6-terra": {name: "GPT 5.6 Terra", contextWindow: 1050000, outputLimit: 128000},
+    "gpt-5.6-sol": {
+      name: "GPT 5.6 Sol", contextWindow: 1050000, outputLimit: 128000,
+      compactionInputBudget: 272000,
+    },
+    "gpt-5.6-luna": {
+      name: "GPT 5.6 Luna", contextWindow: 1050000, outputLimit: 128000,
+      compactionInputBudget: 272000,
+    },
+    "gpt-5.6-terra": {
+      name: "GPT 5.6 Terra", contextWindow: 1050000, outputLimit: 128000,
+      compactionInputBudget: 272000,
+    },
   },
   "google": {
     "gemini-3.6-flash": {name: "Gemini 3.6 Flash", contextWindow: 1048576},
   },
   "ollama": {
   },
-} satisfies Record<
-  AiModelProvider,
-  Record<string, {name: string, contextWindow: number, outputLimit?: number}>
->;
+} satisfies Record<AiModelProvider, Record<string, SuggestedModel>>;
 
-/**
- * Models offered in the picker. `contextWindow` is the maximum tokens one request may total.
- * `outputLimit`, when present, is both the requested response cap and the space reserved for it,
- * leaving the remainder as the prompt budget context compaction sizes against.
- */
-export const SUGGESTED_MODELS: Record<
-  AiModelProvider,
-  Record<string, {name: string, contextWindow: number, outputLimit?: number}>
-> = SUGGESTED_MODEL_CATALOG;
+/** Models offered in the picker, by provider and model id. */
+export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, SuggestedModel>> =
+    SUGGESTED_MODEL_CATALOG;
 
 /** A model ID listed in SUGGESTED_MODELS, optionally narrowed to one provider's catalog. */
 export type SuggestedModelId<P extends AiModelProvider = AiModelProvider> =
@@ -1608,9 +1678,17 @@ export type GadgetMetadata = {
   /**
    * True when the gadget has observed data marked `containsRestrictedData` (see
    * `ObservationDescription`). It can still be shared, with collaborators verified per
-   * gatekeeper, but can no longer perform actions or fetch from the public web.
+   * gatekeeper (if `ownerInvitesOnly` is also set, only the owner can add them), but can no longer
+   * perform actions or fetch from the public web.
    */
   containsRestrictedData?: boolean;
+
+  /**
+   * True when the gadget has observed data marked `ownerInvitesOnly` (see
+   * `ObservationDescription`). Only collaborators the owner added directly have access: share
+   * links can no longer be created, copied, or redeemed, and only the owner can add collaborators.
+   */
+  ownerInvitesOnly?: boolean;
 
   /**
    * Fork: true when the gadget can no longer be shared at all -- a latched owner-only
@@ -1829,6 +1907,44 @@ export type CommitInfo = {
 };
 
 /**
+ * One entry of a commit's tree, as returned by Overseer.listTree(): a directory carrying its own
+ * entries, or a leaf of one of git's four non-directory modes. `name` is a single path segment
+ * (never containing `/`); a file's path is the `/`-join of the names down to it. A `symlink` and
+ * a `submodule` (gitlink) are listed with their kind and have no readable text (see
+ * FileAtCommit). Nested rather than a flat path list so the tree needs one call per commit and
+ * no parsing, and each name travels once. Carries no oids or sizes.
+ */
+export type TreeNode =
+  | { name: string; kind: "file" | "executable" | "symlink" | "submodule" }
+  | { name: string; kind: "dir"; children: TreeNode[] };
+
+/**
+ * One file's content at a commit, as returned by Overseer.readFilesAtCommit(). `text` carries
+ * the file's UTF-8 content; `absent` means the path names no entry at that commit (or names a
+ * directory); `unreadable` means the entry exists but cannot be presented as text -- a symlink,
+ * a submodule, binary content, or a blob over the git store's per-object size cap -- and carries
+ * a descriptive, path-flavored message suitable for display in place of the file.
+ */
+export type FileAtCommit =
+  | { kind: "text"; text: string }
+  | { kind: "absent" }
+  | { kind: "unreadable"; message: string };
+
+/**
+ * Maximum number of paths one Overseer.readFilesAtCommit() call may name. Callers with more
+ * paths chunk them across calls.
+ */
+export const MAX_READ_FILES_PER_CALL = 64;
+
+/**
+ * Text bytes after which Overseer.readFilesAtCommit() stops decoding and omits the remaining
+ * requested paths from its response (the client re-requests them). Keeps one response well
+ * under the RPC message ceiling even with the UTF-16 inflation of serialized text; a single
+ * file, being at most the git store's per-object cap, is always returned whole.
+ */
+export const READ_FILES_RESPONSE_BUDGET = 8 * 1024 * 1024;
+
+/**
  * Specifies the state of an action in the action log:
  * * pending: Action has not been applied yet. It is waiting for approval.
  * * approved: Action was approved and applied.
@@ -1993,8 +2109,10 @@ export interface Overseer extends RpcTarget {
    * Subscribe to the workspace's workpiece list.
    *
    * The subscriber receives one entry() per existing workpiece, followed by ready(), then
-   * incremental entry()/removed() calls as workpieces are created, renamed, or deleted. In v1
-   * only gadget-type workpieces are delivered (see WorkpieceSummary).
+   * incremental entry()/removed() calls as workpieces are created, renamed, or deleted, and
+   * whenever a summary field changes (a gadget's head, a worktree's accepted or head commit).
+   * Gadgets and worktrees are delivered (see WorkpieceSummary for which subscriptions see
+   * worktrees).
    *
    * Disposing the returned `RpcStub` will cancel the subscription.
    */
@@ -2028,23 +2146,43 @@ export interface Overseer extends RpcTarget {
   getGadget(id: WorkpieceId): Promise<RpcStub<GadgetClient>>;
 
   /**
-   * Read the full contents of a commit in the workspace's git object store: one
-   * `[path, content]` entry per file, with nested trees flattened to `/`-joined paths. Paths are
-   * unique; entry order carries no meaning. (`files` is a list of pairs rather than a path-keyed
-   * object so that file names like `__proto__`, which RPC deserialization drops from object
-   * keys, survive in transit -- see CodeChange in `@gadgets/workshop-shared/code-change`.)
+   * Read a commit's whole tree as nested TreeNodes: the root directory's entries, each
+   * directory carrying its own, in git tree order (byte order of names, a directory sorting as
+   * if its name had a trailing `/`). Only tree objects are read -- never blobs -- so the
+   * response is proportional to the commit's entry count. Commits are immutable, so responses
+   * are cacheable client-side by commit ID. Like readFilesAtCommit(), the read may pull missing
+   * trees through the gatekeeper that provided the commit.
    *
-   * Commits are immutable, so responses are cacheable client-side by commit ID. Use this to view
-   * committed code (outside any chat, or for a gadget the open chat has no pin for) and to fetch
-   * the base content of a chat's pins (see ChatCodeBase).
+   * Together with readFilesAtCommit() this is how clients read committed code: a workpiece's
+   * tree at its head or accepted commit (outside any chat, or when the open chat has no pin for
+   * it), and the base content of a chat's pins (see ChatCodeBase), one file at a time as it is
+   * opened or edited.
    */
-  getCodeAtCommit(commitId: string): Promise<{files: [path: string, content: string][]}>;
+  listTree(commitId: string): Promise<TreeNode[]>;
+
+  /**
+   * Read the content of the named files at a commit. Returns one `[path, FileAtCommit]` entry
+   * per requested path, in request order (a list of pairs rather than a path-keyed object so
+   * that file names like `__proto__`, which RPC deserialization drops from object keys, survive
+   * in transit -- see CodeChange in `@gadgets/workshop-shared/code-change`). Blobs missing from
+   * the workspace's git store are pulled in one batch through the gatekeeper that provided the
+   * commit; a pull failure fails the whole call, since it is transient or actionable rather than
+   * a fact about any one file, whereas per-file conditions -- absent path, symlink, submodule,
+   * binary or oversized content -- are reported per entry (see FileAtCommit).
+   *
+   * At most MAX_READ_FILES_PER_CALL paths per call. The server stops decoding once the
+   * accumulated text exceeds READ_FILES_RESPONSE_BUDGET and omits the remaining paths from the
+   * result, so a missing entry means "not answered, ask again" -- never "absent", which is
+   * always stated explicitly. Responses are cacheable by (commit ID, path).
+   */
+  readFilesAtCommit(commitId: string, paths: string[])
+      : Promise<[path: string, FileAtCommit][]>;
 
   /**
    * Walk the commit graph from `fromCommit` (that commit first, then its ancestry), returning up
    * to `depth` commits' metadata -- all reachable commits when `depth` is omitted. Traversal
    * order for merge commits follows git log's default (reverse chronological). Like
-   * getCodeAtCommit(), results are immutable and cacheable.
+   * listTree(), results are immutable and cacheable.
    */
   getCommitLog(fromCommit: string, depth?: number): Promise<CommitInfo[]>;
 
@@ -2067,7 +2205,10 @@ export interface Overseer extends RpcTarget {
    * change. A declaration identical to the existing pin is accepted idempotently; one naming a
    * different `baseCommit` (a race between two first editors) throws. Exception: a gadget still
    * pending in this chat has no head commit to pin (see WorkpieceSummary.commitId), so its changes
-   * carry no declaration and build its content up from nothing (see ChatCodeBase).
+   * carry no declaration and build its content up from nothing (see ChatCodeBase). A worktree
+   * declaration is accepted iff its `baseCommit` is the worktree's accepted commit -- the
+   * content as of the chat's last accept, the analog of a gadget's head -- exactly, with no
+   * parent tolerance (only this chat's accept moves it, and that closes the generation).
    *
    * Retries: `submission.clientId` names the client's editing session and `submission.seq`
    * numbers its submissions from 1. The server remembers each session's last accepted seq and
@@ -2627,16 +2768,16 @@ export type AiChatMetadata = {
 
   /**
    * The workpieces to which this chat has proposed changes that have not been accepted yet
-   * (including changes not yet materialized into a durable `changes` message): gadgets whose
-   * code the chat modified, gadgets it provisionally created, and gadgets it added a binding to.
-   * Absent (or empty) when the chat proposes nothing -- the pending-changes accept/discard
-   * affordances and per-gadget draft previews key off this list. Derived server-side and
-   * delivered on metadata updates; never submitted by clients.
-   *
-   * Worktrees never appear here for now: the UI has no worktree surface yet, so worktree-only
-   * changes must not prompt the user to accept or discard changes they cannot see. (This
-   * replaces the earlier `hasProposedChanges` boolean; values of that retired field may linger
-   * in stored metadata but are never delivered as truth.)
+   * (including changes not yet materialized into a durable `changes` message): gadgets and
+   * worktrees whose code the chat modified (pinned in the current epoch -- for a worktree, an
+   * explicit commit() counts as a modification), gadgets it provisionally created, and gadgets
+   * it added a binding to. A worktree's creation alone is not listed: the worktree is private to
+   * the chat either way, so a checkout made only to be read proposes nothing (see
+   * AiChatMessageBody.createdWorktrees). Absent (or empty) when the chat proposes nothing --
+   * the pending-changes accept/discard affordances and per-workpiece draft previews key off this
+   * list. Derived server-side and delivered on metadata updates; never submitted by clients.
+   * (This replaces the earlier `hasProposedChanges` boolean; values of that retired field may
+   * linger in stored metadata but are never delivered as truth.)
    */
   proposedChangeWorkpieces?: WorkpieceId[];
 
@@ -2694,20 +2835,28 @@ export type AiChatMetadata = {
  * changes fast-forwards each touched gadget's head (see Overseer.mergeChanges()). A gadget
  * joins the stream only when its code is first *modified* in the chat -- at that moment it is
  * pinned at a commit, whose tree its changes apply on top of. Unpinned gadgets always track
- * mainline head, live, and are read via Overseer.getCodeAtCommit(). One exception: a gadget
- * created within this chat and still pending has no head commit to pin, so it stays unpinned
- * while its changes build its content up from nothing (every file starts with a `set`); the merge
- * that makes it permanent ends the epoch anyway, and in later epochs it pins like any other
- * gadget.
+ * mainline head, live, and are read via Overseer.listTree()/readFilesAtCommit(). One exception:
+ * a gadget created within this chat and still pending has no head commit to pin, so it stays
+ * unpinned while its changes build its content up from nothing (every file starts with a
+ * `set`); the merge that makes it permanent ends the epoch anyway, and in later epochs it pins
+ * like any other gadget. A worktree (see createdWorktrees) follows the same rule with its
+ * accepted commit in the role of the head: unpinned it reads as that commit's tree, its first
+ * modification pins it there, and an accept advances the accepted commit rather than creating a
+ * mainline commit.
  *
- * Clients derive the chat's content themselves: for each pin, fetch the base tree
- * (Overseer.getCodeAtCommit(baseCommit)); apply the current epoch's non-reverted `changes`
- * messages' changes in log order; then apply the changes not yet materialized into a message,
- * delivered in revision order via AiChatSubscriber.changeApplied(). Accepting changes ends the
- * epoch: the pin set resets to empty and the change stream restarts.
+ * Clients derive the chat's content themselves: for each pin, start from `baseCommit`'s tree
+ * (Overseer.listTree(baseCommit), with each file's text read by path via readFilesAtCommit()
+ * only when something needs it -- an `edit` to apply, or a file the user opens; a whole
+ * repository tree is never fetched); apply the current epoch's non-reverted `changes` messages'
+ * changes in log order; then apply the changes not yet materialized into a message, delivered
+ * in revision order via AiChatSubscriber.changeApplied(). Accepting changes ends the epoch: the
+ * pin set resets to empty and the change stream restarts.
  */
 export type ChatCodeBase = {
-  /** Per-gadget pins: every permanent gadget whose code has been modified in the current epoch. */
+  /**
+   * Per-workpiece pins: every permanent gadget, and every worktree, whose code has been modified
+   * in the current epoch.
+   */
   pins: ChatGadgetPinState[];
 
   /**
@@ -2766,11 +2915,12 @@ export type ChatCodeBase = {
 };
 
 /**
- * One gadget's pin within a chat (see ChatCodeBase): the record that the gadget's code was
- * modified for the first time in the chat's current epoch, fixing the commit its uncommitted
- * changes apply on top of. A pin is established by that first modification -- a
- * submitCodeChange() pin declaration, or the agent's first write, which pins at the then-current
- * head -- and lasts until the epoch ends or the declaring message is reverted.
+ * One workpiece's pin within a chat (see ChatCodeBase): the record that the gadget's (or
+ * worktree's) code was modified for the first time in the chat's current epoch, fixing the
+ * commit its uncommitted changes apply on top of. A pin is established by that first
+ * modification -- a submitCodeChange() pin declaration, or the agent's first write (for a
+ * worktree, also its first commit()), which pins at the then-current head (a worktree's
+ * accepted commit) -- and lasts until the epoch ends or the declaring message is reverted.
  *
  * This same shape is both the declaration a client submits with a first modification
  * (CodeChangeSubmission.pins) and the permanent record of it in the chat log (the `pins` field of
@@ -2849,9 +2999,10 @@ export type CodeChangeSubmission = {
 
   /**
    * Pin declarations, one per permanent gadget this change touches that is not yet pinned in the
-   * chat (a gadget still pending in the chat is never pinned or declared). The same shape is
-   * what the chat log keeps permanently; see Overseer.submitCodeChange() for the validation
-   * rules.
+   * chat (a gadget still pending in the chat is never pinned or declared), and one per worktree
+   * it touches that is not yet pinned -- pending or not, since a worktree's content is its
+   * accepted commit's tree, never built up from nothing. The same shape is what the chat log
+   * keeps permanently; see Overseer.submitCodeChange() for the validation rules.
    */
   pins?: ChatGadgetPin[];
 
@@ -3107,17 +3258,17 @@ export type AiChatMessageBody = {
   /**
    * Worktrees created as part of this batch of changes (by the agent's `createWorktree` tool).
    * Deliberately separate from `createdGadgets` so a client can never mistake a worktree for a
-   * gadget creation. Like gadget creations, they are provisional -- a merge through this message
-   * makes the record permanent (it stays private to this chat), and a revert covering it deletes
-   * it. The batch's `pins` include the worktree's birth pin `{gadgetId: worktreeId, baseCommit}`,
-   * which is what content reconstruction roots the worktree's changes at. `bindingName` is the
-   * name in the creating chat's env, recorded so replay can pick it back up.
-   *
-   * Worktree *content* is stripped from every client delivery: clients receive `change` payloads
-   * without worktree entries and `pins` without worktree pins (revision numbering preserved), so
-   * ids in this field are the only worktree trace a client sees. There is no worktree UI yet;
-   * without the stripping, a delivered worktree pin would make the code-sync client fetch an
-   * entire repository tree as a base commit.
+   * gadget creation. Unlike a gadget creation, a worktree creation is not a proposed change (see
+   * AiChatMetadata.proposedChangeWorkpieces), so it is not provisional either: recording this
+   * message makes each worktree permanent (though private to this chat for life), nothing needs
+   * accepting until the worktree is first modified, and a revert covering this message rolls
+   * back the worktree's content and head but never deletes it. A creation pins nothing: like a
+   * gadget, a worktree joins `pins` when it is first modified (see ChatGadgetPin). Batches
+   * written before that was so carry the worktree's birth pin `{gadgetId: worktreeId,
+   * baseCommit}` alongside the creation, which readers honor as an ordinary pin. `bindingName`
+   * is the name in the creating chat's env, recorded so replay can pick it back up. The worktree
+   * itself reaches the client as a WorktreeSummary on the workpiece subscription, and its
+   * content rides `change` and `pins` like a gadget's.
    */
   createdWorktrees?: {worktreeId: WorkpieceId, title: string, bindingName: string}[];
 
@@ -3177,17 +3328,18 @@ export type AiChatMessageBody = {
   epochBoundary?: true;
 
   /**
-   * The chat's worktree re-pins across this merge's epoch reset, present when the chat had live
-   * worktrees. The reset evaporates every pin, but a worktree's uncommitted content must survive
-   * an accept, so the merge re-pins each worktree in the new generation at `baseCommit`: a fresh
-   * local auto-commit capturing its uncommitted overlay when the closed epoch left it dirty,
-   * else its unchanged base. Auto-commits are internal bookkeeping, squashed out of explicit
-   * history -- the worktree's reported head is untouched, and a later explicit commit parents on
-   * that head, never on an auto-commit. This field is the durable record the re-pins are
-   * reconstructed from: content reconstruction and compaction checkpoints re-root worktree
-   * content here, since `pins` on "changes" messages only cover in-epoch establishment. Worktree
-   * *content* is stripped from client deliveries, but this field is not a content-fetch trigger
-   * (unlike a `pins` entry) and rides along untouched.
+   * No longer written; honored when read. Merges from when worktrees were pinned from birth
+   * recorded here the re-pin of each live worktree in the new generation, at `baseCommit`: a
+   * fresh local auto-commit capturing its uncommitted overlay when the closed epoch left it
+   * dirty, else its unchanged base. Content reconstruction and compaction checkpoints still
+   * re-root worktree content at these pins so the epochs they open fold as they were written.
+   * Today a worktree pins on first modification like a gadget, and an accept merely advances
+   * the worktree's accepted commit (to the same auto-commit) with no pin in the new generation,
+   * so a merge written now carries no entry here. Auto-commits are internal bookkeeping,
+   * squashed out of explicit history -- the worktree's reported head is untouched, and a later
+   * explicit commit parents on that head, never on an auto-commit. Clients do not need to read
+   * this field: a re-pin that is still in effect is mirrored in ChatCodeBase.pins, which is the
+   * only pin source a client uses.
    */
   worktreePins?: {worktreeId: WorkpieceId, baseCommit: string}[];
 } | {
@@ -3403,10 +3555,19 @@ export type AiToolCall = {
   /**
    * Present when the read was served from committed code rather than the chat's uncommitted
    * content: the workpiece was not pinned in the chat (see ChatGadgetPin), so the agent read the
-   * file at the mainline head commit recorded here. History replay uses this to detect
-   * staleness: if the file has since changed, the read's content is elided from the model's
-   * context and the agent is told to re-read. Reads of pinned workpieces come from the chat's
-   * content, which cannot go stale within an epoch, and carry no stamp.
+   * file at its head -- a gadget's mainline head, a worktree's accepted commit -- and this is
+   * the blob oid of the content it saw. History replay reproduces the read's exact text from
+   * it, whatever the head holds now, and the agent's read-before-edit gate compares it against
+   * the file's oid at the head an edit is about to pin at, refusing an edit anchored to content
+   * another chat has since changed. Reads of pinned workpieces come from the chat's content,
+   * which cannot go stale within an epoch, and carry no stamp.
+   */
+  observedOid?: string;
+
+  /**
+   * No longer written; honored when read. Before reads were stamped with the blob's oid
+   * (`observedOid`), an unpinned read recorded the commit it read at; replay resolves the file's
+   * blob from it by path.
    */
   observedCommit?: string;
 } | {
@@ -3540,8 +3701,11 @@ export type AiToolCall = {
    * `createdWorktrees` on the "changes" message body), like createGadget's.
    *
    * `baseCommit` is the full oid `input.commitId` resolved to -- the commit the worktree is
-   * rooted (and born pinned) at. Recorded because replay needs it to serve reads of untouched
-   * files lazily from the base tree, and the input may be a prefix.
+   * rooted at, and its accepted commit until the chat's first accept of changes to it. Recorded
+   * because the input may be a prefix and the model is told the resolved oid. The creation pins
+   * nothing: the worktree reads as its accepted commit until its first modification pins it
+   * (see ChatGadgetPin), so replay serves untouched files from the pin when there is one and
+   * from the accepted commit otherwise, never from this field.
    */
   output?: {worktreeId: WorkpieceId, changeId?: number, baseCommit: string};
 } | {
@@ -3821,8 +3985,9 @@ export type AiChatStreamEvent = {
    * content/replacement field begins, since it is the input's final field).
    *
    * The event carries no base content: the client locates the span in its own copy of the file
-   * -- the chat's content, or the committed head for a gadget the chat doesn't cover -- which
-   * mirrors the content the agent computes its edit against (both are the same change stream).
+   * -- the chat's content, or the committed head (a worktree's accepted commit) for a workpiece
+   * the chat doesn't cover, read via readFilesAtCommit() if not yet loaded -- which mirrors the
+   * content the agent computes its edit against (both are the same change stream).
    * The preview is display-only provisional state, never entering the client's own change
    * tracking.
    *
@@ -3970,15 +4135,20 @@ export type ConsoleLogEvent = {
 }
 
 /**
- * Summary of one workpiece, delivered via Overseer.subscribeToWorkpieces(). In v1 only
- * gadget-type workpieces are published (gatekeeper workpieces -- chat capsules, ambient
- * singletons, connections -- are not listed); `type` discriminates for future workpiece types.
+ * Summary of one workpiece, delivered via Overseer.subscribeToWorkpieces(), discriminated by
+ * `type`. Gadgets and worktrees are published (gatekeeper workpieces -- chat capsules, ambient
+ * singletons, connections -- are not listed). Worktrees are published only to subscriptions that
+ * include pending workpieces (build role): like a pending gadget, a worktree belongs to one chat
+ * (its `chatId` is always set) and the UI shows it only while that chat is selected.
  */
-export type WorkpieceSummary = {
+export type WorkpieceSummary = GadgetSummary | WorktreeSummary;
+
+/** The WorkpieceSummary of a gadget: an app built from code, with a committed mainline head. */
+export type GadgetSummary = {
   id: WorkpieceId;
   type: "gadget";
 
-  /** Display title. (For a gadget, its user-renamable title.) */
+  /** Display title: the gadget's user-renamable title. */
   title: string;
 
   /**
@@ -3989,11 +4159,11 @@ export type WorkpieceSummary = {
 
   /**
    * The gadget's head commit (40-hex hash) in the workspace's git object store -- i.e. its
-   * committed mainline code, readable via Overseer.getCodeAtCommit()/getCommitLog(). Advances
-   * when a chat's changes are accepted; subscribeToWorkpieces() delivers a fresh entry()
-   * whenever it does. Absent only while the gadget is still pending in a chat (see `chatId`):
-   * every permanent gadget has a head, even before it has any code (an empty initial commit),
-   * so a chat's first edit always has a commit to pin (see ChatGadgetPin).
+   * committed mainline code, readable via Overseer.listTree() / readFilesAtCommit() /
+   * getCommitLog(). Advances when a chat's changes are accepted; subscribeToWorkpieces()
+   * delivers a fresh entry() whenever it does. Absent only while the gadget is still pending in
+   * a chat (see `chatId`): every permanent gadget has a head, even before it has any code (an
+   * empty initial commit), so a chat's first edit always has a commit to pin (see ChatGadgetPin).
    */
   commitId?: string;
 
@@ -4006,6 +4176,48 @@ export type WorkpieceSummary = {
    * reverted (or the chat is deleted).
    */
   chatId?: number;
+};
+
+/**
+ * The WorkpieceSummary of a worktree: a checkout of an external git repository that an agent
+ * works in (see AiChatMessageBody.createdWorktrees). It has no app and no bindings; the UI shows
+ * only its code. Its three commits are the worktree's state as the chat sees it; the OT rows of
+ * the chat's current epoch compose on `pinBase`.
+ */
+export type WorktreeSummary = {
+  id: WorkpieceId;
+  type: "worktree";
+
+  /** Display title: the name the worktree was created under. */
+  title: string;
+
+  /**
+   * The chat this worktree belongs to, for its whole life (a worktree is never shared across
+   * chats). Always set: the UI displays the worktree only while this chat is selected, as it
+   * does a pending gadget, and the worktree is deleted with the chat.
+   */
+  chatId: number;
+
+  /**
+   * The accepted commit (40-hex hash): the worktree's content as of the chat's last accept, and
+   * the worktree analog of a gadget's `commitId`. While the worktree is unpinned in its chat, its
+   * content reads as this commit's tree (via Overseer.listTree()/readFilesAtCommit()), and a
+   * client's pin declaration (CodeChangeSubmission.pins) is accepted iff its `baseCommit` equals
+   * this. Advances when the chat's changes are accepted (to the accept's auto-commit of the
+   * changed content); subscribeToWorkpieces() delivers a fresh entry() whenever it does.
+   */
+  pinBase: string;
+
+  /**
+   * The last explicit commit the agent made (initially `baseCommit`): what the worktree's own
+   * API reports as HEAD. Header display only -- it plays no role in what the UI shows as changed,
+   * which is always relative to `pinBase`. Re-delivered whenever it advances, and rolled back
+   * with the changes that advanced it when they are reverted.
+   */
+  headCommit: string;
+
+  /** The commit the worktree was created at. Immutable; informational. */
+  baseCommit: string;
 };
 
 /** Callback interface used to receive workpiece-list updates. See Overseer.subscribeToWorkpieces(). */

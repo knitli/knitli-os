@@ -4,9 +4,8 @@
 // command. Every shipping public gatekeeper can do that only at a cost that would dominate the test:
 // the OAuth ones need a whole vendor's auth surface mocked before an account exists at all, and the
 // Context Library only refuses once an observation has been *recorded*, which takes a gadget read
-// session (so a Worker Loader), a slash-command invocation, or an AI-chat catalog snapshot. It is also
-// a singleton, so it can never produce the two simultaneously-failing bindings one of these cases
-// needs.
+// session (so a Worker Loader) or a slash-command invocation. It is also a singleton, so it can never
+// produce the two simultaneously-failing bindings one of these cases needs.
 //
 // So the overseer's own logic -- collect every failure, re-prompt once, then name what failed -- is
 // tested against this fixture, where an outcome is one HTTP call away. Realism about a *particular*
@@ -26,6 +25,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type {
   AccountDescription,
   ActionKind,
+  AgentCatalog,
   ApprovalQueue,
   Gatekeeper,
   GatekeeperConnectCallback,
@@ -451,8 +451,11 @@ export class TestVerifier
 // Gatekeeper (one per bound resource, running as a facet under the gadget's Overseer)
 
 export interface TestSession {
-  /** `restricted` marks the observation `containsRestrictedData`. */
-  readValue(restricted?: boolean): Promise<number>;
+  /**
+   * `restricted` marks the observation `containsRestrictedData`; `ownerInvitesOnly` marks it
+   * `ownerInvitesOnly`.
+   */
+  readValue(restricted?: boolean, ownerInvitesOnly?: boolean): Promise<number>;
   writeValue(value: number): Promise<number>;
   observe(): Promise<void>;
   act(): Promise<void>;
@@ -475,11 +478,12 @@ class TestSessionTarget extends RpcTarget implements TestSession {
     this.approvalQueue = approvalQueue.dup();
   }
 
-  async readValue(restricted?: boolean): Promise<number> {
+  async readValue(restricted?: boolean, ownerInvitesOnly?: boolean): Promise<number> {
     await this.approvalQueue.authorizeObservation({
       title: "Read the test value",
       description: "Read the deterministic value exposed by the integration-test gatekeeper.",
       ...(restricted ? { containsRestrictedData: true } : {}),
+      ...(ownerInvitesOnly ? { ownerInvitesOnly: true } : {}),
     });
     return 42;
   }
@@ -615,6 +619,11 @@ export class TestGatekeeper
         () => this.ctx.exports.TestHookCallback({ props: {} }) as unknown as RpcStub<RpcTarget>,
         () => this.ctx.waitUntil(
             control(this.ctx.exports).recordSessionDisposed(this.ctx.props.resourceUrl)));
+  }
+
+  /** No discovery index: the ambient fixture is reached through its session alone. */
+  async getAgentCatalog(): Promise<AgentCatalog | null> {
+    return null;
   }
 
   /**

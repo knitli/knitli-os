@@ -223,3 +223,103 @@ it("PUB-R11 executor settlement refuses late callbacks while earlier calls still
     expect(s.disposed).toEqual(['session', 'client', 'gadget']);
   } finally { release(); observed.mockRestore(); }
 });
+
+describe("PR34 whole-request budget and response correlation", () => {
+  it.each(['deadline', 'abort', 'hanging-cancel'] as const)("bounds a never-ending small body on %s and cancels its reader", async reason => {
+    const s = setup(); const cancelled = vi.fn(() => reason === 'hanging-cancel' ? new Promise<void>(() => {}) : undefined); const abort = new AbortController();
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    let reading!: () => void; const started = new Promise<void>(resolve => { reading = resolve; });
+    const body = new ReadableStream<Uint8Array>({ start(c) { stream = c; c.enqueue(new TextEncoder().encode('{')); }, pull() { reading(); }, cancel: cancelled });
+    vi.useFakeTimers();
+    let completed: Response | undefined;
+    const response = handleOpenApiPublisher(s.request('', { body, signal: abort.signal }), s.config, s.ctx, s.factory).then(value => { completed = value; return value; });
+    try {
+      await started; await vi.advanceTimersByTimeAsync(0);
+      if (reason !== 'abort') await vi.advanceTimersByTimeAsync(60_000);
+      else { abort.abort(); await vi.advanceTimersByTimeAsync(0); }
+      expect(completed?.status).toBe(reason !== 'abort' ? 504 : 499);
+      expect(cancelled).toHaveBeenCalledOnce();
+      expect(s.authenticated.openGadget).not.toHaveBeenCalled();
+      await waitOnExecutionContext(s.ctx);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      if (!cancelled.mock.calls.length) stream.close();
+      await response; await waitOnExecutionContext(s.ctx); vi.useRealTimers();
+    }
+  });
+  it("does not authenticate an already aborted request", async () => {
+    const s = setup(); const controller = new AbortController(); controller.abort();
+    const response = await handleOpenApiPublisher(s.request(JSON.stringify(list), { signal: controller.signal }), s.config, s.ctx, s.factory);
+    expect(response.status).toBe(499); expect(s.factory).not.toHaveBeenCalled();
+    await waitOnExecutionContext(s.ctx);
+  });
+  it("deadline covers authentication and blocks late authentication from opening a gadget", async () => {
+    const s = setup(); let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+    s.api.authenticate.mockImplementation(async () => { entered(); await gate; return s.authenticated; });
+    vi.useFakeTimers(); let completed: Response | undefined;
+    const response = handleOpenApiPublisher(s.request(JSON.stringify(list)), s.config, s.ctx, s.factory).then(value => { completed = value; return value; });
+    try {
+      await started; await vi.advanceTimersByTimeAsync(60_000);
+      expect(completed?.status).toBe(504); expect(vi.getTimerCount()).toBe(0);
+      release(); await waitOnExecutionContext(s.ctx);
+      expect(s.authenticated.openGadget).not.toHaveBeenCalled();
+    } finally { release(); await response; await waitOnExecutionContext(s.ctx); vi.useRealTimers(); }
+  });
+  it.each([0, '', 'request-correlation'])("echoes exact valid ID %j on code, spec and native failures", async id => {
+    const code = setup();
+    const oversized = await code.send({ ...call('x'.repeat(PUBLISHER_CODE_BYTES + 1)), id });
+    expect(oversized.status).toBe(413); expect(await oversized.json()).toMatchObject({ id, error: { code: -32602 } });
+    const spec = setup(); spec.surface.tools[0].description = 'x'.repeat(2 * 1024 * 1024);
+    const large = await spec.send({ ...list, id });
+    expect(large.status).toBe(413); expect(await large.json()).toMatchObject({ id, error: { code: -32603 } });
+    const native = setup(); native.authenticated.openGadget.mockRejectedValue(new Error('unavailable'));
+    const unavailable = await native.send({ ...list, id });
+    expect(unavailable.status).toBe(403); expect(await unavailable.json()).toMatchObject({ id, error: { code: -32603 } });
+  });
+  it("does not send JSON-RPC errors for valid notifications", async () => {
+    for (const failure of ['code', 'spec', 'native']) {
+      const s = setup();
+      if (failure === 'spec') s.surface.tools[0].description = 'x'.repeat(2 * 1024 * 1024);
+      if (failure === 'native') s.authenticated.openGadget.mockRejectedValue(new Error('unavailable'));
+      const message = failure === 'code' ? call('x'.repeat(PUBLISHER_CODE_BYTES + 1)) : list;
+      const { id: _id, ...notification } = message;
+      const response = await s.send(notification);
+      expect(await response.text()).toBe('');
+    }
+  });
+  it.each([{ ...list, id: null }, { ...list, id: true }, { ...list, id: {} }, { jsonrpc: '2.0', id: 'not-a-request', result: {} }])("invalid envelope has null ID before native capabilities", async message => {
+    const s = setup(); const response = await s.send(message);
+    expect(response.status).toBe(400); expect(await response.json()).toMatchObject({ id: null, error: { code: -32600 } });
+    expect(s.authenticated.openGadget).not.toHaveBeenCalled();
+  });
+});
+
+it("PR34 late session after deadline is disposed without catalog or provider access", async () => {
+  const s = setup(); let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+  s.client.openSession.mockImplementation(async () => { entered(); await gate; return s.session; });
+  vi.useFakeTimers();
+  const response = handleOpenApiPublisher(s.request(JSON.stringify(list)), s.config, s.ctx, s.factory);
+  try {
+    await started; await vi.advanceTimersByTimeAsync(60_000);
+    expect((await response).status).toBe(504); expect(vi.getTimerCount()).toBe(0);
+    expect(s.disposed).toEqual([]);
+    release(); await waitOnExecutionContext(s.ctx);
+    expect(s.session.describePublisherSurface).not.toHaveBeenCalled();
+    expect(s.session.callTool).not.toHaveBeenCalled();
+    expect(s.disposed).toEqual(['session', 'client', 'gadget']);
+  } finally { release(); await response; await waitOnExecutionContext(s.ctx); vi.useRealTimers(); }
+});
+
+it("PR34 early authentication and parse errors release the request timer", async () => {
+  vi.useFakeTimers();
+  try {
+    const auth = setup(); auth.api.authenticate.mockRejectedValue(new Error('bad credential'));
+    expect((await auth.send(list)).status).toBe(403); expect(vi.getTimerCount()).toBe(0);
+    const parse = setup();
+    const response = await handleOpenApiPublisher(parse.request('{'), parse.config, parse.ctx, parse.factory);
+    expect(await response.json()).toMatchObject({ id: null, error: { code: -32700 } });
+    await waitOnExecutionContext(parse.ctx); expect(vi.getTimerCount()).toBe(0);
+  } finally { vi.useRealTimers(); }
+});

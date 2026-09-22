@@ -65,28 +65,36 @@ export const MAX_RESPONSE_BYTES = 1024 * 1024;
  * Refused rather than truncated: half a JSON document does not parse, and a clipped SSE stream can
  * lose the very event carrying the response, which would surface as a confusing protocol error
  * instead of the size problem it is. The body is cancelled on refusal so the transfer stops rather
- * than running to completion unread.
+ * than running to completion unread. An optional signal cancels the owned reader and rejects
+ * even if cancellation looks like EOF. Abortable reads do not wait for source cancellation
+ * hooks (including size refusal); callers without a signal retain completion-waiting behavior.
  */
 export async function readTextCapped(
-  response: Response, maxBytes: number = MAX_RESPONSE_BYTES,
+  response: Response, maxBytes: number = MAX_RESPONSE_BYTES, signal?: AbortSignal,
 ): Promise<string> {
-  if (!response.body) return "";
+  if (!response.body) { signal?.throwIfAborted(); return ""; }
 
   const reader = response.body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal?.addEventListener("abort", cancel, { once: true });
   const chunks: Uint8Array[] = [];
   let total = 0;
   try {
+    if (signal?.aborted) { cancel(); signal.throwIfAborted(); }
     for (;;) {
       const { done, value } = await reader.read();
+      signal?.throwIfAborted();
       if (done) break;
       total += value.byteLength;
       if (total > maxBytes) {
-        await reader.cancel();
+        if (signal) cancel();
+        else await reader.cancel();
         throw new Error(`The server's response exceeded ${maxBytes} bytes.`);
       }
       chunks.push(value);
     }
   } finally {
+    signal?.removeEventListener("abort", cancel);
     reader.releaseLock();
   }
 

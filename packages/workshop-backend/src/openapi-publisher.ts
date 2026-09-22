@@ -24,8 +24,8 @@ export function publisherVendorIds(value = "[]"): Set<string> {
   return new Set(ids);
 }
 
-function rpcError(status: number, code: number, message: string): Response {
-  return Response.json({ jsonrpc: "2.0", id: null, error: { code, message } }, { status });
+function rpcError(status: number, code: number, message: string, id: string | number | null = null): Response {
+  return Response.json({ jsonrpc: "2.0", id, error: { code, message } }, { status });
 }
 
 /** One authenticated request owns all native capabilities and SDK state. */
@@ -45,50 +45,28 @@ export async function handleOpenApiPublisher(
   if (origin !== null && origin !== url.origin) return new Response("Cross-origin API access not allowed.", { status: 403 });
 
   const abort = new AbortController();
-  let payload: JWTPayload | undefined;
-  if (env.CF_ACCESS_AUD) {
-    const verified = await verifyCfAccessJwt(req, env);
-    if (!verified || typeof verified.email !== "string" || !verified.email) {
-      return new Response("Invalid CF access identity.", { status: 403 });
-    }
-    payload = verified;
-  }
-  const token = /^Bearer (\S+)$/i.exec(req.headers.get("Authorization") ?? "")?.[1];
-  if (!payload && !token) return new Response("Workshop bearer credential required.", { status: 401 });
-  const api = createPublicApi(reason => abort.abort(reason), payload);
-  let authenticated;
-  try { authenticated = payload ? await api.authenticateFromCfAccess() : await api.authenticate(token!); }
-  catch { return new Response("Authentication failed.", { status: 403 }); }
-
-  let text: string;
-  try { text = await readTextCapped(new Response(req.body), PUBLISHER_BODY_BYTES); }
-  catch { return rpcError(413, -32600, "Request body exceeds publisher limit or could not be read."); }
-  let message;
-  try {
-    const json: unknown = JSON.parse(text);
-    if (Array.isArray(json)) return rpcError(400, -32600, "JSON-RPC batches are not supported.");
-    const parsed = JSONRPCMessageSchema.safeParse(json);
-    if (!parsed.success) return rpcError(400, -32600, "Invalid JSON-RPC request.");
-    message = parsed.data;
-  } catch { return rpcError(400, -32700, "Parse error."); }
-  if ("method" in message && message.method === "tools/call") {
-    const args = message.params?.arguments;
-    if (args && typeof args === "object" && "code" in args && typeof args.code === "string"
-      && encoder.encode(args.code).byteLength > PUBLISHER_CODE_BYTES) {
-      return rpcError(413, -32602, "Code exceeds publisher limit.");
-    }
-  }
-
   let closed = false;
+  const bodyAbort = new AbortController();
+  let readingBody = false;
+  let requestId: string | number | null = null;
+  let notification = false;
+  const requestError = (status: number, code: number, message: string) => notification
+    ? new Response(null, { status: 202 }) : rpcError(status, code, message, requestId);
   const calls = new Set<Promise<unknown>>();
   let stop!: (response: Response) => void;
   const stopped = new Promise<Response>(resolve => { stop = resolve; });
-  const cancel = () => { closed = true; stop(new Response("Publisher request aborted.", { status: 499 })); };
+  const close = (response: Response) => {
+    closed = true;
+    stop(response);
+    // readTextCapped cancels its lock owner without waiting for source cancellation hooks.
+    bodyAbort.abort();
+    if (!readingBody) void req.body?.cancel().catch(() => undefined);
+  };
+  const cancel = () => close(new Response("Publisher request aborted.", { status: 499 }));
   req.signal.addEventListener("abort", cancel, { once: true });
   abort.signal.addEventListener("abort", cancel, { once: true });
   const deadline = setTimeout(() => {
-    closed = true;
-    stop(new Response("Publisher deadline exceeded.", { status: 504 }));
+    close(new Response("Publisher deadline exceeded.", { status: 504 }));
   }, 60_000);
   if (req.signal.aborted || abort.signal.aborted) cancel();
   const requireOpen = () => { if (closed) throw new Error("Publisher request closed."); };
@@ -97,6 +75,47 @@ export async function handleOpenApiPublisher(
   const work = (async () => {
     try {
       requireOpen();
+      let payload: JWTPayload | undefined;
+      if (env.CF_ACCESS_AUD) {
+        const verified = await verifyCfAccessJwt(req, env);
+        if (!verified || typeof verified.email !== "string" || !verified.email) {
+          return new Response("Invalid CF access identity.", { status: 403 });
+        }
+        payload = verified;
+      }
+      requireOpen();
+      const token = /^Bearer (\S+)$/i.exec(req.headers.get("Authorization") ?? "")?.[1];
+      if (!payload && !token) return new Response("Workshop bearer credential required.", { status: 401 });
+      const api = createPublicApi(reason => abort.abort(reason), payload);
+      let authenticated;
+      try { authenticated = payload ? await api.authenticateFromCfAccess() : await api.authenticate(token!); }
+      catch { return new Response("Authentication failed.", { status: 403 }); }
+      requireOpen();
+
+      let text: string;
+      try {
+        readingBody = true;
+        text = await readTextCapped(new Response(req.body), PUBLISHER_BODY_BYTES, bodyAbort.signal);
+      } catch { return rpcError(413, -32600, "Request body exceeds publisher limit or could not be read."); }
+      requireOpen();
+      let message;
+      try {
+        const json: unknown = JSON.parse(text);
+        if (Array.isArray(json)) return rpcError(400, -32600, "JSON-RPC batches are not supported.");
+        const parsed = JSONRPCMessageSchema.safeParse(json);
+        if (!parsed.success || !("method" in parsed.data)) return rpcError(400, -32600, "Invalid JSON-RPC request.");
+        message = parsed.data;
+        notification = !("id" in message);
+        requestId = "id" in message ? message.id : null;
+      } catch { return rpcError(400, -32700, "Parse error."); }
+      if ("method" in message && message.method === "tools/call") {
+        const args = message.params?.arguments;
+        if (args && typeof args === "object" && "code" in args && typeof args.code === "string"
+          && encoder.encode(args.code).byteLength > PUBLISHER_CODE_BYTES) {
+          return requestError(413, -32602, "Code exceeds publisher limit.");
+        }
+      }
+
       const gadget = await authenticated.openGadget(match[1]);
       owned.push(gadget);
       requireOpen();
@@ -125,10 +144,10 @@ export async function handleOpenApiPublisher(
           return value;
         });
       } catch {
-        return rpcError(422, -32602, "SDK publisher does not support __proto__ object keys.");
+        return requestError(422, -32602, "SDK publisher does not support __proto__ object keys.");
       }
       if (encoder.encode(serialized).byteLength > PUBLISHER_SPEC_BYTES) {
-        return rpcError(413, -32603, "Facade spec exceeds publisher limit.");
+        return requestError(413, -32603, "Facade spec exceeds publisher limit.");
       }
       // The pinned SDK escapes '<' when embedding the spec and adds a fixed scaffold.
       const generatedCap = encoder.encode(serialized.replace(/</g, "\\u003c")).byteLength + PUBLISHER_CODE_BYTES + 16 * 1024;
@@ -159,7 +178,7 @@ export async function handleOpenApiPublisher(
       headers.delete("Access-Control-Allow-Origin");
       return new Response(response.body, { status: response.status, headers });
     } catch {
-      return rpcError(403, -32603, "Publisher connection unavailable.");
+      return requestError(403, -32603, "Publisher connection unavailable.");
     } finally {
       closed = true;
       await Promise.allSettled(calls);
@@ -173,11 +192,10 @@ export async function handleOpenApiPublisher(
   })();
   // This same owner drains admitted calls after client abort/deadline; dispatched effects
   // are not canceled or rolled back by ending the HTTP request.
-  const cleanup = work.finally(() => {
+  ctx.waitUntil(work.then(() => undefined, () => undefined));
+  return Promise.race([work, stopped]).finally(() => {
     clearTimeout(deadline);
     req.signal.removeEventListener("abort", cancel);
     abort.signal.removeEventListener("abort", cancel);
   });
-  ctx.waitUntil(cleanup.then(() => undefined, () => undefined));
-  return Promise.race([cleanup, stopped]);
 }

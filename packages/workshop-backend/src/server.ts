@@ -1,3 +1,4 @@
+import { handleOpenApiPublisher } from "./openapi-publisher";
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
@@ -876,6 +877,11 @@ export default {
 
     if (url.pathname === "/api/client-errors") {
       return handleClientErrorRequest(req, env, ctx);
+    }
+
+    if (url.pathname === "/api/mcp" || url.pathname.startsWith("/api/mcp/")) {
+      return handleOpenApiPublisher(req, env, ctx,
+          (abort, payload) => new PublicApiImpl(ctx, env, abort, payload));
     }
 
     if (url.pathname === "/api") {

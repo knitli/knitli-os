@@ -565,3 +565,20 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 - **Known cost:** the agent must look a commit up through an authorized connection first
   (the thrown error says so); upstream phrasing that assumes prefixes ("the input may be a
   prefix") is corrected to the fork rule where it lands.
+
+### Optional native OpenAPI SDK publisher (2026-09-22)
+
+`workshop-backend/src/openapi-publisher.ts` and its exact publisher unit/integration test
+paths are Tier 1 (declared in the boundary manifest). The existing reviewed module remains
+at its standalone path; all publisher policy lives there behind the small `server.ts` seam.
+`server.ts`, `env.d.ts`, package dependencies, test configuration, and the workspace lockfile
+remain Tier 2: preserve upstream changes and reapply only publisher additions at each sync.
+
+The exact opt-in flag and deployment vendor list expose a stateless JSON MCP endpoint through
+existing Access/bearer authentication and owner-only native workspace capabilities. Native
+Gatekeeper sessions still own catalog visibility, grants, approvals and execution; the SDK
+does not acquire provider credentials or alternate authority. Execution has no outbound
+network, bounded request/code/spec sizes, and request-owned callback draining and disposal.
+SDK versions stay pinned; schemas containing own `__proto__` keys fail explicitly because
+the pinned SDK cannot represent those keys faithfully. This is distinct from the retired
+OpenAPI host protocol above and adds no vendor/account protocol or durable session interface.

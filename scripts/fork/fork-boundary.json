@@ -247,6 +247,18 @@
     {
       "path": "scripts/release/testdata/fixture-bundles/gatekeeper-ai-executor/ai-executor.js",
       "reason": "Release-manifest fixture bundle for the fork-owned AI executor gatekeeper."
+    },
+    {
+      "path": "packages/workshop-backend/src/openapi-publisher.ts",
+      "reason": "Bounded optional native OpenAPI SDK publisher; fork-owned policy behind one server route seam, no upstream counterpart."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/openapi-publisher.test.ts",
+      "reason": "Fork-only SDK publisher bounds, execution isolation and capability lifecycle regressions."
+    },
+    {
+      "path": "packages/workshop-backend/__integration__/openapi-publisher-auth.test.ts",
+      "reason": "Fork-only publisher existing-auth and workspace ownership integration regressions."
     }
   ],
   "removedUpstreamPaths": {

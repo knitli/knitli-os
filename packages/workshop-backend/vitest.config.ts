@@ -47,6 +47,7 @@ export default defineConfig({
         bindings: { PUBLIC_BASE_URL: 'https://workshop.example/' },
         // The overseer loads gadget code through this, so a test can run a real gadget facet.
         workerLoaders: { LOADER: {} },
+        serviceBindings: { PUBLISHER_TEST_EGRESS: async () => new Response('EGRESS_ALLOWED') },
         durableObjects: {
           TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
           TEST_USER: { className: 'UserDurableObject', useSQLite: true },

@@ -128,7 +128,7 @@ function capturingHandle(captured: unknown[]): ModelHandle {
 function fakeHooks(): AgentHooks {
   return {
     getChatAgentContext: () => ({ chatId: 1 }),
-    getChatCodeBase: () => undefined,
+    loadChatHistory: () => ({chatMessages: [userMessage("hi")], measuredTokens: 0}),
     listGadgetInfo: () => [],
     prepareChatBindings: async () => [],
     getInstanceInstructions: async () => "",
@@ -146,12 +146,9 @@ describe("runAgent effort threading", () => {
   it("forwards an explicit effort to the stream options", async () => {
     let captured: unknown[] = [];
     await runAgent(
-        fakeHooks(), capturingHandle(captured), 1, AGENT, [userMessage("hi")],
+        fakeHooks(), capturingHandle(captured), 1, AGENT,
         new AbortController().signal, USER,
-        {
-          modelConfig: { provider: "cloudflare", model: GLM_FLASH, apiToken: "" },
-          measuredTokens: 0,
-        },
+        { provider: "cloudflare", model: GLM_FLASH, apiToken: "" },
         { reasoningEffort: "high" });
     expect(captured.length).toBe(1);
     expect(captured[0]).toMatchObject({ reasoningEffort: "high" });
@@ -160,12 +157,9 @@ describe("runAgent effort threading", () => {
   it("leaves the effort key absent when no override is set", async () => {
     let captured: unknown[] = [];
     await runAgent(
-        fakeHooks(), capturingHandle(captured), 1, AGENT, [userMessage("hi")],
+        fakeHooks(), capturingHandle(captured), 1, AGENT,
         new AbortController().signal, USER,
-        {
-          modelConfig: { provider: "cloudflare", model: GLM_FLASH, apiToken: "" },
-          measuredTokens: 0,
-        },
+        { provider: "cloudflare", model: GLM_FLASH, apiToken: "" },
         {});
     expect(captured.length).toBe(1);
     expect("reasoningEffort" in (captured[0] as Record<string, unknown>)).toBe(false);

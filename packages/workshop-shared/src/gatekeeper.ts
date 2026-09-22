@@ -99,7 +99,9 @@ export type AppUiContext = {
 // The agent catalog is bounded discovery metadata a gatekeeper exposes via
 // Gatekeeper.getAgentCatalog() so the agent can see *what* is reachable through a session (e.g. the
 // titles of the Context Library collections it can search) without first reading everything. It is
-// shown to the agent as untrusted data, so entries carry no authority and are size-capped.
+// shown to the agent as untrusted data, so entries carry no authority and are size-capped. It is
+// delivered to every chat automatically and is not an observation, so it must not contain anything
+// that would need observer verification; reading an item through the session is where that happens.
 
 /** One discoverable item within a gatekeeper's session. */
 export type AgentCatalogEntry = {
@@ -410,6 +412,8 @@ export interface ResourceConfiguratorHost extends RpcTarget {
   /**
    * Tell Workshop whether the current selection is ready to submit.
    * Workshop uses this to determine whether `Add connection` button should be enabled/disabled.
+   * A custom frame must report `true` after it initializes successfully; generated configurator
+   * frames do this automatically when their optional readiness predicate is omitted.
    */
   setSelectionReady(ready: boolean): void;
 
@@ -764,8 +768,8 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    * owner's gadgets like any other gatekeeper — as a Facet under the Overseer — and auto-provides
    * its session to the agent as an unnamed capsule. Because it is a normal Gatekeeper, the session
    * (Gatekeeper.startSession) and catalog (Gatekeeper.getAgentCatalog) run gadget-side in the
-   * gatekeeper's own worker with no round-trip back through this account DO; every read is still
-   * authorized as an observation via the ApprovalQueue, exactly like any gatekeeper.
+   * gatekeeper's own worker with no round-trip back through this account DO; every session read is
+   * still authorized as an observation via the ApprovalQueue, exactly like any gatekeeper.
    *
    * The returned class is imbued (via `ctx.props`) with whatever the account needs to serve the
    * singleton (e.g. the account id and sharing domain).
@@ -852,14 +856,16 @@ export interface Gatekeeper<Session> extends DurableObject {
    * Bounded, user-specific metadata the agent uses to discover entries reachable through this
    * gatekeeper's session, without paging the full session API. Implemented only by gatekeepers
    * whose session benefits from a discovery index (e.g. an agent singleton like the Context
-   * Library); most gatekeepers omit it. Catalog access is an observation, so the implementation
-   * must authorize it via `authorizer.authorizeObservation()` before returning metadata. Returns
-   * null when there is no catalog. Return the entries the agent most needs first and pass them
-   * through `boundAgentCatalog()`, since both that clamp and the Workshop's drop from the tail.
+   * Library); most gatekeepers omit it. The Workshop loads the catalog into every chat's prompt on
+   * every turn, so it is not an observation and must not contain anything that would need observer
+   * verification: the item's title and description are all that is revealed, and reading the item
+   * through the session is where the observation happens. Return null only when this gatekeeper has
+   * no catalog at all: the Workshop then stops asking this connection until the workspace next
+   * restarts. A catalog that is empty right now is `{entries: []}`. Return the entries the agent
+   * most needs first and pass them through `boundAgentCatalog()`, since both that clamp and the
+   * Workshop's drop from the tail.
    */
-  getAgentCatalog?(
-    authorizer: RpcStub<ObservationAuthorizer>,
-  ): Promise<AgentCatalog | null>;
+  getAgentCatalog?(): Promise<AgentCatalog | null>;
 
   /**
    * Informs the gatekeeper that a new user is being added to the Gadget with the potential to see
@@ -1255,6 +1261,19 @@ export type ObservationDescription = {
    *   but this requires a more complex policy framework to compute.
    */
   containsRestrictedData?: boolean;
+
+  /**
+   * If true, then once any observation carrying this flag is authorized, only collaborators the
+   * owner added directly keep access: share links stop granting anything (none can be created,
+   * copied, or redeemed), and people who joined through a link or through another collaborator
+   * lose access, restarting the gadget if any are present. After that, only the owner can add
+   * collaborators, one at a time. Those who remain are still subject to `addObserver()`
+   * verification on every open.
+   *
+   * Typically paired with `containsRestrictedData`, for data sources whose own sharing model
+   * requires each recipient to be granted access individually.
+   */
+  ownerInvitesOnly?: boolean;
 
   /**
    * If present, then this observation includes data that must not be revealed to the given

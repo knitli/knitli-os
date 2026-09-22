@@ -236,7 +236,7 @@ function fakeHooks(overrides: {
 }): AgentHooks {
   return {
     getChatAgentContext: () => ({ chatId: 1 }),
-    getChatCodeBase: () => undefined,
+    loadChatHistory: () => ({chatMessages: [userMessage("hi")], measuredTokens: 0}),
     listGadgetInfo: () => [],
     prepareChatBindings: async () => [],
     getInstanceInstructions: async () => overrides.instructions ?? "",
@@ -257,12 +257,9 @@ function fakeHooks(overrides: {
 async function runTurn(captured: {options?: unknown, systemPrompt?: string}[],
                        hooks: AgentHooks, options: {promptRef?: PromptRef}): Promise<void> {
   await runAgent(
-      hooks, capturingHandle(captured), 1, AGENT, [userMessage("hi")],
+      hooks, capturingHandle(captured), 1, AGENT,
       new AbortController().signal, USER,
-      {
-        modelConfig: { provider: "cloudflare", model: GLM_FLASH, apiToken: "" },
-        measuredTokens: 0,
-      },
+      { provider: "cloudflare", model: GLM_FLASH, apiToken: "" },
       options);
 }
 

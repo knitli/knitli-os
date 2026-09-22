@@ -12,14 +12,18 @@
 // only flags the link revoked. Nothing cascades, no records are deleted, and downstream edges are
 // never touched -- users who lose their only path to the owner simply become unreachable and are
 // denied at open() time. Because the graph is never destructively pruned, revocation is reversible:
-// re-adding a removed collaborator restores them and, transitively, everyone they had shared with.
+// re-adding a removed collaborator restores them and, transitively, everyone they had shared with
+// (unless `ownerInvitesOnly` is set, when only the owner's direct grants count).
 // (Records and revoked keys accumulate in storage; a future GC could reclaim long-dead entries.)
 //
 // NOTE: The sensitive-data (`containsRestrictedData`) policy intentionally does NOT live here; the
-// Overseer enforces it. This module only answers questions about the sharing graph.
+// Overseer enforces it. This module only answers questions about the sharing graph. The one
+// exception is the `ownerInvitesOnly` flag, which the Overseer supplies as a hook: once it is set,
+// only direct grants from the owner count, so it narrows which edges `computeEffectiveRoles`
+// follows and must be checked synchronously with each grant's storage write.
 
-import { AiChatAuthorInfo, CollaboratorInfo, PermissionEdge, CollaboratorRole, AffectedCollaborator }
-    from "@gadgets/workshop-shared/api";
+import { AiChatAuthorInfo, CollaboratorInfo, PermissionEdge, CollaboratorRole, AffectedCollaborator,
+    createOpenGadgetError, OPEN_GADGET_ERROR_CODES } from "@gadgets/workshop-shared/api";
 import { Collection, NonUniqueIndex } from "@gadgets/typed-storage";
 
 /**
@@ -153,14 +157,31 @@ export interface SharingCaller {
 export class SharingManager {
   /**
    * `ownerProfileId` is stable for the lifetime of a gadget, so it's supplied once at
-   * construction rather than per call. `beforeAuthorityExpansion`, when supplied, is a
-   * synchronous final-write policy check: throwing from it prevents the authority-bearing write.
+   * construction rather than per call.
+   *
+   * `ownerInvitesOnly` reports the Overseer's `ownerInvitesOnly` flag (see
+   * `ObservationDescription.ownerInvitesOnly`). `computeEffectiveRoles` reads it to count only
+   * direct owner grants once it is set. Grants call it after their last await, right before the
+   * storage write, so an observation that sets the flag mid-call cannot slip a grant through.
+   *
+   * Fork: `beforeAuthorityExpansion`, when supplied, is a synchronous final-write policy check:
+   * throwing from it prevents the authority-bearing write.
    */
   constructor(
-    private storage: SharingStorage,
-    private ownerProfileId: string,
-    private beforeAuthorityExpansion?: () => void,
-  ) {}
+      private storage: SharingStorage,
+      private ownerProfileId: string,
+      private ownerInvitesOnly: () => boolean,
+      private beforeAuthorityExpansion?: () => void) {}
+
+  // Throw if share links are disabled by `ownerInvitesOnly`. Redemption refusals surface
+  // from open(), so they carry the `shareLinksDisabled` open-gadget code; link management throws
+  // the same message uncoded.
+  #requireShareLinksAllowed(opts?: { redeeming: boolean }): void {
+    if (this.ownerInvitesOnly()) {
+      let error = createOpenGadgetError(OPEN_GADGET_ERROR_CODES.shareLinksDisabled);
+      throw opts?.redeeming ? error : new Error(error.message);
+    }
+  }
 
   // Every share link, revoked or not. Aliases are skipped.
   *#listLinks(): Generator<ShareLinkRecord> {
@@ -225,6 +246,11 @@ export class SharingManager {
    *
    * A key whose link is revoked behaves like an unknown key (it cannot be redeemed).
    *
+   * If the workspace has `ownerInvitesOnly` set, a valid key adds nothing: a collaborator the
+   * owner added directly is left as they are (so reopening an old link doesn't fail), and anyone
+   * else -- including someone who joined through a link before the flag was set -- is refused with
+   * a `shareLinksDisabled` exception.
+   *
    * TODO: The edge is written before the redeeming open()'s observer verification runs, so a
    * recipient whose verification fails lingers in listCollaborators until removed or the link is
    * revoked.
@@ -239,6 +265,15 @@ export class SharingManager {
     if (!link) return;
     let linkId = link.id;
     let role = link.role ?? "build";
+
+    if (this.ownerInvitesOnly()) {
+      // Only direct owner grants count (see computeEffectiveRoles), so the link can grant nothing.
+      // Let someone who already has access through the owner re-open with it; refuse anyone else.
+      if (!this.getEffectiveRole(opts.profileId)) {
+        this.#requireShareLinksAllowed({ redeeming: true });
+      }
+      return;
+    }
 
     let existing = this.storage.collaborators.get(opts.profileId);
     if (existing) {
@@ -260,7 +295,8 @@ export class SharingManager {
         this.storage.collaborators.put(updated);
       }
     } else {
-      // New collaborator -- need full profile from their user DO.
+      // New collaborator -- need full profile from their user DO. The RPC may race an observation
+      // setting ownerInvitesOnly, so check again right before the write.
       let profile = await opts.fetchProfile();
       link = this.#getActiveLinkForKey(hash);
       if (!link) return;
@@ -280,11 +316,13 @@ export class SharingManager {
               role,
             }],
           };
+          this.#requireShareLinksAllowed({ redeeming: true });
           this.beforeAuthorityExpansion?.();
           this.storage.collaborators.put(updated);
         }
         return;
       }
+      this.#requireShareLinksAllowed({ redeeming: true });
       this.beforeAuthorityExpansion?.();
       this.storage.collaborators.put({
         profile,
@@ -324,7 +362,8 @@ export class SharingManager {
   /**
    * Add a collaborator with a `user` edge from the caller, granting `role`. The caller is
    * responsible for resolving `profile` (via RPC) and for any policy checks. The caller may not
-   * grant a role higher than their own effective role.
+   * grant a role higher than their own effective role. Once `ownerInvitesOnly` is set, only the
+   * owner may call this.
    */
   addCollaborator(opts: {
     caller: SharingCaller;
@@ -335,6 +374,11 @@ export class SharingManager {
     // Don't add the owner as a collaborator.
     if (opts.profile.id === this.ownerProfileId) {
       throw new Error("Cannot add the workspace owner as a collaborator.");
+    }
+
+    if (this.ownerInvitesOnly() && !opts.caller.isOwner) {
+      throw new Error(
+          "Only the workspace owner can add people to a workspace that contains sensitive data.");
     }
 
     let callerRole = this.#requireCallerRole(opts.caller);
@@ -497,6 +541,7 @@ export class SharingManager {
     if (roleRank(opts.role) > roleRank(callerRole)) {
       throw new Error("You cannot grant a role higher than your own.");
     }
+    this.#requireShareLinksAllowed();
     this.beforeAuthorityExpansion?.();
     this.storage.shareKeys.put({
       id: hash,
@@ -533,6 +578,7 @@ export class SharingManager {
     if (roleRank(link.role ?? "build") > roleRank(callerRole)) {
       throw new Error("You cannot grant a role higher than your own.");
     }
+    this.#requireShareLinksAllowed();
     this.beforeAuthorityExpansion?.();
     this.storage.shareKeys.put({ id: hash, alias: link.id });
     return { key };
@@ -636,6 +682,11 @@ export class SharingManager {
    *   - `removedUser`: a profileId treated as removed (excluded from the graph entirely).
    *   - `removedEdge`: a single user edge (target ← sharer) treated as removed.
    *   - `revokedLinkId`: a link treated as revoked (its edges contribute nothing).
+   *
+   * Once `ownerInvitesOnly` is set, only direct grants from the owner count: every `shareKey` edge
+   * (even for a link the owner created) and every `user` edge from anyone but the owner is
+   * skipped. People who reached the workspace any other way lose access, and a collaborator whose
+   * owner edge grants less than they reached transitively is downgraded to it.
    */
   computeEffectiveRoles(opts: {
     removedUser?: string | null;
@@ -645,6 +696,7 @@ export class SharingManager {
     let removedUser = opts.removedUser ?? null;
     let removedEdge = opts.removedEdge ?? null;
     let revokedLinkId = opts.revokedLinkId ?? null;
+    let ownerGrantsOnly = this.ownerInvitesOnly();
 
     // Map linkId → {creator, role}, excluding revoked links (the persisted `revoked` flag, and the
     // hypothetical `revokedLinkId` used by preview).
@@ -681,6 +733,7 @@ export class SharingManager {
         for (let edge of record.addedBy) {
           let granted: CollaboratorRole | undefined;
           if (edge.type === "shareKey") {
+            if (ownerGrantsOnly) continue;
             let info = linkInfo.get(edge.keyId);
             if (!info) continue;  // link revoked or no longer exists
             let creatorRole = sharerRole(info.creator);
@@ -693,6 +746,7 @@ export class SharingManager {
               continue;
             }
             if (edge.sharer === removedUser) continue;
+            if (ownerGrantsOnly && edge.sharer !== this.ownerProfileId) continue;
             let upstream = sharerRole(edge.sharer);
             if (!upstream) continue;
             granted = minRole(edgeGrantedRole(edge), upstream);
@@ -720,6 +774,15 @@ export class SharingManager {
       throw new Error("You do not have permission to share this workspace.");
     }
     return role;
+  }
+
+  /**
+   * The collaborators who lost access or were downgraded when `ownerInvitesOnly` was set, given
+   * `baseline`, the effective roles computed just before the flag was set.
+   */
+  computeAffectedByOwnerInvitesOnly(
+      baseline: Map<string, CollaboratorRole>): AffectedCollaborator[] {
+    return this.#computeAffected(baseline, this.computeEffectiveRoles());
   }
 
   // Diff two effective-role maps, returning the collaborators whose access changed. A user is

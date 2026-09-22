@@ -57,22 +57,20 @@ function capturingHandle(captured: {options?: unknown, context?: any}[]) {
 async function runTurn(
     captured: {options?: unknown, context?: any}[], hooks: AgentHooks,
     messages: AiChatMessage[]): Promise<void> {
+  let withHistory = {
+    ...hooks,
+    loadChatHistory: () => ({chatMessages: messages, measuredTokens: 0}),
+  } as AgentHooks;
   await runAgent(
-      hooks, capturingHandle(captured), 1, AGENT, messages,
+      withHistory, capturingHandle(captured), 1, AGENT,
       new AbortController().signal, USER,
-      {
-        modelConfig: {
-          provider: "cloudflare", model: "@cf/zai-org/glm-5.3-flash", apiToken: "",
-        },
-        measuredTokens: 0,
-      },
+      {provider: "cloudflare", model: "@cf/zai-org/glm-5.3-flash", apiToken: ""},
       {});
 }
 
 function baseHooks(overrides: Record<string, any> = {}): AgentHooks {
   return {
     getChatAgentContext: () => ({ chatId: 1 }),
-    getChatCodeBase: () => undefined,
     listGadgetInfo: () => [],
     prepareChatBindings: async () => [],
     getInstanceInstructions: async () => "",
@@ -120,13 +118,8 @@ describe("replay blindfold", () => {
       prepareChatBindings: async () =>
           [{name: "G", target: 1, title: "Gadget", isGadget: true}],
       resolveWorkpieceRoot: () => ({workpieceId: 1}),
-      getChatCodeBase: () => ({pins: [{gadgetId: 1, baseCommit: "deadbeef"}]}),
-      changedPaths: async () => new Set(),
-      readCommitFiles: async () => {
-        storageReads++;
-        return new Map([["PROMPT.md", "COMMIT-SECRET"]]);
-      },
-      readWorktreeBase: async () => { storageReads++; return new Map(); },
+      fileOidAtCommit: async () => { storageReads++; return "blob-oid"; },
+      readBlobText: async () => { storageReads++; return "COMMIT-SECRET"; },
     });
     let captured: {options?: unknown, context?: any}[] = [];
     await runTurn(captured, hooks, [
@@ -486,10 +479,11 @@ describe("worktree-binding blindfold", () => {
       },
       hasLocalObject: () => true,
       ensureGitObjects: async () => {},
+      ensureBlobs: async () => new Set<string>(),
       changedFilePathsBetween: async () => new Set(extra?.changed ?? []),
     };
     let turn = {
-      getPinBase: () => "base",
+      getBaseCommit: () => "base",
       getBufferedHead: () => undefined,
       getOverlayFiles: () => new Map(Object.entries(extra?.overlay ?? {})),
       getRemovedPaths: () => new Set<string>(),

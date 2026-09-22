@@ -217,6 +217,10 @@
       "reason": "Regression test for fork-owned rate-limited capability behavior."
     },
     {
+      "path": "packages/workshop-frontend/src/GatekeeperModal.fork.test.tsx",
+      "reason": "Fork ambient-resource and prefill tests, split out when upstream #505 added its own GatekeeperModal.test.tsx so that file stays byte-identical."
+    },
+    {
       "path": "packages/gatekeeper-linear/__tests__/workerd/oauth-link.test.ts",
       "reason": "Workerd test for the Linear OAuth link flow; the fork stood up this harness."
     },
@@ -263,119 +267,49 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "sharingProhibited",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Fork-owned owner-only-tier metadata field, re-added after upstream #381 renamed it to containsRestrictedData."
-    },
-    {
-      "token": "sharingProhibited",
-      "path": "packages/workshop-shared/src/api.ts",
-      "reason": "Declaration of the fork-owned GadgetMetadata.sharingProhibited above."
-    },
-    {
-      "token": "sharingProhibited",
-      "path": "packages/integration-tests/__tests__/fork/observer-privacy.test.ts",
-      "reason": "Fork regression test asserting the owner-only tier latches sharingProhibited."
-    },
-    {
-      "token": "sharingProhibited",
-      "path": "docs/fork-maintenance.md",
-      "reason": "Inventory documents the fork-owned owner-only tier."
-    },
-    {
-      "token": "sharingProhibitedSubscriber",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Subscriber publishing the fork-owned sharingProhibited metadata above."
-    },
-    {
-      "token": "hasAnyShares",
-      "path": "packages/workshop-backend/src/sharing.ts",
-      "reason": "Re-added after upstream #382 deleted it; the owner-only tier still refuses to latch or attach while shared."
-    },
-    {
-      "token": "hasAnyShares",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Owner-only observation and connection guards calling the re-added SharingManager method."
-    },
-    {
-      "token": "hasAnyShares",
-      "path": "docs/fork-maintenance.md",
-      "reason": "Inventory documents the re-added sharing check."
-    },
-    {
-      "token": "listLinks",
-      "path": "packages/workshop-backend/src/sharing.ts",
-      "reason": "The re-added hasAnyShares calls upstream's retained #listLinks private."
-    },
-    {
-      "token": "prohibitAllSharing",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "On-disk storageKey compat for the containsRestrictedData singleton (upstream #381 kept the key too)."
-    },
-    {
-      "token": "prohibitAllSharing",
-      "path": "docs/fork-maintenance.md",
-      "reason": "Inventory records the rename history (né prohibitAllSharing)."
-    },
-    {
-      "token": "prohibitAllSharing",
-      "path": "scripts/fork/sync-upstream.ts",
-      "reason": "This tool's own calibration notes naming the rename it was built around."
-    },
-    {
-      "token": "prohibitAllSharing",
-      "path": "scripts/fork/sync-upstream.test.ts",
-      "reason": "Detector fixture token; the test pins compound-name scoring on it."
-    },
-    {
       "token": "SELF_CLOSING_HTML",
       "path": "scripts/fork/sync-upstream.ts",
       "reason": "This tool's own calibration notes; the product copy was deleted with the handoff adoption."
     },
     {
-      "token": "NativeStub",
-      "path": "scripts/fork/capnweb-native-validation.test.ts",
-      "reason": "Test-local alias imported from cloudflare:workers, not from upstream source; upstream #492 removing TransientStubLoopback is unrelated."
+      "token": "activeIds",
+      "path": "packages/gatekeeper-ai-executor/src/vendor.ts",
+      "reason": "Fork-local Set in profile filtering; unrelated to upstream #267's removed catalog identifiers."
     },
     {
-      "token": "DeepSeek",
-      "path": "packages/workshop-backend/__tests__/knitli-reasoning-levels.test.ts",
-      "reason": "Fork reasoning-level coverage for the shared catalog's DeepSeek entry; upstream #495 only changed eval defaults, not the catalog."
+      "token": "openMenu",
+      "path": "packages/workshop-frontend/src/features/chat/controls/ComposerEffortSelector.test.tsx",
+      "reason": "Test-local menu-opening helper; unrelated to upstream #466's removed blueprint UI identifier."
     },
     {
-      "token": "DeepSeek",
-      "path": "packages/workshop-shared/src/api.ts",
-      "reason": "Shared Workers AI model catalog entry, untouched by this sync."
+      "token": "openMenu",
+      "path": "packages/workshop-frontend/src/features/chat/controls/ComposerPromptSelector.test.tsx",
+      "reason": "Test-local menu-opening helper; unrelated to upstream #466's removed blueprint UI identifier."
     },
     {
-      "token": "SYSTEM_PROMPT",
-      "path": "packages/workshop-backend/__tests__/knitli-chat-prompt.test.ts",
-      "reason": "Fork test asserting the default slot against the live constant; updated for upstream #489's restructured slot."
+      "token": "aEntries",
+      "path": "packages/workshop-backend/src/git-cache.ts",
+      "reason": "Upstream's own diff locals, still present upstream; the fork added none of these lines."
     },
     {
-      "token": "SYSTEM_PROMPT",
-      "path": "packages/workshop-backend/__tests__/knitli-turn-start.test.ts",
-      "reason": "Fork turn-start test asserting preset resolution; default path unchanged in shape."
+      "token": "bEntries",
+      "path": "packages/workshop-backend/src/git-cache.ts",
+      "reason": "Upstream's own diff locals, still present upstream; the fork added none of these lines."
     },
     {
-      "token": "SYSTEM_PROMPT",
+      "token": "treeOf",
+      "path": "packages/workshop-backend/src/git-cache.ts",
+      "reason": "Upstream's own diff helper, still present upstream; the fork added none of these lines."
+    },
+    {
+      "token": "addChatSubscriber",
+      "path": "packages/workshop-backend/src/overseer.ts",
+      "reason": "Upstream's own subscriber method, still present upstream; not fork-added."
+    },
+    {
+      "token": "gadgetInfos",
       "path": "packages/workshop-backend/src/agent.ts",
-      "reason": "Fork export + prompt-swap re-applied on upstream #489's rewritten prompt text."
-    },
-    {
-      "token": "dummyMethodToWorkAroundValidatorBug",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Retained empty validator-workaround methods; capnweb-validate unchanged by this sync, still compiled."
-    },
-    {
-      "token": "getLiveChat",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Shared live-chat accessor with surviving definition and callers; upstream #492 only removed some call sites."
-    },
-    {
-      "token": "resolveUserId",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Ordinary local variable, self-contained; unaffected by upstream renames."
+      "reason": "Upstream's own runAgentPass local, still present upstream; not fork-added."
     }
   ]
 }

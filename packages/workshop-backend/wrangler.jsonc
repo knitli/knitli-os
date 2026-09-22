@@ -7,6 +7,7 @@
     "watch_dir": "src"
   },
   "compatibility_date": "2026-09-04",
+
   // `global_fetch_strictly_public` makes the global fetch() function strictly fetch from
   // the public internet in production, rather than the legacy behavior in which same-zone
   // requests go directly to origin bypassing Cloudflare. This flag is important to protect
@@ -23,42 +24,44 @@
   "compatibility_flags": [
     "allow_irrevocable_stub_storage",
     "global_fetch_strictly_public",
+
     // The pi-ai inference layer wraps the official provider SDKs (@anthropic-ai/sdk, openai,
     // @google/genai), which need Node compatibility. Puppeteer (used for Gadget PDF exports)
     // also requires Node compatibility. Otherwise, we'd only need nodejs_als.
     "nodejs_compat"
   ],
+
   // Wrangler will launch a Chrome instance locally to emulate the Browser Run API during
   // local development. Add "remote": true to use a remote browser running on Cloudflare instead.
   "browser": {
     "binding": "BROWSER"
   },
+
   // Gatekeeper service bindings and the Workers AI binding are dynamically
   // added by run-dev-server.ts (for dev) and generate-wrangler-prod.js (for
   // production).
+
   "migrations": [
     {
       "tag": "v0",
-      "new_sqlite_classes": [
-        "UserDurableObject",
-        "OverseerDurableObject"
-      ]
+      "new_sqlite_classes": [ "UserDurableObject", "OverseerDurableObject" ]
     },
     {
       "tag": "v1",
-      "new_sqlite_classes": [
-        "AdminSettings"
-      ]
+      "new_sqlite_classes": [ "AdminSettings" ]
     },
     {
       // Sign-in via authentication gatekeepers: a short-lived PendingLogin DO bridges each gatekeeper
       // login back to the waiting browser.
       "tag": "v2",
-      "new_sqlite_classes": [
-        "PendingLogin"
-      ]
+      "new_sqlite_classes": [ "PendingLogin" ]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": [ "UserDirectoryDurableObject" ]
     }
   ],
+
   // All DO classes (UserDurableObject, OverseerDurableObject, AdminSettings, PendingLogin, ...) are
   // reached via ctx.exports and need no explicit durable_objects binding.
   "kv_namespaces": [
@@ -82,6 +85,7 @@
       "binding": "LOADER"
     }
   ],
+
   // When deploying to prod, you may want to bundle the frontend as assets on the backend, like so.
   // But it's not the only way to do it.
   //
@@ -97,15 +101,10 @@
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,
-    "logs": {
-      "invocation_logs": false
-    },
+    "logs": { "invocation_logs": false },
     // Traces are free during the beta; spans bill against the Logs quota from 2026-10-01,
     // so revisit the sampling rate before then.
-    "traces": {
-      "enabled": true,
-      "head_sampling_rate": 0.5
-    }
+    "traces": { "enabled": true, "head_sampling_rate": 0.5 }
   },
   "limits": {
     "cpu_ms": 300000
@@ -113,4 +112,5 @@
   "placement": {
     "mode": "smart"
   }
+
 }

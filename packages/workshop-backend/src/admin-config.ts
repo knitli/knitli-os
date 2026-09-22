@@ -20,6 +20,12 @@ export type AdminConfig = {
    */
   signupsEnabled: boolean;
   /**
+   * Whether users may search the deployment-wide user directory to find collaborators. When not
+   * explicitly configured, this defaults to the opposite of `signupsEnabled`. The directory itself
+   * is maintained either way, and this switch just controls user access.
+   */
+  userSearchEnabled: boolean;
+  /**
    * Site name shown next to the top-bar logo, or "" to use DEFAULT_SITE_NAME. Resolve it for
    * display with `resolveSiteName()`.
    */
@@ -86,6 +92,7 @@ export type FormatCuration = {
 
 export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   signupsEnabled: true,
+  userSearchEnabled: false,
   siteName: "",
   siteLogoConfigured: false,
   instanceInstructions: "",
@@ -306,40 +313,64 @@ function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
 
+/**
+ * Apply defaults to a partial admin config loaded from either authoritative DO
+ * storage or its KV mirror.
+ */
+export function normalizeAdminConfig(p: Partial<AdminConfig>): AdminConfig {
+  // Fork: resources are opt-in (enabledResources; unlisted is off), not upstream's opt-out
+  // disabledResources (see #24). Built via fromEntries so special keys (__proto__) stay
+  // ordinary own entries rather than tripping Object.prototype setters. Case is preserved
+  // here: the AdminSettings read path round-trips bulk-written ids verbatim (B-HOST-011), and
+  // only the KV-mirror parse below lowercases (MsGraph handling, kept from #24).
+  let enabledResourceEntries: Array<[string, string[]]> = [];
+  if (p.enabledResources && typeof p.enabledResources === "object") {
+    for (let [vendorId, patterns] of Object.entries(p.enabledResources)) {
+      let list = strings(patterns);
+      if (list.length > 0) enabledResourceEntries.push([vendorId, list]);
+    }
+  }
+  let enabledResources = Object.fromEntries(enabledResourceEntries);
+  let ambientGatekeeperModes: Record<string, AmbientGatekeeperMode> = {};
+  if (p.ambientGatekeeperModes && typeof p.ambientGatekeeperModes === "object") {
+    for (let [vendorId, mode] of Object.entries(p.ambientGatekeeperModes)) {
+      if (isAmbientGatekeeperMode(mode)) ambientGatekeeperModes[vendorId.toLowerCase()] = mode;
+    }
+  }
+  let signupsEnabled = typeof p.signupsEnabled === "boolean"
+    ? p.signupsEnabled
+    : DEFAULT_ADMIN_CONFIG.signupsEnabled;
+  return {
+    signupsEnabled,
+    userSearchEnabled: typeof p.userSearchEnabled === "boolean"
+      ? p.userSearchEnabled
+      : !signupsEnabled,
+    siteName: typeof p.siteName === "string" ? p.siteName : "",
+    siteLogoConfigured: typeof p.siteLogoConfigured === "boolean" ? p.siteLogoConfigured : false,
+    instanceInstructions: typeof p.instanceInstructions === "string" ? p.instanceInstructions : "",
+    promptPresets: parsePromptPresets(p.promptPresets),
+    announcement: typeof p.announcement === "string" ? p.announcement : "",
+    banner: {
+      text: typeof p.banner?.text === "string" ? p.banner.text : "",
+      color: isBannerColor(p.banner?.color) ? p.banner!.color : DEFAULT_BANNER_COLOR,
+    },
+    accentColor: typeof p.accentColor === "string" ? p.accentColor : "",
+    enabledResources,
+    disabledGatekeepers: strings(p.disabledGatekeepers).map(v => v.toLowerCase()),
+    ambientGatekeeperModes,
+    formats: parseFormats(p.formats),
+  };
+}
+
 export function parseAdminConfig(raw: string | null): AdminConfig {
   if (!raw) return { ...DEFAULT_ADMIN_CONFIG };
   try {
-    let p = JSON.parse(raw) as Partial<AdminConfig>;
-    let enabledResourceEntries: Array<[string, string[]]> = [];
-    if (p.enabledResources && typeof p.enabledResources === "object") {
-      for (let [vendorId, patterns] of Object.entries(p.enabledResources)) {
-        let list = strings(patterns);
-        if (list.length > 0) enabledResourceEntries.push([vendorId.toLowerCase(), list]);
-      }
-    }
-    let ambientGatekeeperModes: Record<string, AmbientGatekeeperMode> = {};
-    if (p.ambientGatekeeperModes && typeof p.ambientGatekeeperModes === "object") {
-      for (let [vendorId, mode] of Object.entries(p.ambientGatekeeperModes)) {
-        if (isAmbientGatekeeperMode(mode)) ambientGatekeeperModes[vendorId.toLowerCase()] = mode;
-      }
-    }
-    return {
-      signupsEnabled: typeof p.signupsEnabled === "boolean" ? p.signupsEnabled : true,
-      siteName: typeof p.siteName === "string" ? p.siteName : "",
-      siteLogoConfigured: typeof p.siteLogoConfigured === "boolean" ? p.siteLogoConfigured : false,
-      instanceInstructions: typeof p.instanceInstructions === "string" ? p.instanceInstructions : "",
-      promptPresets: parsePromptPresets(p.promptPresets),
-      announcement: typeof p.announcement === "string" ? p.announcement : "",
-      banner: {
-        text: typeof p.banner?.text === "string" ? p.banner.text : "",
-        color: isBannerColor(p.banner?.color) ? p.banner!.color : DEFAULT_BANNER_COLOR,
-      },
-      accentColor: typeof p.accentColor === "string" ? p.accentColor : "",
-      enabledResources: Object.fromEntries(enabledResourceEntries),
-      disabledGatekeepers: strings(p.disabledGatekeepers).map(v => v.toLowerCase()),
-      ambientGatekeeperModes,
-      formats: parseFormats(p.formats),
-    };
+    let config = normalizeAdminConfig(JSON.parse(raw) as Partial<AdminConfig>);
+    // Fork: the KV-mirror read lowercases vendor ids (see #24); the AdminSettings read path
+    // preserves them (B-HOST-011), so this lives here rather than in the shared normalize.
+    config.enabledResources = Object.fromEntries(
+        Object.entries(config.enabledResources).map(([id, patterns]) => [id.toLowerCase(), patterns]));
+    return config;
   } catch {
     return { ...DEFAULT_ADMIN_CONFIG };
   }

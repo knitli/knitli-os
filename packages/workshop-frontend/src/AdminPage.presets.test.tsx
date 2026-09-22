@@ -66,7 +66,7 @@ vi.mock('@cloudflare/kumo', async () => {
 })
 
 const view = (promptPresets: PromptPreset[]): AdminSettingsView => ({
-  signupsEnabled: true, siteName: '', instanceInstructions: '', announcement: '',
+  signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '',
   banner: { text: '', color: 'info' }, accentColor: '', resourceVendors: [], formats: [],
   promptPresets,
 })

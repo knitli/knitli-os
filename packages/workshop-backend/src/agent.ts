@@ -1,4 +1,4 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, ChatCodeBase, WorkpieceId, type AiModelConfig, type PromptRef, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, WorkpieceId, type AiModelConfig, type PromptRef, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type CodeContent,
   type CodeChange, type FileChange } from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
@@ -14,13 +14,14 @@ import {
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
-import { AgentCatalogSnapshot, formatAlwaysAvailableResourcesPrompt } from "./agent-catalog";
+import { formatAlwaysAvailableResourcesPrompt } from "./agent-catalog";
 import { isPromptFileAnywhere } from "./fork/prompt-files";
 import { formatInstanceInstructions } from "./admin-config";
 import type { AiGatewayLogRoute } from "./ai-gateway";
 import type { SpawnCallableOptions } from "./agent-spawner-binding";
 import { AgentTurnError, completeText, httpStatusFromError, zeroUsage } from "./ai-invoke";
 import type { ModelHandle } from "./ai-models";
+import { blobOid } from "./git-store";
 import {
   buildCompactionState, buildSummaryPrompt, chatChangeStatuses, COMPACTION_SYSTEM_PROMPT,
   estimateProjectionTokens, findCompactionBoundary, findProtectedFromSequence,
@@ -94,11 +95,11 @@ export interface AgentStepChange {
  */
 export interface WorktreeTurnAccess {
   /**
-   * The worktree's pinned base commit -- what the current epoch's changes compose on -- or
-   * undefined when the id is not a worktree pinned in this session (which every live worktree of
-   * the chat is; undefined means "not this chat's worktree").
+   * The base commit the worktree's overlay composes on: the chat pin's base while the worktree
+   * is pinned in this session, else its accepted commit (WorktreeRecord.pinBase) -- the same
+   * commit the first write will pin at. Undefined when the id is not a live worktree.
    */
-  getPinBase(worktreeId: WorkpieceId): string | undefined;
+  getBaseCommit(worktreeId: WorkpieceId): string | undefined;
 
   /**
    * The head advanced by a commit() buffered earlier in this turn, or undefined if none: the
@@ -127,16 +128,18 @@ export interface WorktreeTurnAccess {
 
   /**
    * Buffer one validated file change into the step: applied to the session content immediately,
-   * durable (as an ordinary chat change row) at the step's barrier. The caller has already
-   * enforced the base-entry write rules; this applies the same step budget the file tools do.
+   * durable (as an ordinary chat change row) at the step's barrier, which also pins the
+   * worktree in the chat if nothing in the epoch has yet. The caller has already enforced the
+   * base-entry write rules; this applies the same step budget the file tools do.
    */
   appendChange(worktreeId: WorkpieceId, path: string, change: FileChange): void;
 
   /**
    * Buffer a commit() head advancement for the step barrier, which validates the previousHead
-   * chain, advances the record's headCommit, and records the advancement as `worktreeCommits`
-   * on the step's "changes" message. In-memory until then: a step that dies before its barrier
-   * drops the advancement, leaving only harmless dangling commit objects.
+   * chain, advances the record's headCommit, records the advancement as `worktreeCommits` on
+   * the step's "changes" message, and pins the worktree in the chat if nothing in the epoch has
+   * yet (so the advancement is revertable). In-memory until then: a step that dies before its
+   * barrier drops the advancement, leaving only harmless dangling commit objects.
    */
   appendCommit(worktreeId: WorkpieceId, commit: string, previousHead: string): void;
 }
@@ -188,12 +191,6 @@ export type AiChatAgentContext = {
    * that).
    */
   alwaysAvailableCapsuleIds?: WorkpieceId[];
-
-  /**
-   * Cached discovery catalogs for the always-available resources, keyed per gatekeeper.
-   * Regenerable: re-fetched when missing/stale (see prepareChatBindings).
-   */
-  alwaysAvailableCatalogs?: AgentCatalogSnapshot[];
 };
 
 /**
@@ -294,17 +291,24 @@ export type CompactionCheckpoint = {
   proposedChange?: CodeChange;
 };
 
-/** The compaction state and policy for one call to `runAgent`. */
-export type CompactionContext = {
-  /** The checkpoint to replay from, if the thread has one. */
+/**
+ * The history one agent pass replays: the active compaction checkpoint, if any, the chat log from
+ * it on, and the token total the provider reported for the chat's last model step (zero when none
+ * is recorded). See AgentHooks.loadChatHistory.
+ */
+export type ChatHistory = {
   checkpoint?: CompactionCheckpoint;
-
-  /** The chosen model, whose window and reserved response capacity size the prompt budget. */
-  modelConfig: AiModelConfig;
-
-  /** The total tokens reported for the last measured model step, or zero if none are available. */
+  chatMessages: AiChatMessage[];
   measuredTokens: number;
 };
+
+// Why one pass of the agent returned to runAgent's loop: the turn ran to a stop; a persisted tool
+// step left the next request over the compaction trigger, so the pass ended for a reload; or the
+// pass summarized instead of prompting the model and this is the checkpoint to publish.
+type AgentPassOutcome =
+  | {type: "finished"}
+  | {type: "reloadForCompaction"}
+  | {type: "compacted"; checkpoint: CompactionCheckpoint};
 
 /**
  * Summary of one of the workspace's gadgets, as needed by the agent: identity and its named
@@ -407,22 +411,16 @@ export interface AgentHooks {
   getChatAgentContext(chatId: number): AiChatAgentContext;
 
   /**
-   * The chat's current code base (AiChatMetadata.codeBase): which gadgets are pinned (and
-   * where), for the pinned/unpinned read split and staleness checks.
-   */
-  getChatCodeBase(chatId: number): ChatCodeBase | undefined;
-
-  /**
    * The step's persistence barrier: in one storage transaction, persist the step's chat
    * messages (`msgs`, the tool-call record among them), validate and append each buffered
    * change as a chat change row -- one row per tool call, in call order, with the same
    * pin/codeBase bookkeeping the appends always had -- materialize the rows into the step's
    * single "changes" message carrying the step's gadget creations, binding additions, and
-   * worktree head advancements (stamping pending registry records and advancing worktree
-   * heads), and retire the rows. The step's effects are thus durable iff its transcript record
-   * is; a crash mid-step loses both, and the resumed model re-runs the step against unmodified
-   * content. Returns whether a "changes" message was written (change-ID numbering counts
-   * messages).
+   * worktree head advancements (stamping pending gadget and binding records, making created
+   * worktrees permanent, and advancing worktree heads), and retire the rows. The step's effects
+   * are thus durable iff its transcript record is; a crash mid-step loses both, and the resumed
+   * model re-runs the step against unmodified content. Returns whether a "changes" message was
+   * written (change-ID numbering counts messages).
    *
    * Rows and messages broadcast from inside the transaction, as every append always has: the
    * transaction protects server-side storage, not what subscribers saw before a rollback (a
@@ -448,24 +446,35 @@ export interface AgentHooks {
       estimatedCost?: number): Promise<boolean>;
 
   /**
+   * The history one agent pass replays (see ChatHistory). Read fresh before each pass, since a
+   * pass can compact or persist steps.
+   */
+  loadChatHistory(chatId: number): ChatHistory;
+
+  /** Publish a compaction checkpoint: later history loads start from it. */
+  commitChatCompaction(chatId: number, checkpoint: CompactionCheckpoint): void;
+
+  /**
    * The gadget's current head commit (WorkpieceSummary.commitId), or undefined if it has none:
    * still pending in a chat, created outside chats and never accepted, or deleted. An unpinned
    * gadget with a head is read at that head; one without a head lives only in the session doc.
+   * Undefined for worktrees, whose counterpart is getWorktreePinBase.
    */
   getGadgetHead(gadgetId: WorkpieceId): string | undefined;
+
+  /**
+   * A worktree's accepted commit (WorktreeRecord.pinBase in overseer.ts): what an unpinned
+   * worktree reads at, lazily by path, and what its first modification pins it at -- the
+   * worktree analog of getGadgetHead. Only an accept moves it, and none can run mid-turn.
+   * Undefined for anything that is not a live worktree.
+   */
+  getWorktreePinBase(id: WorkpieceId): string | undefined;
 
   /**
    * Read a commit's full file map from the workspace's git object store. Commits are immutable,
    * so results are cacheable by oid (and the store's parse cache makes repeats cheap).
    */
   readCommitFiles(oid: string): Promise<Map<string, string>>;
-
-  /**
-   * The set of file paths whose content differs between two commits (either side undefined =
-   * empty tree), compared by blob oid without reading content. Drives read-staleness checks:
-   * elision of stamped reads and editFile's read-before-edit gate.
-   */
-  changedPaths(a: string | undefined, b: string | undefined): Promise<Set<string>>;
 
   /**
    * Summarize the workspace's gadgets for the system prompt (see AgentGadgetInfo). Gadgets still
@@ -499,27 +508,49 @@ export interface AgentHooks {
    * without prefix expansion or remote lookup. The worktree is provisional to and
    * permanently private to the given chat. Performs the initial pull
    * when the commit is known only from a gatekeeper. Like createGadget, the creation becomes
-   * durable via the step's "changes" message (`createdWorktrees`), which also establishes the
-   * worktree's birth pin; a step that dies before its barrier leaves an unstamped record that
-   * reconciliation reaps. Returns the normalized full base commit alongside the id
-   * for replay.
+   * durable via the step's "changes" message (`createdWorktrees`); a step that dies before its
+   * barrier leaves an unstamped record that reconciliation reaps. The new worktree is unpinned:
+   * it reads as its base commit until the first modification pins it. Returns the base commit
+   * alongside the id (fork: the input is always the full OID; prefixes are refused).
    */
   createWorktree(title: string, chatId: number, commitRef: string)
       : Promise<{id: WorkpieceId, title: string, baseCommit: string}>;
 
   /**
-   * Whether the workpiece is a worktree: chat-private, git-rooted, always pinned, read lazily.
-   * False for gadgets and for ids that no longer resolve.
+   * Whether the workpiece is a worktree: chat-private, git-rooted, read lazily by path. False
+   * for gadgets and for ids that no longer resolve.
    */
   isWorktree(id: WorkpieceId): boolean;
 
   /**
    * Read one file of a commit's tree by path, walking (and fault-pulling) only the objects along
-   * the path -- the lazy base resolver behind worktree session content. Returns undefined for an
-   * absent path; throws descriptive, agent-visible errors for a symlink or submodule path
-   * (naming the target), oversized or binary content, and pull failures.
+   * the path -- never a whole tree -- the lazy base resolver behind worktree session content and
+   * the way every unpinned read is served, gadget or worktree. Returns undefined for an absent
+   * path; throws descriptive, agent-visible errors for a symlink or submodule path (naming the
+   * target), oversized or binary content, and pull failures.
    */
   readFileAtCommit(commit: string, path: string): Promise<string | undefined>;
+
+  /**
+   * readFileAtCommit that also reports the blob's oid: the file's content address, which an
+   * unpinned read stamps (AiToolCall.observedOid, and the agent's filesRead) so a later edit can
+   * ask whether the committed file is still byte-identical (fileOidAtCommit).
+   */
+  readFileAtCommitWithOid(commit: string, path: string)
+      : Promise<{text: string, oid: string} | undefined>;
+
+  /**
+   * The blob oid of the regular file at `path` in a commit's tree, or undefined for an absent
+   * path or one naming anything else. A tree walk along the path; never reads the blob.
+   */
+  fileOidAtCommit(commit: string, path: string): Promise<string | undefined>;
+
+  /**
+   * Read a blob by oid as text, under readFileAtCommit's content rules (`path` names the file in
+   * errors). How replay reproduces exactly the text a stamped read returned, whatever the
+   * commit holds now.
+   */
+  readBlobText(oid: string, path: string): Promise<string>;
 
   /**
    * Throws the same descriptive errors readFileAtCommit does when `path` names a symlink or
@@ -1166,21 +1197,42 @@ export type RunAgentOptions = {
 };
 
 /**
- * Runs one agent turn against the chat's history. Returns a checkpoint when the turn compacted
- * instead of prompting the model: the caller commits it, then reruns for a normal turn or stops for
- * `/compact`. Returns undefined when the turn ran.
+ * Runs one agent turn against the chat's history, compacting as needed. A pass over the history
+ * may compact instead of prompting the model, or end after a persisted tool step because the next
+ * request would cross the compaction trigger; either way the loop reloads the durable history,
+ * which the next pass compacts first, and goes again. Each compaction moves the boundary strictly
+ * forward and can never pass the newest turn start, so the loop is bounded. `/compact` is done once
+ * it has compacted; the model is never prompted.
  */
 export async function runAgent(
     hooks: AgentHooks,
     handle: ModelHandle,
     chatId: number,
     author: AiChatAuthorInfo,
-    chatMessages: AiChatMessage[],
     abortSignal: AbortSignal,
     initiator: AiChatAuthorInfo,
-    compaction: CompactionContext,
-    options: RunAgentOptions = {}): Promise<CompactionCheckpoint | undefined> {
-  let checkpoint = compaction.checkpoint;
+    modelConfig: AiModelConfig,
+    options: RunAgentOptions = {}): Promise<void> {
+  while (true) {
+    let history = hooks.loadChatHistory(chatId);
+    let outcome = await runAgentPass(
+        hooks, handle, chatId, author, history, abortSignal, initiator, modelConfig, options);
+    if (outcome.type === "compacted") hooks.commitChatCompaction(chatId, outcome.checkpoint);
+    if (outcome.type === "finished" || isCompactionTurn(history.chatMessages)) return;
+    abortSignal.throwIfAborted();
+  }
+}
+
+async function runAgentPass(
+    hooks: AgentHooks,
+    handle: ModelHandle,
+    chatId: number,
+    author: AiChatAuthorInfo,
+    {checkpoint, chatMessages, measuredTokens}: ChatHistory,
+    abortSignal: AbortSignal,
+    initiator: AiChatAuthorInfo,
+    modelConfig: AiModelConfig,
+    options: RunAgentOptions = {}): Promise<AgentPassOutcome> {
 
   // The workspace's gadget registry, snapshotted at the start of the turn (gadgets provisional
   // to other chats are excluded -- they belong to those chats' proposed changes). This is the
@@ -1211,17 +1263,6 @@ export async function runAgent(
     return head;
   };
 
-  // Memoized per-file diff lookups: replay can check many reads stamped at the same commit.
-  let changedPathsCache = new Map<string, Promise<Set<string>>>();
-  let changedPaths = (a: string | undefined, b: string | undefined) => {
-    let key = `${a}:${b}`;
-    let cached = changedPathsCache.get(key);
-    if (!cached) {
-      cached = hooks.changedPaths(a, b);
-      changedPathsCache.set(key, cached);
-    }
-    return cached;
-  };
   // Gadgets created this step (see the createGadget tool), awaiting the step's persistence
   // barrier: its "changes" message is what durably records, and sequence-stamps, each creation.
   // A step that dies before its barrier leaves only the unstamped registry record, which
@@ -1229,8 +1270,8 @@ export async function runAgent(
   let pendingCreatedGadgets: {gadgetId: WorkpieceId, title: string, bindingName: string}[] = [];
 
   // Worktrees created this step (see the createWorktree tool), awaiting the same barrier: its
-  // "changes" message records each creation (`createdWorktrees`), sequence-stamps the pending
-  // record, and establishes the worktree's birth pin.
+  // "changes" message records each creation (`createdWorktrees`) and makes the pending record
+  // permanent (see WorktreeRecord.pending in overseer.ts).
   let pendingCreatedWorktrees: {worktreeId: WorkpieceId, title: string, bindingName: string}[] =
       [];
 
@@ -1238,14 +1279,46 @@ export async function runAgent(
   // barrier's "changes" message (see `addedBindings`), which sequence-stamps the pending edge.
   let pendingAddedBindings: {gadgetId: WorkpieceId, name: string, target: WorkpieceId}[] = [];
 
-  // The pinned base commit of every worktree in the session, keyed by worktree id: recorded by
-  // createWorktree (live and replay) and by pin establishment, and consulted by the worktree
-  // read paths -- a worktree's session content holds only touched/read files, and a path absent
-  // from it is resolved lazily against this base (hooks.readFileAtCommit). Cleared with the
-  // pins at an epoch boundary and immediately re-established from the merge message's
-  // `worktreePins` -- the epoch reset auto-commits dirty worktrees and re-pins at the result,
-  // so content carries across an accept (see mergeChanges in overseer.ts).
+  // The pinned base commit of every worktree pinned in the session's current epoch, keyed by
+  // worktree id -- exactly the worktrees in `pinnedGadgets`: maintained by pin establishment
+  // (replayed declarations and this turn's first modifications) and cleared with the pins at an
+  // epoch boundary. Worktrees pin on first modification like gadgets, so an unpinned worktree
+  // has no entry here and resolves against its accepted commit instead (see worktreeBase).
   let worktreePinBases = new Map<WorkpieceId, string>();
+
+  // The base commit a worktree's untouched paths resolve against -- a worktree's session
+  // content holds only touched/read files, and a path absent from it is read lazily from this
+  // commit (hooks.readFileAtCommit): the chat pin's base while the worktree is pinned in this
+  // session, else its accepted commit, the commit the first modification will pin it at (the
+  // same commit either way; see WorktreeRecord.pinBase). Undefined for anything that is not a
+  // worktree. The pinned case must win: during replay of a closed epoch the pin's base is that
+  // epoch's, while the record already holds a later accept's.
+  let worktreeBase = (id: WorkpieceId): string | undefined =>
+      worktreePinBases.get(id) ?? hooks.getWorktreePinBase(id);
+
+  // The commit an unpinned workpiece's first modification pins it at, and that its unpinned
+  // reads observe: a gadget's head, a worktree's accepted commit. Undefined for a gadget with
+  // no committed code (its content lives only in the session) and for ids that don't resolve.
+  let unpinnedBase = (id: WorkpieceId): string | undefined =>
+      hooks.getGadgetHead(id) ?? hooks.getWorktreePinBase(id);
+
+  // The in-memory half of a worktree's first-modification pin. The barrier establishes the chat
+  // pin for every worktree the step's rows or commits touch that the chat holds none for, at
+  // the accepted commit -- the only base it can have (see commitAgentStep in overseer.ts) -- so
+  // the turn merely records that the worktree is now pinned, at that same commit, for the read
+  // paths: from here on its reads are session-served and unstamped, and later writes and
+  // commits in the step pin nothing further.
+  let pinWorktreeInSession = (id: WorkpieceId) => {
+    if (pinnedGadgets.has(id)) return;
+    let base = hooks.getWorktreePinBase(id);
+    if (base === undefined) return;
+    worktreePinBases.set(id, base);
+    pinnedGadgets.add(id);
+    if (!sessionContent.has(id)) {
+      sessionContent = new Map(sessionContent);
+      sessionContent.set(id, new Map());
+    }
+  };
 
   // Worktree paths whose latest change-stream entry is a `remove`. A worktree's session content
   // holds only touched paths, so a removed path and a never-touched one are both absent from the
@@ -1276,11 +1349,12 @@ export async function runAgent(
   // Lazily reads a worktree file's base text into the session content, so later edits (and
   // replayed changes) apply against it exactly as if the base tree had been materialized.
   // Returns undefined for a path absent from the base; throws readFileAtCommit's descriptive
-  // errors (symlink/submodule/oversized/binary/pull failure). No-ops for unpinned worktrees.
+  // errors (symlink/submodule/oversized/binary/pull failure). No-ops for anything that is not a
+  // worktree.
   let faultWorktreeBase = async (worktreeId: WorkpieceId, filename: string)
       : Promise<string | undefined> => {
-    let base = worktreePinBases.get(worktreeId);
-    if (base === undefined || !pinnedGadgets.has(worktreeId)) return undefined;
+    let base = worktreeBase(worktreeId);
+    if (base === undefined) return undefined;
     let text = await hooks.readFileAtCommit(base, filename);
     if (text === undefined) return undefined;
     sessionContent = new Map(sessionContent);
@@ -1338,49 +1412,63 @@ export async function runAgent(
   // Applies a replayed change to the session content, optionally rendering the change as unified
   // diffs for the model (used to surface user edits as observeUserChanges results). Changes make
   // the changed paths and contents directly visible, so the diff is computed from the change's own
-  // before/after values. Diffs are grouped by gadget: each gadget with changes contributes a
-  // heading line naming it (unified diff format tolerates metadata between files, and this
-  // output only needs to be understandable to the model, not valid `patch` input), followed by
-  // its files' diffs with bare filenames. A gadget with no in-scope binding gets no diff output:
-  // the agent can't reference it, so a diff would only confuse it.
+  // before/after values. Diffs are grouped by workpiece: each one with changes contributes a
+  // heading line naming it by its env name -- the name the model addresses it by (unified diff
+  // format tolerates metadata between files, and this output only needs to be understandable to
+  // the model, not valid `patch` input) -- followed by its files' diffs with bare filenames. A
+  // workpiece with no in-scope binding gets no diff output: the agent can't reference it, so a
+  // diff would only confuse it.
+  //
+  // A deletion is reported as its file header alone (`--- a/path` / `+++ /dev/null`, the same
+  // header a deleted empty file gets, plus a note that the contents were omitted), never by
+  // quoting the file: the model can't act on text that no longer exists, so those tokens would
+  // be wasted. That also means a deletion needs no base text -- only whether there was a file to
+  // delete, which for an entry rooted at a base commit (sparse: untouched paths are absent from
+  // the map) is "not already removed", and for a complete entry is "present in the map". (A
+  // `set` of a base path a sparse entry hasn't loaded renders as an addition, since the previous
+  // text isn't at hand; the shipped clients emit `set` only for new or re-created files, so this
+  // is cosmetic and left alone.)
   let applyReplayedChange = (change: CodeChange, includeDiff: boolean): string | undefined => {
     let before = sessionContent;
     sessionContent = applyCodeChange(sessionContent, change);
-    noteWorktreeRemovals(change);
-    if (!includeDiff) return;
 
     let diffParts: string[] = [];
-    for (let info of gadgetInfos) {
-      let entries = change[info.id];
-      if (entries === undefined) continue;
-      let envName = chatNameFor(info.id);
+    for (let [key, entries] of includeDiff ? Object.entries(change) : []) {
+      let id = Number(key);
+      let envName = chatNameFor(id);
       if (envName === undefined) continue;
 
-      let gadgetDiffParts: string[] = [];
-      for (let [filename] of [...entries].toSorted((a, b) => a[0] < b[0] ? -1 : 1)) {
+      let fileDiffParts: string[] = [];
+      for (let [filename, fileChange] of [...entries].toSorted((a, b) => a[0] < b[0] ? -1 : 1)) {
         // Blindfold: prompt-file edits apply to session state (reverts stay correct) but
         // never render into the model-visible diff.
         if (isPromptFileAnywhere(filename)) continue;
-        let oldContent = before.get(info.id)?.get(filename);
-        let newContent = sessionContent.get(info.id)?.get(filename);
+        let oldContent = before.get(id)?.get(filename);
+        if ("remove" in fileChange) {
+          let existed = oldContent !== undefined ||
+              (worktreeBase(id) !== undefined && !worktreeRemovedPaths.get(id)?.has(filename));
+          if (existed) {
+            fileDiffParts.push(
+                `${formatUnifiedDiff(filename, "", "", true, false)}\n` +
+                `(file deleted; former contents omitted)`);
+          }
+          continue;
+        }
+        let newContent = sessionContent.get(id)?.get(filename);
         if (oldContent === newContent) continue;
         let diff = formatUnifiedDiff(
-            filename,
-            oldContent ?? "",
-            newContent ?? "",
-            oldContent !== undefined,
-            newContent !== undefined);
+            filename, oldContent ?? "", newContent ?? "", oldContent !== undefined, true);
         if (diff) {
-          gadgetDiffParts.push(diff);
+          fileDiffParts.push(diff);
         }
       }
 
-      if (gadgetDiffParts.length > 0) {
-        diffParts.push(
-            `==== Gadget env.${envName}: ${JSON.stringify(info.title)} ====`,
-            ...gadgetDiffParts);
+      if (fileDiffParts.length > 0) {
+        diffParts.push(`==== env.${envName} ====`, ...fileDiffParts);
       }
     }
+    // After the loop: the "already removed" test above asks about the state before this change.
+    noteWorktreeRemovals(change);
 
     if (diffParts.length > 0) {
       return diffParts.join("\n");
@@ -1395,18 +1483,53 @@ export async function runAgent(
   // tool-call message).
   let pendingReplayEdits: ReplayPendingEdit[] = [];
 
-  // Track which files have been read in this session, per workpiece by filename. Edits
-  // aren't allowed before reading. The value is the commit an unpinned read observed
-  // (AiToolCall.observedCommit), or undefined for reads served from the session content;
-  // editFile's gate uses it to require that the read saw the file's *current* committed content
-  // before anchoring a pin at head. Deliberately not carried across a compaction boundary: an
-  // edit has to quote the text it replaces, and a read the summary swallowed no longer tells the
-  // agent what that text is, so re-reading is both required and correct.
+  // The files the model knows the content of, per workpiece by filename: what it has read or
+  // written in this session, and so what editFile lets it edit (an edit quotes the text it
+  // replaces, so the model must have seen it). The value is the blob oid of that content when
+  // the knowledge is anchored to committed code -- an unpinned read of a gadget's head or a
+  // worktree's accepted commit (AiToolCall.observedOid) -- or undefined while it tracks the
+  // session content instead (a pinned workpiece, or a gadget with no committed code), which
+  // cannot go stale within an epoch: everything that changes it is the model's own edit or a
+  // user/mainline change shown to it as a diff. The one way knowledge goes stale is another
+  // chat's accept moving an unpinned gadget's head, and a stamp is checked against the head at
+  // the two points where it would otherwise be trusted: editFile's gate on an unpinned gadget,
+  // and the establishment of a pin (anchorKnowledgeToPin), after which reads are session-served
+  // and the gate is skipped. At an epoch boundary session-tracking entries take an oid stamp of
+  // their own (resetSessionEpoch). Deliberately not carried across a compaction boundary: a
+  // read the summary swallowed no longer tells the agent what the text is, so re-reading is
+  // both required and correct.
   let filesRead = new Map<WorkpieceId, Map<string, string | undefined>>();
-  let markFileRead = (workpieceId: WorkpieceId, filename: string, commit?: string) => {
+  let markFileRead = (workpieceId: WorkpieceId, filename: string, oid?: string) => {
     let files = filesRead.get(workpieceId);
     if (files === undefined) filesRead.set(workpieceId, files = new Map());
-    files.set(filename, commit);
+    files.set(filename, oid);
+  };
+  let unmarkFileRead = (workpieceId: WorkpieceId, filename: string) => {
+    filesRead.get(workpieceId)?.delete(filename);
+  };
+
+  // A gadget pin is where its file knowledge stops being checked against committed code (from
+  // here on reads are session-served and editFile skips the oid gate), so the stamped entries it
+  // holds are settled now, against the pin's base -- the content the session starts from. An
+  // entry whose stamp matches the file's oid there becomes session knowledge; one that doesn't
+  // is dropped, so editFile forces a re-read. Without this, a read of A made before another chat
+  // changed A, followed by a write to B that pinned at the new head, would let editFile(A)
+  // anchor to content the model never saw. Called live and in replay alike (both establish the
+  // pin at the same commit); idempotent, since a second call finds nothing stamped. Worktrees
+  // need none of this: only this chat's accept moves the commit an unpinned worktree reads at,
+  // and stamps carried across that accept are of content it committed, so a worktree's stamps
+  // always match its pin base.
+  let anchorKnowledgeToPin = async (gadgetId: WorkpieceId, baseCommit: string) => {
+    let files = filesRead.get(gadgetId);
+    if (files === undefined) return;
+    for (let [filename, stamp] of files) {
+      if (stamp === undefined) continue;
+      if (await hooks.fileOidAtCommit(baseCommit, filename) === stamp) {
+        files.set(filename, undefined);
+      } else {
+        files.delete(filename);
+      }
+    }
   };
 
   // Resolve a file tool's optional `workpiece` parameter -- the chat binding name of the target
@@ -1464,42 +1587,44 @@ export async function runAgent(
   // message) closed the chat's epoch: everything before it lives in commits from then on, the
   // content restarts empty, and gadgets re-pin lazily.
   //
-  // Read-before-edit knowledge crosses the boundary only where it re-anchors to a commit: a
-  // gadget pinned in the new epoch skips editFile's freshness gate on the strength of a
-  // filesRead entry, so every surviving entry must be byte-identical at the gadget's base when
-  // next consulted. A gadget the merge committed had its files in the chat's session (pinned,
-  // or a covered creation), so all its entries were tracking the session -- the file's
-  // evolution since each read/write was in the model's context -- and the merge committed
-  // exactly that session content: every entry re-anchors to the merge's commit. Other gadgets
-  // were unpinned (or had no net change and no commit): commit-stamped entries keep their
-  // stamps, session-served ones have nothing to anchor to and drop. The
-  // entry then survives only if the file is unchanged from its stamp to the gadget's base
-  // beyond the boundary (stampedReadBase -- the same freshness rule the stamped-read replay
-  // applies); everything else is dropped, so editFile forces a re-read. A conversion boundary
-  // passes no commits: session knowledge from the retired legacy representation has nothing to
-  // anchor to.
-  let resetSessionEpoch = async (boundarySequence: number,
-                                 mergeCommits?: Map<WorkpieceId, string>) => {
+  // The model's file knowledge (filesRead) survives the boundary: what it knows is still true,
+  // since the accept committed exactly the session content (a merge commit, a worktree's
+  // auto-commit, or -- for a pinned workpiece with no net change -- the unchanged base). But an
+  // entry that was tracking the session content has no session to track once the content
+  // restarts, so it takes an oid stamp of the content it knows, computed from that content
+  // itself (blobOid): from here on it is knowledge of committed code, which editFile's gate
+  // checks against the head it is about to pin at, exactly like an unpinned read's. An entry
+  // whose file is absent from the session content (removed, or -- at a conversion boundary --
+  // from the retired legacy representation, which leaves no session content) is dropped, so
+  // editFile forces a re-read.
+  //
+  // A stamped entry normally carries over untouched: its workpiece was unpinned (a pinned
+  // gadget's stamps were settled by anchorKnowledgeToPin), so the session holds nothing of the
+  // file and the stamp is as true after the accept as before. The exception is a worktree,
+  // whose stamps are never settled at its pin: a *user* edit of a file the model read unpinned
+  // lands in the session content while the entry keeps the pre-edit stamp (the model's own
+  // edits re-mark the entry as session knowledge; a user's, shown to it as a diff, do not). The
+  // accept commits that edited content, so the entry is restamped from it like a
+  // session-tracking one -- else the next epoch's gate would refuse the edit as stale content
+  // the model in fact saw. A stamped path the session removed is dropped the same way.
+  let resetSessionEpoch = async () => {
+    for (let [workpieceId, files] of filesRead) {
+      let content = sessionContent.get(workpieceId);
+      let removed = worktreeRemovedPaths.get(workpieceId);
+      for (let [filename, stamp] of files) {
+        let text = content?.get(filename);
+        if (text !== undefined) {
+          files.set(filename, await blobOid(text));
+        } else if (stamp === undefined || removed?.has(filename)) {
+          files.delete(filename);
+        }
+      }
+    }
     sessionContent = new Map();
     pinnedGadgets.clear();
     worktreePinBases.clear();
     worktreeRemovedPaths.clear();
     pendingReplayEdits = [];
-    let survivors = new Map<WorkpieceId, Map<string, string | undefined>>();
-    for (let [workpieceId, files] of filesRead) {
-      let base = stampedReadBase(workpieceId, boundarySequence);
-      if (base === undefined) continue;
-      let mergeCommit = mergeCommits?.get(workpieceId);
-      for (let [filename, observed] of files) {
-        let stamp = mergeCommit ?? observed;
-        if (stamp === undefined) continue;
-        if ((await changedPaths(stamp, base)).has(filename)) continue;
-        let target = survivors.get(workpieceId);
-        if (target === undefined) survivors.set(workpieceId, target = new Map());
-        target.set(filename, stamp);
-      }
-    }
-    filesRead = survivors;
   };
 
   // Establishes a pin's base tree in the session content during replay and marks the gadget
@@ -1523,15 +1648,17 @@ export async function runAgent(
     sessionContent = new Map(sessionContent);
     sessionContent.set(pin.gadgetId, files);
     pinnedGadgets.add(pin.gadgetId);
+    await anchorKnowledgeToPin(pin.gadgetId, pin.baseCommit);
   };
 
-  // Ensures the session content holds a base for a replayed write's target gadget. The pin
-  // declaration itself rides the write's step's "changes" message -- recorded after the tool
-  // step's own message -- but replayed reads between the two need the pinned base in the
-  // content. Establishing early from the upcoming declaration is safe because establishment is
-  // idempotent (above). Cases by what the log holds after `sequence` (a persisted write implies
-  // its step's "changes" message -- they share the barrier's transaction -- so one of these
-  // always follows):
+  // Ensures the session content holds a base for a replayed write's target workpiece -- or, for
+  // a worktree, a replayed session-served read's: a worktree's pin base fixes which commit its
+  // lazy reads resolve against, and a commit() pins with no write at all. The pin declaration
+  // itself rides the step's "changes" message -- recorded after the tool step's own message --
+  // but replayed reads between the two need the pinned base in the content. Establishing early
+  // from the upcoming declaration is safe because establishment is idempotent (above). Cases by
+  // what the log holds after `sequence` (a persisted write implies its step's "changes" message
+  // -- they share the barrier's transaction -- so one of these always follows a write):
   // - an upcoming surviving declaration: establish from it now;
   // - a *reverted* declaration: do nothing -- the range's reads are elided and its pending
   //   edits are discharged by the (reverted) "changes" message, so the base is never needed;
@@ -1539,13 +1666,15 @@ export async function runAgent(
   //   pending edits and what a live write's pin would have ridden) with *no* declaration: the
   //   write was made while the gadget had no committed code -- it was still pending in this
   //   chat, its content built up from its own changes -- and the head seen now is its later
-  //   promotion. Nothing to establish.
+  //   promotion. Nothing to establish. (For a worktree read, this and the case below mean the
+  //   worktree was unpinned at the time and stays so: the read resolves against its accepted
+  //   commit.)
   // (Nothing at all would mean a log from before the barrier existed, whose turn crashed
   // between the write and its flush; that stranded-tail tolerance is gone, so the write's
   // effects are simply absent and reads of them surface as replayed errors.)
   let ensureReplayContentForWrite = async (workpieceId: WorkpieceId, sequence: number) => {
     if (pinnedGadgets.has(workpieceId)) return;
-    if (hooks.getGadgetHead(workpieceId) === undefined) return;  // no committed code
+    if (unpinnedBase(workpieceId) === undefined) return;  // no committed code
 
     let upcoming: ChatGadgetPin | "reverted" | "flushed-unpinned" | undefined;
     for (let msg of chatMessages) {
@@ -1567,29 +1696,6 @@ export async function runAgent(
       return;
     }
     await applyReplayedPin(upcoming);
-  };
-
-  // The base commit-anchored knowledge from before `afterSequence` must match to still be
-  // current: the base of the gadget's next surviving pin declaration after that point, else
-  // (never pinned since) the pin of the chat's live code base -- established by
-  // not-yet-materialized user rows, so declared nowhere yet -- else the live head. The next
-  // *pin* rather than the final head because a pin is where the model's belief chain re-roots:
-  // from the pin on, the file's evolution is in the model's own context (its edits, user-change
-  // diffs, revert notes), so knowledge that matches the pin base stays current through it (and
-  // across an epoch boundary, where resetSessionEpoch re-anchors it to the merge's commit).
-  // Between the knowledge and that pin the gadget was unpinned -- tracking head, with nothing
-  // chat-local in between -- so a plain per-file comparison is exactly the freshness question.
-  let stampedReadBase = (workpieceId: WorkpieceId, afterSequence: number): string | undefined => {
-    for (let msg of chatMessages) {
-      if (msg.sequence <= afterSequence || msg.type !== "changes") continue;
-      if (chatMessageStatus.get(msg.sequence) === "reverted") continue;
-      let pin = (msg.pins ?? []).find(p => p.gadgetId === workpieceId);
-      if (pin !== undefined) return pin.baseCommit;
-    }
-    for (let pin of hooks.getChatCodeBase(chatId)?.pins ?? []) {
-      if (pin.gadgetId === workpieceId) return pin.baseCommit;
-    }
-    return hooks.getGadgetHead(workpieceId);
   };
 
   // We compute sequential change ID numbers for the purpose of telling the LLM about reverts.
@@ -1818,38 +1924,26 @@ export async function runAgent(
                           "current content.",
                       isError: true,
                     };
-                  } else if (toolCall.observedCommit !== undefined) {
+                  } else if (toolCall.observedOid !== undefined ||
+                             toolCall.observedCommit !== undefined) {
                     // The read was served from committed code (the workpiece was unpinned; see
-                    // the live tool). If the file has since changed relative to the base the
-                    // read's knowledge next reaches (stampedReadBase -- the next pin if the
-                    // gadget pinned after the read, since from there the file's evolution is in
-                    // the model's own context), its memory of it is stale: elide the content
-                    // and direct the agent to re-read. The file stays out of filesRead, so
-                    // editFile's gate rejects edits anchored to the elided read too.
+                    // the live tool): reproduce exactly the text the model saw, from the blob
+                    // the read stamped -- whatever the commit holds now. Deliberately no
+                    // staleness check: the model's context must not change from one turn to
+                    // the next on account of other chats' accepts (that breaks prompt caching
+                    // and reasoning continuity), and the stamp already lets editFile refuse an
+                    // edit anchored to content that has since changed. (Reads stamped with a
+                    // commit predate oid stamps; the blob is looked up by path there.)
                     let {workpieceId} = hooks.resolveWorkpieceRoot(
                         resolveToolWorkpieceId(toolCall.input.workpiece));
-                    let base = stampedReadBase(workpieceId, msg.sequence);
-                    let stale = base === undefined ||
-                        (await changedPaths(toolCall.observedCommit, base))
-                            .has(toolCall.input.filename);
-                    if (stale) {
-                      toolOutput = {
-                        text: "This call succeeded when the agent first invoked it, but " +
-                            "the results have been elided from the chat history because " +
-                            "the file has since changed. Re-read the file to see its " +
-                            "current content.",
-                        isError: true,
-                      };
-                    } else {
-                      let value = (await hooks.readCommitFiles(toolCall.observedCommit))
-                          .get(toolCall.input.filename);
-                      if (value === undefined) {
-                        throw new Error("File missing from its observed commit.");
-                      }
-                      toolOutput = {text: value};
-                      markFileRead(workpieceId, toolCall.input.filename,
-                                   toolCall.observedCommit);
+                    let oid = toolCall.observedOid ??
+                        await hooks.fileOidAtCommit(toolCall.observedCommit!,
+                                                    toolCall.input.filename);
+                    if (oid === undefined) {
+                      throw new Error("File missing from its observed commit.");
                     }
+                    toolOutput = {text: await hooks.readBlobText(oid, toolCall.input.filename)};
+                    markFileRead(workpieceId, toolCall.input.filename, oid);
                   } else {
                     let {workpieceId} =
                         hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(toolCall.input.workpiece));
@@ -1859,7 +1953,13 @@ export async function runAgent(
                     // advances only when the step's "changes" message's change applies, so
                     // reads between an edit and that message replay the edits against the
                     // string. Worktree paths absent from the (lazy) session content resolve
-                    // against the pinned base, exactly as the live tool resolves them.
+                    // against the pinned base, exactly as the live tool resolves them -- so a
+                    // worktree the live turn had pinned earlier in this step (by a write, or a
+                    // commit() inside executeCode, whose replay re-runs nothing) is pinned
+                    // here first, from the step's upcoming declaration.
+                    if (hooks.isWorktree(workpieceId)) {
+                      await ensureReplayContentForWrite(workpieceId, msg.sequence);
+                    }
                     let value: string | null =
                         sessionContent.get(workpieceId)?.get(toolCall.input.filename) ??
                         await faultWorktreeBase(workpieceId, toolCall.input.filename) ?? null;
@@ -1889,7 +1989,14 @@ export async function runAgent(
                     content: toolCall.input.content,
                   });
                   toolOutput = {text: jsonToolResultText({success: true, changeId: nextChangeId})};
-                  markFileRead(workpieceId, toolCall.input.filename);
+                  // A write leaves the agent knowing the file's exact content -- unless the user
+                  // reverted it: the file is then back to content the model never saw (its
+                  // reads in the range are elided too), so the write un-marks rather than marks.
+                  if (chatMessageStatus.get(msg.sequence) === "reverted") {
+                    unmarkFileRead(workpieceId, toolCall.input.filename);
+                  } else {
+                    markFileRead(workpieceId, toolCall.input.filename);
+                  }
                   break;
                 }
                 case "editFile": {
@@ -1906,8 +2013,13 @@ export async function runAgent(
                   toolOutput = {text: jsonToolResultText({success: true, changeId: nextChangeId})};
                   // Like writeFile: a successful edit leaves the agent knowing the file's exact
                   // resulting content (the gate guaranteed the before-content, and the edit is
-                  // its own), so it counts as session knowledge for further edits.
-                  markFileRead(workpieceId, toolCall.input.filename);
+                  // its own), so it counts as session knowledge for further edits -- unless
+                  // reverted.
+                  if (chatMessageStatus.get(msg.sequence) === "reverted") {
+                    unmarkFileRead(workpieceId, toolCall.input.filename);
+                  } else {
+                    markFileRead(workpieceId, toolCall.input.filename);
+                  }
                   break;
                 }
                 case "describeBinding":
@@ -1951,20 +2063,15 @@ export async function runAgent(
                 }
                 case "createWorktree": {
                   // Like createGadget: a creation tool can't re-run, so replay returns the
-                  // recorded result. The worktree is pinned from birth; the recorded baseCommit
-                  // (not the input, which may be a prefix) serves lazy base reads until the
-                  // step's own "changes" message re-establishes the pin from the log.
+                  // recorded result. The worktree starts unpinned; a pin the step went on to
+                  // establish (or, in logs from before worktrees pinned on modification, the
+                  // birth pin) is declared on the step's "changes" message, and the reads and
+                  // writes between here and there establish it early from that declaration.
                   if (toolCall.output === undefined) {
                     throw new Error("createWorktree tool call in log is missing its result");
                   }
                   chatBindings.set(toolCall.input.bindingName,
                       {type: "workpiece", id: toolCall.output.worktreeId});
-                  worktreePinBases.set(toolCall.output.worktreeId, toolCall.output.baseCommit);
-                  pinnedGadgets.add(toolCall.output.worktreeId);
-                  if (!sessionContent.has(toolCall.output.worktreeId)) {
-                    sessionContent = new Map(sessionContent);
-                    sessionContent.set(toolCall.output.worktreeId, new Map());
-                  }
                   toolOutput = {text: jsonToolResultText(toolCall.output)};
                   break;
                 }
@@ -2055,8 +2162,10 @@ export async function runAgent(
         // converted content, not the boundary): pre-conversion writes leave pendingReplayEdits
         // that no pre-conversion message discharges (none carries a change or watermark), and they
         // must not leak into the post-boundary epoch. The pre-boundary log contributes no changes
-        // or pins, so the rest of the reset is a no-op either way.
-        if (msg.conversionBoundary) await resetSessionEpoch(msg.sequence);
+        // or pins, so the rest of the reset is a no-op either way (pre-conversion writes marked
+        // files read, but with no session content to stamp them from they drop, as they must:
+        // the converted content is not what those writes produced).
+        if (msg.conversionBoundary) await resetSessionEpoch();
 
         if (chatMessageStatus.get(msg.sequence) !== "reverted") {
           // Pins this batch establishes enter the content before the change applies (a no-op for
@@ -2069,12 +2178,13 @@ export async function runAgent(
           // are still surfaced as observations below. A conversion boundary's change is not user
           // activity -- it re-records content from before the boundary, which the model already
           // saw (or wrote) -- so it applies without an observation.
-          if (msg.change !== undefined) await seedWorktreeBasesForChange(msg.change);
-          let diff = msg.change !== undefined
-              ? applyReplayedChange(
-                  msg.change, msg.author.type === "user" && !msg.conversionBoundary)
-              : undefined;
-          if (msg.author.type === "user" && !msg.conversionBoundary) {
+          let isUserActivity = msg.author.type === "user" && !msg.conversionBoundary;
+          let diff: string | undefined;
+          if (msg.change !== undefined) {
+            await seedWorktreeBasesForChange(msg.change);
+            diff = applyReplayedChange(msg.change, isUserActivity);
+          }
+          if (isUserActivity) {
             // Surface everything the user did in this batch as one synthetic observation:
             // gadgets they created and bindings they added from the workspace UI
             // (agent-initiated creations/additions need no note -- the model already sees its
@@ -2134,18 +2244,13 @@ export async function runAgent(
 
       case "merge":
         // Nothing to tell the agent, but a boundary merge closed the chat's epoch: the session
-        // content restarts empty, later pins re-seed lazily, and read-before-edit knowledge
-        // re-anchors to the merge's commits (see resetSessionEpoch) -- for a worktree, to its
-        // re-pin base, whose tree is by construction the chat's content at the reset, so
-        // session-served worktree reads survive the boundary byte-accurately.
+        // content restarts empty, later pins re-seed lazily, and the model's file knowledge
+        // becomes knowledge of committed code (see resetSessionEpoch).
         if (msg.epochBoundary) {
-          await resetSessionEpoch(msg.sequence, new Map<WorkpieceId, string>([
-            ...msg.commits.map(c => [c.gadgetId, c.commitId] as const),
-            ...(msg.worktreePins ?? []).map(p => [p.worktreeId, p.baseCommit] as const),
-          ]));
-          // Worktree pins re-establish immediately from the merge message (the durable record
-          // of the epoch reset's re-pins; see AiChatMessageBody.worktreePins) rather than
-          // lazily -- worktrees have no mainline head for a later write to re-pin against.
+          await resetSessionEpoch();
+          // Merges from before worktrees pinned on modification re-pinned every worktree at
+          // the boundary and recorded it here (see AiChatMessageBody.worktreePins); those
+          // pins re-establish immediately so the epochs they root fold as written.
           for (let pin of msg.worktreePins ?? []) {
             if (hooks.isWorktree(pin.worktreeId)) {
               await applyReplayedPin({gadgetId: pin.worktreeId, baseCommit: pin.baseCommit});
@@ -2329,11 +2434,14 @@ export async function runAgent(
 
   // Buffer one file edit into the step and apply it to the session content; it becomes durable
   // (row + broadcast) only at the step's persistence barrier. The first write to an unpinned
-  // gadget with committed code pins it at the given head -- always the current head, never an
-  // older observed commit: a read that observed an older head is (or will be) elided, and a
-  // previously-elided read must not spring back to life as the anchor of a later write. The
+  // gadget with committed code pins it at the given head -- always the current head, never the
+  // head an earlier read of this turn observed: a pin at an older head would silently drop
+  // whatever another chat accepted since (editFile's gate is what stops an edit anchored to
+  // such a read; a whole-file write needs no such check). The
   // pin is validated and mirrored into the chat's code base when the barrier appends the row;
-  // within the step, later tools read the edit through the session content.
+  // within the step, later tools read the edit through the session content. The first write to
+  // an unpinned worktree pins it too, at its accepted commit, with nothing to declare (see
+  // pinWorktreeInSession).
   let appendAgentEdit = (
       workpieceId: WorkpieceId, change: CodeChange,
       pin?: {baseCommit: string, baseFiles: Map<string, string>}) => {
@@ -2360,6 +2468,7 @@ export async function runAgent(
     stepBuffer.bytes += size;
     if (pin !== undefined) pinnedGadgets.add(workpieceId);
     sessionContent = newContent;
+    pinWorktreeInSession(workpieceId);
     noteWorktreeRemovals(change);
   };
 
@@ -2375,7 +2484,7 @@ export async function runAgent(
   // consistent worktree. Passed to executeCodeMode, which serves it to the chat's worktree env
   // bindings for the duration of each execution.
   let worktreeTurnAccess: WorktreeTurnAccess = {
-    getPinBase: id => pinnedGadgets.has(id) ? worktreePinBases.get(id) : undefined,
+    getBaseCommit: worktreeBase,
     getBufferedHead: id =>
         pendingWorktreeCommits.findLast(entry => entry.worktreeId === id)?.commit,
     getOverlayFiles: id => sessionContent.get(id) ?? new Map(),
@@ -2388,8 +2497,10 @@ export async function runAgent(
       // editFile's gate, exactly as the writeFile tool records its own writes.
       if (!("remove" in change)) markFileRead(id, path);
     },
-    appendCommit: (id, commit, previousHead) =>
-        pendingWorktreeCommits.push({worktreeId: id, commit, previousHead}),
+    appendCommit: (id, commit, previousHead) => {
+      pendingWorktreeCommits.push({worktreeId: id, commit, previousHead});
+      pinWorktreeInSession(id);
+    },
   };
 
   let emitStreamEvent = (event: AiChatStreamEvent) => {
@@ -2397,16 +2508,7 @@ export async function runAgent(
   };
   let codePreviewManager = new CodePreviewManager(
       emitStreamEvent,
-      workpiece => {
-        let resolved = hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId);
-        if (hooks.isWorktree(resolved.workpieceId)) {
-          // Worktree content never reaches clients (it is stripped from every delivery), so a
-          // streamed edit preview must not carry it either; an unresolvable target shows no
-          // preview (see CodePreviewManager).
-          throw new Error("worktree edits are not previewed");
-        }
-        return resolved;
-      });
+      workpiece => hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId));
   let executeCodeStreamManager = new ExecuteCodeStreamManager(emitStreamEvent);
 
   // Deployment-wide admin instructions, appended to the static system slot (slot 0) so they stay
@@ -2583,7 +2685,7 @@ export async function runAgent(
 
   // Some models charge their response to the same window as the prompt, so the reservation is both
   // withheld from the prompt's budget and sent as the response cap -- the two can't disagree.
-  let {inputBudget, maxOutputTokens} = getModelTokenLimits(compaction.modelConfig);
+  let {inputBudget, maxOutputTokens} = getModelTokenLimits(modelConfig);
 
   let projection: CompactionProjectionMessage[] = modelMessages.map((message, index) => ({
     message, ...modelMessageSources[index],
@@ -2593,8 +2695,8 @@ export async function runAgent(
   // `measuredTokens` covers the prompt and response of the last model step, so estimate only what
   // was added after it. A tool result carries the call's sequence but wasn't in that usage.
   // (The system prompt is not part of the projection, so the pure estimate adds it separately.)
-  let contextTokens = compaction.measuredTokens > 0 && lastMeasuredSequence !== undefined
-    ? compaction.measuredTokens + estimateProjectionTokens(
+  let contextTokens = measuredTokens > 0 && lastMeasuredSequence !== undefined
+    ? measuredTokens + estimateProjectionTokens(
         projection.filter(({message, sequence}) => sequence !== undefined &&
           (sequence > lastMeasuredSequence ||
            (sequence === lastMeasuredSequence && message.role === "toolResult"))))
@@ -2627,7 +2729,7 @@ export async function runAgent(
         // An empty summary would discard the compacted history, so keep the history instead.
         if (!summary) throw new Error("Compaction produced an empty summary.");
 
-        return {
+        let compacted: CompactionCheckpoint = {
           chatId,
           compactedTo,
           summary,
@@ -2640,6 +2742,7 @@ export async function runAgent(
               ]),
               checkpoint),
         };
+        return {type: "compacted", checkpoint: compacted};
       } catch (error) {
         // Compaction triggers below the limit, so the turn's own prompt still fits and a failed
         // summary must not fail the turn. Cancellation and an explicit `/compact` do surface.
@@ -2658,7 +2761,7 @@ export async function runAgent(
     }
   }
   // `/compact` ends the turn whether or not the boundary could advance; the model is never prompted.
-  if (compactionTurn) return;
+  if (compactionTurn) return {type: "finished"};
 
   // Wraps a plain-text tool result (the exact text the model sees) with optional recorded notes
   // (see AiToolCall: observedCodeVersion, recorded output) riding along as pi `details` for the
@@ -2701,20 +2804,23 @@ export async function runAgent(
             throw new Error("File does not exist.");
           }
 
-          // An unpinned gadget with committed code is read live at its head (fixed for the
-          // turn; see observeHead), stamping the commit so replay can detect staleness and
-          // elide. Pinned gadgets -- and gadgets with no committed code, whose files exist
+          // An unpinned workpiece with committed code is read live at its base -- a gadget's
+          // head (fixed for the turn; see observeHead) or a worktree's accepted commit -- by
+          // path, never by materializing the tree, and stamped with the blob's oid: replay
+          // reproduces the text from it, and editFile compares it against the file at the head
+          // it pins. Pinned workpieces -- and gadgets with no committed code, whose files exist
           // only in the chat's change stream -- read from the session content, unstamped: it is
           // never stale within an epoch.
           if (!pinnedGadgets.has(resolved.workpieceId)) {
-            let head = observeHead(resolved.workpieceId);
-            if (head !== undefined) {
-              let fileContent = (await hooks.readCommitFiles(head)).get(filename);
-              if (fileContent === undefined) {
+            let base = observeHead(resolved.workpieceId) ??
+                hooks.getWorktreePinBase(resolved.workpieceId);
+            if (base !== undefined) {
+              let file = await hooks.readFileAtCommitWithOid(base, filename);
+              if (file === undefined) {
                 throw new Error("File does not exist.");
               }
-              markFileRead(resolved.workpieceId, filename, head);
-              return toolResult(fileContent, {observedCommit: head});
+              markFileRead(resolved.workpieceId, filename, file.oid);
+              return toolResult(file.text, {observedOid: file.oid});
             }
           }
 
@@ -2761,22 +2867,25 @@ export async function runAgent(
           // write could never commit (a whole-file write needs no readable *content*, so this
           // is the one base check the set path makes). A removed path is a new file: the base
           // entry it displaced is already gone, so no check applies.
-          let worktreeBase = worktreePinBases.get(resolved.workpieceId);
-          if (worktreeBase !== undefined && pinnedGadgets.has(resolved.workpieceId) &&
+          let base = worktreeBase(resolved.workpieceId);
+          if (base !== undefined &&
               !sessionContent.get(resolved.workpieceId)?.has(filename) &&
               !worktreeRemovedPaths.get(resolved.workpieceId)?.has(filename)) {
-            await hooks.assertWorktreePathWritable(worktreeBase, filename);
+            await hooks.assertWorktreePathWritable(base, filename);
           }
 
           // The first write to an unpinned gadget with committed code pins it at the current
-          // head (a whole-file overwrite is coherent against any base, so no read gate here).
-          // Gadgets with no committed code stay unpinned; their content builds up from changes.
-          // (Worktrees never take this branch: they are pinned from birth.)
+          // head (a whole-file overwrite is coherent against any base, so no read gate here --
+          // but the gadget's *other* stamped reads are settled against that head now, see
+          // anchorKnowledgeToPin). Gadgets with no committed code stay unpinned; their content
+          // builds up from changes. (A worktree's first-write pin needs no declaration;
+          // appendAgentEdit handles it.)
           let pin: {baseCommit: string, baseFiles: Map<string, string>} | undefined;
           if (!pinnedGadgets.has(resolved.workpieceId)) {
             let head = hooks.getGadgetHead(resolved.workpieceId);
             if (head !== undefined) {
               pin = {baseCommit: head, baseFiles: await hooks.readCommitFiles(head)};
+              await anchorKnowledgeToPin(resolved.workpieceId, head);
             }
           }
 
@@ -2833,29 +2942,39 @@ export async function runAgent(
           }
 
           // The first edit to an unpinned gadget with committed code pins it at the *current*
-          // head, so the prior read must have observed this file's content as it stands at
-          // that head -- a read of an older version (elided or not) does not satisfy the gate,
-          // even one that succeeded moments ago, because anchoring its content would silently
-          // overwrite whatever landed since.
+          // head, so the content the model knows must be this file's content as it stands at
+          // that head: the oid its knowledge is stamped with (by the unpinned read, or by the
+          // epoch reset that turned session knowledge into committed knowledge) must equal the
+          // file's oid at head. Knowledge of an older version -- another chat accepted since,
+          // even moments ago -- does not satisfy the gate, because anchoring its content would
+          // silently overwrite whatever landed. An unstamped entry (knowledge of session content
+          // the workpiece no longer has) fails the same way. The same gate guards an unpinned
+          // worktree's first edit, against its accepted commit (which pins it, with nothing to
+          // declare; see appendAgentEdit).
           let pin: {baseCommit: string, baseFiles: Map<string, string>} | undefined;
           if (!pinnedGadgets.has(resolved.workpieceId)) {
-            let head = hooks.getGadgetHead(resolved.workpieceId);
+            let head = unpinnedBase(resolved.workpieceId);
             if (head !== undefined) {
-              let observed = readFiles.get(filename);
-              if (observed === undefined ||
-                  (await changedPaths(observed, head)).has(filename)) {
+              let known = readFiles.get(filename);
+              if (known === undefined ||
+                  await hooks.fileOidAtCommit(head, filename) !== known) {
                 throw new Error("The file's committed content has changed since you read it. " +
                     "Re-read the file and try again.");
               }
-              pin = {baseCommit: head, baseFiles: await hooks.readCommitFiles(head)};
+              if (!hooks.isWorktree(resolved.workpieceId)) {
+                pin = {baseCommit: head, baseFiles: await hooks.readCommitFiles(head)};
+                // This file passed the gate; the gadget's other stamped reads are settled here.
+                await anchorKnowledgeToPin(resolved.workpieceId, head);
+              }
             }
           }
 
           // Compute the edit against the file as the agent sees it (the pinned base's content
           // when this edit establishes the pin -- byte-identical to what the read observed, per
-          // the gate above). The matched span becomes the change directly -- no diffing --
-          // and replaceSpanChange trims the unchanged disambiguation context the model padded
-          // textToReplace with, so the change reports only the text that actually changed.
+          // the gate above; for a worktree, the accepted commit's, read by path). The matched
+          // span becomes the change directly -- no diffing -- and replaceSpanChange trims the
+          // unchanged disambiguation context the model padded textToReplace with, so the
+          // change reports only the text that actually changed.
           let before = pin !== undefined
               ? pin.baseFiles.get(filename)
               : sessionContent.get(resolved.workpieceId)?.get(filename) ??
@@ -3148,19 +3267,15 @@ export async function runAgent(
 
           // Like createGadget: the registry record (chat-private) is created immediately -- this
           // is also where the commit reference resolves and, for gatekeeper-known commits, the
-          // initial pull happens -- but the creation is *recorded* (and the record
-          // sequence-stamped, and the birth pin established) by the step's "changes" message at
-          // the barrier. A step that dies first leaves an unstamped orphan for reconciliation.
+          // initial pull happens -- but the creation is *recorded* (and the record made
+          // permanent) by the step's "changes" message at the barrier. A step that dies first
+          // leaves an unstamped orphan for reconciliation. The new worktree is unpinned:
+          // reads resolve lazily against its base commit (its accepted commit) until the first
+          // write or commit() pins it.
           let created = await hooks.createWorktree(title, chatId, commitId);
           pendingCreatedWorktrees.push(
               {worktreeId: created.id, title: created.title, bindingName});
           chatBindings.set(bindingName, {type: "workpiece", id: created.id});
-
-          // The worktree is born pinned at its base; session reads resolve lazily against it.
-          worktreePinBases.set(created.id, created.baseCommit);
-          pinnedGadgets.add(created.id);
-          sessionContent = new Map(sessionContent);
-          sessionContent.set(created.id, new Map());
 
           // Report the batch's change ID like the other creation/edit tools, and the resolved
           // full commit id (the input may have been a prefix). Recorded as the tool's output for
@@ -3346,8 +3461,9 @@ export async function runAgent(
   // failed turn is persisted.
   let turnFailure: {message: string} | undefined;
 
-  // Turn cap, replacing the old stepCountIs(30).
-  let turnCount = 0;
+  // Set after the persistence barrier when another provider request would cross the preferred
+  // compaction budget. The caller reloads durable history before doing any more model work.
+  let reloadForCompaction = false;
 
   // The awaited event sink driving both the client stream fan-out and the persistence barrier.
   let emit = async (event: AgentEvent): Promise<void> => {
@@ -3550,7 +3666,7 @@ export async function runAgent(
     logger.warn("agent turn skipped: history ends with a completed assistant message", {
       event: "agent.turn.skipped", chatId,
     });
-    return undefined;
+    return {type: "finished"};
   }
 
   let context: AgentContext = {
@@ -3571,20 +3687,41 @@ export async function runAgent(
     // makeHandle's per-API defaults in its options merge (notably openai-responses' medium).
     ...(options.reasoningEffort !== undefined
         ? {reasoningEffort: options.reasoningEffort} : {}),
-    shouldStopAfterTurn: () =>
-        // Cancelled during tool execution: the completed turn was persisted by the turn_end
-        // barrier just above; don't start another (doomed) model request.
-        abortSignal.aborted ||
-        // Hard cap on turns, as before.
-        ++turnCount >= 30 ||
-        // End the turn once the agent has successfully requested a connection: it must wait
-        // for the user to respond, not keep reasoning in the meantime. (Accept resumes it on a
-        // fresh turn; deny just leaves the turn ended.) A rejected requestConnection (e.g.
-        // unresolvable resource) leaves this false so the agent can fix the request and retry
-        // in the same turn.
-        connectionRequested ||
-        // Wait for approval before continuing against state that may not reflect the action.
-        awaitingActionDecision,
+    shouldStopAfterTurn: ({message, toolResults}) => {
+      // The stop reasons that end the turn come first: a compaction reload must not resume work
+      // that one of them ended.
+      if (
+          // Cancelled during tool execution: the completed turn was persisted by the turn_end
+          // barrier just above; don't start another (doomed) model request.
+          abortSignal.aborted ||
+          // End the turn once the agent has successfully requested a connection: it must wait
+          // for the user to respond, not keep reasoning in the meantime. (Accept resumes it on a
+          // fresh turn; deny just leaves the turn ended.) A rejected requestConnection (e.g.
+          // unresolvable resource) leaves this false so the agent can fix the request and retry
+          // in the same turn.
+          connectionRequested ||
+          // Wait for approval before continuing against state that may not reflect the action.
+          awaitingActionDecision) {
+        return true;
+      }
+      // The model stopped on its own; there is no next request to make room for.
+      if (toolResults.length === 0) return false;
+      // Otherwise the next request is this step's measured prompt plus the tool results just
+      // produced, weighed as the model will see them (pi's `details` can carry a second copy of a
+      // large output). Without usage there is nothing to measure against, so reload: the
+      // turn-start check estimates the whole prompt, as it does for that case there.
+      let measured = message.usage.totalTokens;
+      let next = measured + estimateProjectionTokens(
+          toolResults.map(({details: _, ...message}) => ({message})));
+      if (measured <= 0 || shouldCompactChat(next, inputBudget)) {
+        reloadForCompaction = true;
+        // The rerun's fresh preview manager knows of no active file; end this one's marker here,
+        // as a non-edit tool start would, so it doesn't outlive the run on the client.
+        codePreviewManager.clearActiveFile();
+        return true;
+      }
+      return false;
+    },
   }, emit, abortSignal, handle.stream);
 
   // (No end-of-turn flush: every completed step's effects were barrier-committed with its
@@ -3604,8 +3741,7 @@ export async function runAgent(
         turnFailure.message, httpStatusFromError(turnFailure.message, handle));
   }
 
-  // The turn ran, so there is no checkpoint to report.
-  return undefined;
+  return {type: reloadForCompaction ? "reloadForCompaction" : "finished"};
 }
 
 /**

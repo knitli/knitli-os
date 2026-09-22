@@ -5,6 +5,7 @@ import type { McpCallResult, McpToolInfo } from "./types";
 export interface OpenApiPublisherSurface {
   readonly protocol: "native-openapi-facade-v1";
   readonly tools: readonly McpToolInfo[];
+  /** All references target this detached map; embedded $defs/definitions scopes are unsupported. */
   readonly defs: Readonly<Record<string, JsonSchema>>;
 }
 
@@ -20,8 +21,12 @@ function plainObject(value: unknown): value is Record<string, unknown> {
     && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 }
 
+// Bound stack usage independently of serialized size, including compact deeply nested inputs.
+const MAX_TRAVERSAL_DEPTH = 128;
+
 // Reject accessors, symbols, non-finite numbers and cycles without invoking caller code.
-function requireJson(value: unknown, ancestors = new Set<object>()): void {
+function requireJson(value: unknown, ancestors = new Set<object>(), depth = 0): void {
+  if (depth > MAX_TRAVERSAL_DEPTH) throw new Error("JSON nesting exceeds native facade limit.");
   if (value === null || typeof value === "string" || typeof value === "boolean") return;
   if (typeof value === "number" && Number.isFinite(value)) return;
   if (!Array.isArray(value) && !plainObject(value)) throw new Error("Expected plain JSON data.");
@@ -35,7 +40,7 @@ function requireJson(value: unknown, ancestors = new Set<object>()): void {
       throw new Error("Expected plain JSON properties.");
     }
     if (Array.isArray(value) && !/^(0|[1-9][0-9]*)$/.test(key)) throw new Error("Invalid JSON array.");
-    requireJson(descriptor.value, ancestors);
+    requireJson(descriptor.value, ancestors, depth + 1);
   }
   if (Array.isArray(value) && keys.length !== value.length + 1) throw new Error("Sparse JSON array.");
   ancestors.delete(value);
@@ -66,24 +71,31 @@ export function buildNativeOpenApiFacade(surface: OpenApiPublisherSurface): {
   if (surface.protocol !== "native-openapi-facade-v1") throw new Error("Unsupported facade protocol.");
   const schemas: Record<string, unknown> = {};
   const visited = new Set<string>();
-  const escape = (name: string) => name.replaceAll("~", "~0").replaceAll("/", "~1");
-  function rewrite(value: unknown): unknown {
-    if (Array.isArray(value)) return value.map(rewrite);
+  // Code-point hex is injective even for lone surrogates and uses only legal component-key characters.
+  const componentKey = (name: string) => `schema_${Array.from(name, char => char.codePointAt(0)!.toString(16)).join("_")}`;
+  function rewrite(value: unknown, depth = 0): unknown {
+    if (depth > MAX_TRAVERSAL_DEPTH) throw new Error("Schema traversal exceeds native facade limit.");
+    if (Array.isArray(value)) return value.map(child => rewrite(child, depth + 1));
     if (!plainObject(value)) return value;
+    // The native producer normalizes declaration maps into detached definitions. Refuse
+    // ambiguous local scope rather than resolving a local name against an unrelated shared def.
+    if (Object.hasOwn(value, "$defs") || Object.hasOwn(value, "definitions")) {
+      throw new Error("Embedded schema definitions are not supported by the native facade.");
+    }
     return Object.fromEntries(Object.entries(value).map(([key, item]) => {
       if (key !== "$ref") {
         // Only schema positions contain references; property names and literal data do not.
-        if (["properties", "$defs", "definitions", "patternProperties", "dependentSchemas", "dependencies"].includes(key)
+        if (["properties", "patternProperties", "dependentSchemas", "dependencies"].includes(key)
           && plainObject(item)) {
           return [key, Object.fromEntries(Object.entries(item).map(([name, child]) =>
-            [name, key === "dependencies" && Array.isArray(child) ? structuredClone(child) : rewrite(child)]))];
+            [name, key === "dependencies" && Array.isArray(child) ? structuredClone(child) : rewrite(child, depth + 1)]))];
         }
         if (["additionalProperties", "unevaluatedProperties", "propertyNames", "additionalItems",
           "unevaluatedItems", "contains", "not", "if", "then", "else", "contentSchema", "items"].includes(key)) {
-          return [key, rewrite(item)];
+          return [key, rewrite(item, depth + 1)];
         }
         if (["allOf", "anyOf", "oneOf", "prefixItems"].includes(key) && Array.isArray(item)) {
-          return [key, item.map(rewrite)];
+          return [key, item.map(child => rewrite(child, depth + 1))];
         }
         return [key, structuredClone(item)];
       }
@@ -95,9 +107,9 @@ export function buildNativeOpenApiFacade(surface: OpenApiPublisherSurface): {
       if (!visited.has(name)) {
         visited.add(name);
         requireJson(surface.defs[name]);
-        Object.defineProperty(schemas, name, { value: rewrite(surface.defs[name]), enumerable: true });
+        Object.defineProperty(schemas, componentKey(name), { value: rewrite(surface.defs[name], depth + 1), enumerable: true });
       }
-      return [key, `#/components/schemas/${escape(name)}`];
+      return [key, `#/components/schemas/${componentKey(name)}`];
     }));
   }
   const routes = new Map<string, string>();

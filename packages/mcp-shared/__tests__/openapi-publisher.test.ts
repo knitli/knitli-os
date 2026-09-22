@@ -16,10 +16,10 @@ it("copies reachable escaped, cyclic and prototype-named definitions safely", ()
   const defs = JSON.parse('{"a/b~c":{"$ref":"#/$defs/__proto__"},"__proto__":{"anyOf":[{"$ref":"#/$defs/a~1b~0c"},{"type":"null"}]},"unused":{"type":"string"}}');
   const { spec } = buildNativeOpenApiFacade({ ...input, defs });
   const json = JSON.stringify(spec);
-  expect(json).toContain('"$ref":"#/components/schemas/a~1b~0c"');
-  expect(json).toContain('"$ref":"#/components/schemas/__proto__"');
+  expect(json).toContain('"$ref":"#/components/schemas/schema_61_2f_62_7e_63"');
+  expect(json).toContain('"$ref":"#/components/schemas/schema_5f_5f_70_72_6f_74_6f_5f_5f"');
   const schemas = (spec.components as { schemas: Record<string, unknown> }).schemas;
-  expect(Object.keys(schemas).sort()).toEqual(["__proto__", "a/b~c"]);
+  expect(Object.keys(schemas).toSorted()).toEqual(["schema_5f_5f_70_72_6f_74_6f_5f_5f", "schema_61_2f_62_7e_63"]);
   expect(Object.getPrototypeOf(schemas)).toBe(Object.prototype);
   expect(json).not.toContain("unused");
   expect(input.tools[0].inputSchema).toEqual({ $ref: "#/$defs/a~1b~0c" });
@@ -106,7 +106,7 @@ it("preserves literal $ref property names and data while rewriting schema refs",
   const paths = spec.paths as Record<string, { post: { requestBody: { content: { "application/json": { schema: typeof schema } } } } }>;
   const result = paths["/operations/73656e64"].post.requestBody.content["application/json"].schema;
   expect(result.properties.body.properties.$ref).toEqual({ type: "string" });
-  expect(result.properties.body.properties.linked.$ref).toBe("#/components/schemas/value");
+  expect(result.properties.body.properties.linked.$ref).toBe("#/components/schemas/schema_76_61_6c_75_65");
   for (const keyword of ["enum", "const", "default", "examples"] as const) {
     expect(result[keyword]).toEqual(schema[keyword]);
     expect(result[keyword]).not.toBe(schema[keyword]);
@@ -114,4 +114,60 @@ it("preserves literal $ref property names and data while rewriting schema refs",
 });
 it.each(["https://provider/schema", "#/$defs/missing"])("rejects genuine nested schema reference %s", ref => {
   expect(() => buildNativeOpenApiFacade(surface({ properties: { $ref: { $ref: ref } } }))).toThrow(/reference/);
+});
+it("emits valid distinct component keys for arbitrary definition names", () => {
+  const names = ["a/b~c", "a_b", "", "é", "__proto__", "schema_612f627e63"];
+  const defs = Object.fromEntries(names.map(name => [name, { type: "string", title: name }]));
+  const schema = { anyOf: names.map(name => ({ $ref: `#/$defs/${name.replaceAll("~", "~0").replaceAll("/", "~1")}` })) };
+  const { spec } = buildNativeOpenApiFacade({ ...surface(schema), defs });
+  const components = (spec.components as { schemas: Record<string, { title: string }> }).schemas;
+  expect(Object.keys(components)).toHaveLength(names.length);
+  expect(Object.keys(components).every(name => /^[a-zA-Z0-9._-]+$/.test(name))).toBe(true);
+  const refs = JSON.stringify(spec).matchAll(/"\$ref":"#\/components\/schemas\/([^"]+)"/g);
+  expect([...refs].map(match => components[match[1]]?.title)).toEqual(names);
+});
+it.each(["$defs", "definitions"])("rejects unsupported tool-local %s scope before projecting a global collision", keyword => {
+  const schema = { [keyword]: { value: { type: "string" } }, $ref: `#/${keyword}/value` };
+  expect(() => buildNativeOpenApiFacade({ ...surface(schema), defs: { value: { type: "number" } } }))
+    .toThrow("Embedded schema definitions are not supported by the native facade.");
+  expect(() => buildNativeOpenApiFacade(surface(schema)))
+    .toThrow("Embedded schema definitions are not supported by the native facade.");
+});
+it("rejects local scopes in reachable shared definitions", () => {
+  expect(() => buildNativeOpenApiFacade({ ...surface({ $ref: "#/$defs/value" }),
+    defs: { value: { $defs: { nested: { type: "string" } }, $ref: "#/$defs/nested" } } }))
+    .toThrow("Embedded schema definitions are not supported by the native facade.");
+});
+it("bounds schema nesting with a controlled error", () => {
+  let schema: unknown = { type: "string" };
+  for (let index = 0; index < 2000; index++) schema = { not: schema };
+  expect(() => buildNativeOpenApiFacade(surface(schema))).toThrow("JSON nesting exceeds native facade limit.");
+});
+it("bounds reference-chain traversal independently of JSON nesting", () => {
+  const defs = Object.fromEntries(Array.from({ length: 2000 }, (_, index) =>
+    [`d${index}`, index === 1999 ? { type: "string" } : { $ref: `#/$defs/d${index + 1}` }]));
+  expect(() => buildNativeOpenApiFacade({ ...surface({ $ref: "#/$defs/d0" }), defs }))
+    .toThrow("Schema traversal exceeds native facade limit.");
+});
+it("bounds callback nesting before reaching native authority", async () => {
+  const { session, operationIdsByPath } = setup();
+  let body: Record<string, unknown> = {};
+  for (let index = 0; index < 2000; index++) body = { x: body };
+  await expect(dispatchNativeFacade(session, operationIdsByPath, { method: "POST", path: "/operations/73656e64", body }))
+    .rejects.toThrow("JSON nesting exceeds native facade limit.");
+  expect(session.callTool).not.toHaveBeenCalled();
+});
+it("preserves declaration-like property names and literal data", () => {
+  const schema = { properties: { $defs: { type: "string" }, definitions: { type: "number" } },
+    const: { $defs: { value: 1 }, definitions: { value: 2 } } };
+  const { spec } = buildNativeOpenApiFacade(surface(schema));
+  expect(JSON.stringify(spec)).toContain(JSON.stringify(schema));
+});
+it("accepts bounded nested schemas and shared reference chains", () => {
+  let schema: unknown = { $ref: "#/$defs/d0" };
+  for (let index = 0; index < 16; index++) schema = { not: schema };
+  const defs = Object.fromEntries(Array.from({ length: 16 }, (_, index) =>
+    [`d${index}`, index === 15 ? { type: "string" } : { $ref: `#/$defs/d${index + 1}` }]));
+  const { spec } = buildNativeOpenApiFacade({ ...surface(schema), defs });
+  expect(Object.keys((spec.components as { schemas: object }).schemas)).toHaveLength(16);
 });

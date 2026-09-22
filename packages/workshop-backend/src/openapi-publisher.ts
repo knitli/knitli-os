@@ -154,7 +154,7 @@ export async function handleOpenApiPublisher(
       });
       const transport = new WorkerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       const handle = createLegacyMcpHandler(server, { route: url.pathname, transport });
-      const response = await handle(new Request(req, { body: text }), env, ctx);
+      const response = await handle(new Request(req, { method: "POST", body: text }), env, ctx);
       const headers = new Headers(response.headers);
       headers.delete("Access-Control-Allow-Origin");
       return new Response(response.body, { status: response.status, headers });
@@ -165,7 +165,7 @@ export async function handleOpenApiPublisher(
       await Promise.allSettled(calls);
       try { await server?.close(); }
       finally {
-        for (const stub of owned.reverse()) {
+        for (const stub of owned.toReversed()) {
           try { stub[Symbol.dispose](); } catch { /* Continue releasing the other owned stubs. */ }
         }
       }

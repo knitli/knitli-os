@@ -107,6 +107,142 @@
     {
       "path": "docs/fork-maintenance.md",
       "reason": "The fork's maintenance playbook, documenting the divergence policy this file encodes."
+    },
+    {
+      "path": ".claude/",
+      "reason": "Committed Claude workstation settings; upstream has no equivalent directory."
+    },
+    {
+      "path": ".serena/",
+      "reason": "Committed Serena project config from workstation setup; upstream has no equivalent directory."
+    },
+    {
+      "path": "docs/superpowers/",
+      "reason": "Fork design-plan archive; upstream has no docs/superpowers tree."
+    },
+    {
+      "path": "plans/prompt-presets-and-reasoning-controls.md",
+      "reason": "Fork implementation plan for prompt presets; plans/ is shared with upstream so this stays file-scoped."
+    },
+    {
+      "path": "packages/mcp-shared/src/openapi-publisher.ts",
+      "reason": "Native OpenAPI facade publisher surface for the bounded spike; fork-owned protocol with no upstream counterpart."
+    },
+    {
+      "path": "packages/mcp-shared/__tests__/openapi-publisher.test.ts",
+      "reason": "Regression test for the fork-owned native OpenAPI facade publisher above."
+    },
+    {
+      "path": "packages/workshop-backend/src/chat-commit-guard.ts",
+      "reason": "Synchronous commit-guard ordering for chat preparation; fork-owned authorization helper."
+    },
+    {
+      "path": "packages/workshop-backend/src/collaborator-bookkeeping.ts",
+      "reason": "Detached collaborator bookkeeping with per-boundary re-authorization; fork-owned helper."
+    },
+    {
+      "path": "packages/workshop-backend/src/gatekeeper-initialization-recovery.ts",
+      "reason": "Discards interrupted gatekeeper initializations after a DO restart; fork-owned recovery helper."
+    },
+    {
+      "path": "packages/workshop-backend/src/inference-admin-protocol-v1.fixture.ts",
+      "reason": "Compile-time shape fixture pinning the AI executor admin protocol v1; fork-owned."
+    },
+    {
+      "path": "packages/workshop-backend/src/keyed-async-sequencer.ts",
+      "reason": "Per-key async serializer for fork-owned backend flows; no upstream counterpart."
+    },
+    {
+      "path": "packages/workshop-backend/src/revocation-cleanup.ts",
+      "reason": "Best-effort cross-DO revocation cleanup dispatched before the input gate shuts; extracted fork-owned policy."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/authorized-collaborator-bookkeeping.test.ts",
+      "reason": "Regression test for the fork-owned collaborator bookkeeping helper."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/connect-initiator.test.ts",
+      "reason": "Backend regression test for connect-initiator threading; upstream has no initiator binding."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/external-message-commit-guard.test.ts",
+      "reason": "Regression test for the fork-owned chat commit-guard ordering."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/external-message-production-commit-guard.test.ts",
+      "reason": "Production-path variant of the fork-owned commit-guard regression above."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/gatekeeper-initialization-recovery-unit.test.ts",
+      "reason": "Unit test for the fork-owned gatekeeper initialization-recovery helper."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/gatekeeper-initialization-recovery.test.ts",
+      "reason": "Integration test for the fork-owned gatekeeper initialization-recovery helper."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/keyed-async-sequencer.test.ts",
+      "reason": "Regression test for the fork-owned keyed async sequencer."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/revocation-cleanup.test.ts",
+      "reason": "Regression test for the fork-owned revocation cleanup behind the input gate."
+    },
+    {
+      "path": "packages/workshop-backend/__integration__/ai-executor-admin-rpc.test.ts",
+      "reason": "Integration test for the fork-owned AI executor admin RPC surface."
+    },
+    {
+      "path": "packages/workshop-backend/__integration__/connection-request-resource-resolution.test.ts",
+      "reason": "Integration test for fork-owned connection resource resolution through connector authority."
+    },
+    {
+      "path": "packages/workshop-frontend/src/components/AdminAiExecutorsPanel.tsx",
+      "reason": "Admin UI for AI executor profiles; fork-owned panel with no upstream counterpart."
+    },
+    {
+      "path": "packages/workshop-frontend/src/components/AdminAiExecutorsPanel.test.tsx",
+      "reason": "Regression test for the fork-owned AI executor admin panel."
+    },
+    {
+      "path": "packages/workshop-frontend/src/components/ai-executors-form-model.ts",
+      "reason": "Form model behind the fork-owned AI executor admin panel."
+    },
+    {
+      "path": "packages/workshop-frontend/src/components/ai-executors-form-model.test.ts",
+      "reason": "Regression test for the fork-owned executor form model."
+    },
+    {
+      "path": "packages/workshop-frontend/src/rateLimitedCapability.test.ts",
+      "reason": "Regression test for fork-owned rate-limited capability behavior."
+    },
+    {
+      "path": "packages/gatekeeper-linear/__tests__/workerd/oauth-link.test.ts",
+      "reason": "Workerd test for the Linear OAuth link flow; the fork stood up this harness."
+    },
+    {
+      "path": "packages/gatekeeper-linear/__tests__/workerd/worker.ts",
+      "reason": "Workerd test entry exporting the Linear account; the fork stood up this harness."
+    },
+    {
+      "path": "packages/gatekeeper-linear/tsconfig.test.json",
+      "reason": "Type config for the fork-added Linear workerd test harness."
+    },
+    {
+      "path": "packages/gatekeeper-linear/vitest.worker.config.ts",
+      "reason": "Workerd vitest project for the fork-added Linear test harness."
+    },
+    {
+      "path": "scripts/gatekeeper-discovery-policy.ts",
+      "reason": "Fork-owned AI Executor discovery policy behind a one-line upstream seam; the rule-3 worked example."
+    },
+    {
+      "path": "scripts/gatekeeper-discovery-policy.test.ts",
+      "reason": "Regression test for the fork-owned gatekeeper discovery policy."
+    },
+    {
+      "path": "scripts/release/testdata/fixture-bundles/gatekeeper-ai-executor/ai-executor.js",
+      "reason": "Release-manifest fixture bundle for the fork-owned AI executor gatekeeper."
     }
   ],
   "removedUpstreamPaths": {

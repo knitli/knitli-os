@@ -16,6 +16,7 @@
     "./html": "./src/html.ts",
     "./http": "./src/http.ts",
     "./log": "./src/log.ts",
+    "./openapi-publisher": "./src/openapi-publisher.ts",
     "./portal": "./src/portal.ts",
     "./schema-to-ts": "./src/schema-to-ts.ts",
     "./scope": "./src/scope.ts",

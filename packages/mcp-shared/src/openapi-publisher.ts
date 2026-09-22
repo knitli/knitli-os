@@ -5,7 +5,10 @@ import type { McpCallResult, McpToolInfo } from "./types";
 export interface OpenApiPublisherSurface {
   readonly protocol: "native-openapi-facade-v1";
   readonly tools: readonly McpToolInfo[];
-  /** All references target this detached map; embedded $defs/definitions scopes are unsupported. */
+  /**
+   * References are URI-fragment JSON Pointers into this detached map. Embedded definitions,
+   * resource IDs/anchors, dynamic/recursive references, custom vocabularies and discriminators are unsupported.
+   */
   readonly defs: Readonly<Record<string, JsonSchema>>;
 }
 
@@ -82,6 +85,18 @@ export function buildNativeOpenApiFacade(surface: OpenApiPublisherSurface): {
     if (Object.hasOwn(value, "$defs") || Object.hasOwn(value, "definitions")) {
       throw new Error("Embedded schema definitions are not supported by the native facade.");
     }
+    for (const keyword of ["id", "$id", "$anchor", "$dynamicAnchor", "$recursiveAnchor", "$dynamicRef", "$recursiveRef", "$vocabulary"]) {
+      if (Object.hasOwn(value, keyword)) throw new Error(`Unsupported schema URI keyword: ${keyword}`);
+    }
+    if (Object.hasOwn(value, "$schema")
+      && value.$schema !== "https://json-schema.org/draft/2020-12/schema"
+      && value.$schema !== "https://spec.openapis.org/oas/3.1/dialect/base") {
+      throw new Error("Unsupported schema dialect.");
+    }
+    // Native output omits discriminators; component renaming also breaks implicit mappings.
+    if (Object.hasOwn(value, "discriminator")) {
+      throw new Error("Discriminators are not supported by the native facade.");
+    }
     return Object.fromEntries(Object.entries(value).map(([key, item]) => {
       if (key !== "$ref") {
         // Only schema positions contain references; property names and literal data do not.
@@ -99,8 +114,15 @@ export function buildNativeOpenApiFacade(surface: OpenApiPublisherSurface): {
         }
         return [key, structuredClone(item)];
       }
-      if (typeof item !== "string" || !item.startsWith("#/$defs/")) throw new Error("Nonlocal schema reference.");
-      const pointer = item.slice(8);
+      if (typeof item !== "string" || !item.startsWith("#")) throw new Error("Nonlocal schema reference.");
+      let fragment: string;
+      try {
+        fragment = decodeURIComponent(item.slice(1));
+      } catch {
+        throw new Error("Invalid definition reference.");
+      }
+      if (!fragment.startsWith("/$defs/")) throw new Error("Nonlocal schema reference.");
+      const pointer = fragment.slice(7);
       if (pointer.includes("/") || /~(?![01])/.test(pointer)) throw new Error("Invalid definition reference.");
       const name = pointer.replaceAll("~1", "/").replaceAll("~0", "~");
       if (!Object.hasOwn(surface.defs, name)) throw new Error(`Dangling schema reference: ${item}`);

@@ -171,3 +171,47 @@ it("accepts bounded nested schemas and shared reference chains", () => {
   const { spec } = buildNativeOpenApiFacade({ ...surface(schema), defs });
   expect(Object.keys((spec.components as { schemas: object }).schemas)).toHaveLength(16);
 });
+it.each(["id", "$id", "$anchor", "$dynamicAnchor", "$dynamicRef", "$recursiveRef", "$recursiveAnchor", "$vocabulary"])("rejects unsupported schema URI keyword %s", keyword => {
+  const schema = { [keyword]: "https://external.example/schema", $ref: "#/$defs/value" };
+  expect(() => buildNativeOpenApiFacade({ ...surface(schema), defs: { value: { type: "string" } } }))
+    .toThrow("Unsupported schema URI keyword");
+  expect(() => buildNativeOpenApiFacade({ ...surface({ $ref: "#/$defs/value" }), defs: { value: schema } }))
+    .toThrow("Unsupported schema URI keyword");
+});
+it("decodes URI fragments before JSON pointer tokens exactly once", () => {
+  const defs = { "a b": { title: "space" }, "a%20b": { title: "literal percent" }, "a/b": { title: "slash" }, "a~b": { title: "tilde" } };
+  const schema = { anyOf: ["a%20b", "a%2520b", "a%7E1b", "a%7E0b"].map(name => ({ $ref: `#/$defs/${name}` })) };
+  const { spec } = buildNativeOpenApiFacade({ ...surface(schema), defs });
+  const components = (spec.components as { schemas: Record<string, { title: string }> }).schemas;
+  const refs = JSON.stringify(spec).matchAll(/"\$ref":"#\/components\/schemas\/([^"]+)"/g);
+  expect([...refs].map(match => components[match[1]]?.title)).toEqual(["space", "literal percent", "slash", "tilde"]);
+});
+it.each(["a%2Fb", "a%", "a%ZZ", "a%C0%AF"])("rejects invalid fragment reference %s", name => {
+  expect(() => buildNativeOpenApiFacade({ ...surface({ $ref: `#/$defs/${name}` }), defs: { [name]: { type: "string" } } }))
+    .toThrow("Invalid definition reference.");
+});
+it.each(["#/$defs/Cat", "Cat", "https://external.example/Cat"])("rejects unsupported discriminator mapping %s", ref => {
+  const schema = { discriminator: { propertyName: "kind", mapping: { cat: ref } } };
+  expect(() => buildNativeOpenApiFacade({ ...surface(schema), defs: { Cat: { type: "object" } } }))
+    .toThrow("Discriminators are not supported by the native facade.");
+  expect(() => buildNativeOpenApiFacade({ ...surface({ $ref: "#/$defs/Cat" }), defs: { Cat: schema } }))
+    .toThrow("Discriminators are not supported by the native facade.");
+});
+it("preserves URI keywords and mappings in property names and literal data", () => {
+  const schema = { properties: { $id: { type: "string" }, $dynamicRef: { type: "string" }, discriminator: { type: "object" } },
+    const: { $id: "https://literal.example", $dynamicRef: "literal", discriminator: { mapping: { cat: "#/$defs/Cat" } } } };
+  expect(JSON.stringify(buildNativeOpenApiFacade(surface(schema)).spec)).toContain(JSON.stringify(schema));
+});
+it.each(["http://json-schema.org/draft-04/schema#", "https://external.example/dialect", null])("rejects unsupported schema dialect %s", dialect => {
+  expect(() => buildNativeOpenApiFacade(surface({ $schema: dialect }))).toThrow("Unsupported schema dialect.");
+});
+it.each(["https://json-schema.org/draft/2020-12/schema", "https://spec.openapis.org/oas/3.1/dialect/base"])("preserves supported schema dialect %s", dialect => {
+  expect(JSON.stringify(buildNativeOpenApiFacade(surface({ $schema: dialect, type: "string" })).spec)).toContain(dialect);
+});
+it.each(["#/%24defs/value", "#%2F$defs%2Fvalue"])("decodes the complete reference fragment %s", ref => {
+  const { spec } = buildNativeOpenApiFacade({ ...surface({ $ref: ref }), defs: { value: { type: "string" } } });
+  expect(JSON.stringify(spec)).toContain('"$ref":"#/components/schemas/schema_76_61_6c_75_65"');
+});
+it.each([{ propertyName: "kind" }, { propertyName: "kind", mapping: "malformed" }, null])("rejects unsupported discriminator semantics %j", discriminator => {
+  expect(() => buildNativeOpenApiFacade(surface({ discriminator }))).toThrow("Discriminators are not supported by the native facade.");
+});

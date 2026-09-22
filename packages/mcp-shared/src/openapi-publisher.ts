@@ -144,12 +144,14 @@ export function buildNativeOpenApiFacade(surface: OpenApiPublisherSurface): {
     const path = `/operations/${key}`;
     if (routes.has(path)) throw new Error("Duplicate native operation ID.");
     routes.set(path, tool.name);
-    const schema = tool.inputSchema ?? {
+    // This checks root shape, not the metaschema: the verified native producer supplies
+    // object keyword semantics. Never hide JSON admission or reference/scope failures.
+    if (tool.inputSchema !== undefined) requireJson(tool.inputSchema);
+    const schema = plainObject(tool.inputSchema) || typeof tool.inputSchema === "boolean" ? tool.inputSchema : {
       type: "object", description: "Native argument envelope; documentation is incomplete. Native validation remains authoritative.",
       properties: { path: { type: "object" }, query: { type: "object" }, headers: { type: "object" }, body: {} },
       additionalProperties: true,
     };
-    requireJson(schema);
     paths[path] = { post: {
       operationId: `native_${key}`, description: tool.description ?? tool.title ?? tool.name,
       "x-native-operation-id": tool.name, "x-native-mode": tool.mode,

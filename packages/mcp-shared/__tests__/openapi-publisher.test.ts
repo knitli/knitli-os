@@ -215,3 +215,28 @@ it.each(["#/%24defs/value", "#%2F$defs%2Fvalue"])("decodes the complete referenc
 it.each([{ propertyName: "kind" }, { propertyName: "kind", mapping: "malformed" }, null])("rejects unsupported discriminator semantics %j", discriminator => {
   expect(() => buildNativeOpenApiFacade(surface({ discriminator }))).toThrow("Discriminators are not supported by the native facade.");
 });
+it.each([[], [{ type: "object" }], "object", 42, null])("degrades malformed JSON schema root (%#) to the native envelope", input => {
+  const { spec } = buildNativeOpenApiFacade(surface(input));
+  const paths = spec.paths as Record<string, { post: { requestBody: { content: { "application/json": { schema: unknown } } } } }>;
+  expect(paths["/operations/73656e64"].post.requestBody.content["application/json"].schema).toEqual({
+    type: "object", description: "Native argument envelope; documentation is incomplete. Native validation remains authoritative.",
+    properties: { path: { type: "object" }, query: { type: "object" }, headers: { type: "object" }, body: {} },
+    additionalProperties: true,
+  });
+});
+it.each([true, false, {}, { type: "object", properties: { value: { type: "string" } } }])("preserves usable schema root %j", input => {
+  const { spec } = buildNativeOpenApiFacade(surface(input));
+  const paths = spec.paths as Record<string, { post: { requestBody: { content: { "application/json": { schema: unknown } } } } }>;
+  expect(paths["/operations/73656e64"].post.requestBody.content["application/json"].schema).toEqual(input);
+});
+it.each([new Date(), NaN, () => undefined])("rejects non-JSON schema root rather than hiding admission failure (%#)", input => {
+  expect(() => buildNativeOpenApiFacade(surface(input))).toThrow("Expected plain JSON data.");
+});
+it("keeps the selected native call and arguments unchanged after schema fallback", async () => {
+  const { session } = setup();
+  const { operationIdsByPath } = buildNativeOpenApiFacade(surface([]));
+  const body = { query: { top: 2 }, body: { value: "native validation owns this" } };
+  expect(await dispatchNativeFacade(session, operationIdsByPath, { method: "POST", path: "/operations/73656e64", body })).toBe(pending);
+  expect(session.callTool).toHaveBeenCalledExactlyOnceWith("send", body);
+  expect(session.callTool.mock.calls[0][1]).toBe(body);
+});

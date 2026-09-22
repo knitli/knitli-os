@@ -14,13 +14,17 @@
     "import:bundled-blueprint": "node scripts/import-bundled-blueprint.ts"
   },
   "dependencies": {
+    "@cloudflare/codemode": "0.5.2",
     "@cloudflare/puppeteer": "^1.4.0",
     "@earendil-works/pi-agent-core": "0.84.3",
     "@earendil-works/pi-ai": "0.84.4",
     "@gadgets/backend-utils": "workspace:*",
     "@gadgets/error-reporting": "workspace:*",
+    "@gadgets/mcp-shared": "workspace:*",
     "@gadgets/typed-storage": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "agents": "0.24.0",
     "capnweb": "catalog:",
     "capnweb-validate": "catalog:",
     "diff": "catalog:",

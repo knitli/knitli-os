@@ -96,6 +96,8 @@ import { GatekeeperIcon } from "./components/GatekeeperIcon";
 import { formatOf, FORMAT_ICONS } from "./components/format/formats";
 import { FormatMiniature } from "./components/format/FormatVisuals";
 import { HookToggle } from "./components/HookToggle";
+import { IncompleteDescriptionNotice, isDescriptionIncomplete } from "./components/IncompleteDescriptionNotice";
+import { ActionFields, entryFields } from "./components/ActionFields";
 import DeleteConfirmationDialog from "./components/DeleteConfirmationDialog";
 import AutoApproveConfirmDialog from "./components/AutoApproveConfirmDialog";
 import { AlwaysApproveButton, ResolveButton } from "./components/ResolveButton";
@@ -582,6 +584,8 @@ function getToolCallSummary(
       return { verb: "Wrote", target: tc.input.filename };
     case "editFile":
       return { verb: "Edited", target: tc.input.filename };
+    case "grep":
+      return { verb: "Searched", target: tc.input.path ?? tc.input.workpiece };
     case "describeBinding":
       return { verb: "Inspected", target: `${String(tc.input.name)} binding` };
     case "setBindingHook":
@@ -712,6 +716,8 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return `Wrote ${pluralize(count, "file")}`;
     case "editFile":
       return count === 1 ? "Made 1 edit" : `Made ${count} edits`;
+    case "grep":
+      return count === 1 ? "Searched files" : `Searched files ${formatTimes(count)}`;
     case "webFetch":
       return `Fetched ${pluralize(count, "page")}`;
     case "executeCode":
@@ -759,6 +765,7 @@ function getToolIcon(
       return Terminal;
     case "webFetch":
       return Globe;
+    case "grep":
     case "describeBinding":
       return MagnifyingGlass;
     case "setBindingHook":
@@ -788,6 +795,8 @@ function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undef
       return "Writing file";
     case "editFile":
       return "Editing file";
+    case "grep":
+      return "Searching files";
     case "describeBinding":
       return "Inspecting binding";
     case "setBindingHook":
@@ -823,6 +832,7 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "readFile": return "Reading";
     case "writeFile": return "Writing";
     case "editFile": return "Editing";
+    case "grep": return "Searching";
     case "describeBinding": return "Inspecting";
     case "setBindingHook": return "Connecting";
     case "setGadgetBinding": return "Wiring up";
@@ -848,6 +858,7 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "readFile": return `Reading ${pluralize(count, "file")}`;
     case "writeFile": return `Writing ${pluralize(count, "file")}`;
     case "editFile": return `Making ${count} edits`;
+    case "grep": return `Searching files ${formatTimes(count)}`;
     case "webFetch": return `Fetching ${pluralize(count, "page")}`;
     case "executeCode": return count === 1 ? "Running code" : `Running code ${formatTimes(count)}`;
     case "describeBinding": return `Inspecting ${pluralize(count, "binding")}`;
@@ -1514,6 +1525,7 @@ const ObservationDetails = memo(function ObservationDetails(
           <div className="mt-1.5 text-[12px] leading-[18px] tracking-[-0.2px] text-kumo-subtle">
             <MarkdownMessage message={log.description.description} />
           </div>
+          <ActionFields fields={entryFields(log)} className="mt-2" />
         </div>
       </div>
     </div>
@@ -5023,6 +5035,7 @@ function ChatInterface({
           {open && (
             <div className="themed-surface-inset ml-8 mt-1 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 text-[13px] leading-[19px] text-kumo-subtle">
               <MarkdownMessage message={log.description.description} />
+              <ActionFields fields={entryFields(log)} className="mt-2" />
             </div>
           )}
         </div>
@@ -5136,6 +5149,14 @@ function ChatInterface({
                 <div className={`chat-panel mt-1 max-h-[200px] overflow-y-auto pr-1 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
                   <MarkdownMessage message={log.description.description} />
                 </div>
+                {entryFields(log).length > 0 && (
+                  <div className="chat-panel mt-2 max-h-[360px] overflow-y-auto pr-1">
+                    <ActionFields fields={entryFields(log)} />
+                  </div>
+                )}
+                {isDescriptionIncomplete(log) && (
+                  <IncompleteDescriptionNotice className="mt-2" />
+                )}
               </div>
               <div className="ml-3 flex flex-shrink-0 items-center gap-1 self-center">
                 {actionControls}
@@ -5196,6 +5217,12 @@ function ChatInterface({
             <div className={`chat-panel max-h-[200px] overflow-y-auto pr-1 ${styles.markdownContent}`}>
               <MarkdownMessage message={log.description.description} />
             </div>
+            {entryFields(log).length > 0 && (
+              <div className="chat-panel max-h-[360px] overflow-y-auto pr-1">
+                <ActionFields fields={entryFields(log)} />
+              </div>
+            )}
+            {isPending && isDescriptionIncomplete(log) && <IncompleteDescriptionNotice />}
             {resourceMeta}
           </div>
         )}

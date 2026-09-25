@@ -19,6 +19,8 @@ import { useVendorBranding } from './useVendorBranding'
 import { useResolveAction } from './useResolveAction'
 import { safeExternalUrl } from './utils/safeExternalUrl'
 import AutoApproveConfirmDialog from './components/AutoApproveConfirmDialog'
+import { IncompleteDescriptionNotice, isDescriptionIncomplete } from './components/IncompleteDescriptionNotice'
+import { ActionFields, entryFields, fieldCountLabel } from './components/ActionFields'
 
 export type ActivityView = 'review' | 'history' | 'auto'
 
@@ -609,6 +611,7 @@ function ReviewRequest({
   onAlwaysApprove?: () => void
 }) {
   const resourceUrl = safeExternalUrl(record.resourceUrl)
+  const fields = entryFields(record)
   return (
     <article className="border-b border-kumo-line px-5 py-3 transition-colors hover:bg-kumo-elevated/50">
       <div className="flex flex-wrap items-start gap-x-3 gap-y-1.5">
@@ -655,6 +658,18 @@ function ReviewRequest({
         <p className={`mt-1.5 max-w-2xl whitespace-pre-wrap text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle ${expanded ? '' : 'line-clamp-2'}`}>
           {record.description.description}
         </p>
+      )}
+
+      {fields.length > 0 && (expanded ? (
+        <ActionFields fields={fields} className="mt-2 max-w-2xl" />
+      ) : (
+        <p className="m-0 mt-1 text-[11.5px] leading-4 tracking-[-0.1px] text-kumo-inactive">
+          {fieldCountLabel(fields.length)}
+        </p>
+      ))}
+
+      {isDescriptionIncomplete(record) && (
+        <IncompleteDescriptionNotice className="mt-2 max-w-2xl" />
       )}
     </article>
   )
@@ -716,6 +731,7 @@ function HistoryRow({
               {record.description.description}
             </p>
           )}
+          <ActionFields fields={entryFields(record)} className="mt-2 max-w-2xl" />
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px] text-kumo-inactive">
             <span>{formatFullDate(at)}</span>
             <span className="text-kumo-subtle">{record.resourceTitle}</span>

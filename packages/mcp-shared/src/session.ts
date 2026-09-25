@@ -50,9 +50,9 @@ export type StoredAction = {
   claimedAt?: number;
   /**
    * Whether a `failed` record may be sent again. Absent means yes, which is the reading for records
-   * written before this field existed. False marks a failure that left the outcome unknown: the
+   * written before this field existed. False marks a failure that left the outcome unknown -- the
    * request may already have been carried out, so another attempt could duplicate a write that MCP
-   * gives no way to undo. See `ActionStore.apply`.
+   * gives no way to undo -- or one the user discarded. See `ActionStore.apply` and `reject`.
    */
   retryable?: boolean;
   /** Populated once applied; delivered to the Gadget as an observation. */
@@ -108,18 +108,6 @@ function requireToolName(method: string, name: unknown): asserts name is string 
 export class McpSessionBase extends RpcTarget {
   #host: McpSessionHost;
   #queue: RpcStub<ApprovalQueue>;
-
-  /**
-   * The longest rendering of a tool call's arguments reproduced in an approval prompt, passed
-   * through to `describeCall`'s own `maxArguments`. `undefined` keeps `describeCall`'s default.
-   *
-   * A subclass overrides it to raise or lower that budget for arguments that are structured rather
-   * than a free-form blob -- an HTTP request split into path, query, headers and body -- so the
-   * approver reads the whole thing rather than a truncated fragment, or so a bulky blob does not
-   * fill the prompt. It cannot reword the prompt: the action-branch text below is not overridable,
-   * only this one number is.
-   */
-  protected readonly maxArguments: number | undefined = undefined;
 
   constructor(host: McpSessionHost, queue: RpcStub<ApprovalQueue>) {
     super();
@@ -199,8 +187,8 @@ export class McpSessionBase extends RpcTarget {
    *
    * Overridable so a connector whose calls are not MCP tool calls can record what it actually did --
    * a method and a path, say -- rather than a wire name the person reading the record has never
-   * seen. The default is the same text `describeCall` renders for an action, which is what both MCP
-   * connectors record and what they keep.
+   * seen. The default is the same description `describeCall` renders for an action, which is
+   * what both MCP connectors record and what they keep.
    *
    * Reads only. The action branch builds its description from `describeCall` directly, so an
    * override cannot reword what a person reads when approving a write.
@@ -215,15 +203,15 @@ export class McpSessionBase extends RpcTarget {
   protected describeRead(
     entry: ClassifiedTool, args: Record<string, unknown>,
   ): ObservationDescription {
-    return describeCall({
+    const { title, description, fields } = describeCall({
       serverName: this.#host.serverName,
       endpoint: this.#host.endpoint,
       tool: entry.tool,
       toolArgs: args,
       mode: entry.mode,
       classifiedBy: entry.classifiedBy,
-      maxArguments: this.maxArguments,
     });
+    return { title, description, ...(fields ? { fields } : {}) };
   }
 
   async callTool(name: string, args?: Record<string, unknown>): Promise<McpCallResult> {
@@ -247,19 +235,22 @@ export class McpSessionBase extends RpcTarget {
       return toCallResult(result);
     }
 
-    const described = describeCall({
+    const { title, description: text, fields, descriptionIsComplete } = describeCall({
       serverName: host.serverName,
       endpoint: host.endpoint,
       tool: entry.tool,
       toolArgs,
       mode: entry.mode,
       classifiedBy: entry.classifiedBy,
-      maxArguments: this.maxArguments,
     });
 
     const staged = host.stageAction(name, toolArgs);
     const description: ActionDescription = {
-      ...described,
+      title,
+      description: text,
+      ...(fields ? { fields } : {}),
+      // Absent unless the arguments were shown in full; the overseer reads presence as a claim.
+      ...(descriptionIsComplete ? { descriptionIsComplete } : {}),
       // MCP describes no inverse operation for a tool call.
       implementsRevert: false,
       // Nothing about a queued call is simulated, so later reads would show a world in which it

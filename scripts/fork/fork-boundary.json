@@ -66,7 +66,7 @@
     },
     {
       "path": "packages/mcp-shared/__tests__/fork/",
-      "reason": "Fork regression tests for named $defs aliases, read-before-dispatch authorization, and the caller-settable argument budget."
+      "reason": "Fork regression tests for named $defs aliases and read-before-dispatch authorization."
     },
     {
       "path": "packages/backend-utils/src/access.ts",
@@ -279,49 +279,14 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "SELF_CLOSING_HTML",
-      "path": "scripts/fork/sync-upstream.ts",
-      "reason": "This tool's own calibration notes; the product copy was deleted with the handoff adoption."
+      "token": "MAX_ARGUMENTS",
+      "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
+      "reason": "Historical plan archive quoting the retired caller-settable argument budget; upstream #565 replaced the truncation model it describes."
     },
     {
-      "token": "activeIds",
-      "path": "packages/gatekeeper-ai-executor/src/vendor.ts",
-      "reason": "Fork-local Set in profile filtering; unrelated to upstream #267's removed catalog identifiers."
-    },
-    {
-      "token": "openMenu",
-      "path": "packages/workshop-frontend/src/features/chat/controls/ComposerEffortSelector.test.tsx",
-      "reason": "Test-local menu-opening helper; unrelated to upstream #466's removed blueprint UI identifier."
-    },
-    {
-      "token": "openMenu",
-      "path": "packages/workshop-frontend/src/features/chat/controls/ComposerPromptSelector.test.tsx",
-      "reason": "Test-local menu-opening helper; unrelated to upstream #466's removed blueprint UI identifier."
-    },
-    {
-      "token": "aEntries",
-      "path": "packages/workshop-backend/src/git-cache.ts",
-      "reason": "Upstream's own diff locals, still present upstream; the fork added none of these lines."
-    },
-    {
-      "token": "bEntries",
-      "path": "packages/workshop-backend/src/git-cache.ts",
-      "reason": "Upstream's own diff locals, still present upstream; the fork added none of these lines."
-    },
-    {
-      "token": "treeOf",
-      "path": "packages/workshop-backend/src/git-cache.ts",
-      "reason": "Upstream's own diff helper, still present upstream; the fork added none of these lines."
-    },
-    {
-      "token": "addChatSubscriber",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Upstream's own subscriber method, still present upstream; not fork-added."
-    },
-    {
-      "token": "gadgetInfos",
-      "path": "packages/workshop-backend/src/agent.ts",
-      "reason": "Upstream's own runAgentPass local, still present upstream; not fork-added."
+      "token": "grepFiles",
+      "path": "docs/fork-maintenance.md",
+      "reason": "Sync note naming the deleted WorktreeSessionImpl#grepFiles upstream #494 extracted into scanWorkpieceForGrep; prose reference, not code."
     }
   ]
 }

@@ -395,37 +395,29 @@ Intentional, reviewed differences from upstream. Keep this current.
   the intended behavior change; a subclass that overrides `describeRead` to restate what a read
   records takes on keeping that text meaningful to an approver.
 - **Upstream-preserving default:** the default `describeRead()` body reproduces the exact
-  `describeCall()` text the read branch always built, so a subclass that does not override it sees
+  `describeCall()` rendering the read branch always built, so a subclass that does not override it sees
   identical approval/observation records to before the reordering — proven by
   `packages/mcp-shared/__tests__/fork/session-read-authorization.test.ts`.
+- **2026-09-25 sync:** upstream #565's structured fields changed `describeCall`'s return from
+  `{title, description}` prose to title plus `RenderedDescription`; the default body now spreads
+  the returned `fields` into the observation. The sibling `maxArguments` budget was retired (see
+  below); the read-before-dispatch ordering is unchanged.
 - **Scope:** `listTools()`'s three branches — reading the full catalog via `host.tools()`, a single
   tool via `host.findTool()`, or a search via `host.searchTools()` — still authorize after the host
   call returns; only `callTool`'s read branch moved to authorize before dispatch, by design.
 
-### Caller-settable argument budget in `describeCall`/`maxArguments`
+### Caller-settable argument budget in `describeCall`/`maxArguments` (retired 2026-09-25)
 
-- **Where:** `describeCall()` in `packages/mcp-shared/src/tools.ts`, and the
-  `protected readonly maxArguments` field on `McpSessionBase` in `packages/mcp-shared/src/session.ts`
-- **Introduced:** `bda5d32`, `ff09d2a`, `d8a2f3b`
-- **What:** `describeCall()` takes an optional `maxArguments`, capping how much of the rendered
-  arguments JSON reaches the approval prompt before truncation; it defaults to the module-private
-  `MAX_ARGUMENTS` (4000), which is what an MCP tool call has always used. `McpSessionBase` exposes the
-  same budget as an overridable `protected readonly maxArguments: number | undefined = undefined`
-  field, passed through on both the action branch's `describeCall` call and the default
-  `describeRead()` body's, so a subclass can raise or lower it for either branch. `maxArguments` is
-  reserved in `RESERVED_METHOD_NAMES` for the same reason `describeRead` is: it is now a named
-  instance field, so a tool named `max_arguments` would otherwise get an unreachable generated
-  delegate shadowing it.
-- **Why:** A connector whose arguments are structured rather than a free-form blob — an HTTP request
-  split into path, query, headers and body — can raise or lower the cap: lower so the approver reads a
-  prompt rather than scrolls one, raise so a payload that would otherwise truncate reaches the
-  approver whole.
-- **Known cost:** a subclass raising the cap past what a person will actually read buys nothing but is
-  not prevented.
-- **Upstream-preserving default:** `describeCall`'s `maxArguments` is optional and `McpSessionBase`'s
-  field defaults to `undefined`, so `args.maxArguments ?? MAX_ARGUMENTS` reduces to the original 4000
-  cap when neither is set — proven by
-  `packages/mcp-shared/__tests__/fork/tools-max-arguments.test.ts`.
+Upstream #565 replaced `describeCall`'s prose truncation (arguments JSON cut at 4000 characters)
+with structured fields: the full arguments render as a JSON field under a 96 KiB whole-description
+budget, with `descriptionIsComplete` set only when nothing was dropped. That covers the budget's
+raise direction by default, and its lower direction contradicts upstream's approver-must-see-every-byte
+posture — so the optional `maxArguments` parameter, the `protected readonly maxArguments` field on
+`McpSessionBase`, its `RESERVED_METHOD_NAMES` entry, and
+`packages/mcp-shared/__tests__/fork/tools-max-arguments.test.ts` were removed in the 2026-09-25
+sync (`tools.ts` is byte-identical to upstream again). No production subclass ever overrode the
+field. The sibling `describeRead` hook and read-before-dispatch ordering are kept: upstream still
+authorizes a read after fetching it.
 
 ## Open questions
 
@@ -539,6 +531,14 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   rewrite moved the replay-diff blindfold onto the new loop and renamed the pin-base
   `WorktreeTurnAccess` hook the tests fake. The `knitli-*` turn harnesses now supply
   history via `loadChatHistory`.
+- **2026-09-25 sync:** upstream #494 extracted the worktree grep scan into shared `grep.ts`
+  and added the agent `grep` tool plus `readFile` windows; the fork's `#grepFiles` was deleted
+  and its three blindfold guards moved into `scanWorkpieceForGrep`, which blindfolds the new
+  agent tool too (the `knitli-blindfold` grep cases pin the shared scan through the binding).
+  Upstream #522's `sawRevertedContent` replaced the replay's message-status check under the
+  blindfold, and upstream #556's pi 0.87.1 renamed `shouldStopAfterTurn` to `finishTurn` — the
+  effort spread is kept, since pi still forwards the whole loop config into stream calls
+  (verified against 0.87.1's `streamAssistantResponse`).
 
 ### Gatekeeper resources are opt-in (`enabledResources`)
 

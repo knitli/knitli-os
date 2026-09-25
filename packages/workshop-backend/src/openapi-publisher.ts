@@ -7,7 +7,10 @@ import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createLegacyMcpHandler, WorkerTransport } from "agents/mcp";
 import type { RpcStub } from "capnweb";
 import type { JWTPayload } from "jose";
+import { createLogger } from "@gadgets/backend-utils/logger";
 import { verifyCfAccessJwt } from "./access";
+
+const logger = createLogger({ component: "workshop.openapi-publisher" });
 
 export const PUBLISHER_BODY_BYTES = 128 * 1024;
 export const PUBLISHER_CODE_BYTES = 64 * 1024;
@@ -177,7 +180,9 @@ export async function handleOpenApiPublisher(
       const headers = new Headers(response.headers);
       headers.delete("Access-Control-Allow-Origin");
       return new Response(response.body, { status: response.status, headers });
-    } catch {
+    } catch (err) {
+      // The client only ever sees this generic answer, so the cause is logged for operators.
+      logger.warn("publisher native capability failed", { event: "publisher.native.failed", error: err });
       return requestError(403, -32603, "Publisher connection unavailable.");
     } finally {
       closed = true;

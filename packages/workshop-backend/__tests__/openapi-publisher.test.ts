@@ -273,9 +273,12 @@ describe("PR34 whole-request budget and response correlation", () => {
     const spec = setup(); spec.surface.tools[0].description = 'x'.repeat(2 * 1024 * 1024);
     const large = await spec.send({ ...list, id });
     expect(large.status).toBe(413); expect(await large.json()).toMatchObject({ id, error: { code: -32603 } });
-    const native = setup(); native.authenticated.openGadget.mockRejectedValue(new Error('unavailable'));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const native = setup(); native.authenticated.openGadget.mockRejectedValue(new Error('No such gatekeeper id: 7'));
     const unavailable = await native.send({ ...list, id });
-    expect(unavailable.status).toBe(403); expect(await unavailable.json()).toMatchObject({ id, error: { code: -32603 } });
+    expect(unavailable.status).toBe(403); expect(await unavailable.json()).toMatchObject({ id, error: { code: -32603, message: "Publisher connection unavailable." } });
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "publisher.native.failed", error: expect.stringContaining("No such gatekeeper id: 7") }));
+    warn.mockRestore();
   });
   it("does not send JSON-RPC errors for valid notifications", async () => {
     for (const failure of ['code', 'spec', 'native']) {

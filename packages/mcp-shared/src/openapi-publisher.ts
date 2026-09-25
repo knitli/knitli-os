@@ -136,7 +136,7 @@ export function buildNativeOpenApiFacade(surface: OpenApiPublisherSurface): {
   }
   const routes = new Map<string, string>();
   const paths: Record<string, unknown> = {};
-  const responses = { "200": { description: "Unmodified native McpCallResult; return pending immediately.",
+  const responses = { "200": { description: "Native McpCallResult; pending call messages are rewritten for chatless callers. Return pending immediately.",
     content: { "application/json": { schema: resultSchema } } } };
   for (const tool of surface.tools) {
     if (!tool.name || !tool.name.isWellFormed()) throw new Error("Invalid native operation ID.");
@@ -190,7 +190,15 @@ export async function dispatchNativeFacade(
     if (Object.keys(options).some(key => !["method", "path", "body", "contentType"].includes(key))
       || (Object.hasOwn(options, "contentType") && options.contentType !== "application/json")
       || !plainObject(options.body)) throw new Error("Invalid native operation envelope.");
-    return session.callTool(operationIdsByPath.get(path)!, options.body);
+    const operation = operationIdsByPath.get(path)!;
+    const result = await session.callTool(operation, options.body);
+    // Publisher calls have no chat; the native advice to wait for a chat card is wrong here.
+    if (result.status !== "pending") return result;
+    return { status: "pending", actionId: result.actionId, message:
+      `"${operation}" needs the workspace owner's approval. Publisher calls get no chat card: the owner `
+      + `approves it in the workspace's Activity panel, listed under the API's name followed by ": ${operation}" under this `
+      + `connection. Id ${result.actionId} belongs to this connection and is not shown in Activity. `
+      + `Return now; after approval, GET /actions/${result.actionId} returns the outcome.` };
   }
   if (method === "GET" && /^\/actions\/[1-9][0-9]*$/.test(path)) {
     const id = Number(path.slice(9));

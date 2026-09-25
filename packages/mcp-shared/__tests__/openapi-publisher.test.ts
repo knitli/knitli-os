@@ -51,7 +51,22 @@ it("does not let generated tools shadow describePublisherSurface", () => {
   const Session = installToolMethods(Base, [{ tool: { name: "describe_publisher_surface" }, mode: "action", classifiedBy: "default", autoApprovable: false }]);
   expect(new Session().describePublisherSurface()).toBe("native");
 });
-it.each<McpCallResult>([pending, { status: "ok", content: [], text: "", isError: true }, { status: "failed", message: "failed" }, { status: "rejected", message: "rejected" }])("preserves native $status and exact arguments", async result => {
+function expectPublisherPending(result: McpCallResult) {
+  expect(result).not.toBe(pending);
+  expect(result).toMatchObject({ status: "pending", actionId: 7 });
+  const { message } = result as Extract<McpCallResult, { status: "pending" }>;
+  for (const text of ['"send"', "Activity", `API's name followed by ": send"`, "GET /actions/7"]) expect(message).toContain(text);
+  for (const text of ["appear in chat", "executeCode", "<API name>"]) expect(message).not.toContain(text);
+}
+it("rewrites a pending call for chatless publisher callers and keeps exact arguments", async () => {
+  const { session, operationIdsByPath } = setup();
+  const body = { path: { id: "a/b" }, query: { top: [1, 2] }, headers: { custom: "value" }, body: { nested: null } };
+  expectPublisherPending(await dispatchNativeFacade(session, operationIdsByPath, { method: "POST", path: "/operations/73656e64", body, contentType: "application/json" }));
+  expect(session.callTool.mock.calls[0]).toEqual(["send", body]);
+  expect(session.callTool.mock.calls[0][1]).toBe(body);
+  expect(session.getActionResult).not.toHaveBeenCalled();
+});
+it.each<McpCallResult>([{ status: "ok", content: [], text: "", isError: true }, { status: "failed", message: "failed" }, { status: "rejected", message: "rejected" }])("preserves native $status and exact arguments", async result => {
   const { session, operationIdsByPath } = setup(); session.callTool.mockResolvedValue(result);
   const body = { path: { id: "a/b" }, query: { top: [1, 2] }, headers: { custom: "value" }, body: { nested: null } };
   expect(await dispatchNativeFacade(session, operationIdsByPath, { method: "POST", path: "/operations/73656e64", body, contentType: "application/json" })).toBe(result);
@@ -236,7 +251,7 @@ it("keeps the selected native call and arguments unchanged after schema fallback
   const { session } = setup();
   const { operationIdsByPath } = buildNativeOpenApiFacade(surface([]));
   const body = { query: { top: 2 }, body: { value: "native validation owns this" } };
-  expect(await dispatchNativeFacade(session, operationIdsByPath, { method: "POST", path: "/operations/73656e64", body })).toBe(pending);
+  expectPublisherPending(await dispatchNativeFacade(session, operationIdsByPath, { method: "POST", path: "/operations/73656e64", body }));
   expect(session.callTool).toHaveBeenCalledExactlyOnceWith("send", body);
   expect(session.callTool.mock.calls[0][1]).toBe(body);
 });

@@ -47,12 +47,19 @@ describe("publisher admission", () => {
   });
   it("rejects noncanonical route, method and foreign Origin", async () => {
     const s = setup();
-    for (const path of [route + '/', route + '?x=1', route.replace('/1', '/01'), route.replace('a'.repeat(64), 'A'.repeat(64))]) {
+    for (const path of [route + '/', route + '?x=1', route.replace('/1', '/01'), route.replace('/1', '/00'), route.replace('a'.repeat(64), 'A'.repeat(64))]) {
       expect((await handleOpenApiPublisher(new Request(path, { method: 'POST', body: '{}' }), s.config, s.ctx, s.factory)).status).toBe(404);
     }
     expect((await handleOpenApiPublisher(new Request(route), s.config, s.ctx, s.factory)).status).toBe(405);
     expect((await handleOpenApiPublisher(s.request('{}', { headers: { Origin: 'https://foreign.invalid' } }), s.config, s.ctx, s.factory)).status).toBe(403);
     expect(s.factory).not.toHaveBeenCalled();
+  });
+  it("routes a workspace's first connection, workpiece id 0", async () => {
+    const s = setup();
+    const response = await handleOpenApiPublisher(new Request(route.replace(/\/1$/, '/0'), s.request(JSON.stringify(list))), s.config, s.ctx, s.factory);
+    await waitOnExecutionContext(s.ctx);
+    expect(response.status).toBe(200);
+    expect(s.gadget.getGatekeeperById).toHaveBeenCalledWith(0);
   });
   it("Access mode cannot use bearer as bypass", async () => {
     const s = setup();

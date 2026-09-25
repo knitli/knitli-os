@@ -38,7 +38,8 @@ export async function handleOpenApiPublisher(
 ): Promise<Response> {
   if (env.OPENAPI_MCP_PUBLISHER_ENABLED !== "true") return new Response("Not Found", { status: 404 });
   const url = new URL(req.url);
-  const match = /^\/api\/mcp\/([a-f0-9]{64})\/([1-9][0-9]{0,15})$/.exec(url.pathname);
+  // Workpiece ids start at 0 (nextGatekeeperId), so a workspace's first connection is 0.
+  const match = /^\/api\/mcp\/([a-f0-9]{64})\/(0|[1-9][0-9]{0,15})$/.exec(url.pathname);
   if (!match || url.search || !Number.isSafeInteger(Number(match[2]))) return new Response("Not Found", { status: 404 });
   if (req.method !== "POST") return new Response("Only POST is supported.", { status: 405, headers: { Allow: "POST" } });
   let vendors: Set<string>;

@@ -115,11 +115,12 @@ describe("real pinned SDK and Loader", () => {
     expect(JSON.stringify(result)).toContain('/operations/73656e64');
     expect(s.session.callTool).not.toHaveBeenCalled();
   });
-  it("PUB-R10 preserves pending native envelope through real execute", async () => {
+  it("PUB-R10 returns the chatless pending envelope through real execute", async () => {
     const s = setup();
     const response = await s.send(call('async () => await codemode.request({method:"POST",path:"/operations/73656e64",body:{},contentType:"application/json"})'));
     const result = await response.json() as { result: { content: { text: string }[] } };
-    expect(JSON.parse(result.result.content[0].text)).toEqual(pending);
+    expect(JSON.parse(result.result.content[0].text)).toEqual({ status: 'pending', actionId: 7,
+      message: expect.stringMatching(/^"send" needs .*Activity panel.*GET \/actions\/7 returns the outcome\.$/) });
     expect(s.session.callTool).toHaveBeenCalledWith('send', {});
     expect(s.disposed).toEqual(['session', 'client', 'gadget']);
   });

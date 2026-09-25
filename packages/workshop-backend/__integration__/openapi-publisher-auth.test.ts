@@ -108,3 +108,26 @@ it("PUB-R08 real workspace owner reaches SDK; wrong owner and initializing conne
   });
   expect((await send(`${name}:${secret}`)).status).toBe(403); expect(sessions).toBe(1);
 });
+
+it("PUB-R09 a publisher session lists a provisional workspace with no chat activity", async () => {
+  const name = `publist${crypto.randomUUID().replaceAll('-', '')}`;
+  const user = exports.UserDurableObject.getByName(name);
+  const secret = await user.createAccount(name, name, new Uint8Array([1, 2, 3]));
+  const id = exports.OverseerDurableObject.newUniqueId();
+  const workspace = exports.OverseerDurableObject.get(id);
+  await user.newGadget(id.toString(), 'Publisher listing fixture');
+  using _opened = await workspace.open(user.id.toString(), name, () => {});
+  await runInDurableObject(workspace, async instance => {
+    const impl = (instance as unknown as { impl: any }).impl;
+    impl.storage.gatekeepers.put({ id: 1, resourceTitle: 'Publisher fixture', class: {}, creationSpec: { type: 'gatekeeper', vendorId: 'native', resourceUrl: 'https://provider.invalid', typeUrlPattern: 'https://*' } });
+    impl.getGatekeeperFacet = () => ({ startSession: async () => new PublisherFixtureSession() });
+  });
+  const listed = async () => (await user.listGadgets()).some(g => g.id === id.toString());
+  expect(await listed()).toBe(false);
+  const response = await server.fetch(new Request(`https://workshop.invalid/api/mcp/${id}/1`, {
+    method: 'POST', headers: { Authorization: `Bearer ${name}:${secret}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+  }), config, createExecutionContext());
+  expect(response.status).toBe(200);
+  await vi.waitFor(async () => expect(await listed()).toBe(true));
+});

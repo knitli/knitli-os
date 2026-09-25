@@ -13416,6 +13416,8 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
       (session as { [Symbol.dispose](): void })[Symbol.dispose]();
       throw error;
     }
+    // Opening a session is use of the workspace (e.g. a native publisher with no chat), so list it.
+    this.impl.bumpLastActive();
     return session;
   }
 

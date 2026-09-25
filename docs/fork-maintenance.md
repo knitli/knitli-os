@@ -582,3 +582,22 @@ network, bounded request/code/spec sizes, and request-owned callback draining an
 SDK versions stay pinned; schemas containing own `__proto__` keys fail explicitly because
 the pinned SDK cannot represent those keys faithfully. This is distinct from the retired
 OpenAPI host protocol above and adds no vendor/account protocol or durable session interface.
+The facade (`mcp-shared/src/openapi-publisher.ts`) rewrites the message of a pending call for
+these chatless callers, pointing them at the Activity panel instead of a chat card; its action
+ids are facet-local, not Activity ids.
+
+### Opening a connection session activates a provisional workspace
+
+- **Where:** `GatekeeperClientImpl.openSession()` in `packages/workshop-backend/src/overseer.ts`
+- **What:** one added `this.impl.bumpLastActive()` after the final `assertGatekeeperUsable`, so
+  a successful session open sets the workspace's `lastActive` in the owner's User DO and lists it.
+  Upstream bumps only on chat activity and code changes.
+- **Why:** a workspace used only through the native OpenAPI publisher never chats, so it stayed
+  provisional and hidden from the owner's workspace list. Bumping in `addGatekeeper`/`newGatekeeper`
+  instead would list abandoned home-page drafts (`routes/index.tsx` creates connections on the
+  provisional workspace), and bumping in `submitAction` would miss read-only publishers.
+- **Test:** `PUB-R09 a publisher session lists a provisional workspace with no chat activity` in
+  `packages/workshop-backend/__integration__/openapi-publisher-auth.test.ts`; removing the line
+  fails it at the listing `waitFor`.
+- **At sync:** Tier 2. If upstream reshapes `openSession()`, reapply the one line after the final
+  `assertGatekeeperUsable`.

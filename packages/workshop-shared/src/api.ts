@@ -1560,9 +1560,9 @@ type SuggestedModel = {
   outputLimit?: number;
 
   /**
-   * When present, the prompt size compaction keeps the chat under. Set below the window for models
-   * whose input is priced higher past a threshold (GPT-5.6 doubles above 272K), so ordinary use
-   * stays in the cheaper tier while the window remains the hard limit.
+   * When present, the preferred prompt budget used for compaction, below the model's hard context
+   * window. Can avoid long-context pricing (GPT-5.6 doubles above 272K) while retaining the full
+   * window as the hard limit.
    */
   compactionInputBudget?: number;
 };
@@ -1587,13 +1587,27 @@ const SUGGESTED_MODEL_CATALOG = {
     },
   },
   "anthropic": {
-    // TODO: Include Fable -- but we need an admin option to disable it, since many orgs don't
-    //   allow it for ZDR reasons. It's sort of overkill for building gadgets anyway.
+    "claude-opus-5-5": {name: "Claude Opus 5.5", contextWindow: 1000000},
+    "claude-fable-5-1": {name: "Claude Fable 5.1", contextWindow: 1000000},
     "claude-opus-5": {name: "Claude Opus 5", contextWindow: 1000000},
     "claude-sonnet-5": {name: "Claude Sonnet 5", contextWindow: 1000000},
     "claude-haiku-4-5": {name: "Claude Haiku 4.5", contextWindow: 200000},
   },
   "openai": {
+    // pi's GPT-6 catalog reports a 272K window, but these models support 1.05M. Use 272K as the
+    // preferred compaction budget, not as the hard context limit.
+    "gpt-6-sol": {
+      name: "GPT-6 Sol", contextWindow: 1050000, outputLimit: 128000,
+      compactionInputBudget: 272000,
+    },
+    "gpt-6-luna": {
+      name: "GPT-6 Luna", contextWindow: 1050000, outputLimit: 128000,
+      compactionInputBudget: 272000,
+    },
+    "gpt-6-astra": {
+      name: "GPT-6 Astra", contextWindow: 1050000, outputLimit: 128000,
+      compactionInputBudget: 272000,
+    },
     "gpt-5.6-sol": {
       name: "GPT 5.6 Sol", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
@@ -3550,7 +3564,18 @@ export type AiToolCall = {
    * the pair of a workpiece reference (the `workpiece` chat binding name) and `filename`.
    */
   toolName: "readFile";
-  input: {workpiece?: string, filename: string};
+  input: {
+    workpiece?: string;
+    filename: string;
+
+    /**
+     * Optional line window: `startLine` is 1-based and `lineCount` is the number of lines to return
+     * from there, each defaulting to the file's edge. A windowed read ends with a line stating the
+     * range shown and where to continue. Absent on reads recorded before ranges existed.
+     */
+    startLine?: number;
+    lineCount?: number;
+  };
 
   /**
    * Present when the read was served from committed code rather than the chat's uncommitted
@@ -3570,6 +3595,22 @@ export type AiToolCall = {
    * blob from it by path.
    */
   observedCommit?: string;
+} | {
+  /**
+   * Search a workpiece's files for lines matching a regular expression, in `grep -n` form. The
+   * output, bounded as the model saw it, is recorded so replay doesn't re-run the search.
+   */
+  toolName: "grep";
+  input: {
+    workpiece: string;
+
+    /** JavaScript regular expression, matched against each line. */
+    pattern: string;
+
+    /** A file to search, or a directory to search recursively. Absent means the whole workpiece. */
+    path?: string;
+  };
+  output?: string;
 } | {
   toolName: "writeFile";
   input: {

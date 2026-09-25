@@ -220,7 +220,13 @@ function capturingHandle(captured: {options?: unknown, systemPrompt?: string}[])
   return {
     model,
     stream: ((m, c, options) => {
-      captured.push({options, systemPrompt: c.systemPrompt});
+      // pi 0.87 folds the system prompt into the transcript's leading system message before
+      // the request reaches the stream function, so read it back from there.
+      const system = c.messages.find(msg => msg.role === "system");
+      captured.push({
+        options,
+        systemPrompt: typeof system?.content === "string" ? system.content : undefined,
+      });
       return {
         async *[Symbol.asyncIterator]() {},
         result: async () => fauxAssistantMessage("done."),

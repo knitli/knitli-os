@@ -200,9 +200,14 @@ export class ActionStore {
 
   reject(id: number): void {
     const stored = this.get(id);
-    // A failed call is still on the user's approval card and "deny" is how it is dismissed. The
-    // record keeps its failure (it may be outcome-unknown); the host records the rejection.
-    if (!stored || stored.state === "rejected" || stored.state === "failed") return;
+    if (!stored || stored.state === "rejected") return;
+    // The Workshop keeps a failed approval pending until the user retries or discards it, so refusing
+    // the discard strands it there. The failure stays on record for the Gadget to collect; discarding
+    // only rules out another attempt.
+    if (stored.state === "failed") {
+      this.#sql.exec("UPDATE mcp_actions SET retryable = 0 WHERE id = ?", id);
+      return;
+    }
     if (stored.state !== "pending") {
       throw new Error(stored.state === "applying"
         ? `MCP action ${id} is already being applied.`

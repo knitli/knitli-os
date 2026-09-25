@@ -24,9 +24,10 @@ export const THINKING_LEVEL_ORDER: readonly ThinkingLevel[] =
     ["minimal", "low", "medium", "high", "xhigh", "max"];
 
 /**
- * pi API implementations that consume `options.reasoningEffort` (pi-ai 0.84.4:
+ * pi API implementations that consume `options.reasoningEffort` (pi-ai 0.87.1:
  * openai-completions and openai-responses map it through `model.thinkingLevelMap`;
- * anthropic-messages and google-generative-ai ignore it). Levels are offered only for models
+ * anthropic-messages reads `options.effort`/`options.reasoning` instead, and
+ * google-generative-ai reads neither). Levels are offered only for models
  * on these APIs -- offering them elsewhere would be UI that does nothing.
  */
 const REASONING_EFFORT_APIS: ReadonlySet<string> =
@@ -56,15 +57,12 @@ const APP_PROVIDER_PI_SHAPE: Record<AiModelConfig["provider"], {pi: string, api:
  * Fork corrections to pi's thinking-level data, keyed by `${piProvider} ${modelId}`. An entry
  * merges over pi's map (or stands alone when pi has none). Correct here immediately when a
  * level proves wrong against a live provider; pi bumps are picked up normally.
+ *
+ * Empty since pi 0.87.1: its GLM-5.3-Flash map ({low, high, max}) replaced the 0.84.4 gap the
+ * one entry mirrored the family for, and kimi-k2.7-code's dropped map is taken at face value
+ * (no control offered) rather than restored unproven.
  */
-const FORK_THINKING_LEVEL_OVERRIDES: Record<string, ThinkingLevelMap> = {
-  // pi 0.84.4 has no map for GLM-5.3-Flash while every sibling @cf/zai-org GLM carries the
-  // identical low/medium/high one; mirror the family until the provider says otherwise.
-  "cloudflare-workers-ai @cf/zai-org/glm-5.3-flash": {
-    off: null, minimal: null, low: "low", medium: "medium", high: "high",
-    xhigh: null, max: null,
-  },
-};
+const FORK_THINKING_LEVEL_OVERRIDES: Record<string, ThinkingLevelMap> = {};
 
 /** pi's thinking-level map for a model, or undefined when pi catalogs no map for it. */
 export function piCatalogThinkingLevelMap(

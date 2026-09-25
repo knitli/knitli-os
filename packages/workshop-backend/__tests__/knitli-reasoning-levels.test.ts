@@ -41,21 +41,19 @@ function directEnv(): Cloudflare.Env {
 }
 
 describe("resolveThinkingLevelMap", () => {
-  it("fills a missing pi map from the fork override table", () => {
-    // pi 0.84.4 catalogs no map for GLM-5.3-Flash at all.
+  it("returns pi's map for GLM-5.3-Flash now that pi catalogs one", () => {
+    // pi 0.84.4 cataloged no map, so the fork override table mirrored the family's
+    // {low, medium, high}; pi 0.87.1 ships {low, high, max} and the override is gone.
     expect(resolveThinkingLevelMap("cloudflare-workers-ai", GLM_FLASH, undefined)).toEqual({
-      off: null, minimal: null, low: "low", medium: "medium", high: "high",
-      xhigh: null, max: null,
+      off: null, minimal: null, low: "low", medium: null, high: "high",
+      xhigh: null, max: "max",
     });
   });
 
-  it("lets override keys win over a passed catalog map, passing the rest through", () => {
-    let merged = resolveThinkingLevelMap("cloudflare-workers-ai", GLM_FLASH,
-        { low: "low", medium: "CUSTOM", high: "high", xhigh: "xhigh", max: "max" });
-    expect(merged?.medium).toBe("medium");
-    expect(merged?.low).toBe("low");
-    expect(merged?.high).toBe("high");
-    expect(merged?.xhigh).toBeNull();
+  it("prefers a passed catalog map over pi's own lookup", () => {
+    let catalog = { low: "low", medium: "CUSTOM", high: "high" };
+    expect(resolveThinkingLevelMap(
+        "cloudflare-workers-ai", GLM_FLASH, catalog)).toEqual(catalog);
   });
 
   it("passes pi's map through untouched when no override exists", () => {
@@ -121,15 +119,20 @@ describe("isReasoningLevel", () => {
 
 describe("modelReasoningForConfig", () => {
   it("resolves the Workers AI picker models", () => {
+    // pi 0.87.1 revised the GLM-5.3 family from {low, medium, high} to {low, high, max}.
     expect(modelReasoningForConfig("cloudflare", GLM_FLASH)).toEqual({
-      levels: ["low", "medium", "high"], default: "medium",
+      levels: ["low", "high", "max"], default: "high",
     });
     expect(modelReasoningForConfig("cloudflare", DEEPSEEK_PRO)).toEqual({
       levels: ["high", "max"], default: "high",
     });
-    expect(modelReasoningForConfig("cloudflare", KIMI_CODE)).toEqual({
-      levels: ["low", "medium", "high"], default: "medium",
-    });
+  });
+
+  it("offers no control where pi catalogs no map", () => {
+    // pi 0.87.1 dropped kimi-k2.7-code's map while narrowing its sibling to {high}; the
+    // fork takes that at face value (provider default applies) rather than restoring the
+    // 0.84.4 range unproven.
+    expect(modelReasoningForConfig("cloudflare", KIMI_CODE)).toBeNull();
   });
 
   it("resolves OpenAI's full range including xhigh/max", () => {
@@ -156,7 +159,7 @@ describe("getModelReasoning resolution", () => {
   it("resolves gateway built-in ids through the fork table", () => {
     let gwConfig = new AiGatewayConfig(gatewayEnv());
     for (let [id, expected] of [
-      [GLM_FLASH, { levels: ["low", "medium", "high"], default: "medium" }],
+      [GLM_FLASH, { levels: ["low", "high", "max"], default: "high" }],
       [DEEPSEEK_PRO, { levels: ["high", "max"], default: "high" }],
       ["gpt-5.6-terra", {
         levels: ["low", "medium", "high", "xhigh", "max"], default: "medium",
@@ -195,7 +198,7 @@ describe("getModelReasoning resolution", () => {
 });
 
 describe("makeHandle thinking-level wiring", () => {
-  it("attaches the merged map to Workers AI descriptors that never carried one", () => {
+  it("attaches pi's map to Workers AI descriptors that drop it", () => {
     let config: AiModelConfig = {
       provider: "cloudflare", model: GLM_FLASH,
       accountId: "account-id", apiToken: "token",
@@ -203,8 +206,8 @@ describe("makeHandle thinking-level wiring", () => {
     let handle = getModel(directEnv(), config, INITIATOR);
     expect(handle.model.api).toBe("openai-completions");
     expect(handle.model.thinkingLevelMap).toEqual({
-      off: null, minimal: null, low: "low", medium: "medium", high: "high",
-      xhigh: null, max: null,
+      off: null, minimal: null, low: "low", medium: null, high: "high",
+      xhigh: null, max: "max",
     });
   });
 
@@ -212,7 +215,7 @@ describe("makeHandle thinking-level wiring", () => {
     let handle = getModel(gatewayEnv(), {
       provider: "anthropic", model: "claude-opus-5", apiToken: "",
     }, INITIATOR);
-    expect(handle.model.thinkingLevelMap).toEqual({ xhigh: "xhigh", max: "max" });
+    expect(handle.model.thinkingLevelMap).toEqual({ off: null, xhigh: "xhigh", max: "max" });
   });
 
   it("attaches no map where neither source has one", () => {

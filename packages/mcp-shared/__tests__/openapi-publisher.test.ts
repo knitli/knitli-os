@@ -55,8 +55,8 @@ function expectPublisherPending(result: McpCallResult) {
   expect(result).not.toBe(pending);
   expect(result).toMatchObject({ status: "pending", actionId: 7 });
   const { message } = result as Extract<McpCallResult, { status: "pending" }>;
-  for (const text of ['"send"', "Activity", "GET /actions/7"]) expect(message).toContain(text);
-  for (const text of ["appear in chat", "executeCode"]) expect(message).not.toContain(text);
+  for (const text of ['"send"', "Activity", `API's name followed by ": send"`, "GET /actions/7"]) expect(message).toContain(text);
+  for (const text of ["appear in chat", "executeCode", "<API name>"]) expect(message).not.toContain(text);
 }
 it("rewrites a pending call for chatless publisher callers and keeps exact arguments", async () => {
   const { session, operationIdsByPath } = setup();

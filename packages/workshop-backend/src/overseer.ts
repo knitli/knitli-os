@@ -13416,8 +13416,9 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
       (session as { [Symbol.dispose](): void })[Symbol.dispose]();
       throw error;
     }
-    // Opening a session is use of the workspace (e.g. a native publisher with no chat), so list it.
-    this.impl.bumpLastActive();
+    // A direct open is use of the workspace (e.g. a native publisher with no chat), so list it.
+    // Binding loopbacks are gadget/agent traffic and must not re-sort the owner's list.
+    if (this.caller.from === "user") this.impl.bumpLastActive();
     return session;
   }
 

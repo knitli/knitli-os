@@ -196,7 +196,7 @@ export async function dispatchNativeFacade(
     if (result.status !== "pending") return result;
     return { status: "pending", actionId: result.actionId, message:
       `"${operation}" needs the workspace owner's approval. Publisher calls get no chat card: the owner `
-      + `approves it in the workspace's Activity panel, listed as "<API name>: ${operation}" under this `
+      + `approves it in the workspace's Activity panel, listed under the API's name followed by ": ${operation}" under this `
       + `connection. Id ${result.actionId} belongs to this connection and is not shown in Activity. `
       + `Return now; after approval, GET /actions/${result.actionId} returns the outcome.` };
   }

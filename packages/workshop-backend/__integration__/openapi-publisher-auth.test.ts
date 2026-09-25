@@ -131,3 +131,26 @@ it("PUB-R09 a publisher session lists a provisional workspace with no chat activ
   expect(response.status).toBe(200);
   await vi.waitFor(async () => expect(await listed()).toBe(true));
 });
+
+it("PUB-R09 binding loopback sessions do not list a provisional workspace", async () => {
+  const name = `publoop${crypto.randomUUID().replaceAll('-', '')}`;
+  const user = exports.UserDurableObject.getByName(name);
+  await user.createAccount(name, name, new Uint8Array([1, 2, 3]));
+  const id = exports.OverseerDurableObject.newUniqueId();
+  const workspace = exports.OverseerDurableObject.get(id);
+  await user.newGadget(id.toString(), 'Loopback listing fixture');
+  using _opened = await workspace.open(user.id.toString(), name, () => {});
+  await runInDurableObject(workspace, async instance => {
+    const impl = (instance as unknown as { impl: any }).impl;
+    impl.storage.gatekeepers.put({ id: 1, resourceTitle: 'Publisher fixture', class: {}, creationSpec: { type: 'gatekeeper', vendorId: 'native', resourceUrl: 'https://provider.invalid', typeUrlPattern: 'https://*' } });
+    impl.getGatekeeperFacet = () => ({ startSession: async () => new PublisherFixtureSession() });
+    const bump = vi.spyOn(impl, 'bumpLastActive');
+    for (const caller of [{ from: 'gadget', gadgetId: 100 }, { from: 'agent', chatId: 1 }]) {
+      expect(await impl.startGatekeeperSession({ type: 'gatekeeper', id: 1 }, caller)).toBeInstanceOf(PublisherFixtureSession);
+    }
+    expect(bump).not.toHaveBeenCalled();
+    // Control: the spy does intercept, and a direct (user) open through the same path bumps.
+    await impl.startGatekeeperSession({ type: 'gatekeeper', id: 1 }, { from: 'user' });
+    expect(bump).toHaveBeenCalledOnce();
+  });
+});

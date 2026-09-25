@@ -589,15 +589,22 @@ ids are facet-local, not Activity ids.
 ### Opening a connection session activates a provisional workspace
 
 - **Where:** `GatekeeperClientImpl.openSession()` in `packages/workshop-backend/src/overseer.ts`
-- **What:** one added `this.impl.bumpLastActive()` after the final `assertGatekeeperUsable`, so
-  a successful session open sets the workspace's `lastActive` in the owner's User DO and lists it.
-  Upstream bumps only on chat activity and code changes.
+- **Introduced:** `d62cbc74`
+- **What:** one added `if (this.caller.from === "user") this.impl.bumpLastActive()` after the
+  final `assertGatekeeperUsable`, so a successful direct (user-caller) session open sets the
+  workspace's `lastActive` in the owner's User DO and lists it. Binding loopbacks
+  (`startGatekeeperSession`, gadget/agent callers) do not bump. Upstream bumps only on chat
+  activity and code changes.
 - **Why:** a workspace used only through the native OpenAPI publisher never chats, so it stayed
-  provisional and hidden from the owner's workspace list. Bumping in `addGatekeeper`/`newGatekeeper`
-  instead would list abandoned home-page drafts (`routes/index.tsx` creates connections on the
-  provisional workspace), and bumping in `submitAction` would miss read-only publishers.
-- **Test:** `PUB-R09 a publisher session lists a provisional workspace with no chat activity` in
-  `packages/workshop-backend/__integration__/openapi-publisher-auth.test.ts`; removing the line
-  fails it at the listing `waitFor`.
-- **At sync:** Tier 2. If upstream reshapes `openSession()`, reapply the one line after the final
-  `assertGatekeeperUsable`.
+  provisional and hidden from the owner's workspace list. The publisher opens with the default
+  `{from: "user"}` caller. Loopbacks are excluded because every gadget binding call, including a
+  "use" collaborator's, would otherwise re-sort the owner's list. Bumping in
+  `addGatekeeper`/`newGatekeeper` instead would list abandoned home-page drafts
+  (`routes/index.tsx` creates connections on the provisional workspace), and bumping in
+  `submitAction` would miss read-only publishers.
+- **Test:** in `packages/workshop-backend/__integration__/openapi-publisher-auth.test.ts`,
+  `PUB-R09 a publisher session lists a provisional workspace with no chat activity` (removing the
+  line fails it at the listing `waitFor`) and `PUB-R09 binding loopback sessions do not list a
+  provisional workspace` (removing the `from === "user"` guard fails it).
+- **At sync:** Tier 2. If upstream reshapes `openSession()`, reapply the one guarded line after
+  the final `assertGatekeeperUsable`.

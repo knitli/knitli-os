@@ -386,3 +386,76 @@ describe('ObserverConfigModal account selection', () => {
     expect(findButton(rendered, 'Re-authenticate this account')).toBeDefined()
   })
 })
+
+describe('ObserverConfigModal when a service cannot be connected', () => {
+  let root: Root | undefined
+  let container: HTMLDivElement | undefined
+
+  afterEach(() => {
+    act(() => root?.unmount())
+    container?.remove()
+    vi.restoreAllMocks()
+    root = undefined
+    container = undefined
+  })
+
+  const MEMORY_NEED: ObserverBindingNeed = {
+    gatekeeperId: 30, vendorId: 'memory', resourceTitle: 'Knitli Memory', ambient: true,
+  }
+
+  async function render(
+    api: RpcStub<AuthenticatedApi>,
+    needs: ObserverBindingNeed[],
+    onCancel = vi.fn<(reason?: string) => void>(),
+  ) {
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => {
+      root!.render(
+        <ObserverConfigModal needs={needs} authenticatedApi={api} onConfirm={() => {}} onCancel={onCancel} />,
+      )
+      await Promise.resolve()
+    })
+    return { container, onCancel }
+  }
+
+  it('explains a hidden always-on service instead of prompting, and closes with that reason', async () => {
+    // Memory is in neither vendor listing (hidden from this user) and they have no account for it.
+    const { container, onCancel } = await render(
+      fakeApi([account(1, 'me@example.com', [DOC_RESOURCE.urlPattern])]), [NEED, MEMORY_NEED])
+    const message =
+      'This workspace uses its owner’s Knitli Memory (always on). You need your own access to Knitli Memory to collaborate here.'
+
+    expect(container.textContent).toContain('You can’t open this workspace')
+    expect(container.textContent).toContain(message)
+    expect(findButton(container, 'Verify and open')).toBeUndefined()
+    expect(findButton(container, 'Connect')).toBeUndefined()
+
+    await act(async () => findButton(container, 'Close')!.click())
+    expect(onCancel).toHaveBeenCalledWith(message)
+  })
+
+  it('keeps the ordinary prompt when the vendor listing itself failed', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const api = Object.assign(fakeApi([]), {
+      listGatekeeperVendors: async () => { throw new Error('listing unavailable') },
+    }) as RpcStub<AuthenticatedApi>
+    const { container } = await render(api, [MEMORY_NEED])
+
+    expect(container.textContent).not.toContain('You can’t open this workspace')
+    expect(findButton(container, 'Verify and open')).toBeDefined()
+  })
+
+  it('still offers Connect for an always-on service the user can opt into', async () => {
+    const api = Object.assign(fakeApi([]), {
+      listAddableGatekeepers: async () => [{
+        id: 'memory', description: { displayName: 'Knitli Memory' } as VendorDescription, supportedResources: [],
+      }],
+    }) as RpcStub<AuthenticatedApi>
+    const { container } = await render(api, [MEMORY_NEED])
+
+    expect(container.textContent).not.toContain('You can’t open this workspace')
+    expect(findButton(container, 'Connect')).toBeDefined()
+  })
+})

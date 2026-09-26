@@ -48,6 +48,23 @@ async function list(storage: ReturnType<typeof seed>, kinds = KINDS, warn = vi.f
 }
 
 describe("listPreApprovableActions", () => {
+  it("waits for this open's ambient reconcile before listing", async () => {
+    // A later open reconciles ambient records in the background; a singleton the owner just
+    // connected lands only when that finishes, and the tab doesn't refresh on its own.
+    let storage = seed();
+    let ambient = storage.gatekeepers.get(2)!;
+    storage.gatekeepers.delete(2);
+    let client = await openFakeOverseer(storage, { implOverrides: {
+      ensureAmbientCapsules: async () => {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        storage.gatekeepers.put(ambient);
+      },
+      getGatekeeperFacet: (id: number) => ({ getAutoApprovableActions: async () => KINDS[id] }),
+    } });
+    let ids = (await client.listPreApprovableActions()).map(action => action.gatekeeperId);
+    expect(ids.toSorted()).toEqual([1, 2]);
+  });
+
   it("offers an ambient gatekeeper's kinds alongside bound ones, but not unbound capsules", async () => {
     let storage = seed();
     storage.autoApproveTags.put({

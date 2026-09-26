@@ -11759,7 +11759,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async listPreApprovableActions(): Promise<PreApprovableAction[]> {
     // Surface actions from every gatekeeper bound by some gadget (the connections the UI shows),
-    // plus the ambient ones every chat gets without any binding (see ensureAmbientCapsules).
+    // plus the ambient ones every chat gets without any binding (see ensureAmbientCapsules). Wait
+    // for this open's ambient reconcile, as listSlashCommands does, or a new one would be missed.
+    await this.slashCommandsReady;
     let boundIds = new Set<WorkpieceId>();
     for (let gadget of this.impl.storage.gadgets.list()) {
       if (gadget.type !== "gadget") continue;  // worktrees have no binding edges

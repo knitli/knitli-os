@@ -193,7 +193,7 @@ describe('useWorkspaceOpen', () => {
     expect(container.textContent).toBe('This workspace uses its owner’s Knitli Memory (always on).')
   })
 
-  it('does not carry a blocked reason into a later plain cancel after trying again', async () => {
+  it('a plain cancel replaces an earlier blocked reason (cancelObserverConfig always overwrites it)', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     let state!: ReturnType<typeof useWorkspaceOpen>
     const authenticatedApi = {

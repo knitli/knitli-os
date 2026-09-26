@@ -84,7 +84,6 @@ export function useWorkspaceOpen({
     }
 
     const load = async () => {
-      observerCancelReasonRef.current = undefined
       if (!id) {
         showTerminalError({ kind: 'open', failure: 'not-found' })
         return

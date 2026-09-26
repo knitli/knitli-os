@@ -442,6 +442,12 @@ export default function GatekeeperModal({
         accountMap.delete(id)
         setAccounts(Array.from(accountMap.values()))
       },
+      // The modal stays mounted while closed, so `accounts` still holds the previous open's list.
+      // An empty snapshot sends no add/remove, so publish the fresh map once it is complete.
+      ready() {
+        if (cancelled) return
+        setAccounts(Array.from(accountMap.values()))
+      },
     })
     const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
     subscription.catch(error => {

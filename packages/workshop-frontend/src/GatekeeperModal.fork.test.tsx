@@ -305,6 +305,30 @@ describe('GatekeeperModal ambient resource connections', () => {
     expect(add?.disabled).toBe(true)
   })
 
+  it('forgets a singleton account that is gone when the picker reopens', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
+    const getOverseer = vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({} as RpcStub<Overseer>)
+    const rendered = await render(testApi.api, getOverseer)
+    expect(alwaysOnSection(rendered.container)).not.toBeNull()
+
+    // Disconnected elsewhere while the picker was closed: the next subscription's snapshot is empty.
+    vi.mocked(testApi.api.subscribeConnectedAccounts).mockImplementation((subscriber) => {
+      subscriber.ready()
+      return Object.assign(Promise.resolve({ [Symbol.dispose]() {} }), { [Symbol.dispose]() {} })
+    })
+    for (const open of [false, true]) {
+      await act(async () => {
+        root!.render(<GatekeeperModal open={open} onClose={() => {}} getOverseer={getOverseer} onCreated={async () => {}} />)
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+    }
+
+    expect(alwaysOnSection(rendered.container)).toBeNull()
+    expect([...rendered.container.querySelectorAll('button')]
+      .find(button => button.textContent?.includes('Knitli Memory'))).toBeDefined()
+  })
+
   it('provisions an auto-provisioned resource account without starting OAuth', async () => {
     const testApi = buildApi({ autoProvisionsAccount: true })
     const rendered = await render(testApi.api)

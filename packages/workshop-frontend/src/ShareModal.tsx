@@ -295,8 +295,8 @@ function RecipientVerification({
         </ul>
         {requirements.some(requirement => requirement.ambient) && (
           <p className="mt-1.5 text-[12px] leading-[16px] tracking-[-0.15px] text-kumo-subtle">
-            Always-on services are part of every workspace you own. Anyone without their own access to
-            them can’t open this one.
+            Always-on services are part of every workspace its owner has. Anyone who can’t get their
+            own access to one can’t open this workspace.
           </p>
         )}
       </div>

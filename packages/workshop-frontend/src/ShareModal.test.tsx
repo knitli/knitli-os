@@ -1166,7 +1166,7 @@ describe('ShareModal', () => {
     expect(rendered.textContent).toContain('Knitli Memory (always on)')
     expect(rendered.textContent).not.toContain('Q3 planning (always on)')
     expect(rendered.textContent).toContain(
-      'Always-on services are part of every workspace you own. Anyone without their own access to them can’t open this one.')
+      'Always-on services are part of every workspace its owner has. Anyone who can’t get their own access to one can’t open this workspace.')
   })
 
   it('keeps invite and share-link requirements tied to their own role pickers', async () => {

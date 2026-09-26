@@ -749,7 +749,7 @@ export default function GatekeeperModal({
 
   const handleCreateResourceConnection = async () => {
     if (creating) return
-    if (!selectedConnection || selectedAccountId === null) return
+    if (!selectedConnection || selectedAccountId === null || selectedAlwaysOn) return
     const resourceUrlPattern = selectedConnection.resourceUrlPattern
     if (!resourceUrlPattern) return
 
@@ -794,6 +794,9 @@ export default function GatekeeperModal({
     if (selectedConnection.id === 'agent-spawner') {
       return Boolean(spawnerDisplayName.trim()) && !spawnerEnvError
     }
+    // Checked here, not left to the configurator Effect's cleanup: a singleton account can arrive
+    // while a frame is up, and Add must be off from that render on, not only after the Effect runs.
+    if (selectedAlwaysOn) return false
     if (selectedConnection.resourceUrlPattern) {
       const resourceUrlPattern = selectedConnection.resourceUrlPattern
       return Boolean(

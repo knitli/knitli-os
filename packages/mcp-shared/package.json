@@ -42,7 +42,7 @@
     "@types/node": "^26.1.0",
     "jose": "^6.2.8",
     "typescript": "catalog:",
-    "typescript6": "npm:typescript@6.0.3",
+    "typescript6": "catalog:",
     "vitest": "catalog:"
   }
 }

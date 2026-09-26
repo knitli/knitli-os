@@ -252,6 +252,17 @@ export function validateBindingName(name: string): void {
 }
 
 /**
+ * Throws unless `email` is acceptable as `AiChatAuthorInfo.commitEmail`: `local@domain`, at most
+ * 254 characters, with no whitespace, control characters, or angle brackets. This is not full
+ * address validation; it exists so the value cannot break out of a git `Name <email>` header.
+ */
+export function validateCommitEmail(email: string): void {
+  if (email.length > 254 || !/^[^\p{Cc}\s<>@]+@[^\p{Cc}\s<>@]+$/u.test(email)) {
+    throw new Error(`Invalid commit email: expected an address like name@example.com.`);
+  }
+}
+
+/**
  * Why a previously-configured observer binding failed verification on this open attempt. Attached to
  * the ObserverBindingNeed the overseer re-prompts with, so the client can explain what went wrong
  * instead of dead-ending the open.
@@ -420,6 +431,12 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /** Set the user's own display name, seen in chats, etc. */
   setOwnDisplayName(name: string): Promise<void>;
+
+  /**
+   * Set the email address used on git commits the user authors, or clear it with null to fall
+   * back to one derived from their user ID. Rejects an address `validateCommitEmail` refuses.
+   */
+  setOwnCommitEmail(email: string | null): Promise<void>;
 
   /**
    * Find other users of this deployment by a case-insensitive substring of
@@ -1699,7 +1716,7 @@ export type GadgetMetadata = {
    * True when the gadget has observed data marked `containsRestrictedData` (see
    * `ObservationDescription`). It can still be shared, with collaborators verified per
    * gatekeeper (if `ownerInvitesOnly` is also set, only the owner can add them), but can no longer
-   * perform actions or fetch from the public web.
+   * fetch from the public web, and every action requires manual approval.
    */
   containsRestrictedData?: boolean;
 
@@ -2339,6 +2356,9 @@ export interface Overseer extends RpcTarget {
    *
    * Auto-approval rules are workspace-wide per gatekeeper: approving an action kind approves it
    * no matter which gadget invokes it.
+   *
+   * Once the workspace has read restricted data (`GadgetMetadata.containsRestrictedData`), rules
+   * are stored but never fire: every action pends for manual approval.
    */
   setAutoApprovedActionKind(gatekeeperId: WorkpieceId, actionKind: ActionKind): Promise<void>;
 
@@ -3132,6 +3152,13 @@ export type AiChatAuthorInfo = {
   /** Display name for author, e.g. "Kenton Varda" or "GPT" */
   name: string;
 
+  /**
+   * The user's preferred email address for git commits they author, set via
+   * `AuthenticatedApi.setOwnCommitEmail()`. When absent, commits derive an address from `id`.
+   * Self-asserted and unverified: it is attribution only and must never be read as identity.
+   */
+  commitEmail?: string;
+
   // Note: the avatar is intentionally not included here to keep this type lightweight (it's
   // embedded in every chat message). Fetch user avatars separately via
   // `AuthenticatedApi.getAvatar(userId)`.
@@ -3635,13 +3662,23 @@ export type AiToolCall = {
   };
 } | {
   /**
-   * Describe one of the chat's bindings by name. Numeric names appear only in logs persisted
-   * before named chat bindings (they were capsule indices).
+   * Describe a binding by name: one of the chat's bindings or, when `gadget` is given, one of
+   * that gadget's own bindings. Numeric names appear only in logs persisted before named chat
+   * bindings (they were capsule indices).
    */
   toolName: "describeBinding";
   input: {
     name: string | number;
+    /** Chat binding name of a gadget; when present, `name` is a binding in that gadget's env. */
+    gadget?: string;
   };
+
+  /**
+   * The description, exactly as the model saw it (already bounded), which history replay returns
+   * verbatim rather than describing the binding again. Absent when the call failed, and in logs
+   * persisted before descriptions were recorded, whose replay elides the result.
+   */
+  output?: string;
 } | {
   toolName: "setBindingHook";
   input: {
@@ -3734,9 +3771,11 @@ export type AiToolCall = {
     bindingName: string;
 
     /**
-     * The git commit to root the worktree at: a full 40-hex OID,
-     * resolved against the workspace's local git store and its gatekeeper-provided metadata
-     * (never a remote lookup -- remote refs resolve through gatekeeper APIs first).
+     * The git commit to root the worktree at: a full 40-hex oid, resolved against the
+     * workspace's local git store and its gatekeeper-provided metadata (never a remote lookup --
+     * remote refs resolve through gatekeeper APIs first). Abbreviated ids are refused, since
+     * knowing a commit's id is the capability to read it; logs written before that may carry an
+     * unambiguous prefix.
      */
     commitId: string;
   };
@@ -3750,7 +3789,7 @@ export type AiToolCall = {
    *
    * `baseCommit` is the full oid `input.commitId` resolved to -- the commit the worktree is
    * rooted at, and its accepted commit until the chat's first accept of changes to it. Recorded
-   * because the input may be a prefix and the model is told the resolved oid. The creation pins
+   * because the input of an older log may be a prefix and the model is told the resolved oid. The creation pins
    * nothing: the worktree reads as its accepted commit until its first modification pins it
    * (see ChatGadgetPin), so replay serves untouched files from the pin when there is one and
    * from the accepted commit otherwise, never from this field.

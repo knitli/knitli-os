@@ -539,6 +539,9 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   blindfold, and upstream #556's pi 0.87.1 renamed `shouldStopAfterTurn` to `finishTurn` — the
   effort spread is kept, since pi still forwards the whole loop config into stream calls
   (verified against 0.87.1's `streamAssistantResponse`).
+- **2026-09-26 sync:** upstream #570 added `assertMayModifyWorkpiece` to `writeFile`/`editFile`;
+  the prompt-file blindfold now runs right after it. Both refusals are independent of the
+  filename, so the order discloses nothing about prompt files.
 
 ### Gatekeeper resources are opt-in (`enabledResources`)
 
@@ -553,18 +556,48 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   the fork re-pointed it at `enabledResources` (plus `promptPresets`, which the shared normalize
   would otherwise drop for both the KV-mirror and AdminSettings read paths).
 
-### Worktree commits require full 40-hex SHAs
+### Worktree commits require full 40-hex SHAs (retired 2026-09-26)
 
-- **Where:** `GitCache.resolveCommitRef()` in `packages/workshop-backend/src/git-cache.ts`,
-  enforced for `createWorktree` and `Worktree.diff()` (see the `formatExceptions` entry for
-  `worktree-binding.d.ts`)
-- **What:** upstream resolves unambiguous prefixes (≥4 hex digits) against workspace-global
-  objects and metadata; the fork refuses anything but a full OID: prefix lookup would disclose
-  another chat's commit capabilities to a caller that was never given them.
-- **Why:** a commit id is a bearer capability, and the object store is shared across chats.
-- **Known cost:** the agent must look a commit up through an authorized connection first
-  (the thrown error says so); upstream phrasing that assumes prefixes ("the input may be a
-  prefix") is corrected to the fork rule where it lands.
+Upstream #570 adopted the same rule: `GitCache.resolveCommitId()` accepts only 40 lowercase hex
+digits and never expands a prefix, on the same bearer-capability reasoning. The fork's version, its `formatExceptions` entry for
+`worktree-binding.d.ts` and its prompt/doc wording were dropped in the 2026-09-26 sync
+(`worktree-binding.d.ts` is byte-identical to upstream again). One behavioural difference goes
+with it: the fork lowercased its input, upstream refuses an uppercase id. The fork's
+`rejects another chat's commit prefixes before reading or creating a worktree` case stays in
+`worktrees.test.ts`, re-pointed at upstream's error, since it also pins that the refusal
+happens before any object read.
+
+### Thin-pack delta bases are scoped to the pulling gatekeeper
+
+- **Where:** `WorkspaceGitCache.consumePackFromGatekeeper()`'s `resolveBase` in
+  `packages/workshop-backend/src/git-cache.ts`, via the fork's `#isVisibleToGatekeeper()`, which
+  `readForGatekeeper()` shares
+- **Introduced:** `3ddf0bb6`
+- **What:** upstream resolves a thin pack's external delta base from any locally stored object.
+  The fork resolves it only when that object is `onRemote` or `pendingPush` for the pulling
+  gatekeeper -- exactly what `GitCache.get()` would serve it -- and otherwise leaves the base
+  unavailable, so decoding fails.
+- **Why:** naming a base OID is not proof of possession. A gatekeeper could send a copy-only
+  delta against another connection's (or a local-only) object and have its bytes attributed to
+  itself, reading content it was never given.
+- **Test:** `thin-pack gatekeeper isolation` in `packages/workshop-backend/__tests__/git-cache.test.ts`.
+- **At sync:** Tier 2. If upstream reshapes the pack decode, keep `resolveBase` behind the same
+  visibility check as the scoped read view.
+
+### Git pull failures are reported categorically
+
+- **Where:** `WorkspaceGitCache.ensureGitObjects()` in `packages/workshop-backend/src/git-cache.ts`
+- **Introduced:** `3ddf0bb6`
+- **What:** upstream logs the caught pull error and quotes the last one in the exhausted-sources
+  error. The fork logs only the event, gatekeeper id, object count and an 8-hex OID prefix, and the
+  thrown error names the object by that prefix and asks the user to reconnect the connection
+  that provides it, quoting nothing from the remote.
+- **Why:** a remote's error message and stack can carry full capability OIDs or response bodies,
+  and both the log and the thrown error (which reaches the agent) outlive the request.
+- **Known cost:** the agent and the logs no longer say *why* a pull failed; the gatekeeper's own
+  logs still do.
+- **Test:** `pull failure privacy` in `packages/workshop-backend/__tests__/git-cache.test.ts`, plus
+  the exact-message assertions in `worktrees.test.ts` and `worktree-session.test.ts`.
 
 ### Optional native OpenAPI SDK publisher (2026-09-22)
 

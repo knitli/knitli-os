@@ -101,6 +101,7 @@ import { ActionFields, entryFields } from "./components/ActionFields";
 import DeleteConfirmationDialog from "./components/DeleteConfirmationDialog";
 import AutoApproveConfirmDialog from "./components/AutoApproveConfirmDialog";
 import { AlwaysApproveButton, ResolveButton } from "./components/ResolveButton";
+import { RestrictedApprovalNotice } from "./components/RestrictedApprovalNotice";
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from "./components/WorkshopControls";
 import { actionLogResumed, useActionEntries } from "./useActions";
 import { useAlwaysApproveTag } from "./useAlwaysApproveTag";
@@ -587,7 +588,12 @@ function getToolCallSummary(
     case "grep":
       return { verb: "Searched", target: tc.input.path ?? tc.input.workpiece };
     case "describeBinding":
-      return { verb: "Inspected", target: `${String(tc.input.name)} binding` };
+      return {
+        verb: "Inspected",
+        target: tc.input.gadget === undefined
+          ? `${String(tc.input.name)} binding`
+          : `${String(tc.input.name)} binding of ${tc.input.gadget}`,
+      };
     case "setBindingHook":
       return {
         verb: "Connected",
@@ -1482,6 +1488,11 @@ const ToolCallDetails = memo(function ToolCallDetails(
             </>
           )}
         </>
+      ) : tc.toolName === "describeBinding" && tc.output !== undefined ? (
+        // The description names the binding it describes, so the input would only repeat it.
+        <pre className="max-h-96 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
+          {tc.output}
+        </pre>
       ) : (
         <pre className="max-h-56 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
           {JSON.stringify(tc.input, null, 2)}
@@ -2436,6 +2447,9 @@ function fallbackToStoredModelSelection(
 interface ChatInterfaceProps {
   workspaceId: string | undefined;
   overseer: RpcStub<Overseer>;
+  // True once the workspace has read restricted data (GadgetMetadata.containsRestrictedData).
+  // Latched actions are never auto-approved, so the always-approve affordance is hidden.
+  restricted?: boolean;
   selectedChatId: number | null;
   onNavigateToChat: (
     chatId: number | null,
@@ -2650,6 +2664,7 @@ function selectionOfRef(ref: PromptRef | undefined): PromptSelection | null {
 function ChatInterface({
   workspaceId,
   overseer,
+  restricted,
   selectedChatId,
   onNavigateToChat,
   onChatChangesChange,
@@ -5064,8 +5079,10 @@ function ChatInterface({
     // Auto-approval target: offer "Always approve this type" only when enabling a rule would
     // actually apply this action -- a tagged action on a connection that the gatekeeper marked
     // auto-approvable. (A non-auto-approvable action stays a manual gate even with a rule; an
-    // auto-approvable action with an existing rule wouldn't still be pending.)
+    // auto-approvable action with an existing rule wouldn't still be pending.) Not offered while
+    // restricted.
     const autoApproveTarget =
+      !restricted &&
       log.gatekeeperId !== undefined && log.description.actionKind !== undefined &&
       log.description.autoApprovable === true
         ? {
@@ -5076,6 +5093,25 @@ function ChatInterface({
             actionLabel: log.description.title,
           }
         : undefined;
+
+    // While restricted the notices and the request follow the controls in DOM order, so the
+    // approve/deny buttons name them as their description. Ids derive from the action id: this is
+    // a render closure, not a component, so useId is unavailable, and one card renders per action.
+    const restrictedReview = restricted && isPending;
+    const noticeId = `action-${msg.actionId}-restricted-notice`;
+    const requestId = `action-${msg.actionId}-request`;
+    const fieldsId = `action-${msg.actionId}-fields`;
+    const incompleteId = `action-${msg.actionId}-incomplete-notice`;
+    const hasFields = entryFields(log).length > 0;
+    const incomplete = isPending && isDescriptionIncomplete(log);
+    const describedBy = restrictedReview
+      ? [
+        noticeId,
+        requestId,
+        ...(hasFields ? [fieldsId] : []),
+        ...(incomplete ? [incompleteId] : []),
+      ].join(" ")
+      : undefined;
 
     const actionControls = isPending ? (
       <>
@@ -5094,12 +5130,14 @@ function ChatInterface({
           tone="deny"
           onClick={() => void resolveAction(msg.actionId, "deny")}
           disabled={isProc}
+          describedBy={describedBy}
         />
         <ResolveButton
           tone="approve"
           variant={isBlocking ? "filled" : "quiet"}
           onClick={() => void resolveAction(msg.actionId, "approve")}
           disabled={isProc}
+          describedBy={describedBy}
         />
       </>
     ) : null;
@@ -5146,17 +5184,16 @@ function ChatInterface({
                   </span>
                   {resourceMeta}
                 </div>
-                <div className={`chat-panel mt-1 max-h-[200px] overflow-y-auto pr-1 text-[13px] leading-[18px] text-kumo-subtle ${styles.markdownContent}`}>
+                {restricted && <RestrictedApprovalNotice id={noticeId} className="mt-2" />}
+                <div id={requestId} className={`chat-panel mt-1 pr-1 text-[13px] leading-[18px] text-kumo-subtle ${restricted ? "" : "max-h-[200px] overflow-y-auto"} ${styles.markdownContent}`}>
                   <MarkdownMessage message={log.description.description} />
                 </div>
-                {entryFields(log).length > 0 && (
-                  <div className="chat-panel mt-2 max-h-[360px] overflow-y-auto pr-1">
-                    <ActionFields fields={entryFields(log)} />
+                {hasFields && (
+                  <div id={fieldsId} className={`chat-panel mt-2 pr-1 ${restricted ? "" : "max-h-[360px] overflow-y-auto"}`}>
+                    <ActionFields fields={entryFields(log)} uncapped={restricted} />
                   </div>
                 )}
-                {isDescriptionIncomplete(log) && (
-                  <IncompleteDescriptionNotice className="mt-2" />
-                )}
+                {incomplete && <IncompleteDescriptionNotice id={incompleteId} className="mt-2" />}
               </div>
               <div className="ml-3 flex flex-shrink-0 items-center gap-1 self-center">
                 {actionControls}
@@ -5214,15 +5251,16 @@ function ChatInterface({
         )}
         {showDescription && (
           <div className="themed-surface-inset ml-8 mt-1 space-y-1.5 rounded-2xl border border-kumo-line/70 bg-kumo-elevated/45 p-3 text-[13px] leading-[19px] tracking-[-0.25px] text-kumo-subtle">
-            <div className={`chat-panel max-h-[200px] overflow-y-auto pr-1 ${styles.markdownContent}`}>
+            {restrictedReview && <RestrictedApprovalNotice id={noticeId} />}
+            <div id={requestId} className={`chat-panel pr-1 ${restrictedReview ? "" : "max-h-[200px] overflow-y-auto"} ${styles.markdownContent}`}>
               <MarkdownMessage message={log.description.description} />
             </div>
-            {entryFields(log).length > 0 && (
-              <div className="chat-panel max-h-[360px] overflow-y-auto pr-1">
-                <ActionFields fields={entryFields(log)} />
+            {hasFields && (
+              <div id={fieldsId} className={`chat-panel pr-1 ${restrictedReview ? "" : "max-h-[360px] overflow-y-auto"}`}>
+                <ActionFields fields={entryFields(log)} uncapped={restrictedReview} />
               </div>
             )}
-            {isPending && isDescriptionIncomplete(log) && <IncompleteDescriptionNotice />}
+            {incomplete && <IncompleteDescriptionNotice id={incompleteId} />}
             {resourceMeta}
           </div>
         )}
@@ -6620,7 +6658,8 @@ function ChatInterface({
         onConfirm={handleDeleteConfirm}
       />
 
-      {autoApproveConfirm && (
+      {/* The workspace latched: the affordance is gone and confirming could only error. */}
+      {!restricted && autoApproveConfirm && (
         <AutoApproveConfirmDialog
           open
           actionLabel={autoApproveConfirm.actionLabel}

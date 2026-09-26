@@ -351,6 +351,8 @@ export function auditFormatDrift(opts: {
   oursRef: string;
   upstreamRef: string;
   onException?: (exception: FormatException) => void;
+  /** Defaults to the boundary's; tests pass their own so they don't depend on live entries. */
+  formatExceptions?: FormatException[];
 }): FormatChurnFile[] {
   const { oursRef, upstreamRef } = opts;
   const baseRef = gitOrNull(["merge-base", upstreamRef, oursRef])?.trim();
@@ -366,7 +368,7 @@ export function auditFormatDrift(opts: {
     // Upstream-only comment changes are not fork churn. Unavailable ancestry cannot grant a skip.
     if (baseRef && gitOrNull(["show", `${baseRef}:${path}`]) === ours) continue;
 
-    const exception = forkBoundary().formatExceptions.find(entry => entry.path === path &&
+    const exception = (opts.formatExceptions ?? forkBoundary().formatExceptions).find(entry => entry.path === path &&
       entry.upstreamBlob === git(["rev-parse", `${upstreamRef}:${path}`]).trim() &&
       entry.forkBlob === git(["rev-parse", `${oursRef}:${path}`]).trim());
     if (exception) {

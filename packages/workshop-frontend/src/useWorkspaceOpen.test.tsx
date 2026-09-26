@@ -192,4 +192,39 @@ describe('useWorkspaceOpen', () => {
     await act(async () => { cancel('This workspace uses its owner’s Knitli Memory (always on).'); await Promise.resolve() })
     expect(container.textContent).toBe('This workspace uses its owner’s Knitli Memory (always on).')
   })
+
+  it('does not carry a blocked reason into a later plain cancel after trying again', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    let state!: ReturnType<typeof useWorkspaceOpen>
+    const authenticatedApi = {
+      openGadget: (_id: string, _shareKey: string | undefined, configure: { configure(needs: unknown[]): Promise<unknown> }) =>
+        disposableStub({
+          subscribeToMetadata: async () => {
+            await configure.configure([{ gatekeeperId: 30, vendorId: 'memory', resourceTitle: 'Knitli Memory', ambient: true }])
+            throw new Error('unreachable')
+          },
+        }) as unknown as RpcStub<Overseer>,
+    } as unknown as RpcStub<AuthenticatedApi>
+
+    function Probe() {
+      state = useWorkspaceOpen({
+        id: 'workspace-1', authenticatedApi,
+        onInvalidShareKey: () => {}, onMetadata: () => {}, onShareKeyConsumed: () => {},
+      })
+      return <p>{state.error?.kind === 'message' ? state.error.message : state.observerConfig ? 'prompting' : ''}</p>
+    }
+
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => root!.render(<Probe />))
+    await act(async () => { state.cancelObserverConfig('Blocked reason.'); await Promise.resolve() })
+    expect(container.textContent).toBe('Blocked reason.')
+
+    await act(async () => { state.retry(); await Promise.resolve() })
+    expect(container.textContent).toBe('prompting')
+    await act(async () => { state.cancelObserverConfig(); await Promise.resolve() })
+    expect(container.textContent)
+      .toBe('To open this workspace, you must choose connected accounts for the services it uses.')
+  })
 })

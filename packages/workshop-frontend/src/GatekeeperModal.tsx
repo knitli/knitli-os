@@ -182,6 +182,14 @@ function accountSupportsConnection(account: AccountOption, connection: Connectio
       account.supportedResources.some(resource => resource.urlPattern === connection.resourceUrlPattern))
 }
 
+// A connection whose vendor's account provides an agent singleton (AccountDescription.singleton):
+// the Workshop adds that singleton to new chats in the account's own workspaces (ensureAmbientCapsules;
+// a chat's ambient set is fixed at first use, see prepareChatBindings), and such an account has no
+// configurator, so there is nothing to add.
+function isAlwaysOn(connection: ConnectionType, alwaysOnVendorIds: ReadonlySet<string>): boolean {
+  return connection.vendorId !== undefined && alwaysOnVendorIds.has(connection.vendorId)
+}
+
 function disposeConfiguratorFrame(frame: ResourceConfiguratorFrame | null) {
   const uiDisposable = frame?.ui as any
   uiDisposable?.[Symbol.dispose]?.()
@@ -255,10 +263,24 @@ export default function GatekeeperModal({
       .map(resource => connectionForResource(vendor, resource))),
   ], [siteName, vendors])
 
+  const alwaysOnVendorIds = useMemo(
+    // An expired singleton stays out, so its vendor keeps the chooser's Reconnect action.
+    () => new Set(accounts.filter(account => account.description.singleton && account.credentialsValid)
+      .map(account => account.vendorId)),
+    [accounts],
+  )
+  const addableConnections = useMemo(
+    () => allConnections.filter(connection => !isAlwaysOn(connection, alwaysOnVendorIds)),
+    [allConnections, alwaysOnVendorIds],
+  )
+  const alwaysOnVendors = vendors.filter(vendor =>
+    alwaysOnVendorIds.has(vendor.id) && vendor.supportedResources.length > 0)
+
   const selectedConnection = useMemo(
     () => allConnections.find(connection => connection.id === selectedConnectionId) ?? null,
     [allConnections, selectedConnectionId],
   )
+  const selectedAlwaysOn = selectedConnection !== null && isAlwaysOn(selectedConnection, alwaysOnVendorIds)
 
   // Pre-seed the selection for the agent requestConnection accept flow. Runs once per open after
   // vendors load and nothing is selected yet.
@@ -422,6 +444,12 @@ export default function GatekeeperModal({
         accountMap.delete(id)
         setAccounts(Array.from(accountMap.values()))
       },
+      // The modal stays mounted while closed, so `accounts` still holds the previous open's list.
+      // An empty snapshot sends no add/remove, so publish the fresh map once it is complete.
+      ready() {
+        if (cancelled) return
+        setAccounts(Array.from(accountMap.values()))
+      },
     })
     const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
     subscription.catch(error => {
@@ -445,8 +473,8 @@ export default function GatekeeperModal({
 
   const filteredConnections = useMemo(() => {
     const query = searchText.trim().toLowerCase()
-    if (!query) return allConnections
-    return allConnections.filter(connection => {
+    if (!query) return addableConnections
+    return addableConnections.filter(connection => {
       const haystack = [
         connection.title,
         connection.vendor,
@@ -459,7 +487,7 @@ export default function GatekeeperModal({
         matchesResourceUrl(query, connection.resourceUrlPattern)
       return matchesText || matchesUrl
     })
-  }, [allConnections, searchText])
+  }, [addableConnections, searchText])
 
   // Group connections by stable vendor key (e.g. all Google resources together).
   // Preserves the order in which a vendor's first item appears in the flat list.
@@ -469,14 +497,14 @@ export default function GatekeeperModal({
   // named after the site.
   const groupedConnections = useMemo(() => {
     const groups = new Map<string, { label: string; items: ConnectionType[] }>()
-    for (const connection of allConnections) {
+    for (const connection of addableConnections) {
       const key = connection.groupKey
       const existing = groups.get(key)
       if (existing) existing.items.push(connection)
       else groups.set(key, { label: connection.groupLabel, items: [connection] })
     }
     return Array.from(groups.entries()).map(([key, { label, items }]) => ({ key, label, items }))
-  }, [allConnections])
+  }, [addableConnections])
 
   const isSearching = searchText.trim().length > 0
 
@@ -541,7 +569,7 @@ export default function GatekeeperModal({
 
   useEffect(() => {
     const resourceUrlPattern = selectedConnection?.resourceUrlPattern ?? null
-    if (!open || !resourceUrlPattern || !selectedAccount || hasMissingResourceGrants) {
+    if (!open || !resourceUrlPattern || !selectedAccount || hasMissingResourceGrants || selectedAlwaysOn) {
       updateConfiguratorFrameState(null)
       setConfiguratorError(null)
       setConfiguratorLoading(false)
@@ -584,7 +612,7 @@ export default function GatekeeperModal({
     return () => {
       cancelled = true
     }
-  }, [open, authenticatedApi, selectedConnection?.id, selectedConnection?.resourceUrlPattern, selectedAccount?.id, hasMissingResourceGrants])
+  }, [open, authenticatedApi, selectedConnection?.id, selectedConnection?.resourceUrlPattern, selectedAccount?.id, hasMissingResourceGrants, selectedAlwaysOn])
 
   const handleSelectConnection = (connection: ConnectionType) => {
     setSelectedConnectionId(connection.id)
@@ -729,7 +757,7 @@ export default function GatekeeperModal({
 
   const handleCreateResourceConnection = async () => {
     if (creating) return
-    if (!selectedConnection || selectedAccountId === null) return
+    if (!selectedConnection || selectedAccountId === null || selectedAlwaysOn) return
     const resourceUrlPattern = selectedConnection.resourceUrlPattern
     if (!resourceUrlPattern) return
 
@@ -774,6 +802,9 @@ export default function GatekeeperModal({
     if (selectedConnection.id === 'agent-spawner') {
       return Boolean(spawnerDisplayName.trim()) && !spawnerEnvError
     }
+    // Checked here, not left to the configurator Effect's cleanup: a singleton account can arrive
+    // while a frame is up, and Add must be off from that render on, not only after the Effect runs.
+    if (selectedAlwaysOn) return false
     if (selectedConnection.resourceUrlPattern) {
       const resourceUrlPattern = selectedConnection.resourceUrlPattern
       return Boolean(
@@ -844,7 +875,13 @@ export default function GatekeeperModal({
               </button>
 
               <div className="space-y-4">
-                {needsAccount && (
+                {selectedAlwaysOn && (
+                  <p role="status" className="m-0 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+                    {`${selectedConnection.vendor} is added automatically to new chats in your workspaces, so there's nothing to add here.`}
+                  </p>
+                )}
+
+                {needsAccount && !selectedAlwaysOn && (
                   <AccountChooser
                     accounts={matchingAccounts}
                     selectedAccountId={selectedAccountId}
@@ -868,7 +905,7 @@ export default function GatekeeperModal({
                   />
                 )}
 
-                {selectedConnection.resourceUrlPattern && !hasMissingResourceGrants && (
+                {selectedConnection.resourceUrlPattern && !hasMissingResourceGrants && !selectedAlwaysOn && (
                   <ResourceConfiguratorHost
                     key={configuratorSeedKey}
                     frame={configuratorFrameState?.frame ?? null}
@@ -957,6 +994,7 @@ export default function GatekeeperModal({
                   ))
                 )}
               </div>
+              {alwaysOnVendors.length > 0 && <AlwaysOnVendors vendors={alwaysOnVendors} />}
             </div>
           </div>
         )}
@@ -1028,6 +1066,45 @@ function ConnectionTypeRow({
       </div>
       <CaretRight size={14} className="shrink-0 text-kumo-inactive transition-transform group-hover:translate-x-0.5 group-hover:text-kumo-default" />
     </button>
+  )
+}
+
+function AlwaysOnVendors({ vendors }: { vendors: VendorOption[] }) {
+  return (
+    <section aria-labelledby="always-on-connections" className="mt-4">
+      <h2 id="always-on-connections" className="m-0 text-[12px] font-medium leading-4 tracking-[-0.2px] text-kumo-subtle">
+        Always on
+      </h2>
+      <p className="mt-0.5 mb-2 text-[12px] leading-4 tracking-[-0.2px] text-kumo-inactive">
+        Added automatically to new chats in your workspaces, so there's nothing to add here.
+      </p>
+      <ul className="m-0 list-none overflow-hidden rounded-xl border border-kumo-line bg-kumo-base p-0">
+        {vendors.map(vendor => (
+          <li key={vendor.id} className="flex items-center gap-3 border-t border-kumo-line px-3 py-3 first:border-t-0">
+            <div
+              className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-kumo-elevated"
+              style={vendor.description.color ? { backgroundColor: vendor.description.color } : undefined}
+            >
+              {vendor.description.logo?.url ? (
+                <img src={vendor.description.logo.url} alt="" className="h-6 w-6 object-contain" />
+              ) : (
+                <Database size={19} weight="duotone" className="text-kumo-strong" />
+              )}
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="m-0 truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-default">
+                {vendor.description.displayName}
+              </p>
+              {vendor.description.tagline && (
+                <p className="mt-0.5 mb-0 line-clamp-1 text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
+                  {vendor.description.tagline}
+                </p>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }
 

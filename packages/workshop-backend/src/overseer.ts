@@ -11759,13 +11759,19 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listPreApprovableActions(): Promise<PreApprovableAction[]> {
-    // Surface actions from every gatekeeper bound by some gadget (the connections the UI shows).
+    // Surface actions from every gatekeeper bound by some gadget (the connections the UI shows),
+    // plus the ambient ones every chat gets without any binding (see ensureAmbientCapsules). Wait
+    // for this open's ambient reconcile, as listSlashCommands does, or a new one would be missed.
+    await this.slashCommandsReady;
     let boundIds = new Set<WorkpieceId>();
     for (let gadget of this.impl.storage.gadgets.list()) {
       if (gadget.type !== "gadget") continue;  // worktrees have no binding edges
       for (let edge of Object.values(gadget.bindings)) {
         boundIds.add(edge.target);
       }
+    }
+    for (let gk of this.impl.storage.gatekeepers.list()) {
+      if (gk.creationSpec?.type === "ambient") boundIds.add(gk.id);
     }
 
     // TODO: a single gatekeeper failing (e.g. a rejected RPC) currently fails the whole catalog,
@@ -11777,14 +11783,23 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         .filter(gk => gk !== undefined)
         .map(async (gk): Promise<PreApprovableAction[]> => {
       let facet = this.impl.getGatekeeperFacet(gk.id);
-      let kinds = await facet.getAutoApprovableActions();
+      // An ambient record can be stale (e.g. its vendor was uninstalled); it isn't a connection the
+      // user chose, so it must not blank the tab. Bound gatekeepers still fail it (see TODO above).
+      let kinds = gk.creationSpec?.type === "ambient"
+          ? await facet.getAutoApprovableActions().catch((err: unknown) => {
+            this.impl.logger.warn("failed to list an ambient gatekeeper's auto-approvable actions", {
+              event: "auto.approval.ambient.list.failed", gatekeeperId: gk.id, vendorId: gatekeeperVendorId(gk), error: err,
+            });
+            return [];
+          })
+          : await facet.getAutoApprovableActions();
       return kinds.map(actionKind => ({
         gatekeeperId: gk.id,
         // resourceTitle is a denormalized cache of the gatekeeper's describe().title, populated in a
         // second step after the record is first persisted (see addGatekeeper). It can be absent if
         // that describe() failed, or for records predating the field, so fall back to a placeholder.
         resourceTitle: gk.resourceTitle || "(title unavailable)",
-        vendorId: gk.creationSpec?.type === "gatekeeper" ? gk.creationSpec.vendorId : undefined,
+        vendorId: gatekeeperVendorId(gk),
         actionKind,
         alreadyEnabled:
             this.impl.storage.autoApproveTags.get(`${gk.id}:${actionKind.tag}`) !== undefined,

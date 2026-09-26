@@ -2352,8 +2352,9 @@ export interface Overseer extends RpcTarget {
   listAutoApprovedActionKinds(): Promise<Array<{ gatekeeperId: WorkpieceId; actionKind: ActionKind }>>;
 
   /**
-   * List the auto-approvable action kinds offered by gatekeepers bound in this workspace. Each
-   * entry identifies its connection and reports whether a matching auto-approval rule is enabled.
+   * List the auto-approvable action kinds offered by gatekeepers bound in this workspace, and by
+   * its ambient gatekeepers (auto-provided to every chat without a binding). Each entry
+   * identifies its connection and reports whether a matching auto-approval rule is enabled.
    */
   listPreApprovableActions(): Promise<PreApprovableAction[]>;
 
@@ -4307,8 +4308,9 @@ export type GadgetBindingInfo = {
 };
 
 /**
- * An auto-approvable action kind offered by a specific connection. Aggregated from each bound
- * gatekeeper's getAutoApprovableActions(); `alreadyEnabled` reports whether a matching rule exists.
+ * An auto-approvable action kind offered by a specific connection. Aggregated from the
+ * getAutoApprovableActions() of each bound or ambient gatekeeper; `alreadyEnabled` reports whether
+ * a matching rule exists.
  */
 export type PreApprovableAction = {
   gatekeeperId: WorkpieceId;

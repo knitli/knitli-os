@@ -106,7 +106,9 @@ type TestApi = {
 
 function vendor(autoProvisionsAccount: boolean, vendorId = autoProvisionsAccount ? 'ai-executor' : 'google'): VendorDescription {
   return {
-    displayName: vendorId === 'openapi' ? 'OpenAPI' : autoProvisionsAccount ? 'Knitli AI' : 'Google',
+    displayName: vendorId === 'openapi' ? 'OpenAPI'
+      : vendorId === 'memory' ? 'Knitli Memory'
+      : autoProvisionsAccount ? 'Knitli AI' : 'Google',
     url: 'https://example.test/',
     autoProvisionsAccount,
   }
@@ -117,6 +119,8 @@ function buildApi({
   provisionFailure,
   grantable = false,
   initialAccount = false,
+  singleton = false,
+  credentialsValid = true,
   vendorId = autoProvisionsAccount ? 'ai-executor' : 'google',
   resources = [{ ...RESOURCE, grantable }],
 }: {
@@ -124,6 +128,8 @@ function buildApi({
   provisionFailure?: Error
   grantable?: boolean
   initialAccount?: boolean
+  singleton?: boolean
+  credentialsValid?: boolean
   vendorId?: string
   resources?: SupportedResource[]
 }): TestApi {
@@ -159,10 +165,13 @@ function buildApi({
       if (initialAccount) {
         subscriber.add(
           42,
-          { displayName: vendorDescription.displayName } as AccountDescription,
+          {
+            displayName: vendorDescription.displayName,
+            ...(singleton ? { singleton: { tsType: 'MemorySession' } } : {}),
+          } as AccountDescription,
           vendorDescription,
           resources,
-          true,
+          credentialsValid,
           vendorId,
         )
       }
@@ -174,6 +183,16 @@ function buildApi({
     startResourceConfigurator,
   } as unknown as RpcStub<AuthenticatedApi>
   return { api, subscriber: () => accountSubscriber, connectAccount, provisionAmbientAccount, startResourceConfigurator }
+}
+
+const MEMORY_ACCOUNT = {
+  displayName: 'Knitli Memory',
+  singleton: { tsType: 'MemorySession' },
+} as AccountDescription
+
+function alwaysOnSection(rendered: HTMLElement) {
+  return [...rendered.querySelectorAll('h2')]
+    .find(heading => heading.textContent === 'Always on')?.closest('section') ?? null
 }
 
 describe('GatekeeperModal ambient resource connections', () => {
@@ -238,6 +257,91 @@ describe('GatekeeperModal ambient resource connections', () => {
     expect(resource).toBeDefined()
     await act(async () => resource!.click())
   }
+
+  it('lists a singleton account\'s vendor under Always on instead of offering it', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
+    const rendered = await render(testApi.api)
+
+    expect([...rendered.container.querySelectorAll('button')]
+      .find(button => button.textContent?.includes('Knitli Memory'))).toBeUndefined()
+    const section = alwaysOnSection(rendered.container)
+    expect(section?.textContent).toContain('Knitli Memory')
+    expect(section?.textContent).toContain('Added automatically to new chats in your workspaces, so there\'s nothing to add here.')
+    expect(section?.querySelector('button')).toBeNull()
+    expect(testApi.startResourceConfigurator).not.toHaveBeenCalled()
+  })
+
+  it('keeps an expired singleton account\'s vendor offered so it can be reconnected', async () => {
+    const testApi = buildApi({
+      autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true, credentialsValid: false,
+    })
+    const rendered = await render(testApi.api)
+
+    expect(alwaysOnSection(rendered.container)).toBeNull()
+    expect([...rendered.container.querySelectorAll('button')]
+      .find(button => button.textContent?.includes('Knitli Memory'))).toBeDefined()
+  })
+
+  it('keeps the explanation visible while searching', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
+    const rendered = await render(testApi.api)
+
+    const search = rendered.container.querySelector<HTMLInputElement>('input[placeholder^="Search"]')!
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      setValue.call(search, 'memory')
+      search.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+
+    expect(rendered.container.textContent).toContain('No matching connection types.')
+    expect(alwaysOnSection(rendered.container)?.textContent).toContain('Knitli Memory')
+  })
+
+  it('switches to the always-on notice when the account connected from the picker is a singleton', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory' })
+    const rendered = await render(testApi.api)
+    await chooseResource(rendered.container, 'Knitli Memory')
+    expect(rendered.container.textContent).toContain('Connect Knitli Memory')
+
+    await act(async () => {
+      testApi.subscriber()!.add(42, MEMORY_ACCOUNT, vendor(false, 'memory'), [RESOURCE], true, 'memory')
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(testApi.startResourceConfigurator).not.toHaveBeenCalled()
+    expect(rendered.container.querySelector('[role="status"]')?.textContent)
+      .toBe('Knitli Memory is added automatically to new chats in your workspaces, so there\'s nothing to add here.')
+    expect(rendered.container.textContent).not.toContain('Waiting for profile account')
+    const add = [...rendered.container.querySelectorAll('button')]
+      .find(button => button.textContent === 'Add connection')
+    expect(add?.disabled).toBe(true)
+  })
+
+  it('forgets a singleton account that is gone when the picker reopens', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
+    const getOverseer = vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({} as RpcStub<Overseer>)
+    const rendered = await render(testApi.api, getOverseer)
+    expect(alwaysOnSection(rendered.container)).not.toBeNull()
+
+    // Disconnected elsewhere while the picker was closed: the next subscription's snapshot is empty.
+    // The mock is typed at the RPC boundary (stubs); this fake plays the plain client side of it.
+    vi.mocked(testApi.api.subscribeConnectedAccounts).mockImplementation(((subscriber: ConnectedAccountsSubscriber) => {
+      void subscriber.ready()
+      return Object.assign(Promise.resolve({ [Symbol.dispose]() {} }), { [Symbol.dispose]() {} })
+    }) as never)
+    for (const open of [false, true]) {
+      await act(async () => {
+        root!.render(<GatekeeperModal open={open} onClose={() => {}} getOverseer={getOverseer} onCreated={async () => {}} />)
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+    }
+
+    expect(alwaysOnSection(rendered.container)).toBeNull()
+    expect([...rendered.container.querySelectorAll('button')]
+      .find(button => button.textContent?.includes('Knitli Memory'))).toBeDefined()
+  })
 
   it('provisions an auto-provisioned resource account without starting OAuth', async () => {
     const testApi = buildApi({ autoProvisionsAccount: true })

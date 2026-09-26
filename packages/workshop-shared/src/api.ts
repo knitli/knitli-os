@@ -289,6 +289,12 @@ export type ObserverBindingNeed = {
   /** Canonical resource URL, if known, for display. */
   resourceUrl?: string;
   /**
+   * Set when the binding is one of the owner's ambient (always-on) gatekeepers, which every
+   * workspace they own carries without the owner adding it. Lets the client say so when a
+   * collaborator cannot get access to it and so cannot open the workspace.
+   */
+  ambient?: true;
+  /**
    * Set only when this binding was already configured but its chosen account failed verification on
    * this attempt (expired credentials, a revoked grant, an upstream outage, or a genuine denial).
    * Absent for a binding that has simply never been configured. Deliberately carries no

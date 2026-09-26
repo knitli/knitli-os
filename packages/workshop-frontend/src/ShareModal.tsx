@@ -283,7 +283,7 @@ function RecipientVerification({
           {requirements.map(requirement => (
             <li key={requirement.gatekeeperId} className="min-w-0">
               <p className="truncate text-[12px] leading-4 font-medium tracking-[-0.15px] text-kumo-default">
-                {requirement.resourceTitle}
+                {requirement.resourceTitle}{requirement.ambient && ' (always on)'}
               </p>
               {requirement.resourceUrl && (
                 <p className="truncate font-mono text-[11px] leading-4 text-kumo-inactive">
@@ -293,6 +293,12 @@ function RecipientVerification({
             </li>
           ))}
         </ul>
+        {requirements.some(requirement => requirement.ambient) && (
+          <p className="mt-1.5 text-[12px] leading-[16px] tracking-[-0.15px] text-kumo-subtle">
+            Always-on services are part of every workspace its owner has. Anyone who can’t get their
+            own access to one can’t open this workspace.
+          </p>
+        )}
       </div>
     )
   }

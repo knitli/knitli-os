@@ -117,6 +117,13 @@ const CRM_REQUIREMENT: ObserverBindingNeed = {
   resourceTitle: 'Pipeline dashboard',
 }
 
+const MEMORY_REQUIREMENT: ObserverBindingNeed = {
+  gatekeeperId: 9,
+  vendorId: 'memory',
+  resourceTitle: 'Knitli Memory',
+  ambient: true,
+}
+
 const SHARE_LINK: ShareLinkInfo = {
   linkId: 'link-1',
   note: 'Team link',
@@ -1146,6 +1153,20 @@ describe('ShareModal', () => {
     await click(roleOption(rendered, 'Workspace'))
 
     expect(rendered.textContent).toContain('Pipeline dashboard')
+  })
+
+  it('labels always-on requirements and says what they cost a recipient', async () => {
+    const rendered = await render(fakeOverseer({
+      requirements: { use: [DOC_REQUIREMENT], build: [DOC_REQUIREMENT, MEMORY_REQUIREMENT] },
+    }))
+    expect(rendered.textContent).not.toContain('Always-on services')
+
+    await click(roleOption(rendered, 'Workspace'))
+
+    expect(rendered.textContent).toContain('Knitli Memory (always on)')
+    expect(rendered.textContent).not.toContain('Q3 planning (always on)')
+    expect(rendered.textContent).toContain(
+      'Always-on services are part of every workspace its owner has. Anyone who can’t get their own access to one can’t open this workspace.')
   })
 
   it('keeps invite and share-link requirements tied to their own role pickers', async () => {

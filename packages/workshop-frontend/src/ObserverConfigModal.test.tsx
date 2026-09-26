@@ -22,6 +22,7 @@ vi.mock('@cloudflare/kumo', () => {
     {
       Root: ({ children }: { children: ReactNode }) => <>{children}</>,
       Title: ({ children }: { children: ReactNode }) => <h1>{children}</h1>,
+      Description: ({ children }: { children: ReactNode }) => <p>{children}</p>,
     },
   )
   const Select = Object.assign(
@@ -384,5 +385,98 @@ describe('ObserverConfigModal account selection', () => {
     // stays on offer for a gatekeeper that refused on an auth error without reporting the expiry.
     expect(findButton(rendered, 'Verify again')?.disabled).toBe(false)
     expect(findButton(rendered, 'Re-authenticate this account')).toBeDefined()
+  })
+})
+
+describe('ObserverConfigModal when a service cannot be connected', () => {
+  let root: Root | undefined
+  let container: HTMLDivElement | undefined
+
+  afterEach(() => {
+    act(() => root?.unmount())
+    container?.remove()
+    vi.restoreAllMocks()
+    root = undefined
+    container = undefined
+  })
+
+  const MEMORY_NEED: ObserverBindingNeed = {
+    gatekeeperId: 30, vendorId: 'memory', resourceTitle: 'Knitli Memory', ambient: true,
+  }
+
+  async function render(
+    api: RpcStub<AuthenticatedApi>,
+    needs: ObserverBindingNeed[],
+    onCancel = vi.fn<(reason?: string) => void>(),
+  ) {
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => {
+      root!.render(
+        <ObserverConfigModal needs={needs} authenticatedApi={api} onConfirm={() => {}} onCancel={onCancel} />,
+      )
+      await Promise.resolve()
+    })
+    return { container, onCancel }
+  }
+
+  it('explains a hidden always-on service instead of prompting, and closes with that reason', async () => {
+    // Memory is in neither vendor listing (hidden from this user) and they have no account for it.
+    const { container: modal, onCancel } = await render(
+      fakeApi([account(1, 'me@example.com', [DOC_RESOURCE.urlPattern])]), [NEED, MEMORY_NEED])
+    const message =
+      'This workspace uses its owner’s Knitli Memory (always on). You need your own access to Knitli Memory to collaborate here.'
+
+    expect(modal.textContent).toContain('You can’t open this workspace')
+    expect(modal.textContent).toContain(message)
+    expect(findButton(modal, 'Verify and open')).toBeUndefined()
+    expect(findButton(modal, 'Connect')).toBeUndefined()
+
+    await act(async () => findButton(modal, 'Close')!.click())
+    expect(onCancel).toHaveBeenCalledWith(message)
+  })
+
+  it('keeps the ordinary prompt when the vendor listing itself failed', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const api = Object.assign(fakeApi([]), {
+      listGatekeeperVendors: async () => { throw new Error('listing unavailable') },
+    }) as RpcStub<AuthenticatedApi>
+    const { container: modal } = await render(api, [MEMORY_NEED])
+
+    expect(modal.textContent).not.toContain('You can’t open this workspace')
+    expect(findButton(modal, 'Verify and open')).toBeDefined()
+  })
+
+  it('still offers Connect for an always-on service the user can opt into', async () => {
+    const api = Object.assign(fakeApi([]), {
+      listAddableGatekeepers: async () => [{
+        id: 'memory', description: { displayName: 'Knitli Memory' } as VendorDescription, supportedResources: [],
+      }],
+    }) as RpcStub<AuthenticatedApi>
+    const { container: modal } = await render(api, [MEMORY_NEED])
+
+    expect(modal.textContent).not.toContain('You can’t open this workspace')
+    expect(findButton(modal, 'Connect')).toBeDefined()
+  })
+
+  it('does not block a forced always-on service the user already has an account for', async () => {
+    // Forced ambient vendors (Context, Scheduler) appear in neither listing; the account is what
+    // shows the user can meet the need.
+    const CONTEXT_NEED: ObserverBindingNeed = {
+      gatekeeperId: 31, vendorId: 'context', resourceTitle: 'Context Library', ambient: true,
+    }
+    const api = fakeApi([], {
+      subscribeConnectedAccounts: vi.fn<(subscriber: ConnectedAccountsSubscriber) => Promise<{ [Symbol.dispose](): void }>>((subscriber) => {
+        const entry = account(5, 'library')
+        subscriber.add(entry.id, entry.description, VENDOR, [], true, 'context')
+        subscriber.ready()
+        return Object.assign(Promise.resolve({ [Symbol.dispose]() {} }), { [Symbol.dispose]() {} })
+      }),
+    })
+    const { container: modal } = await render(api, [CONTEXT_NEED])
+
+    expect(modal.textContent).not.toContain('You can’t open this workspace')
+    expect(findButton(modal, 'Verify and open')).toBeDefined()
   })
 })

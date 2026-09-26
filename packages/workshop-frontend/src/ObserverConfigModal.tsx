@@ -72,7 +72,9 @@ interface ObserverConfigModalProps {
   needs: ObserverBindingNeed[]
   authenticatedApi: RpcStub<AuthenticatedApi>
   onConfirm: (choices: ObserverAccountChoice[]) => void
-  onCancel: () => void
+  // `reason` is set when the open cannot succeed because a service can't be connected; the caller
+  // shows it in place of the generic cancellation message.
+  onCancel: (reason?: string) => void
 }
 
 export default function ObserverConfigModal({
@@ -91,6 +93,9 @@ export default function ObserverConfigModal({
   // observer binding needs.
   const [vendorsById, setVendorsById] = useState<Map<string, GatekeeperVendorInfo>>(new Map())
   const [vendorsReady, setVendorsReady] = useState(false)
+  // True only when the vendor listing succeeded: only then does a vendor's absence mean the user
+  // cannot connect it, rather than that we failed to find out.
+  const [vendorsLoaded, setVendorsLoaded] = useState(false)
   // The flow being started, by vendorId (connect) or accountId (re-authenticate, grant). Held only
   // while the request that starts it is in flight, not until the account arrives: a popup flow can
   // end without adding one (abandoned, refused by the provider, or an account the user already has),
@@ -156,6 +161,7 @@ export default function ObserverConfigModal({
         const map = new Map<string, GatekeeperVendorInfo>()
         for (const vendor of [...vendors, ...addable]) map.set(vendor.id, vendor)
         setVendorsById(map)
+        setVendorsLoaded(true)
         setVendorsReady(true)
       })
       .catch(err => {
@@ -301,6 +307,45 @@ export default function ObserverConfigModal({
   // The overseer re-prompts with `failure` set when an already-configured binding failed
   // verification on this open: expired credentials, or an account without access to the data.
   const isRetry = needs.some(n => n.failure)
+
+  // A need the user holds no account for and cannot connect: its vendor is in neither listing,
+  // because it is hidden from them (Knitli Memory outside its allowed principals) or disabled by
+  // an admin. Opening cannot succeed, so say so instead of prompting. The account check is what
+  // keeps forced ambient vendors (Context, Scheduler), which no listing offers, out of this.
+  const hasAccount = (need: ObserverBindingNeed) =>
+    [...accounts.values()].some(a => a.vendorId === need.vendorId)
+  const blocked = !ready || !vendorsLoaded ? [] : needs
+    .filter(need => !vendorsById.has(need.vendorId) && !hasAccount(need))
+    .map(need => need.ambient
+      ? `This workspace uses its owner’s ${need.resourceTitle} (always on). You need your own ` +
+        `access to ${need.resourceTitle} to collaborate here.`
+      : `This workspace uses ${need.resourceTitle}, which isn’t available to your account. You ` +
+        `need your own access to it to collaborate here.`)
+
+  if (blocked.length > 0) {
+    const reason = blocked.join(' ')
+    return (
+      <Dialog.Root open disablePointerDismissal onOpenChange={open => { if (!open) onCancel(reason) }}>
+        <Dialog className="responsive-dialog overflow-y-auto p-6" size="lg">
+          <Dialog.Title className="mb-2 text-lg font-semibold">You can’t open this workspace</Dialog.Title>
+          <Dialog.Description className="text-sm text-kumo-subtle">
+            Ask the workspace owner or your administrator for access.
+          </Dialog.Description>
+          <div role="alert" className="flex flex-col gap-3 mt-5">
+            {blocked.map(message => (
+              <div key={message} className="flex items-start gap-2 px-3 py-2 rounded-md text-sm text-kumo-danger bg-kumo-danger-tint border border-kumo-danger/20">
+                <Warning size={14} className="mt-0.5 shrink-0" />
+                <div className="min-w-0">{message}</div>
+              </div>
+            ))}
+          </div>
+          <div className="flex justify-end gap-2 mt-6">
+            <WorkshopButton tone="primary" autoFocus onClick={() => onCancel(reason)}>Close</WorkshopButton>
+          </div>
+        </Dialog>
+      </Dialog.Root>
+    )
+  }
 
   return (
     <Dialog.Root open disablePointerDismissal onOpenChange={open => { if (!open) onCancel() }}>
@@ -490,7 +535,7 @@ export default function ObserverConfigModal({
         )}
 
         <div className="flex justify-end gap-2 mt-6">
-          <WorkshopButton tone="secondary" onClick={onCancel}>
+          <WorkshopButton tone="secondary" onClick={() => onCancel()}>
             Cancel
           </WorkshopButton>
           <WorkshopButton

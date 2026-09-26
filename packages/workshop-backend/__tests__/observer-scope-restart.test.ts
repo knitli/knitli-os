@@ -1146,3 +1146,17 @@ describe("ambient catalogs", () => {
     expect(other.find(seed => seed.target === 2)?.catalog).toBeNull();
   }));
 });
+
+describe("observer requirements", () => {
+  it("mark ambient gatekeepers, so collaborators and owners can be told they are always on",
+      () => withImpl(async (impl) => {
+    seedGatekeeper(impl, 1);
+    impl.storage.gatekeepers.put({
+      id: 2, resourceTitle: "Knitli Memory", class: {} as any,
+      creationSpec: { type: "ambient", vendorId: "memory", accountId: 7 },
+    });
+
+    expect(impl.listObserverRequirements("build").map((need: any) => [need.gatekeeperId, need.ambient]))
+        .toEqual([[1, undefined], [2, true]]);
+  }));
+});

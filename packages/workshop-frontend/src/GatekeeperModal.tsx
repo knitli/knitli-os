@@ -183,8 +183,9 @@ function accountSupportsConnection(account: AccountOption, connection: Connectio
 }
 
 // A connection whose vendor's account provides an agent singleton (AccountDescription.singleton):
-// the Workshop already puts that singleton in every chat of the account's own workspaces
-// (ensureAmbientCapsules), and such an account has no configurator, so there is nothing to add.
+// the Workshop adds that singleton to new chats in the account's own workspaces (ensureAmbientCapsules;
+// a chat's ambient set is fixed at first use, see prepareChatBindings), and such an account has no
+// configurator, so there is nothing to add.
 function isAlwaysOn(connection: ConnectionType, alwaysOnVendorIds: ReadonlySet<string>): boolean {
   return connection.vendorId !== undefined && alwaysOnVendorIds.has(connection.vendorId)
 }
@@ -865,7 +866,7 @@ export default function GatekeeperModal({
               <div className="space-y-4">
                 {selectedAlwaysOn && (
                   <p role="status" className="m-0 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-                    {`${selectedConnection.vendor} is always on: every chat in your workspaces already has it, so there's nothing to add.`}
+                    {`${selectedConnection.vendor} is added automatically to new chats in your workspaces, so there's nothing to add here.`}
                   </p>
                 )}
 
@@ -1064,7 +1065,7 @@ function AlwaysOnVendors({ vendors }: { vendors: VendorOption[] }) {
         Always on
       </h2>
       <p className="mt-0.5 mb-2 text-[12px] leading-4 tracking-[-0.2px] text-kumo-inactive">
-        Every chat in your workspaces already has these, so there's nothing to add.
+        Added automatically to new chats in your workspaces, so there's nothing to add here.
       </p>
       <ul className="m-0 list-none overflow-hidden rounded-xl border border-kumo-line bg-kumo-base p-0">
         {vendors.map(vendor => (

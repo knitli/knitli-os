@@ -264,7 +264,7 @@ describe('GatekeeperModal ambient resource connections', () => {
       .find(button => button.textContent?.includes('Knitli Memory'))).toBeUndefined()
     const section = alwaysOnSection(rendered.container)
     expect(section?.textContent).toContain('Knitli Memory')
-    expect(section?.textContent).toContain('nothing to add')
+    expect(section?.textContent).toContain('Added automatically to new chats in your workspaces, so there\'s nothing to add here.')
     expect(section?.querySelector('button')).toBeNull()
     expect(testApi.startResourceConfigurator).not.toHaveBeenCalled()
   })
@@ -298,7 +298,7 @@ describe('GatekeeperModal ambient resource connections', () => {
 
     expect(testApi.startResourceConfigurator).not.toHaveBeenCalled()
     expect(rendered.container.querySelector('[role="status"]')?.textContent)
-      .toContain('Knitli Memory is always on')
+      .toBe('Knitli Memory is added automatically to new chats in your workspaces, so there\'s nothing to add here.')
     expect(rendered.container.textContent).not.toContain('Waiting for profile account')
     const add = [...rendered.container.querySelectorAll('button')]
       .find(button => button.textContent === 'Add connection')

@@ -844,32 +844,71 @@ export class WorkspaceGitCache {
   }
 
   /**
-   * Resolve a full commit capability against local knowledge without pulling. Never
-   * expand abbreviated IDs: workspace-global objects and metadata may belong to another
-   * chat, so prefix lookup would disclose capabilities the caller was never given.
-   * A full OID known only through metadata retains the reader rule: its assertion-grade
-   * type cannot refuse the operation; the caller pulls and checks the measured bytes.
+   * Resolves a commit id -- exactly 40 lowercase hex digits, as git itself emits them -- against
+   * *local knowledge only*: the object store plus the metadata rows written by gatekeepers' puts
+   * and advertisements. Never a remote lookup. Returns the oid without pulling anything; the
+   * caller decides whether to fetch.
+   *
+   * Abbreviated ids are deliberately not accepted: knowing a commit's id is the capability to
+   * read the commit, and a short prefix is guessable. (Remote truncated-id resolution, where a
+   * human supplied one, is a gatekeeper API, e.g. GitHub's getCommit, which returns and
+   * advertises the full oid.)
+   *
+   * Errors are agent-readable: a malformed id, an unknown commit ("look it up via the connection
+   * first"), and a locally-present non-commit. An id known only from metadata resolves regardless
+   * of its recorded type (the reader rule: an assertion-grade non-commit tag must not refuse the
+   * operation without pulling, so the caller's pull lets the decoded bytes decide).
    */
-  resolveCommitRef(ref: string): GitOid {
-    let normalized = ref.toLowerCase();
-    if (!/^[0-9a-f]{40}$/.test(normalized)) {
+  resolveCommitId(id: string): GitOid {
+    if (!/^[0-9a-f]{40}$/.test(id)) {
       throw new Error(
-        "A full 40-hex git commit SHA-1 is required. Look it up through an authorized connection first.");
+          `${JSON.stringify(id)} is not a full git commit id: expected 40 lowercase hex digits.`);
     }
-    let local = this.readLocalObject(normalized);
+    let local = this.readLocalObject(id);
     if (local !== undefined) {
       if (local.type !== "commit") {
-        throw new Error(`${normalized} is a ${local.type}, not a commit.`);
+        throw new Error(`${id} is a ${local.type}, not a commit.`);
       }
-      return normalized;
+      return id;
     }
-    if (this.storage.gitObjectMetadata.get(normalized) === undefined) {
+    if (this.storage.gitObjectMetadata.get(id) === undefined) {
       throw new Error(
-        `Commit ${ref} is not known to this workspace. Look it up through the connection that ` +
-        `provides the repository first (e.g. its commit or branch APIs), which makes it ` +
-        `available here.`);
+          `Commit ${id} is not known to this workspace. Look it up through the connection that ` +
+          `provides the repository first (e.g. its commit or branch APIs), which makes it ` +
+          `available here.`);
     }
-    return normalized;
+    return id;
+  }
+
+  /**
+   * Resolves a commit id (see resolveCommitId) to a commit a worktree can be rooted at.
+   * When the commit is absent locally but a gatekeeper is recorded as a source, performs the
+   * *initial pull* -- one fetch for the commit, its full tree structure, and every blob under
+   * EAGER_BLOB_LIMIT -- so ordinary reads never fault. Any locally-present commit works with no
+   * gatekeeper at all (a gadget's history, another worktree's commit).
+   */
+  async fetchCommit(commitId: string): Promise<GitOid> {
+    let commit = this.resolveCommitId(commitId);
+    if (!this.hasLocalObject(commit)) {
+      // Known only from gatekeeper metadata: pull eagerly. (A locally-present commit skips this;
+      // any of its tree/blob objects missing locally fault in lazily on first read.)
+      await this.ensureGitObjects([commit], {
+        type: "commit",
+        commitHistory: { kind: "depth", depth: 1 },
+        filterBlobSize: EAGER_BLOB_LIMIT,
+      });
+    }
+    let local = this.readLocalObject(commit);
+    if (local === undefined) {
+      // ensureGitObjects throws on failure; defensive backstop.
+      throw new Error(`Commit ${commit} could not be fetched.`);
+    }
+    if (local.type !== "commit") {
+      // The reader rule let an assertion-grade metadata row through resolveCommitId; the pulled
+      // bytes have now decided.
+      throw new Error(`${commit} is a ${local.type}, not a commit.`);
+    }
+    return commit;
   }
 
   /**

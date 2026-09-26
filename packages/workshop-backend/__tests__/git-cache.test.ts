@@ -1265,32 +1265,26 @@ describe("worktree read/write helpers", () => {
   });
 });
 
-describe("resolveCommitRef", () => {
-  it("accepts full commit capabilities, including uppercase, while checking decoded type", async () => {
+describe("resolveCommitId", () => {
+  it("resolves only full, exact commit ids", async () => {
     let t = makeCache();
     let tree = await storeLocal(t.storage, { type: "tree", payload: treePayload([]) });
-    let commit = await storeLocal(t.storage, { type: "commit", payload: commitPayload(tree, [], "local") });
-    expect(t.cache.resolveCommitRef(commit)).toBe(commit);
-    expect(t.cache.resolveCommitRef(commit.toUpperCase())).toBe(commit);
-    expect(() => t.cache.resolveCommitRef(tree)).toThrow(`${tree} is a tree, not a commit.`);
-    let advertised = "bbbb1111".padEnd(40, "0");
-    t.storage.gitObjectMetadata.put({ oid: advertised, type: "blob", onRemote: [G1], pullableFrom: [], pendingPush: [] });
-    // Full capabilities retain the reader rule: measured bytes, not an asserted tag,
-    // decide whether the caller can use this as a commit after pulling it.
-    expect(t.cache.resolveCommitRef(advertised)).toBe(advertised);
-    expect(() => t.cache.resolveCommitRef("cccc".padEnd(40, "0")))
-      .toThrow(/not known to this workspace/);
-  });
+    let commit = await storeLocal(t.storage,
+        { type: "commit", payload: commitPayload(tree, [], "local") });
+    let remote = "aaaa1111".padEnd(40, "0");
+    t.storage.gitObjectMetadata.put(
+        { oid: remote, type: "blob", onRemote: [G1], pullableFrom: [], pendingPush: [] });
 
-  it.each(["aaaa", "aaaa1", "aaaa1111", "aaaa1111".padEnd(39, "0"), "xyz", "abc", "a".repeat(41)])(
-    "rejects incomplete or malformed capabilities without enumerating metadata: %s", ref => {
-      let t = makeCache();
-      for (let oid of ["aaaa1111".padEnd(40, "0"), "aaaa2222".padEnd(40, "0")]) {
-        t.storage.gitObjectMetadata.put({ oid, type: "commit", onRemote: [G2], pullableFrom: [], pendingPush: [] });
-      }
-      expect(() => t.cache.resolveCommitRef(ref)).toThrow(new Error(
-        "A full 40-hex git commit SHA-1 is required. Look it up through an authorized connection first."));
-    });
+    expect(t.cache.resolveCommitId(commit)).toBe(commit);
+    // The reader rule: an id known only from metadata resolves regardless of its recorded type
+    // (the caller's pull lets the decoded bytes decide).
+    expect(t.cache.resolveCommitId(remote)).toBe(remote);
+    for (let id of [commit.slice(0, 8), commit.slice(0, 39), commit.toUpperCase(), "main"]) {
+      expect(() => t.cache.resolveCommitId(id)).toThrow(/not a full git commit id/);
+    }
+    expect(() => t.cache.resolveCommitId("feed".repeat(10))).toThrow(/not known/);
+    expect(() => t.cache.resolveCommitId(tree)).toThrow(`${tree} is a tree, not a commit.`);
+  });
 });
 
 // A copy-only thin pack needs only the base OID and size, never its contents.

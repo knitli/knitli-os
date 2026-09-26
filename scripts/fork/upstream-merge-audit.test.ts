@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -196,22 +196,19 @@ for (const variation of ["upstream only", "fork reflow", "fork comment", "unavai
   });
 }
 
+const hash = (content: string) => execFileSync("git", ["hash-object", "--stdin"], {
+  input: content, encoding: "utf8",
+}).trim();
+
 for (const variation of ["exact pair", "changed fork", "changed upstream", "unrelated path"] as const) {
   test(`comment-only formatting exception: ${variation}`, () => {
-    const exception = forkBoundary().formatExceptions[0]!;
-    // Ordinary test jobs have shallow history. Reconstruct the reviewed comment-only
-    // delta from checked-in content, verifying both blob IDs before exercising Git trees.
-    const fork = readFileSync(new URL(`../../${exception.path}`, import.meta.url), "utf8");
-    const upstream = fork.replace(
-      "   * must be a full 40-hex SHA-1 for a commit known to the workspace, e.g. the worktree's base\n" +
-      "   * commit to see everything changed since it was created.",
-      "   * may be any commit known to the workspace, e.g. the worktree's base commit to see everything\n" +
-      "   * changed since it was created.");
-    for (const [content, expected] of [[upstream, exception.upstreamBlob], [fork, exception.forkBlob]]) {
-      assert.equal(execFileSync("git", ["hash-object", "--stdin"], {
-        input: content, encoding: "utf8",
-      }).trim(), expected);
-    }
+    // Synthetic, so the mechanism stays covered whether or not the boundary lists any exception.
+    const upstream = "/**\n * May be any commit.\n */\nexport const value = 1;\n";
+    const fork = "/**\n * Must be a full commit id.\n */\nexport const value = 1;\n";
+    const exception = {
+      path: "src/documented.ts", upstreamBlob: hash(upstream), forkBlob: hash(fork),
+      reason: "Document the enforced rule.",
+    };
     const dir = scratchRepo();
     const run = (...args: string[]) =>
       execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
@@ -230,6 +227,7 @@ for (const variation of ["exact pair", "changed fork", "changed upstream", "unre
         const applied: typeof exception[] = [];
         const findings = auditFormatDrift({
           upstreamRef, oursRef: "HEAD", onException: entry => applied.push(entry),
+          formatExceptions: [exception],
         });
         if (variation === "exact pair") {
           assert.deepEqual(findings, []);

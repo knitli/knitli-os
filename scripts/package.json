@@ -42,8 +42,9 @@
   "dependencies": {
     "aws4fetch": "^1.0.20",
     "jsonc-parser": "^3.3.1",
-    "typescript6": "npm:typescript@6.0.3",
-    "vite": "catalog:"
+    "typescript6": "catalog:",
+    "vite": "catalog:",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@oxlint/plugins": "1.73.0",

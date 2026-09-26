@@ -37,6 +37,10 @@
       "reason": "Regression test for the fork-owned approval-turn continuation."
     },
     {
+      "path": "packages/workshop-backend/__tests__/knitli-restricted-ambient.test.ts",
+      "reason": "Regression test that upstream's restricted mode also suspends the fork's ambient-gatekeeper pre-approval rules."
+    },
+    {
       "path": "packages/workshop-backend/__tests__/knitli-reasoning-levels.test.ts",
       "reason": "Regression test for the fork-owned reasoning-effort resolver and its makeHandle wiring."
     },
@@ -269,24 +273,6 @@
     "scripts/contribution-policy.ts": "Only consumer was contribution-policy.yml, via actions/github-script.",
     "scripts/contribution-policy.test.ts": "Tests the above, and reads the workflow file, so it cannot outlive either."
   },
-  "formatExceptions": [
-    {
-      "path": "packages/workshop-backend/src/worktree-binding.d.ts",
-      "upstreamBlob": "ff54d738edfe0880bf56120e091818c891a7bfb1",
-      "forkBlob": "e7046837ca08f49c6dc657142e9402b2029fceb1",
-      "reason": "Document the enforced full 40-hex commit capability boundary for Worktree.diff()."
-    }
-  ],
-  "reviewedSurvivors": [
-    {
-      "token": "MAX_ARGUMENTS",
-      "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
-      "reason": "Historical plan archive quoting the retired caller-settable argument budget; upstream #565 replaced the truncation model it describes."
-    },
-    {
-      "token": "grepFiles",
-      "path": "docs/fork-maintenance.md",
-      "reason": "Sync note naming the deleted WorktreeSessionImpl#grepFiles upstream #494 extracted into scanWorkpieceForGrep; prose reference, not code."
-    }
-  ]
+  "formatExceptions": [],
+  "reviewedSurvivors": []
 }

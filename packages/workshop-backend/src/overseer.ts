@@ -6077,6 +6077,7 @@ class OverseerImpl implements AgentHooks {
           "This action was blocked because the connection it was submitted through has been " +
           "removed from this workspace.");
     }
+    await this.assertGatekeeperObserverReadiness(gatekeeperId);
 
     // Restricted mode: the approver vouches for the text they read, and a push's commits cannot
     // be reviewed as text here, so a push is refused outright until there is a UI to review
@@ -6090,7 +6091,6 @@ class OverseerImpl implements AgentHooks {
           "reviewed as of yet.");
     }
 
-    await this.assertGatekeeperObserverReadiness(gatekeeperId);
     // Push authorization (see ActionDescription.pushedCommits): before anything is queued,
     // verify that every declared head's ancestry reaches a commit proven on this gatekeeper's
     // remote. This is the chokepoint that makes an accidental push to an unrelated remote fail

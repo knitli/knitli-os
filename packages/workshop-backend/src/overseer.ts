@@ -534,6 +534,7 @@ function observerBindingNeed(record: GatekeeperRecord): ObserverBindingNeed {
     vendorId: observerVendorId(record)!,
     resourceTitle: observerBindingTitle(record),
     resourceUrl: record.resourceUrl,
+    ambient: record.creationSpec?.type === "ambient" || undefined,
   };
 }
 

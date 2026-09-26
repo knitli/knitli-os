@@ -51,6 +51,8 @@ export function useWorkspaceOpen({
   const [reloadNonce, setReloadNonce] = useState(0)
   const openWorkspaceIdRef = useRef<string | undefined>(undefined)
   const pendingObserverRejectRef = useRef<((error: unknown) => void) | null>(null)
+  // Why the user cancelled the account prompt, when the modal knows the open cannot succeed.
+  const observerCancelReasonRef = useRef<string | undefined>(undefined)
   const callbacksRef = useRef({ onMetadata, onShareKeyConsumed, onInvalidShareKey })
   callbacksRef.current = { onMetadata, onShareKeyConsumed, onInvalidShareKey }
 
@@ -147,7 +149,8 @@ export function useWorkspaceOpen({
         if (message.includes(OBSERVER_CANCELLED)) {
           showTerminalError({
             kind: 'message',
-            message: 'To open this workspace, you must choose connected accounts for the services it uses.',
+            message: observerCancelReasonRef.current ??
+              'To open this workspace, you must choose connected accounts for the services it uses.',
           })
         } else if (message.includes('permitted to observe') ||
                    message.includes('no longer connected') ||
@@ -189,7 +192,8 @@ export function useWorkspaceOpen({
       setError(null)
       setReloadNonce(value => value + 1)
     },
-    cancelObserverConfig() {
+    cancelObserverConfig(reason?: string) {
+      observerCancelReasonRef.current = reason
       observerConfig?.reject(new Error(OBSERVER_CANCELLED))
     },
     updateTitle(title: string) {

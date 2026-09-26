@@ -423,17 +423,17 @@ describe('ObserverConfigModal when a service cannot be connected', () => {
 
   it('explains a hidden always-on service instead of prompting, and closes with that reason', async () => {
     // Memory is in neither vendor listing (hidden from this user) and they have no account for it.
-    const { container, onCancel } = await render(
+    const { container: modal, onCancel } = await render(
       fakeApi([account(1, 'me@example.com', [DOC_RESOURCE.urlPattern])]), [NEED, MEMORY_NEED])
     const message =
       'This workspace uses its owner’s Knitli Memory (always on). You need your own access to Knitli Memory to collaborate here.'
 
-    expect(container.textContent).toContain('You can’t open this workspace')
-    expect(container.textContent).toContain(message)
-    expect(findButton(container, 'Verify and open')).toBeUndefined()
-    expect(findButton(container, 'Connect')).toBeUndefined()
+    expect(modal.textContent).toContain('You can’t open this workspace')
+    expect(modal.textContent).toContain(message)
+    expect(findButton(modal, 'Verify and open')).toBeUndefined()
+    expect(findButton(modal, 'Connect')).toBeUndefined()
 
-    await act(async () => findButton(container, 'Close')!.click())
+    await act(async () => findButton(modal, 'Close')!.click())
     expect(onCancel).toHaveBeenCalledWith(message)
   })
 
@@ -442,10 +442,10 @@ describe('ObserverConfigModal when a service cannot be connected', () => {
     const api = Object.assign(fakeApi([]), {
       listGatekeeperVendors: async () => { throw new Error('listing unavailable') },
     }) as RpcStub<AuthenticatedApi>
-    const { container } = await render(api, [MEMORY_NEED])
+    const { container: modal } = await render(api, [MEMORY_NEED])
 
-    expect(container.textContent).not.toContain('You can’t open this workspace')
-    expect(findButton(container, 'Verify and open')).toBeDefined()
+    expect(modal.textContent).not.toContain('You can’t open this workspace')
+    expect(findButton(modal, 'Verify and open')).toBeDefined()
   })
 
   it('still offers Connect for an always-on service the user can opt into', async () => {
@@ -454,10 +454,10 @@ describe('ObserverConfigModal when a service cannot be connected', () => {
         id: 'memory', description: { displayName: 'Knitli Memory' } as VendorDescription, supportedResources: [],
       }],
     }) as RpcStub<AuthenticatedApi>
-    const { container } = await render(api, [MEMORY_NEED])
+    const { container: modal } = await render(api, [MEMORY_NEED])
 
-    expect(container.textContent).not.toContain('You can’t open this workspace')
-    expect(findButton(container, 'Connect')).toBeDefined()
+    expect(modal.textContent).not.toContain('You can’t open this workspace')
+    expect(findButton(modal, 'Connect')).toBeDefined()
   })
 
   it('does not block a forced always-on service the user already has an account for', async () => {
@@ -467,16 +467,16 @@ describe('ObserverConfigModal when a service cannot be connected', () => {
       gatekeeperId: 31, vendorId: 'context', resourceTitle: 'Context Library', ambient: true,
     }
     const api = fakeApi([], {
-      subscribeConnectedAccounts: vi.fn((subscriber: ConnectedAccountsSubscriber) => {
+      subscribeConnectedAccounts: vi.fn<(subscriber: ConnectedAccountsSubscriber) => Promise<{ [Symbol.dispose](): void }>>((subscriber) => {
         const entry = account(5, 'library')
         subscriber.add(entry.id, entry.description, VENDOR, [], true, 'context')
         subscriber.ready()
         return Object.assign(Promise.resolve({ [Symbol.dispose]() {} }), { [Symbol.dispose]() {} })
       }),
     })
-    const { container } = await render(api, [CONTEXT_NEED])
+    const { container: modal } = await render(api, [CONTEXT_NEED])
 
-    expect(container.textContent).not.toContain('You can’t open this workspace')
-    expect(findButton(container, 'Verify and open')).toBeDefined()
+    expect(modal.textContent).not.toContain('You can’t open this workspace')
+    expect(findButton(modal, 'Verify and open')).toBeDefined()
   })
 })

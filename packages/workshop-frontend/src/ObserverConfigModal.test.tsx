@@ -22,6 +22,7 @@ vi.mock('@cloudflare/kumo', () => {
     {
       Root: ({ children }: { children: ReactNode }) => <>{children}</>,
       Title: ({ children }: { children: ReactNode }) => <h1>{children}</h1>,
+      Description: ({ children }: { children: ReactNode }) => <p>{children}</p>,
     },
   )
   const Select = Object.assign(
@@ -457,5 +458,25 @@ describe('ObserverConfigModal when a service cannot be connected', () => {
 
     expect(container.textContent).not.toContain('You can’t open this workspace')
     expect(findButton(container, 'Connect')).toBeDefined()
+  })
+
+  it('does not block a forced always-on service the user already has an account for', async () => {
+    // Forced ambient vendors (Context, Scheduler) appear in neither listing; the account is what
+    // shows the user can meet the need.
+    const CONTEXT_NEED: ObserverBindingNeed = {
+      gatekeeperId: 31, vendorId: 'context', resourceTitle: 'Context Library', ambient: true,
+    }
+    const api = fakeApi([], {
+      subscribeConnectedAccounts: vi.fn((subscriber: ConnectedAccountsSubscriber) => {
+        const entry = account(5, 'library')
+        subscriber.add(entry.id, entry.description, VENDOR, [], true, 'context')
+        subscriber.ready()
+        return Object.assign(Promise.resolve({ [Symbol.dispose]() {} }), { [Symbol.dispose]() {} })
+      }),
+    })
+    const { container } = await render(api, [CONTEXT_NEED])
+
+    expect(container.textContent).not.toContain('You can’t open this workspace')
+    expect(findButton(container, 'Verify and open')).toBeDefined()
   })
 })

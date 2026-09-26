@@ -240,8 +240,9 @@ describe("createWorktree", () => {
     const read = vi.spyOn(impl.gitCache, "readLocalObject");
     try {
       for (const length of [4, 12, 39]) {
-        await expect(impl.createWorktree("Restricted chat", 1, hidden.slice(0, length)))
-          .rejects.toThrow(/not a full git commit id/);
+        const prefix = hidden.slice(0, length);
+        await expect(impl.createWorktree("Restricted chat", 1, prefix)).rejects.toThrow(new Error(
+          `${JSON.stringify(prefix)} is not a full git commit id: expected 40 lowercase hex digits.`));
       }
       expect(read).not.toHaveBeenCalled();
       // Deliberately supplying the full bearer capability still grants access.
@@ -273,7 +274,8 @@ describe("createWorktree", () => {
         { oid, type: "commit", onRemote: [99], pullableFrom: [], pendingPush: [] });
     await expect(impl.createWorktree("W", 1, oid)).rejects.toThrow(new Error(
         `Could not pull git object ${oid.slice(0, 8)}: ` +
-        "every connection that could provide it failed (git.pull.source.failed)."));
+        "every connection that could provide it failed. Reconnect the connection " +
+        "that provides it, then try again (git.pull.source.failed)."));
   }));
 
   it("records the first recorded source as sourceGatekeeperId", () => withImpl(async impl => {

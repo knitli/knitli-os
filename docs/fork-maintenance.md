@@ -567,6 +567,38 @@ with it: the fork lowercased its input, upstream refuses an uppercase id. The fo
 `worktrees.test.ts`, re-pointed at upstream's error, since it also pins that the refusal
 happens before any object read.
 
+### Thin-pack delta bases are scoped to the pulling gatekeeper
+
+- **Where:** `WorkspaceGitCache.consumePackFromGatekeeper()`'s `resolveBase` in
+  `packages/workshop-backend/src/git-cache.ts`, via the fork's `#isVisibleToGatekeeper()`, which
+  `readForGatekeeper()` shares
+- **Introduced:** `3ddf0bb6`
+- **What:** upstream resolves a thin pack's external delta base from any locally stored object.
+  The fork resolves it only when that object is `onRemote` or `pendingPush` for the pulling
+  gatekeeper -- exactly what `GitCache.get()` would serve it -- and otherwise leaves the base
+  unavailable, so decoding fails.
+- **Why:** naming a base OID is not proof of possession. A gatekeeper could send a copy-only
+  delta against another connection's (or a local-only) object and have its bytes attributed to
+  itself, reading content it was never given.
+- **Test:** `thin-pack gatekeeper isolation` in `packages/workshop-backend/__tests__/git-cache.test.ts`.
+- **At sync:** Tier 2. If upstream reshapes the pack decode, keep `resolveBase` behind the same
+  visibility check as the scoped read view.
+
+### Git pull failures are reported categorically
+
+- **Where:** `WorkspaceGitCache.ensureGitObjects()` in `packages/workshop-backend/src/git-cache.ts`
+- **Introduced:** `3ddf0bb6`
+- **What:** upstream logs the caught pull error and quotes the last one in the exhausted-sources
+  error. The fork logs only the event, gatekeeper id, object count and an 8-hex OID prefix, and the
+  thrown error names the object by that prefix and asks the user to reconnect the connection
+  that provides it, quoting nothing from the remote.
+- **Why:** a remote's error message and stack can carry full capability OIDs or response bodies,
+  and both the log and the thrown error (which reaches the agent) outlive the request.
+- **Known cost:** the agent and the logs no longer say *why* a pull failed; the gatekeeper's own
+  logs still do.
+- **Test:** `pull failure privacy` in `packages/workshop-backend/__tests__/git-cache.test.ts`, plus
+  the exact-message assertions in `worktrees.test.ts` and `worktree-session.test.ts`.
+
 ### Optional native OpenAPI SDK publisher (2026-09-22)
 
 `workshop-backend/src/openapi-publisher.ts` and its exact publisher unit/integration test

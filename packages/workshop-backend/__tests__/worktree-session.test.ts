@@ -709,7 +709,9 @@ describe("commit and diff", () => {
     const read = vi.spyOn(impl.gitCache, "readLocalObject");
     try {
       for (const length of [4, 12, 39]) {
-        await expect(session.diff(hidden.slice(0, length))).rejects.toThrow(/not a full git commit id/);
+        const prefix = hidden.slice(0, length);
+        await expect(session.diff(prefix)).rejects.toThrow(new Error(
+          `${JSON.stringify(prefix)} is not a full git commit id: expected 40 lowercase hex digits.`));
       }
       expect(read).not.toHaveBeenCalled();
       expect(await session.diff(hidden)).toContain("other chat contents");
@@ -755,7 +757,8 @@ describe("commit and diff", () => {
         7, "commit", commitPayload(ghostTree, [], "ghost target"));
     await expect(session.diff(ghostTarget)).rejects.toThrow(new Error(
       `Could not pull git object ${ghostOid.slice(0, 8)}: ` +
-      "every connection that could provide it failed (git.pull.source.failed)."));
+      "every connection that could provide it failed. Reconnect the connection " +
+      "that provides it, then try again (git.pull.source.failed)."));
     // The blob read's pull hint names its containing tree, not the commit: blobs are
     // referenced by trees (the referencedBy hint contract).
     expect(pulls).toEqual(

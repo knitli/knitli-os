@@ -446,7 +446,8 @@ export class WorkspaceGitCache {
               `Could not pull git object ${oid.slice(0, 8)}: ` +
               (sources.length === 0
                   ? "no connection is known to provide it."
-                  : `every connection that could provide it failed (git.pull.source.failed).`));
+                  : `every connection that could provide it failed. Reconnect the connection ` +
+                    `that provides it, then try again (git.pull.source.failed).`));
         }
         let group = groups.get(next);
         if (group === undefined) groups.set(next, group = []);

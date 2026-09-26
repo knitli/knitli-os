@@ -37,6 +37,10 @@
       "reason": "Regression test for the fork-owned approval-turn continuation."
     },
     {
+      "path": "packages/workshop-backend/__tests__/pre-approvable-actions.test.ts",
+      "reason": "Regression test for the fork's ambient-gatekeeper entries in listPreApprovableActions (knitli-os #37); exact path because this package's vitest include is non-recursive, so a __tests__/fork/ tree would need an upstream config edit."
+    },
+    {
       "path": "packages/workshop-backend/__tests__/knitli-restricted-ambient.test.ts",
       "reason": "Regression test that upstream's restricted mode also suspends the fork's ambient-gatekeeper pre-approval rules."
     },

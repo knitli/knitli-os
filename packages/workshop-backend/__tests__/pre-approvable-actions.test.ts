@@ -74,7 +74,7 @@ describe("listPreApprovableActions", () => {
     let actions = await list(storage, { ...KINDS, 4: new Error("vendor uninstalled") }, warn);
     expect(actions.map(action => action.gatekeeperId)).toEqual([1, 2]);
     expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
-      event: "auto-approval.ambient.list.failed", gatekeeperId: 4,
+      event: "auto.approval.ambient.list.failed", gatekeeperId: 4, vendorId: "gone",
     }));
   });
 

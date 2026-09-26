@@ -11785,7 +11785,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       let kinds = gk.creationSpec?.type === "ambient"
           ? await facet.getAutoApprovableActions().catch((err: unknown) => {
             this.impl.logger.warn("failed to list an ambient gatekeeper's auto-approvable actions", {
-              event: "auto-approval.ambient.list.failed", gatekeeperId: gk.id, error: err,
+              event: "auto.approval.ambient.list.failed", gatekeeperId: gk.id, vendorId: gatekeeperVendorId(gk), error: err,
             });
             return [];
           })

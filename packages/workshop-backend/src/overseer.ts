@@ -11780,7 +11780,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         .filter(gk => gk !== undefined)
         .map(async (gk): Promise<PreApprovableAction[]> => {
       let facet = this.impl.getGatekeeperFacet(gk.id);
-      let kinds = await facet.getAutoApprovableActions();
+      // An ambient record can be stale (e.g. its vendor was uninstalled); it isn't a connection the
+      // user chose, so it must not blank the tab. Bound gatekeepers still fail it (see TODO above).
+      let kinds = gk.creationSpec?.type === "ambient"
+          ? await facet.getAutoApprovableActions().catch((err: unknown) => {
+            this.impl.logger.warn("failed to list an ambient gatekeeper's auto-approvable actions", {
+              event: "auto-approval.ambient.list.failed", gatekeeperId: gk.id, error: err,
+            });
+            return [];
+          })
+          : await facet.getAutoApprovableActions();
       return kinds.map(actionKind => ({
         gatekeeperId: gk.id,
         // resourceTitle is a denormalized cache of the gatekeeper's describe().title, populated in a

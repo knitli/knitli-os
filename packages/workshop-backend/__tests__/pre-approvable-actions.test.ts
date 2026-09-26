@@ -33,11 +33,16 @@ function seed(ambientAlsoBound = false) {
   return storage;
 }
 
-const KINDS: Record<number, ActionKind[]> = { 1: [ISSUE], 2: [WRITE], 3: [ISSUE] };
+const KINDS: Record<number, ActionKind[] | Error> = { 1: [ISSUE], 2: [WRITE], 3: [ISSUE] };
 
-async function list(storage: ReturnType<typeof seed>) {
+async function list(storage: ReturnType<typeof seed>, kinds = KINDS, warn = vi.fn()) {
   let client = await openFakeOverseer(storage, { implOverrides: {
-    getGatekeeperFacet: (id: number) => ({ getAutoApprovableActions: async () => KINDS[id] }),
+    logger: { warn },
+    getGatekeeperFacet: (id: number) => ({ getAutoApprovableActions: async () => {
+      let result = kinds[id];
+      if (result instanceof Error) throw result;
+      return result;
+    } }),
   } });
   return (await client.listPreApprovableActions()).toSorted((a, b) => a.gatekeeperId - b.gatekeeperId);
 }
@@ -56,6 +61,21 @@ describe("listPreApprovableActions", () => {
       { gatekeeperId: 2, resourceTitle: "Knitli Memory", vendorId: "memory",
         actionKind: WRITE, alreadyEnabled: true },
     ]);
+  });
+
+  it("still lists the others when an ambient gatekeeper's catalog rejects", async () => {
+    let storage = seed();
+    storage.gatekeepers.put({
+      id: 4, class: {} as never, resourceTitle: "Uninstalled",
+      creationSpec: { type: "ambient", vendorId: "gone", accountId: 8 },
+    });
+
+    let warn = vi.fn();
+    let actions = await list(storage, { ...KINDS, 4: new Error("vendor uninstalled") }, warn);
+    expect(actions.map(action => action.gatekeeperId)).toEqual([1, 2]);
+    expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      event: "auto-approval.ambient.list.failed", gatekeeperId: 4,
+    }));
   });
 
   it("lists an ambient gatekeeper a gadget also binds once", async () => {

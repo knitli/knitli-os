@@ -120,6 +120,7 @@ function buildApi({
   grantable = false,
   initialAccount = false,
   singleton = false,
+  credentialsValid = true,
   vendorId = autoProvisionsAccount ? 'ai-executor' : 'google',
   resources = [{ ...RESOURCE, grantable }],
 }: {
@@ -128,6 +129,7 @@ function buildApi({
   grantable?: boolean
   initialAccount?: boolean
   singleton?: boolean
+  credentialsValid?: boolean
   vendorId?: string
   resources?: SupportedResource[]
 }): TestApi {
@@ -169,7 +171,7 @@ function buildApi({
           } as AccountDescription,
           vendorDescription,
           resources,
-          true,
+          credentialsValid,
           vendorId,
         )
       }
@@ -269,6 +271,17 @@ describe('GatekeeperModal ambient resource connections', () => {
     expect(testApi.startResourceConfigurator).not.toHaveBeenCalled()
   })
 
+  it('keeps an expired singleton account\'s vendor offered so it can be reconnected', async () => {
+    const testApi = buildApi({
+      autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true, credentialsValid: false,
+    })
+    const rendered = await render(testApi.api)
+
+    expect(alwaysOnSection(rendered.container)).toBeNull()
+    expect([...rendered.container.querySelectorAll('button')]
+      .find(button => button.textContent?.includes('Knitli Memory'))).toBeDefined()
+  })
+
   it('keeps the explanation visible while searching', async () => {
     const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
     const rendered = await render(testApi.api)
@@ -312,10 +325,11 @@ describe('GatekeeperModal ambient resource connections', () => {
     expect(alwaysOnSection(rendered.container)).not.toBeNull()
 
     // Disconnected elsewhere while the picker was closed: the next subscription's snapshot is empty.
-    vi.mocked(testApi.api.subscribeConnectedAccounts).mockImplementation((subscriber) => {
-      subscriber.ready()
+    // The mock is typed at the RPC boundary (stubs); this fake plays the plain client side of it.
+    vi.mocked(testApi.api.subscribeConnectedAccounts).mockImplementation(((subscriber: ConnectedAccountsSubscriber) => {
+      void subscriber.ready()
       return Object.assign(Promise.resolve({ [Symbol.dispose]() {} }), { [Symbol.dispose]() {} })
-    })
+    }) as never)
     for (const open of [false, true]) {
       await act(async () => {
         root!.render(<GatekeeperModal open={open} onClose={() => {}} getOverseer={getOverseer} onCreated={async () => {}} />)

@@ -264,7 +264,9 @@ export default function GatekeeperModal({
   ], [siteName, vendors])
 
   const alwaysOnVendorIds = useMemo(
-    () => new Set(accounts.filter(account => account.description.singleton).map(account => account.vendorId)),
+    // An expired singleton stays out, so its vendor keeps the chooser's Reconnect action.
+    () => new Set(accounts.filter(account => account.description.singleton && account.credentialsValid)
+      .map(account => account.vendorId)),
     [accounts],
   )
   const addableConnections = useMemo(

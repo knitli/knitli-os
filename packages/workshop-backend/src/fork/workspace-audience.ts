@@ -124,23 +124,39 @@ export async function beginAdmission(
       sharing?.getEffectiveRole(profileId) === role ? role : undefined;
 }
 
-/**
- * Called where #enforceExcludeObservers de-registers an out-of-scope observer from one gatekeeper:
- * their record no longer stands for a live build admission, so it must not count as one if their
- * scope later widens back (e.g. use upgraded to build) before an open re-verifies them. The account
- * choices are kept, so that open re-verifies the remembered account without asking.
- */
-export function forgetBuildAdmission(
-    observers: {
-      byObserverId: { get(observerId: string): ObserverRecordLike | undefined };
-      put(record: ObserverRecordLike): void;
-    },
-    observerId: string): void {
-  const record = observers.byObserverId.get(observerId);
+type ForgettableObservers = {
+  get(profileId: string): ObserverRecordLike | undefined;
+  byObserverId: { get(observerId: string): ObserverRecordLike | undefined };
+  put(record: ObserverRecordLike): void;
+};
+
+function forget(observers: ForgettableObservers, record: ObserverRecordLike | undefined): void {
   if (!record) return;
   const generations = generationsFor(observers);
   generations.set(record.profileId, (generations.get(record.profileId) ?? 0) + 1);
   if (record.admittedAs === undefined) return;
   const { admittedAs: _dropped, ...rest } = record;
   observers.put(rest);
+}
+
+/**
+ * Called where #enforceExcludeObservers de-registers an out-of-scope observer from one gatekeeper:
+ * their record no longer stands for a live build admission, so it must not count as one if their
+ * scope later widens back (e.g. use upgraded to build) before an open re-verifies them. The account
+ * choices are kept, so that open re-verifies the remembered account without asking.
+ */
+export function forgetBuildAdmission(observers: ForgettableObservers, observerId: string): void {
+  forget(observers, observers.byObserverId.get(observerId));
+}
+
+/**
+ * Called first thing in tearDownLostObservers, which every sharing change that lowers someone's
+ * effective role goes through (removeCollaborator, revokeShareLink, the ownerInvitesOnly latch).
+ * Synchronous for every affected profile: that teardown awaits cross-DO removals one entry at a
+ * time behind a closing input gate, so later entries (including deleting a lost collaborator's
+ * record) may never run. An admission is re-earned only by a fresh open at the new role.
+ */
+export function forgetContractedAdmissions(
+    observers: ForgettableObservers, affected: readonly { profile: { id: string } }[]): void {
+  for (const entry of affected) forget(observers, observers.get(entry.profile.id));
 }

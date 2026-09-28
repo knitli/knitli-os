@@ -1,6 +1,7 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { isReasoningLevel } from "./fork/reasoning-levels";
-import { ActionApplyContextImpl, attestWorkspaceAudience, beginAdmission, forgetBuildAdmission } from "./fork/workspace-audience";
+import { ActionApplyContextImpl, attestWorkspaceAudience, beginAdmission, forgetBuildAdmission,
+  forgetContractedAdmissions } from "./fork/workspace-audience";
 import type { WorkspaceAudience } from "@gadgets/workshop-shared/gatekeeper";
 import {
   PROMPT_FILENAME, hasRootPromptFile, isPromptFileAnywhere,
@@ -9685,6 +9686,7 @@ class OverseerImpl implements AgentHooks {
   // never a data leak: a registration is what admits an open, and every open re-runs addObserver,
   // so a stale one grants nothing on its own. See observers-implementation-plan.md §5 Step 6.
   async tearDownLostObservers(affected: AffectedCollaborator[]): Promise<void> {
+    forgetContractedAdmissions(this.storage.observers, affected);
     let gatekeeperIds = [...this.storage.gatekeepers.list()].map(gk => gk.id);
     for (let entry of affected) {
       if (entry.newRole !== null) continue;  // downgraded but still has access -> keep record

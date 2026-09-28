@@ -267,6 +267,74 @@ describe("attestAudience", () => {
     expect(await admitAcross(async () => {})).toEqual(["bob", "carol"]);
   });
 
+  // Every sharing change that lowers someone's role goes through tearDownLostObservers, which
+  // keeps a downgraded collaborator's record. Here the ownerInvitesOnly latch drops Carol (added
+  // by the owner as use, by Bob as build) to use; a build-only observation that does not name her
+  // follows; then the owner upgrades her. She must not count until a fresh build open.
+  it("excludes a collaborator downgraded and re-upgraded until a fresh build open", async () => {
+    await withWorkspace(async (impl, overseer, facet) => {
+      impl.scheduleRevocationRestart = () => {};  // the restart would abort this test's DO
+      let sharing = await impl.getSharingManager();
+      addCollaborator(impl, sharing, "bob", "build", ALL);
+      let carol = { type: "user", id: "carol", name: "carol" };
+      sharing.addCollaborator({ caller: OWNER_CALLER, profile: carol, role: "use" });
+      sharing.addCollaborator({ caller: { profileId: "bob", isOwner: false }, profile: carol, role: "build" });
+      impl.storage.observers.put(
+          { profileId: "carol", observerId: "obs-carol", accountChoices: ALL, admittedAs: "build" });
+      let queue = await queueFor(overseer, facet, MESSAGING);
+      expect((await queue.attestAudience()).collaborators).toEqual(["bob", "carol"]);
+
+      const CALLER = { from: "agent", chatId: 1 };
+      await impl.authorizeObservation(MESSAGING,
+          { title: "Latch", description: "d", ownerInvitesOnly: true }, CALLER);
+      expect(sharing.getEffectiveRole("carol")).toBe("use");
+      await impl.authorizeObservation(OTHER, { title: "Build-only", description: "d" }, CALLER);
+      sharing.addCollaborator({ caller: OWNER_CALLER, profile: carol, role: "build" });
+      expect(sharing.getEffectiveRole("carol")).toBe("build");
+      expect((await queue.attestAudience()).collaborators).toEqual(["bob"]);
+
+      await impl.ensureObserver("carol", {
+        getVerifier: async () => ({}),
+        listProvidedAccounts: async () => [],
+        describeConnectedAccount: async () => null,
+      }, "build");
+      expect((await queue.attestAudience()).collaborators).toEqual(["bob", "carol"]);
+    });
+  });
+
+  // tearDownLostObservers awaits each removal in turn; behind a restart's closed input gate the
+  // replies never land, so later entries -- deleting their records -- never run. A collaborator
+  // whose record survived that way must not count when re-added.
+  it("excludes a lost collaborator whose record a stalled teardown left behind", async () => {
+    await withWorkspace(async (impl, overseer, facet) => {
+      let sharing = await impl.getSharingManager();
+      addCollaborator(impl, sharing, "bob", "build", ALL);
+      addCollaborator(impl, sharing, "dave", "build", ALL);
+      sharing.addCollaborator({
+        caller: { profileId: "dave", isOwner: false },
+        profile: { type: "user", id: "carol", name: "carol" }, role: "build",
+      });
+      impl.storage.observers.put(
+          { profileId: "carol", observerId: "obs-carol", accountChoices: ALL, admittedAs: "build" });
+      let affected = sharing.removeCollaborator(OWNER_CALLER, "dave", []);
+      expect(affected.map((entry: any) => entry.newRole)).toEqual([null, null]);
+
+      let facetFor = impl.getGatekeeperFacet;
+      impl.getGatekeeperFacet = (id: number) =>
+          ({ ...facetFor(id), removeObserver: () => new Promise(() => {}) });
+      void impl.tearDownLostObservers(affected);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      // Exactly one of the two records was deleted before the teardown stalled.
+      expect(["dave", "carol"].filter(id => impl.storage.observers.get(id))).toHaveLength(1);
+
+      // Re-adding Dave restores Carol through his edge.
+      sharing.addCollaborator(
+          { caller: OWNER_CALLER, profile: { type: "user", id: "dave", name: "dave" }, role: "build" });
+      let queue = await queueFor(overseer, facet, MESSAGING);
+      expect((await queue.attestAudience()).collaborators).toEqual(["bob"]);
+    });
+  });
+
   it("refuses while a revocation is in flight", async () => {
     await withWorkspace(async (impl, overseer, facet) => {
       let queue = await queueFor(overseer, facet, MESSAGING);

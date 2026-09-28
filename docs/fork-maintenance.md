@@ -280,8 +280,9 @@ Intentional, reviewed differences from upstream. Keep this current.
   `packages/workshop-backend/src/overseer.ts` -- a four-line method on `ApprovalQueueImpl`, one
   extra argument at `applyPendingAction()` (the single chokepoint for manual and auto approval),
   an optional `ObserverRecord.admittedAs` field written by `ensureObserver`'s two persist lines
-  from a `beginAdmission()` call at the top of `#ensureObserverUnserialized`, and one
-  `forgetBuildAdmission()` call in `#enforceExcludeObservers`' out-of-scope branch.
+  from a `beginAdmission()` call at the top of `#ensureObserverUnserialized`, one
+  `forgetBuildAdmission()` call in `#enforceExcludeObservers`' out-of-scope branch, and one
+  `forgetContractedAdmissions()` call at the top of `tearDownLostObservers()`.
 - **What:** A gatekeeper holding an approval queue can ask who could already see everything the
   workspace has observed: its id, the owner's profile id, the build collaborators the overseer has
   admitted, and the `containsRestrictedData` / `ownerInvitesOnly` / `sharingProhibited` latches. A
@@ -312,6 +313,13 @@ Intentional, reviewed differences from upstream. Keep this current.
   the teardown does not wait for it) writes `admittedAs` only if no build admission of that profile
   was forgotten meanwhile (an in-memory per-overseer generation, safe because a DO reset also
   aborts the admission) and their effective role still equals the captured one.
+- **Role contractions clear `admittedAs`:** every sharing change that lowers someone's effective
+  role (`removeCollaborator`, `revokeShareLink`, the `ownerInvitesOnly` latch) calls
+  `tearDownLostObservers()`, which now first clears `admittedAs` for every affected profile,
+  downgraded or lost, synchronously. A downgraded collaborator keeps their record, so without this
+  a later re-upgrade would count them without a fresh build open. It must run before the first
+  await: the teardown awaits cross-DO removals one entry at a time behind the restart's closing
+  input gate, so later entries -- including deleting a lost collaborator's record -- may never run.
 - **Why:** Gatekeepers that move data between workspaces (Knitli Messaging) need an information-flow
   check. Reconstructing the audience inside a facet from `addObserver`/`removeObserver` fails open:
   `#removeObserverFromGatekeepers` is best-effort and use-role observers register too. Only the

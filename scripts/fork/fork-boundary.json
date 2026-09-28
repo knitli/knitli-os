@@ -45,6 +45,10 @@
       "reason": "Regression test that upstream's restricted mode also suspends the fork's ambient-gatekeeper pre-approval rules."
     },
     {
+      "path": "packages/workshop-backend/__tests__/knitli-workspace-audience.test.ts",
+      "reason": "Regression test for the fork-owned ApprovalQueue.attestAudience() (src/fork/workspace-audience.ts)."
+    },
+    {
       "path": "packages/workshop-backend/__tests__/knitli-reasoning-levels.test.ts",
       "reason": "Regression test for the fork-owned reasoning-effort resolver and its makeHandle wiring."
     },

@@ -272,6 +272,33 @@ Intentional, reviewed differences from upstream. Keep this current.
   itself is adopted wholesale — it complements the owner-only tier (owner-added collaborators
   keep access) rather than replacing it.
 
+### `ApprovalQueue.attestAudience()` and `applyAction`'s context
+
+- **Where:** optional `ApprovalQueue.attestAudience()`, `ActionApplyContext`, `WorkspaceAudience` and
+  an optional third `applyAction()` parameter in `packages/workshop-shared/src/gatekeeper.ts`;
+  policy in `packages/workshop-backend/src/fork/workspace-audience.ts`; two seams in
+  `packages/workshop-backend/src/overseer.ts` -- a four-line method on `ApprovalQueueImpl` and one
+  extra argument at `applyPendingAction()`, the single chokepoint for manual and auto approval.
+- **What:** A gatekeeper holding an approval queue can ask who could already see everything the
+  workspace has observed: its id, the owner's profile id, the build collaborators the overseer has
+  admitted, and the `containsRestrictedData` / `ownerInvitesOnly` / `sharingProhibited` latches. A
+  collaborator counts only while their effective role in the sharing graph is `build` and their
+  persisted `ObserverRecord` holds a verified account choice for every current build-scope
+  connection, so a use admission upgraded to build, or an admission predating a new connection, is
+  left out until the next open re-verifies it. The same answer is available while an action is
+  applied, through `applyAction()`'s `context`, since no queue exists then.
+- **Why:** Gatekeepers that move data between workspaces (Knitli Messaging) need an information-flow
+  check. Reconstructing the audience inside a facet from `addObserver`/`removeObserver` fails open:
+  `#removeObserverFromGatekeepers` is best-effort and use-role observers register too. Only the
+  overseer's own state is authoritative.
+- **Why on `ApprovalQueue`, not `ObservationAuthorizer`:** an optional member on
+  `ObservationAuthorizer` breaks `RpcStub<ObservationAuthorizer>` assignability in upstream's
+  `slash-commands.ts` (RPC stub typing turns an optional method into `Promise<undefined> | ...`).
+- **Upstream-preserving default:** the method and parameter are optional, so upstream-shaped
+  implementations and fakes still typecheck and gatekeepers that ignore `context` are unaffected;
+  a gatekeeper must treat an absent method or context as "no attestation", never as an empty
+  audience. Pinned by `packages/workshop-backend/__tests__/knitli-workspace-audience.test.ts`.
+
 ### `open()` routes sharing and revocation guards through the impl
 
 - **Where:** `OverseerDurableObject.open()` in `packages/workshop-backend/src/overseer.ts`, mirrored

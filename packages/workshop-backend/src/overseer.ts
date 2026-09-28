@@ -1,5 +1,6 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { isReasoningLevel } from "./fork/reasoning-levels";
+import { ActionApplyContextImpl, attestWorkspaceAudience } from "./fork/workspace-audience";
 import {
   PROMPT_FILENAME, hasRootPromptFile, isPromptFileAnywhere,
 } from "./fork/prompt-files";
@@ -9,7 +10,7 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints, WorkspaceAudience } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -5455,7 +5456,8 @@ class OverseerImpl implements AgentHooks {
     // happen long after the session that queued it, so the queue-time stub is gone) -- the
     // binding that makes buildPack() serve exactly this action's pending-push closure.
     await gatekeeper.applyAction(record.action,
-        new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id));
+        new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id),
+        new ActionApplyContextImpl(this));
     record.state = "approved";
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
@@ -13597,6 +13599,12 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
         description: HookDescription): Promise<void> {
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
     return this.impl.bindHook(this.gatekeeperId, controller, callback, description, this.caller);
+  }
+
+  // Fork: see fork/workspace-audience.ts.
+  attestAudience(): Promise<WorkspaceAudience> {
+    if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
+    return attestWorkspaceAudience(this.impl);
   }
 }
 

@@ -1,6 +1,6 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { isReasoningLevel } from "./fork/reasoning-levels";
-import { ActionApplyContextImpl, attestWorkspaceAudience, forgetBuildAdmission } from "./fork/workspace-audience";
+import { ActionApplyContextImpl, attestWorkspaceAudience, beginAdmission, forgetBuildAdmission } from "./fork/workspace-audience";
 import type { WorkspaceAudience } from "@gadgets/workshop-shared/gatekeeper";
 import {
   PROMPT_FILENAME, hasRootPromptFile, isPromptFileAnywhere,
@@ -9786,6 +9786,7 @@ class OverseerImpl implements AgentHooks {
       clientUser: DurableObjectStub<UserDurableObject>,
       role: CollaboratorRole,
       configureCb?: RpcStub<ObserverConfigCallback>): Promise<void> {
+    let admittedAs = await beginAdmission(this, profileId, role);
     // 1. Select in-scope gatekeepers. If none require an account, there is nothing to verify and
     //    admission still persists an empty record so later scope expansion can detect this live
     //    collaborator before exposing the new connection.
@@ -9794,7 +9795,7 @@ class OverseerImpl implements AgentHooks {
     let accountChoices: {[gatekeeperId: number]: number} = {...record?.accountChoices};
     let observerId = record?.observerId ?? crypto.randomUUID();
     if (inScope.length === 0) {
-      this.storage.observers.put({profileId, observerId, accountChoices, admittedAs: role});
+      this.storage.observers.put({profileId, observerId, accountChoices, admittedAs: admittedAs()});
       return;
     }
 
@@ -9980,7 +9981,7 @@ class OverseerImpl implements AgentHooks {
 
     // 6. Persist the observer record only after all addObserver calls succeed. Creating/updating
     //    the record is the canonical moment the user becomes a configured observer.
-    this.storage.observers.put({profileId, observerId, accountChoices, admittedAs: role});
+    this.storage.observers.put({profileId, observerId, accountChoices, admittedAs: admittedAs()});
   }
 
   // Render the observer verification failures as one line per binding, naming the connection and the

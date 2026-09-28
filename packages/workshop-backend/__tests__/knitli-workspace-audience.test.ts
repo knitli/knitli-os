@@ -172,9 +172,9 @@ describe("attestAudience", () => {
   });
 
   // Carol's build admission verified her for connection 2. Downgraded to use, 2 is outside her
-  // scope, so an observation on 2 naming her de-registers her from it instead of blocking. Her
-  // account choice for 2 must go with that registration: upgraded back to build, she has not been
-  // re-verified for 2 and must not count until her next open.
+  // scope, so an observation on 2 naming her de-registers her from it instead of blocking. That
+  // clears her record's build admission (her account choices stay): upgraded back to build, she
+  // has not been re-verified for 2 and must not count until her next build open.
   it("excludes a collaborator re-upgraded after an out-of-scope de-registration", async () => {
     let { audience } = await attest(async (impl, sharing) => {
       addCollaborator(impl, sharing, "bob", "build", ALL);
@@ -209,6 +209,62 @@ describe("attestAudience", () => {
       }, "build");
       expect((await queue.attestAudience()).collaborators).toEqual(["carol"]);
     });
+  });
+
+  // A build open captures her role when it begins and can park (account prompts, verifier RPCs)
+  // while #enforceExcludeObservers, which does not wait for admissions, runs. Here the open
+  // registers her on connection 2 at once and parks on the Messaging connections' verifiers;
+  // meanwhile `during` runs; then the open completes and persists her record.
+  async function admitAcross(during: (impl: any, sharing: any) => Promise<void>): Promise<string[]> {
+    return await withWorkspace(async (impl, overseer, facet) => {
+      let sharing = await impl.getSharingManager();
+      addCollaborator(impl, sharing, "bob", "build", ALL);
+      addCollaborator(impl, sharing, "carol", "build", ALL);
+      let release!: () => void;
+      let gate = new Promise<void>(resolve => { release = resolve; });
+      let parked!: () => void;
+      let reached = new Promise<void>(resolve => { parked = resolve; });
+      let open = impl.ensureObserver("carol", {
+        getVerifier: async (_accountId: number, vendorId: string) => {
+          if (vendorId === "messaging") { parked(); await gate; }
+          return {};
+        },
+        listProvidedAccounts: async () => [],
+        describeConnectedAccount: async () => null,
+      }, "build");
+      await reached;
+      await during(impl, sharing);
+      release();
+      await open;
+      sharing.addCollaborator(
+          { caller: OWNER_CALLER, profile: { type: "user", id: "carol", name: "carol" }, role: "build" });
+      let queue = await queueFor(overseer, facet, MESSAGING);
+      return (await queue.attestAudience()).collaborators;
+    });
+  }
+
+  it("excludes her when a de-registration lands during her build open", async () => {
+    // Downgraded and de-registered from 2 after the open registered her there, then upgraded
+    // again before the open persists: her role reads "build" at the put, but the registration the
+    // open made on 2 is gone.
+    expect(await admitAcross(async (impl, sharing) => {
+      downgradeToUse(sharing, "carol");
+      await impl.authorizeObservation(OTHER,
+          { title: "Observation", description: "d", excludeObservers: ["obs-carol"] },
+          { from: "agent", chatId: 1 });
+      sharing.addCollaborator(
+          { caller: OWNER_CALLER, profile: { type: "user", id: "carol", name: "carol" }, role: "build" });
+    })).toEqual(["bob"]);
+  });
+
+  it("excludes her when her role changes during her build open", async () => {
+    // Conservative: nothing was torn down, but the admission no longer matches her role.
+    expect(await admitAcross(async (_impl, sharing) => downgradeToUse(sharing, "carol")))
+        .toEqual(["bob"]);
+  });
+
+  it("counts her when nothing changes during her build open", async () => {
+    expect(await admitAcross(async () => {})).toEqual(["bob", "carol"]);
   });
 
   it("refuses while a revocation is in flight", async () => {

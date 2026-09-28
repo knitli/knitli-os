@@ -25,7 +25,7 @@ export interface AudienceSource {
   ctx: { id: { toString(): string } };
   storage: {
     observers: { list(): Iterable<ObserverRecordLike> };
-    gatekeepers: { get(id: number): { creationSpec?: object } | undefined };
+    gatekeepers: { get(id: number): { creationSpec?: { type: string; vendorId?: string } } | undefined };
     containsRestrictedData: { get(): boolean };
     ownerInvitesOnly: { get(): boolean };
   };
@@ -47,8 +47,7 @@ export interface AudienceSource {
  */
 export async function attestWorkspaceAudience(
     impl: AudienceSource, gatekeeperId: number): Promise<WorkspaceAudience> {
-  const spec = impl.storage.gatekeepers.get(gatekeeperId)?.creationSpec;
-  const vendorId = spec && "vendorId" in spec ? String(spec.vendorId).toLowerCase() : undefined;
+  const vendorId = impl.storage.gatekeepers.get(gatekeeperId)?.creationSpec?.vendorId?.toLowerCase();
   if (!vendorId || !AUDIENCE_VENDORS.has(vendorId)) {
     throw new Error("This connection is not permitted to attest the workspace audience.");
   }
@@ -92,6 +91,39 @@ export class ActionApplyContextImpl extends RpcTarget implements ActionApplyCont
   }
 }
 
+// Per overseer (keyed by its observers collection), how often each profile's build admission has
+// been forgotten. In memory only: a DO reset also aborts every admission in flight.
+const forgetGenerations = new WeakMap<object, Map<string, number>>();
+
+function generationsFor(observers: object): Map<string, number> {
+  let generations = forgetGenerations.get(observers);
+  if (!generations) forgetGenerations.set(observers, generations = new Map());
+  return generations;
+}
+
+/**
+ * Called at the start of an admission (ensureObserver); the returned function gives the
+ * `admittedAs` to persist when it succeeds. The admission captured `role` when it began and can
+ * park for a long time (account prompts, verifier RPCs), and #enforceExcludeObservers does not wait
+ * for it: if a registration of this profile was torn down meanwhile, or their role changed, the
+ * record must not claim an admission at `role`. Call the returned function synchronously right
+ * before the put.
+ */
+export async function beginAdmission(
+    impl: {
+      storage: { observers: object };
+      getSharingManager(): Promise<{ getEffectiveRole(profileId: string): CollaboratorRole | undefined }>;
+    },
+    profileId: string, role: CollaboratorRole): Promise<() => CollaboratorRole | undefined> {
+  // Never throws: an uninitialized workspace (no owner to build the sharing graph from) still
+  // admits as upstream does, just without claiming a role.
+  const sharing = await impl.getSharingManager().catch(() => undefined);
+  const generations = generationsFor(impl.storage.observers);
+  const start = generations.get(profileId) ?? 0;
+  return () => (generations.get(profileId) ?? 0) === start &&
+      sharing?.getEffectiveRole(profileId) === role ? role : undefined;
+}
+
 /**
  * Called where #enforceExcludeObservers de-registers an out-of-scope observer from one gatekeeper:
  * their record no longer stands for a live build admission, so it must not count as one if their
@@ -105,7 +137,10 @@ export function forgetBuildAdmission(
     },
     observerId: string): void {
   const record = observers.byObserverId.get(observerId);
-  if (record?.admittedAs === undefined) return;
+  if (!record) return;
+  const generations = generationsFor(observers);
+  generations.set(record.profileId, (generations.get(record.profileId) ?? 0) + 1);
+  if (record.admittedAs === undefined) return;
   const { admittedAs: _dropped, ...rest } = record;
   observers.put(rest);
 }

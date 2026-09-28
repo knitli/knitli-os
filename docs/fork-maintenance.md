@@ -279,8 +279,9 @@ Intentional, reviewed differences from upstream. Keep this current.
   policy in `packages/workshop-backend/src/fork/workspace-audience.ts`; seams in
   `packages/workshop-backend/src/overseer.ts` -- a four-line method on `ApprovalQueueImpl`, one
   extra argument at `applyPendingAction()` (the single chokepoint for manual and auto approval),
-  an optional `ObserverRecord.admittedAs` field written by `ensureObserver`'s two persist lines,
-  and one `forgetBuildAdmission()` call in `#enforceExcludeObservers`' out-of-scope branch.
+  an optional `ObserverRecord.admittedAs` field written by `ensureObserver`'s two persist lines
+  from a `beginAdmission()` call at the top of `#ensureObserverUnserialized`, and one
+  `forgetBuildAdmission()` call in `#enforceExcludeObservers`' out-of-scope branch.
 - **What:** A gatekeeper holding an approval queue can ask who could already see everything the
   workspace has observed: its id, the owner's profile id, the build collaborators the overseer has
   admitted, and the `containsRestrictedData` / `ownerInvitesOnly` / `sharingProhibited` latches. A
@@ -306,7 +307,11 @@ Intentional, reviewed differences from upstream. Keep this current.
   makes the next open re-prompt for the account, which fails upstream's
   `observer-exclude-scope.test.ts` "a concurrent registration waits for the in-flight
   de-registration it raced" (a non-interactive re-open after a rebind is denied). With the marker,
-  upstream open behaviour is unchanged; only the attestation reads it.
+  upstream open behaviour is unchanged; only the attestation reads it. An admission in flight when
+  that happens (it captured the role at its start and may park on prompts or verifier RPCs, and
+  the teardown does not wait for it) writes `admittedAs` only if no build admission of that profile
+  was forgotten meanwhile (an in-memory per-overseer generation, safe because a DO reset also
+  aborts the admission) and their effective role still equals the captured one.
 - **Why:** Gatekeepers that move data between workspaces (Knitli Messaging) need an information-flow
   check. Reconstructing the audience inside a facet from `addObserver`/`removeObserver` fails open:
   `#removeObserverFromGatekeepers` is best-effort and use-role observers register too. Only the

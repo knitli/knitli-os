@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
+import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
+import { OverseerDurableObject } from "../src/overseer.js";
 import { makeActionStorage, openFakeOverseer } from "./fixtures.js";
+
+declare module "cloudflare:workers" {
+  interface ProvidedEnv {
+    TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
+  }
+}
 
 // Fork: getAmbientGatekeeper() lets a chat whose ambient set was frozen before the owner gained a
 // singleton accept an agent's connection request for it (see GatekeeperModal's "Add to this chat").
@@ -50,5 +59,34 @@ describe("getAmbientGatekeeper", () => {
   it("is denied to a use collaborator", async () => {
     let client = await openFakeOverseer(seed(), { role: "use" });
     await expect(client.getAmbientGatekeeper("memory")).rejects.toThrow("Unauthorized: this collaborator only has permission to use the gadget's UI.");
+  });
+});
+
+describe("ensureAmbientCapsules", () => {
+  it("provisions one capsule per vendor when runs overlap", async () => {
+    let stub = env.TEST_OVERSEER.getByName(`knitli-ambient-reconcile-${crypto.randomUUID()}`);
+    let ambientVendors = await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+      let impl = (instance as unknown as { impl: any }).impl;
+      impl.ownerId = "owner";
+      let owner = {
+        id: { toString: () => "owner" },
+        listProvidedAccounts: async () => [{ vendorId: "messaging", accountId: 8,
+          description: { displayName: "Knitli Messaging", singleton: { tsType: "MessagingSession" } } }],
+        getSingletonGatekeeperClass: async () => ({}),
+      };
+      impl.users = { idFromString: (id: string) => id, get: () => owner };
+      // addGatekeeper publishes the record only after describe(), so a slow describe holds the first
+      // run's capsule unpublished while the second reads the gatekeeper list.
+      impl.getGatekeeperFacet = () => ({ describe: async () => {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return { title: "Knitli Messaging" };
+      } });
+
+      await Promise.all([impl.ensureAmbientCapsules(), impl.ensureAmbientCapsules()]);
+      return [...impl.storage.gatekeepers.list()]
+          .filter((gk: any) => gk.creationSpec?.type === "ambient")
+          .map((gk: any) => gk.creationSpec.vendorId);
+    });
+    expect(ambientVendors).toEqual(["messaging"]);
   });
 });

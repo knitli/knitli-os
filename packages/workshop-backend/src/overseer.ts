@@ -7760,7 +7760,20 @@ class OverseerImpl implements AgentHooks {
   //
   // The session is reached through the owner's stored connected account, not by asserting the owner's
   // identity to the vendor — so the capability is the account the user actually holds.
-  async ensureAmbientCapsules(): Promise<void> {
+  //
+  // Fork: runs are serialized. Two overlapping runs (e.g. two sessions' open(), or
+  // getAmbientGatekeeper beside an open) would both see a vendor unbound before either adds it,
+  // provisioning two capsules for one vendor -- and new chats would get MESSAGING and MESSAGING_2.
+  // Queued rather than shared, so every caller's run starts after its call and sees accounts
+  // connected before it.
+  ensureAmbientCapsules(): Promise<void> {
+    let run = this.#ambientReconcile.then(() => this.#reconcileAmbientCapsules());
+    this.#ambientReconcile = run.catch(() => {});
+    return run;
+  }
+  #ambientReconcile: Promise<void> = Promise.resolve();
+
+  async #reconcileAmbientCapsules(): Promise<void> {
     if (!this.ownerId) return;
     let ownerDo = this.#ownerUserDo();
     // listProvidedAccounts ensures the owner's auto-provisioned singleton accounts exist first, so this

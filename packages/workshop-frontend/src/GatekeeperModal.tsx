@@ -816,8 +816,10 @@ export default function GatekeeperModal({
         toasts.add({ title: `${selectedConnection.vendor} isn't available in this workspace.`, variant: 'error' })
       }
     } catch (err) {
+      // Surfaces e.g. the host's retryable "restarting to apply a connection change" when a
+      // collaborator's session is severed by the capsule this call provisioned.
       console.error('Failed to add always-on connection to chat:', err)
-      toasts.add({ title: 'Failed to add connection', variant: 'error' })
+      toasts.add({ title: err instanceof Error && err.message ? err.message : 'Failed to add connection', variant: 'error' })
     } finally {
       if (gatekeeper && !transferred) gatekeeper[Symbol.dispose]()
       setCreating(false)
@@ -910,7 +912,7 @@ export default function GatekeeperModal({
                 {selectedAlwaysOn && (
                   <p role="status" className="m-0 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
                     {addsAmbientToChat
-                      ? `${selectedConnection.vendor} is added automatically to new chats in your workspaces. This chat started before it was, so add it here to let the agent use it.`
+                      ? `${selectedConnection.vendor} is always on in new chats, but this chat may not have it yet. Add it to this chat?`
                       : `${selectedConnection.vendor} is added automatically to new chats in your workspaces, so there's nothing to add here.`}
                   </p>
                 )}

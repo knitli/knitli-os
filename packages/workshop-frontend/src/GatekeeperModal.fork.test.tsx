@@ -333,7 +333,7 @@ describe('GatekeeperModal ambient resource connections', () => {
     )
 
     expect(rendered.container.querySelector('[role="status"]')?.textContent)
-      .toBe('Knitli Memory is added automatically to new chats in your workspaces. This chat started before it was, so add it here to let the agent use it.')
+      .toBe('Knitli Memory is always on in new chats, but this chat may not have it yet. Add it to this chat?')
     const add = [...rendered.container.querySelectorAll('button')].find(button => button.textContent === 'Add to this chat')
     expect(add?.disabled).toBe(false)
     await act(async () => add!.click())
@@ -374,6 +374,25 @@ describe('GatekeeperModal ambient resource connections', () => {
 
     expect(onCreated).not.toHaveBeenCalled()
     expect(toastAdd).toHaveBeenCalledWith({ title: 'Knitli Memory isn\'t available in this workspace.', variant: 'error' })
+  })
+
+  it('shows the host\'s retry message when adding the ambient gatekeeper is refused', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
+    const restarting = 'The workspace is restarting to apply a connection change. Please retry.'
+    const getAmbientGatekeeper = vi.fn<(vendorId: string) => Promise<never>>().mockRejectedValue(new Error(restarting))
+    const onCreated = vi.fn<ComponentProps<typeof GatekeeperModal>['onCreated']>().mockResolvedValue(undefined)
+    const rendered = await render(
+      testApi.api,
+      vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({ getAmbientGatekeeper } as unknown as RpcStub<Overseer>),
+      { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL, onCreated },
+    )
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const add = () => [...rendered.container.querySelectorAll('button')].find(button => button.textContent === 'Add to this chat')
+    await act(async () => add()!.click())
+
+    expect(toastAdd).toHaveBeenCalledWith({ title: restarting, variant: 'error' })
+    expect(onCreated).not.toHaveBeenCalled()
+    expect(add()?.disabled).toBe(false)
   })
 
   it('forgets a singleton account that is gone when the picker reopens', async () => {

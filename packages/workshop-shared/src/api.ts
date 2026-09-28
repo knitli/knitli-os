@@ -2285,8 +2285,12 @@ export interface Overseer extends RpcTarget {
   /**
    * Fork: get this workspace's ambient (always-on) gatekeeper for `vendorId`, reconciling the
    * owner's singleton accounts first, or null if the owner has none for that vendor. A chat's
-   * ambient set is frozen at first use, so this is how a chat started before the owner gained the
-   * singleton accepts an agent's connection request for it.
+   * ambient set is frozen at first use; accepting an agent's connection request with this
+   * gatekeeper adds it to a chat that started without it.
+   *
+   * Throws the retryable "restarting to apply a connection change" error when the reconcile
+   * provisions the capsule while a build collaborator is connected; the retry after the restart
+   * finds it.
    */
   getAmbientGatekeeper(vendorId: string): Promise<GatekeeperClient<any> | null>;
 

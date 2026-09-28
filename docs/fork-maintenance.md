@@ -693,12 +693,16 @@ ids are facet-local, not Activity ids.
 - **Where:** `Overseer.getAmbientGatekeeper()` in `packages/workshop-shared/src/api.ts`, its
   implementation on `OverseerClientInterface` (and default-deny on `UseOverseerInterface`) in
   `packages/workshop-backend/src/overseer.ts`, and `addsAmbientToChat` in
-  `packages/workshop-frontend/src/GatekeeperModal.tsx`
+  `packages/workshop-frontend/src/GatekeeperModal.tsx`; `OverseerImpl.ensureAmbientCapsules()`
+  serializes its runs
+- **Introduced:** knitli-os #41
 - **What:** when the connection-request accept modal lands on an always-on (singleton) vendor that
   the agent requested, it offers "Add to this chat": the workspace's existing ambient gatekeeper
   for that same vendor (reconciled first via `ensureAmbientCapsules()`) is passed to the unchanged
   `onCreated` -> `acceptConnectionRequest` path, so the chat gets it under the requested binding
   name. Upstream says "nothing to add here" and the request can only be denied.
+  `ensureAmbientCapsules()` queues each run behind the previous one (upstream runs them
+  concurrently), so overlapping runs can't provision two capsules for one vendor.
 - **Why:** `prepareChatBindings` freezes a chat's ambient set at first use, so a chat started
   before the owner connected e.g. Knitli Messaging never gets `env.MESSAGING`; the agent's
   `requestConnection` for it was a dead end.
@@ -706,7 +710,10 @@ ids are facet-local, not Activity ids.
   vendor matches the request (upstream's accept flow lets the user pick any connection type,
   AI models and agent spawners included, so a strict check would break it). The vendor match is
   enforced by the modal, which only offers the requested vendor's ambient gatekeeper. The ambient
-  gatekeeper is the owner's, as in every new chat.
+  gatekeeper is the owner's, as in every new chat. When the reconcile provisions the capsule while
+  a build collaborator is connected, `addGatekeeper` restarts the workspace and the call throws the
+  host's retryable message, which the modal shows; the request card stays pending, so the retry
+  after reconnecting succeeds.
 - **Test:** `packages/workshop-backend/__tests__/knitli-ambient-connection-request.test.ts` and the
   "always-on vendor" cases in `packages/workshop-frontend/src/GatekeeperModal.fork.test.tsx`.
 - **At sync:** Tier 2. If upstream reshapes the modal's always-on branch or the accept flow, keep

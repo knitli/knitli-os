@@ -1243,8 +1243,8 @@ export interface WorkspaceAudience {
   owner: string;
   /**
    * Profile ids of collaborators whose effective role is currently "build" and whose persisted
-   * observer admission covers every current build-scope gatekeeper. Sorted, deduped, never the
-   * owner.
+   * observer admission was made at "build" and covers every current build-scope gatekeeper.
+   * Sorted, deduped, never the owner; empty while sharing is prohibited.
    */
   collaborators: string[];
   containsRestrictedData: boolean;

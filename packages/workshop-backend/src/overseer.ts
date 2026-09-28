@@ -1,6 +1,7 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { isReasoningLevel } from "./fork/reasoning-levels";
-import { ActionApplyContextImpl, attestWorkspaceAudience } from "./fork/workspace-audience";
+import { ActionApplyContextImpl, attestWorkspaceAudience, forgetBuildAdmission } from "./fork/workspace-audience";
+import type { WorkspaceAudience } from "@gadgets/workshop-shared/gatekeeper";
 import {
   PROMPT_FILENAME, hasRootPromptFile, isPromptFileAnywhere,
 } from "./fork/prompt-files";
@@ -10,7 +11,7 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints, WorkspaceAudience } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -565,6 +566,10 @@ type ObserverRecord = {
   // ConnectedAccountRecord in THIS user's own User DO. An entry records only that choice -- it
   // asserts nothing about whether the gatekeeper still admits them, which every open re-checks.
   accountChoices: { [gatekeeperId: number]: number };
+
+  // Fork: the role of the admission that last wrote this record; cleared when any of its
+  // registrations is torn down. See fork/workspace-audience.ts.
+  admittedAs?: CollaboratorRole;
 };
 
 function connectionTypeFromCreationSpec(
@@ -5457,7 +5462,7 @@ class OverseerImpl implements AgentHooks {
     // binding that makes buildPack() serve exactly this action's pending-push closure.
     await gatekeeper.applyAction(record.action,
         new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id),
-        new ActionApplyContextImpl(this));
+        new ActionApplyContextImpl(this, record.gatekeeperId));
     record.state = "approved";
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
@@ -5995,6 +6000,7 @@ class OverseerImpl implements AgentHooks {
       return this.#removeObserverFromGatekeepers(observer.observerId, allGatekeeperIds);
     });
     for (let observerId of outOfScope) {
+      forgetBuildAdmission(this.storage.observers, observerId);
       removals.push(this.#removeObserverFromGatekeepers(observerId, [gatekeeperId]));
     }
     await Promise.all(removals);
@@ -9788,7 +9794,7 @@ class OverseerImpl implements AgentHooks {
     let accountChoices: {[gatekeeperId: number]: number} = {...record?.accountChoices};
     let observerId = record?.observerId ?? crypto.randomUUID();
     if (inScope.length === 0) {
-      this.storage.observers.put({profileId, observerId, accountChoices});
+      this.storage.observers.put({profileId, observerId, accountChoices, admittedAs: role});
       return;
     }
 
@@ -9974,7 +9980,7 @@ class OverseerImpl implements AgentHooks {
 
     // 6. Persist the observer record only after all addObserver calls succeed. Creating/updating
     //    the record is the canonical moment the user becomes a configured observer.
-    this.storage.observers.put({profileId, observerId, accountChoices});
+    this.storage.observers.put({profileId, observerId, accountChoices, admittedAs: role});
   }
 
   // Render the observer verification failures as one line per binding, naming the connection and the
@@ -13604,7 +13610,7 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   // Fork: see fork/workspace-audience.ts.
   attestAudience(): Promise<WorkspaceAudience> {
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
-    return attestWorkspaceAudience(this.impl);
+    return attestWorkspaceAudience(this.impl, this.gatekeeperId);
   }
 }
 

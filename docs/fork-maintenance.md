@@ -274,19 +274,39 @@ Intentional, reviewed differences from upstream. Keep this current.
 
 ### `ApprovalQueue.attestAudience()` and `applyAction`'s context
 
-- **Where:** optional `ApprovalQueue.attestAudience()`, `ActionApplyContext`, `WorkspaceAudience` and
-  an optional third `applyAction()` parameter in `packages/workshop-shared/src/gatekeeper.ts`;
-  policy in `packages/workshop-backend/src/fork/workspace-audience.ts`; two seams in
-  `packages/workshop-backend/src/overseer.ts` -- a four-line method on `ApprovalQueueImpl` and one
-  extra argument at `applyPendingAction()`, the single chokepoint for manual and auto approval.
+- **Where:** optional `ApprovalQueue.attestAudience()`, `ActionApplyContext`, `WorkspaceAudience`
+  and an optional third `applyAction()` parameter in `packages/workshop-shared/src/gatekeeper.ts`;
+  policy in `packages/workshop-backend/src/fork/workspace-audience.ts`; seams in
+  `packages/workshop-backend/src/overseer.ts` -- a four-line method on `ApprovalQueueImpl`, one
+  extra argument at `applyPendingAction()` (the single chokepoint for manual and auto approval),
+  an optional `ObserverRecord.admittedAs` field written by `ensureObserver`'s two persist lines,
+  and one `forgetBuildAdmission()` call in `#enforceExcludeObservers`' out-of-scope branch.
 - **What:** A gatekeeper holding an approval queue can ask who could already see everything the
   workspace has observed: its id, the owner's profile id, the build collaborators the overseer has
   admitted, and the `containsRestrictedData` / `ownerInvitesOnly` / `sharingProhibited` latches. A
-  collaborator counts only while their effective role in the sharing graph is `build` and their
-  persisted `ObserverRecord` holds a verified account choice for every current build-scope
-  connection, so a use admission upgraded to build, or an admission predating a new connection, is
-  left out until the next open re-verifies it. The same answer is available while an action is
-  applied, through `applyAction()`'s `context`, since no queue exists then.
+  collaborator counts only while their effective role in the sharing graph is `build`, their
+  persisted `ObserverRecord` was last written by an admission at `build` (`admittedAs`), and it
+  holds an account choice for every current build-scope connection. So a use admission upgraded to
+  build, an admission predating a new connection, or a record written before `admittedAs` existed
+  is left out until the next build open re-verifies it. The same answer is available while an
+  action is applied, through `applyAction()`'s `context`, since no queue exists then. Attestation
+  is refused while a revocation is in flight, and names nobody but the owner while
+  `sharingProhibited`.
+- **Vendor allowlist:** only vendors in `AUDIENCE_VENDORS` (today `messaging`) may ask; any other
+  connection's queue or apply context is refused. The answer names collaborators by profile id,
+  which undoes the opaque `observerId` design for every other gatekeeper
+  (`ObserverRecord.observerId`, `__tests__/fork/observer-privacy.test.ts`). Every gatekeeper still
+  receives an apply context -- refusing inside it keeps the upstream call site a single argument
+  rather than a conditional.
+- **Out-of-scope de-registration clears `admittedAs`:** when `#enforceExcludeObservers`
+  de-registers an out-of-scope observer from one connection, it also clears their record's
+  `admittedAs`, in the same synchronous step. Otherwise a collaborator verified at build, downgraded
+  to use, de-registered, then upgraded back would still read as build-admitted without a live
+  registration. The account choices are deliberately kept: dropping them instead (the first design)
+  makes the next open re-prompt for the account, which fails upstream's
+  `observer-exclude-scope.test.ts` "a concurrent registration waits for the in-flight
+  de-registration it raced" (a non-interactive re-open after a rebind is denied). With the marker,
+  upstream open behaviour is unchanged; only the attestation reads it.
 - **Why:** Gatekeepers that move data between workspaces (Knitli Messaging) need an information-flow
   check. Reconstructing the audience inside a facet from `addObserver`/`removeObserver` fails open:
   `#removeObserverFromGatekeepers` is best-effort and use-role observers register too. Only the
@@ -298,6 +318,15 @@ Intentional, reviewed differences from upstream. Keep this current.
   implementations and fakes still typecheck and gatekeepers that ignore `context` are unaffected;
   a gatekeeper must treat an absent method or context as "no attestation", never as an empty
   audience. Pinned by `packages/workshop-backend/__tests__/knitli-workspace-audience.test.ts`.
+- **Known residuals:**
+  - *Removed connections.* Build scope is computed from current connections, so data observed
+    through a connection that has since been removed is no longer checked by anyone admitted
+    afterwards. This is upstream's admission model, not something the attestation adds.
+  - *`TODO(observer-races)`* in `#enforceExcludeObservers`: a first-time admission registers its
+    observerId with gatekeepers before the record persists, so an observation naming that id in the
+    window is admitted. The attestation can then include a collaborator whom that observation
+    should have excluded. The fix upstream proposes there (an in-memory map of pending ids) would
+    close both.
 
 ### `open()` routes sharing and revocation guards through the impl
 

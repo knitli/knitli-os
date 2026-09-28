@@ -62,31 +62,82 @@ describe("getAmbientGatekeeper", () => {
   });
 });
 
+const MESSAGING_ACCOUNT = { vendorId: "messaging", accountId: 8,
+  description: { displayName: "Knitli Messaging", singleton: { tsType: "MessagingSession" } } };
+
+// Runs `fn` against a real OverseerImpl whose owner holds the accounts `listProvidedAccounts`
+// returns, with every gatekeeper facet describing itself after `describeDelay` ms.
+async function withImpl<T>(
+    listProvidedAccounts: () => Promise<unknown[]>, fn: (impl: any) => Promise<T>,
+    describeDelay = 0): Promise<T> {
+  let stub = env.TEST_OVERSEER.getByName(`knitli-ambient-${crypto.randomUUID()}`);
+  return await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+    let impl = (instance as unknown as { impl: any }).impl;
+    impl.ownerId = "owner";
+    let owner = {
+      id: { toString: () => "owner" },
+      listProvidedAccounts,
+      getSingletonGatekeeperClass: async () => ({}),
+    };
+    impl.users = { idFromString: (id: string) => id, get: () => owner };
+    impl.getGatekeeperFacet = () => ({ describe: async () => {
+      await new Promise(resolve => setTimeout(resolve, describeDelay));
+      return { title: "Knitli Messaging" };
+    } });
+    return await fn(impl);
+  });
+}
+
+function ambientVendors(impl: any): string[] {
+  return [...impl.storage.gatekeepers.list()]
+      .filter((gk: any) => gk.creationSpec?.type === "ambient")
+      .map((gk: any) => gk.creationSpec.vendorId);
+}
+
 describe("ensureAmbientCapsules", () => {
   it("provisions one capsule per vendor when runs overlap", async () => {
-    let stub = env.TEST_OVERSEER.getByName(`knitli-ambient-reconcile-${crypto.randomUUID()}`);
-    let ambientVendors = await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
-      let impl = (instance as unknown as { impl: any }).impl;
-      impl.ownerId = "owner";
-      let owner = {
-        id: { toString: () => "owner" },
-        listProvidedAccounts: async () => [{ vendorId: "messaging", accountId: 8,
-          description: { displayName: "Knitli Messaging", singleton: { tsType: "MessagingSession" } } }],
-        getSingletonGatekeeperClass: async () => ({}),
-      };
-      impl.users = { idFromString: (id: string) => id, get: () => owner };
-      // addGatekeeper publishes the record only after describe(), so a slow describe holds the first
-      // run's capsule unpublished while the second reads the gatekeeper list.
-      impl.getGatekeeperFacet = () => ({ describe: async () => {
-        await new Promise(resolve => setTimeout(resolve, 10));
-        return { title: "Knitli Messaging" };
-      } });
-
+    // addGatekeeper publishes the record only after describe(), so a slow describe holds the first
+    // run's capsule unpublished while the second reads the gatekeeper list.
+    let vendors = await withImpl(async () => [MESSAGING_ACCOUNT], async impl => {
       await Promise.all([impl.ensureAmbientCapsules(), impl.ensureAmbientCapsules()]);
-      return [...impl.storage.gatekeepers.list()]
-          .filter((gk: any) => gk.creationSpec?.type === "ambient")
-          .map((gk: any) => gk.creationSpec.vendorId);
+      return ambientVendors(impl);
+    }, 10);
+    expect(vendors).toEqual(["messaging"]);
+  });
+
+  it("still runs later reconciles after one fails", async () => {
+    let calls = 0;
+    let listProvidedAccounts = async () => {
+      if (calls++ === 0) throw new Error("owner DO unavailable");
+      return [MESSAGING_ACCOUNT];
+    };
+    let result = await withImpl(listProvidedAccounts, async impl => {
+      let first = impl.ensureAmbientCapsules();
+      let second = impl.ensureAmbientCapsules();
+      let firstError = await first.then(() => null, (err: Error) => err.message);
+      await second;
+      return { firstError, vendors: ambientVendors(impl) };
     });
-    expect(ambientVendors).toEqual(["messaging"]);
+    expect(result).toEqual({ firstError: "owner DO unavailable", vendors: ["messaging"] });
+  });
+});
+
+describe("ownerHasAmbientVendor", () => {
+  it("reports the owner's singleton vendors without provisioning a capsule", async () => {
+    let result = await withImpl(async () => [
+      MESSAGING_ACCOUNT,
+      // A non-singleton provided account (e.g. one that only provides a UI) is no ambient vendor.
+      { vendorId: "memory", accountId: 9, description: { displayName: "Knitli Memory" } },
+    ], async impl => ({
+      messaging: await impl.ownerHasAmbientVendor("messaging"),
+      memory: await impl.ownerHasAmbientVendor("memory"),
+      vendors: ambientVendors(impl),
+    }));
+    expect(result).toEqual({ messaging: true, memory: false, vendors: [] });
+  });
+
+  it("is denied to a use collaborator", async () => {
+    let client = await openFakeOverseer(seed(), { role: "use" });
+    await expect(client.hasAmbientGatekeeper("memory")).rejects.toThrow("Unauthorized: this collaborator only has permission to use the gadget's UI.");
   });
 });

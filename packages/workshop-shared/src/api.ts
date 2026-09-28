@@ -2288,11 +2288,21 @@ export interface Overseer extends RpcTarget {
    * ambient set is frozen at first use; accepting an agent's connection request with this
    * gatekeeper adds it to a chat that started without it.
    *
-   * Throws the retryable "restarting to apply a connection change" error when the reconcile
-   * provisions the capsule while a build collaborator is connected; the retry after the restart
-   * finds it.
+   * Throws the retryable "restarting to apply a connection change" error, to any caller (owner
+   * included), when the reconcile provisions the capsule while a build collaborator is connected:
+   * the new connection widens their verification scope, so the workspace restarts and the capsule
+   * is unusable until it has. The retry after the restart finds it.
    */
   getAmbientGatekeeper(vendorId: string): Promise<GatekeeperClient<any> | null>;
+
+  /**
+   * Fork: whether this workspace's owner holds an always-on (singleton) account for `vendorId`, so
+   * getAmbientGatekeeper() will find its ambient gatekeeper. Read-only: provisions no capsule. This
+   * is the owner's availability, not the caller's: a collaborator's own singleton account never
+   * provides the workspace's capsule (the host asks for it separately, to verify them as an
+   * observer, when they open the workspace).
+   */
+  hasAmbientGatekeeper(vendorId: string): Promise<boolean>;
 
   /**
    * Try to create a new gatekeeper for this URL.

@@ -280,11 +280,27 @@ export default function GatekeeperModal({
     () => allConnections.find(connection => connection.id === selectedConnectionId) ?? null,
     [allConnections, selectedConnectionId],
   )
-  const selectedAlwaysOn = selectedConnection !== null && isAlwaysOn(selectedConnection, alwaysOnVendorIds)
-  // Fork: completing an agent's connection request (only that flow passes initialVendorId) for an
-  // always-on vendor. The chat's ambient set was frozen before it had this vendor, so the request
-  // is accepted with the workspace's existing ambient gatekeeper -- of the requested vendor only.
-  const addsAmbientToChat = selectedAlwaysOn && selectedConnection.vendorId === initialVendorId
+  // Fork: completing an agent's connection request (only that flow passes initialVendorId) for a
+  // vendor the workspace OWNER has always on. The chat's ambient set was frozen before it had this
+  // vendor, so the request is accepted with the workspace's ambient gatekeeper -- of the requested
+  // vendor only. Availability is the owner's, not the viewer's (alwaysOnVendorIds): the capsule is
+  // provisioned from the owner's account, and a collaborator's own account is asked for separately
+  // by the host when it verifies them.
+  const [ownerHasAmbient, setOwnerHasAmbient] = useState<boolean | null>(null)
+  useEffect(() => {
+    setOwnerHasAmbient(null)
+    if (!open || !initialVendorId) return
+    let cancelled = false
+    // Only the request flow reaches here, whose getOverseer (ChatInterface's) provisions nothing.
+    Promise.resolve().then(() => getOverseer())
+      .then(overseer => overseer.hasAmbientGatekeeper(initialVendorId))
+      .then(has => { if (!cancelled) setOwnerHasAmbient(has) },
+            () => { if (!cancelled) setOwnerHasAmbient(false) })
+    return () => { cancelled = true }
+  }, [open, initialVendorId, getOverseer])
+  const requestedVendorSelected = initialVendorId !== undefined && selectedConnection?.vendorId === initialVendorId
+  const addsAmbientToChat = requestedVendorSelected && ownerHasAmbient === true
+  const selectedAlwaysOn = (selectedConnection !== null && isAlwaysOn(selectedConnection, alwaysOnVendorIds)) || addsAmbientToChat
 
   // Pre-seed the selection for the agent requestConnection accept flow. Runs once per open after
   // vendors load and nothing is selected yet.
@@ -816,8 +832,10 @@ export default function GatekeeperModal({
         toasts.add({ title: `${selectedConnection.vendor} isn't available in this workspace.`, variant: 'error' })
       }
     } catch (err) {
-      // Surfaces e.g. the host's retryable "restarting to apply a connection change" when a
-      // collaborator's session is severed by the capsule this call provisioned.
+      // Surfaces e.g. the host's retryable "restarting to apply a connection change": when this
+      // call provisions the capsule while any build collaborator is connected, the workspace
+      // restarts to re-verify them and the capsule is refused (to every caller, owner included)
+      // until it has.
       console.error('Failed to add always-on connection to chat:', err)
       toasts.add({ title: err instanceof Error && err.message ? err.message : 'Failed to add connection', variant: 'error' })
     } finally {
@@ -913,6 +931,8 @@ export default function GatekeeperModal({
                   <p role="status" className="m-0 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
                     {addsAmbientToChat
                       ? `${selectedConnection.vendor} is always on in new chats, but this chat may not have it yet. Add it to this chat?`
+                      : requestedVendorSelected && ownerHasAmbient === false
+                      ? `This workspace's owner doesn't have ${selectedConnection.vendor}, so it can't be added to this chat.`
                       : `${selectedConnection.vendor} is added automatically to new chats in your workspaces, so there's nothing to add here.`}
                   </p>
                 )}

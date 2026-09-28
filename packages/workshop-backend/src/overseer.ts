@@ -7766,12 +7766,27 @@ class OverseerImpl implements AgentHooks {
   // provisioning two capsules for one vendor -- and new chats would get MESSAGING and MESSAGING_2.
   // Queued rather than shared, so every caller's run starts after its call and sees accounts
   // connected before it.
+  //
+  // ponytail: the queue link gives up on a run after 30s, so one hung run (e.g. a stalled owner DO)
+  // can't wedge every later reconcile. Past that bound a slow run may overlap the next and add a
+  // duplicate again; acceptable only because a run that slow is genuinely hung.
   ensureAmbientCapsules(): Promise<void> {
     let run = this.#ambientReconcile.then(() => this.#reconcileAmbientCapsules());
-    this.#ambientReconcile = run.catch(() => {});
+    this.#ambientReconcile = Promise.race([run, scheduler.wait(30_000)]).catch(() => {});
     return run;
   }
   #ambientReconcile: Promise<void> = Promise.resolve();
+
+  // Fork: whether the owner holds a singleton account for `vendorId` -- the account the reconcile
+  // provisions this workspace's ambient capsule from. The same account read open() makes; adds no
+  // capsule. See Overseer.hasAmbientGatekeeper.
+  async ownerHasAmbientVendor(vendorId: string): Promise<boolean> {
+    if (!this.ownerId) return false;
+    let accounts = await retryOnDoReset(
+        () => this.#ownerUserDo().listProvidedAccounts(), this.logger);
+    return accounts.some(account =>
+        account.vendorId === vendorId && account.description.singleton?.tsType);
+  }
 
   async #reconcileAmbientCapsules(): Promise<void> {
     if (!this.ownerId) return;
@@ -11499,6 +11514,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         undefined, this.#mintedCapabilityKind());
   }
 
+  async hasAmbientGatekeeper(vendorId: string): Promise<boolean> {
+    return this.impl.ownerHasAmbientVendor(vendorId);
+  }
+
   // Fork: reconcile first, after this open's own reconcile, so a singleton the owner connected
   // since this session opened is found rather than reported missing.
   async getAmbientGatekeeper(vendorId: string): Promise<GatekeeperClient<any> | null> {
@@ -12944,6 +12963,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async listPreApprovableActions(): Promise<PreApprovableAction[]> { this.#deny(); }
   async getGatekeeperById(_id: number): Promise<GatekeeperClient<any>> { this.#deny(); }
   async getAmbientGatekeeper(_vendorId: string): Promise<GatekeeperClient<any> | null> { this.#deny(); }
+  async hasAmbientGatekeeper(_vendorId: string): Promise<boolean> { this.#deny(); }
   async newGatekeeper(_accountId: number, _resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> { this.#deny(); }
   async newAiModelGatekeeper(_modelId: string): Promise<GatekeeperClient<any>> { this.#deny(); }

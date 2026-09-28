@@ -690,19 +690,25 @@ ids are facet-local, not Activity ids.
 
 ### Always-on vendors can complete a connection request
 
-- **Where:** `Overseer.getAmbientGatekeeper()` in `packages/workshop-shared/src/api.ts`, its
-  implementation on `OverseerClientInterface` (and default-deny on `UseOverseerInterface`) in
-  `packages/workshop-backend/src/overseer.ts`, and `addsAmbientToChat` in
-  `packages/workshop-frontend/src/GatekeeperModal.tsx`; `OverseerImpl.ensureAmbientCapsules()`
-  serializes its runs
+- **Where:** `Overseer.getAmbientGatekeeper()` and `Overseer.hasAmbientGatekeeper()` in
+  `packages/workshop-shared/src/api.ts`; their implementations on `OverseerClientInterface`
+  (default-deny on `UseOverseerInterface`), `OverseerImpl.ownerHasAmbientVendor()`, and a queue in
+  front of `OverseerImpl.ensureAmbientCapsules()` in `packages/workshop-backend/src/overseer.ts`;
+  `ownerHasAmbient`/`addsAmbientToChat` in `packages/workshop-frontend/src/GatekeeperModal.tsx`
 - **Introduced:** knitli-os #41
-- **What:** when the connection-request accept modal lands on an always-on (singleton) vendor that
-  the agent requested, it offers "Add to this chat": the workspace's existing ambient gatekeeper
-  for that same vendor (reconciled first via `ensureAmbientCapsules()`) is passed to the unchanged
-  `onCreated` -> `acceptConnectionRequest` path, so the chat gets it under the requested binding
-  name. Upstream says "nothing to add here" and the request can only be denied.
+- **What:** when the connection-request accept modal lands on the requested vendor and the
+  workspace **owner** holds a singleton account for it (`hasAmbientGatekeeper`, read-only), it
+  offers "Add to this chat": the workspace's ambient gatekeeper for that vendor (reconciled first
+  via `ensureAmbientCapsules()`) is passed to the unchanged `onCreated` -> `acceptConnectionRequest`
+  path, so the chat gets it under the requested binding name. Upstream says "nothing to add here"
+  and the request can only be denied. The decision is the owner's availability, not the viewer's
+  accounts: the capsule comes from the owner's account, and a build collaborator's own account of
+  the vendor is what the host separately requires at `open()` to verify them as an observer of the
+  capsule (the ambient step of `ensureObserver`), so the modal need not ask for it. A viewer
+  whose own singleton the owner lacks is told the owner doesn't have it.
   `ensureAmbientCapsules()` queues each run behind the previous one (upstream runs them
-  concurrently), so overlapping runs can't provision two capsules for one vendor.
+  concurrently), so overlapping runs can't provision two capsules for one vendor; the queue link
+  gives up on a run after 30 s, so one hung run can't wedge later reconciles.
 - **Why:** `prepareChatBindings` freezes a chat's ambient set at first use, so a chat started
   before the owner connected e.g. Knitli Messaging never gets `env.MESSAGING`; the agent's
   `requestConnection` for it was a dead end.
@@ -711,11 +717,13 @@ ids are facet-local, not Activity ids.
   AI models and agent spawners included, so a strict check would break it). The vendor match is
   enforced by the modal, which only offers the requested vendor's ambient gatekeeper. The ambient
   gatekeeper is the owner's, as in every new chat. When the reconcile provisions the capsule while
-  a build collaborator is connected, `addGatekeeper` restarts the workspace and the call throws the
-  host's retryable message, which the modal shows; the request card stays pending, so the retry
-  after reconnecting succeeds.
+  any build collaborator is connected, `addGatekeeper` schedules a restart (`ctx.abort()` resets
+  the whole DO) and marks the capsule pending, so `getGatekeeperById` -> `assertGatekeeperUsable`
+  throws the host's retryable message to every caller, owner included; the modal shows it. The
+  request card stays pending, and the retry after reconnecting finds the capsule already there.
+  A reconcile run hung past the 30 s queue bound may overlap the next and add a duplicate again.
 - **Test:** `packages/workshop-backend/__tests__/knitli-ambient-connection-request.test.ts` and the
-  "always-on vendor" cases in `packages/workshop-frontend/src/GatekeeperModal.fork.test.tsx`.
+  "always-on vendor"/collaborator cases in `packages/workshop-frontend/src/GatekeeperModal.fork.test.tsx`.
 - **At sync:** Tier 2. If upstream reshapes the modal's always-on branch or the accept flow, keep
   the request case offering the ambient gatekeeper rather than a dead end.
 

@@ -2283,6 +2283,14 @@ export interface Overseer extends RpcTarget {
   getGatekeeperById(id: WorkpieceId): Promise<GatekeeperClient<any>>;
 
   /**
+   * Fork: get this workspace's ambient (always-on) gatekeeper for `vendorId`, reconciling the
+   * owner's singleton accounts first, or null if the owner has none for that vendor. A chat's
+   * ambient set is frozen at first use, so this is how a chat started before the owner gained the
+   * singleton accepts an agent's connection request for it.
+   */
+  getAmbientGatekeeper(vendorId: string): Promise<GatekeeperClient<any> | null>;
+
+  /**
    * Try to create a new gatekeeper for this URL.
    *
    * `accountId` is the user's connected account to use to access this resource. To determine an

@@ -11486,6 +11486,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         undefined, this.#mintedCapabilityKind());
   }
 
+  // Fork: reconcile first, after this open's own reconcile, so a singleton the owner connected
+  // since this session opened is found rather than reported missing.
+  async getAmbientGatekeeper(vendorId: string): Promise<GatekeeperClient<any> | null> {
+    await this.slashCommandsReady;
+    await this.impl.ensureAmbientCapsules();
+    let id = [...this.impl.storage.gatekeepers.list()].find(gk =>
+        gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === vendorId)?.id;
+    return id === undefined ? null : this.getGatekeeperById(id);
+  }
+
   private async recordConnectionCreated(
       result: GatekeeperClient<any>, connectionType: ProductAnalyticsConnectionType,
       vendorId?: string): Promise<void> {
@@ -12920,6 +12930,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async listPreApprovableActions(): Promise<PreApprovableAction[]> { this.#deny(); }
   async getGatekeeperById(_id: number): Promise<GatekeeperClient<any>> { this.#deny(); }
+  async getAmbientGatekeeper(_vendorId: string): Promise<GatekeeperClient<any> | null> { this.#deny(); }
   async newGatekeeper(_accountId: number, _resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> { this.#deny(); }
   async newAiModelGatekeeper(_modelId: string): Promise<GatekeeperClient<any>> { this.#deny(); }

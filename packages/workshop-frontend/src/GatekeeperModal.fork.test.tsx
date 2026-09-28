@@ -318,6 +318,64 @@ describe('GatekeeperModal ambient resource connections', () => {
     expect(add?.disabled).toBe(true)
   })
 
+  // Fork: an agent in a chat whose ambient set was frozen before the owner gained the singleton
+  // requests it; the modal completes that request with the workspace's ambient gatekeeper.
+  it('adds an always-on vendor to the requesting chat with its ambient gatekeeper', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
+    const capability = { [Symbol.dispose]() {} }
+    const getAmbientGatekeeper = vi.fn<(vendorId: string) => Promise<typeof capability | null>>()
+      .mockResolvedValue(capability)
+    const onCreated = vi.fn<ComponentProps<typeof GatekeeperModal>['onCreated']>().mockResolvedValue(undefined)
+    const rendered = await render(
+      testApi.api,
+      vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({ getAmbientGatekeeper } as unknown as RpcStub<Overseer>),
+      { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL, onCreated },
+    )
+
+    expect(rendered.container.querySelector('[role="status"]')?.textContent)
+      .toBe('Knitli Memory is added automatically to new chats in your workspaces. This chat started before it was, so add it here to let the agent use it.')
+    const add = [...rendered.container.querySelectorAll('button')].find(button => button.textContent === 'Add to this chat')
+    expect(add?.disabled).toBe(false)
+    await act(async () => add!.click())
+
+    expect(getAmbientGatekeeper).toHaveBeenCalledExactlyOnceWith('memory')
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith(capability)
+    expect(testApi.startResourceConfigurator).not.toHaveBeenCalled()
+  })
+
+  it('offers no ambient gatekeeper for a request made for a different vendor', async () => {
+    // The picker only reaches an always-on vendor by connecting its account from there, as below.
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory' })
+    const rendered = await render(testApi.api, undefined, { initialVendorId: 'google' })
+    await chooseResource(rendered.container, 'Knitli Memory')
+    await act(async () => {
+      testApi.subscriber()!.add(42, MEMORY_ACCOUNT, vendor(false, 'memory'), [RESOURCE], true, 'memory')
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(rendered.container.querySelector('[role="status"]')?.textContent)
+      .toBe('Knitli Memory is added automatically to new chats in your workspaces, so there\'s nothing to add here.')
+    expect([...rendered.container.querySelectorAll('button')]
+      .find(button => button.textContent === 'Add to this chat')).toBeUndefined()
+  })
+
+  it('reports an always-on vendor the workspace has no ambient gatekeeper for', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
+    const getAmbientGatekeeper = vi.fn<(vendorId: string) => Promise<null>>().mockResolvedValue(null)
+    const onCreated = vi.fn<ComponentProps<typeof GatekeeperModal>['onCreated']>().mockResolvedValue(undefined)
+    const rendered = await render(
+      testApi.api,
+      vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({ getAmbientGatekeeper } as unknown as RpcStub<Overseer>),
+      { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL, onCreated },
+    )
+    const add = [...rendered.container.querySelectorAll('button')].find(button => button.textContent === 'Add to this chat')
+    await act(async () => add!.click())
+
+    expect(onCreated).not.toHaveBeenCalled()
+    expect(toastAdd).toHaveBeenCalledWith({ title: 'Knitli Memory isn\'t available in this workspace.', variant: 'error' })
+  })
+
   it('forgets a singleton account that is gone when the picker reopens', async () => {
     const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
     const getOverseer = vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({} as RpcStub<Overseer>)

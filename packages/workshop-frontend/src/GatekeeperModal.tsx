@@ -281,6 +281,10 @@ export default function GatekeeperModal({
     [allConnections, selectedConnectionId],
   )
   const selectedAlwaysOn = selectedConnection !== null && isAlwaysOn(selectedConnection, alwaysOnVendorIds)
+  // Fork: completing an agent's connection request (only that flow passes initialVendorId) for an
+  // always-on vendor. The chat's ambient set was frozen before it had this vendor, so the request
+  // is accepted with the workspace's existing ambient gatekeeper -- of the requested vendor only.
+  const addsAmbientToChat = selectedAlwaysOn && selectedConnection.vendorId === initialVendorId
 
   // Pre-seed the selection for the agent requestConnection accept flow. Runs once per open after
   // vendors load and nothing is selected yet.
@@ -796,6 +800,30 @@ export default function GatekeeperModal({
     }
   }
 
+  const handleAddAmbientToChat = async () => {
+    if (creating || !selectedConnection?.vendorId) return
+    setCreating(true)
+    let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
+    let transferred = false
+    try {
+      const overseer = await getOverseer()
+      gatekeeper = await overseer.getAmbientGatekeeper(selectedConnection.vendorId)
+      if (gatekeeper) {
+        await onCreated(gatekeeper)
+        transferred = true
+        onClose()
+      } else {
+        toasts.add({ title: `${selectedConnection.vendor} isn't available in this workspace.`, variant: 'error' })
+      }
+    } catch (err) {
+      console.error('Failed to add always-on connection to chat:', err)
+      toasts.add({ title: 'Failed to add connection', variant: 'error' })
+    } finally {
+      if (gatekeeper && !transferred) gatekeeper[Symbol.dispose]()
+      setCreating(false)
+    }
+  }
+
   const canCreate = (() => {
     if (!selectedConnection) return false
     if (selectedConnection.id === 'ai-model') return Boolean(selectedModelId)
@@ -804,7 +832,7 @@ export default function GatekeeperModal({
     }
     // Checked here, not left to the configurator Effect's cleanup: a singleton account can arrive
     // while a frame is up, and Add must be off from that render on, not only after the Effect runs.
-    if (selectedAlwaysOn) return false
+    if (selectedAlwaysOn) return addsAmbientToChat
     if (selectedConnection.resourceUrlPattern) {
       const resourceUrlPattern = selectedConnection.resourceUrlPattern
       return Boolean(
@@ -822,7 +850,9 @@ export default function GatekeeperModal({
 
   const handleCreate = () => {
     if (!selectedConnection) return
-    if (selectedConnection.id === 'ai-model') {
+    if (addsAmbientToChat) {
+      handleAddAmbientToChat()
+    } else if (selectedConnection.id === 'ai-model') {
       handleCreateAiModel()
     } else if (selectedConnection.id === 'agent-spawner') {
       handleCreateAgentSpawner()
@@ -831,7 +861,9 @@ export default function GatekeeperModal({
     }
   }
 
-  const createLabel = selectedConnection?.resourceUrlPattern
+  const createLabel = addsAmbientToChat
+    ? 'Add to this chat'
+    : selectedConnection?.resourceUrlPattern
     ? 'Add connection'
     : 'Create connection'
 
@@ -877,7 +909,9 @@ export default function GatekeeperModal({
               <div className="space-y-4">
                 {selectedAlwaysOn && (
                   <p role="status" className="m-0 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-                    {`${selectedConnection.vendor} is added automatically to new chats in your workspaces, so there's nothing to add here.`}
+                    {addsAmbientToChat
+                      ? `${selectedConnection.vendor} is added automatically to new chats in your workspaces. This chat started before it was, so add it here to let the agent use it.`
+                      : `${selectedConnection.vendor} is added automatically to new chats in your workspaces, so there's nothing to add here.`}
                   </p>
                 )}
 

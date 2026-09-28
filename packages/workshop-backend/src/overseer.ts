@@ -1,5 +1,8 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { isReasoningLevel } from "./fork/reasoning-levels";
+import { ActionApplyContextImpl, attestWorkspaceAudience, beginAdmission, forgetBuildAdmission,
+  forgetContractedAdmissions } from "./fork/workspace-audience";
+import type { WorkspaceAudience } from "@gadgets/workshop-shared/gatekeeper";
 import {
   PROMPT_FILENAME, hasRootPromptFile, isPromptFileAnywhere,
 } from "./fork/prompt-files";
@@ -564,6 +567,10 @@ type ObserverRecord = {
   // ConnectedAccountRecord in THIS user's own User DO. An entry records only that choice -- it
   // asserts nothing about whether the gatekeeper still admits them, which every open re-checks.
   accountChoices: { [gatekeeperId: number]: number };
+
+  // Fork: the role of the admission that last wrote this record; cleared when any of its
+  // registrations is torn down. See fork/workspace-audience.ts.
+  admittedAs?: CollaboratorRole;
 };
 
 function connectionTypeFromCreationSpec(
@@ -5455,7 +5462,8 @@ class OverseerImpl implements AgentHooks {
     // happen long after the session that queued it, so the queue-time stub is gone) -- the
     // binding that makes buildPack() serve exactly this action's pending-push closure.
     await gatekeeper.applyAction(record.action,
-        new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id));
+        new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id),
+        new ActionApplyContextImpl(this, record.gatekeeperId));
     record.state = "approved";
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
@@ -5993,6 +6001,7 @@ class OverseerImpl implements AgentHooks {
       return this.#removeObserverFromGatekeepers(observer.observerId, allGatekeeperIds);
     });
     for (let observerId of outOfScope) {
+      forgetBuildAdmission(this.storage.observers, observerId);
       removals.push(this.#removeObserverFromGatekeepers(observerId, [gatekeeperId]));
     }
     await Promise.all(removals);
@@ -9677,6 +9686,7 @@ class OverseerImpl implements AgentHooks {
   // never a data leak: a registration is what admits an open, and every open re-runs addObserver,
   // so a stale one grants nothing on its own. See observers-implementation-plan.md §5 Step 6.
   async tearDownLostObservers(affected: AffectedCollaborator[]): Promise<void> {
+    forgetContractedAdmissions(this.storage.observers, affected);
     let gatekeeperIds = [...this.storage.gatekeepers.list()].map(gk => gk.id);
     for (let entry of affected) {
       if (entry.newRole !== null) continue;  // downgraded but still has access -> keep record
@@ -9778,6 +9788,7 @@ class OverseerImpl implements AgentHooks {
       clientUser: DurableObjectStub<UserDurableObject>,
       role: CollaboratorRole,
       configureCb?: RpcStub<ObserverConfigCallback>): Promise<void> {
+    let admittedAs = await beginAdmission(this, profileId, role);
     // 1. Select in-scope gatekeepers. If none require an account, there is nothing to verify and
     //    admission still persists an empty record so later scope expansion can detect this live
     //    collaborator before exposing the new connection.
@@ -9786,7 +9797,7 @@ class OverseerImpl implements AgentHooks {
     let accountChoices: {[gatekeeperId: number]: number} = {...record?.accountChoices};
     let observerId = record?.observerId ?? crypto.randomUUID();
     if (inScope.length === 0) {
-      this.storage.observers.put({profileId, observerId, accountChoices});
+      this.storage.observers.put({profileId, observerId, accountChoices, admittedAs: admittedAs()});
       return;
     }
 
@@ -9972,7 +9983,7 @@ class OverseerImpl implements AgentHooks {
 
     // 6. Persist the observer record only after all addObserver calls succeed. Creating/updating
     //    the record is the canonical moment the user becomes a configured observer.
-    this.storage.observers.put({profileId, observerId, accountChoices});
+    this.storage.observers.put({profileId, observerId, accountChoices, admittedAs: admittedAs()});
   }
 
   // Render the observer verification failures as one line per binding, naming the connection and the
@@ -13597,6 +13608,12 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
         description: HookDescription): Promise<void> {
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
     return this.impl.bindHook(this.gatekeeperId, controller, callback, description, this.caller);
+  }
+
+  // Fork: see fork/workspace-audience.ts.
+  attestAudience(): Promise<WorkspaceAudience> {
+    if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
+    return attestWorkspaceAudience(this.impl, this.gatekeeperId);
   }
 }
 

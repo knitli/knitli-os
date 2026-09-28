@@ -272,6 +272,75 @@ Intentional, reviewed differences from upstream. Keep this current.
   itself is adopted wholesale — it complements the owner-only tier (owner-added collaborators
   keep access) rather than replacing it.
 
+### `ApprovalQueue.attestAudience()` and `applyAction`'s context
+
+- **Where:** optional `ApprovalQueue.attestAudience()`, `ActionApplyContext`, `WorkspaceAudience`
+  and an optional third `applyAction()` parameter in `packages/workshop-shared/src/gatekeeper.ts`;
+  policy in `packages/workshop-backend/src/fork/workspace-audience.ts`; seams in
+  `packages/workshop-backend/src/overseer.ts` -- a four-line method on `ApprovalQueueImpl`, one
+  extra argument at `applyPendingAction()` (the single chokepoint for manual and auto approval),
+  an optional `ObserverRecord.admittedAs` field written by `ensureObserver`'s two persist lines
+  from a `beginAdmission()` call at the top of `#ensureObserverUnserialized`, one
+  `forgetBuildAdmission()` call in `#enforceExcludeObservers`' out-of-scope branch, and one
+  `forgetContractedAdmissions()` call at the top of `tearDownLostObservers()`.
+- **What:** A gatekeeper holding an approval queue can ask who could already see everything the
+  workspace has observed: its id, the owner's profile id, the build collaborators the overseer has
+  admitted, and the `containsRestrictedData` / `ownerInvitesOnly` / `sharingProhibited` latches. A
+  collaborator counts only while their effective role in the sharing graph is `build`, their
+  persisted `ObserverRecord` was last written by an admission at `build` (`admittedAs`), and it
+  holds an account choice for every current build-scope connection. So a use admission upgraded to
+  build, an admission predating a new connection, or a record written before `admittedAs` existed
+  is left out until the next build open re-verifies it. The same answer is available while an
+  action is applied, through `applyAction()`'s `context`, since no queue exists then. Attestation
+  is refused while a revocation is in flight, and names nobody but the owner while
+  `sharingProhibited`.
+- **Vendor allowlist:** only vendors in `AUDIENCE_VENDORS` (today `messaging`) may ask; any other
+  connection's queue or apply context is refused. The answer names collaborators by profile id,
+  which undoes the opaque `observerId` design for every other gatekeeper
+  (`ObserverRecord.observerId`, `__tests__/fork/observer-privacy.test.ts`). Every gatekeeper still
+  receives an apply context -- refusing inside it keeps the upstream call site a single argument
+  rather than a conditional.
+- **Out-of-scope de-registration clears `admittedAs`:** when `#enforceExcludeObservers`
+  de-registers an out-of-scope observer from one connection, it also clears their record's
+  `admittedAs`, in the same synchronous step. Otherwise a collaborator verified at build, downgraded
+  to use, de-registered, then upgraded back would still read as build-admitted without a live
+  registration. The account choices are deliberately kept: dropping them instead (the first design)
+  makes the next open re-prompt for the account, which fails upstream's
+  `observer-exclude-scope.test.ts` "a concurrent registration waits for the in-flight
+  de-registration it raced" (a non-interactive re-open after a rebind is denied). With the marker,
+  upstream open behaviour is unchanged; only the attestation reads it. An admission in flight when
+  that happens (it captured the role at its start and may park on prompts or verifier RPCs, and
+  the teardown does not wait for it) writes `admittedAs` only if no build admission of that profile
+  was forgotten meanwhile (an in-memory per-overseer generation, safe because a DO reset also
+  aborts the admission) and their effective role still equals the captured one.
+- **Role contractions clear `admittedAs`:** every sharing change that lowers someone's effective
+  role (`removeCollaborator`, `revokeShareLink`, the `ownerInvitesOnly` latch) calls
+  `tearDownLostObservers()`, which now first clears `admittedAs` for every affected profile,
+  downgraded or lost, synchronously. A downgraded collaborator keeps their record, so without this
+  a later re-upgrade would count them without a fresh build open. It must run before the first
+  await: the teardown awaits cross-DO removals one entry at a time behind the restart's closing
+  input gate, so later entries -- including deleting a lost collaborator's record -- may never run.
+- **Why:** Gatekeepers that move data between workspaces (Knitli Messaging) need an information-flow
+  check. Reconstructing the audience inside a facet from `addObserver`/`removeObserver` fails open:
+  `#removeObserverFromGatekeepers` is best-effort and use-role observers register too. Only the
+  overseer's own state is authoritative.
+- **Why on `ApprovalQueue`, not `ObservationAuthorizer`:** an optional member on
+  `ObservationAuthorizer` breaks `RpcStub<ObservationAuthorizer>` assignability in upstream's
+  `slash-commands.ts` (RPC stub typing turns an optional method into `Promise<undefined> | ...`).
+- **Upstream-preserving default:** the method and parameter are optional, so upstream-shaped
+  implementations and fakes still typecheck and gatekeepers that ignore `context` are unaffected;
+  a gatekeeper must treat an absent method or context as "no attestation", never as an empty
+  audience. Pinned by `packages/workshop-backend/__tests__/knitli-workspace-audience.test.ts`.
+- **Known residuals:**
+  - *Removed connections.* Build scope is computed from current connections, so data observed
+    through a connection that has since been removed is no longer checked by anyone admitted
+    afterwards. This is upstream's admission model, not something the attestation adds.
+  - *`TODO(observer-races)`* in `#enforceExcludeObservers`: a first-time admission registers its
+    observerId with gatekeepers before the record persists, so an observation naming that id in the
+    window is admitted. The attestation can then include a collaborator whom that observation
+    should have excluded. The fix upstream proposes there (an in-memory map of pending ids) would
+    close both.
+
 ### `open()` routes sharing and revocation guards through the impl
 
 - **Where:** `OverseerDurableObject.open()` in `packages/workshop-backend/src/overseer.ts`, mirrored

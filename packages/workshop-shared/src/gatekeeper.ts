@@ -970,8 +970,12 @@ export interface Gatekeeper<Session> extends DurableObject {
    * in the action's `ActionDescription.pushedCommits`. Actions that don't interact with git can
    * ignore this parameter (and can even omit the parameter from their `applyAction()`
    * declaration).
+   *
+   * Fork: `context` gives the gatekeeper what it may need to re-check at the moment of applying
+   * (see `ActionApplyContext`). Optional, so gatekeepers that ignore it are unaffected.
    */
-  applyAction(action: number, cache: RpcStub<GitCache>): Promise<void>;
+  applyAction(action: number, cache: RpcStub<GitCache>,
+              context?: RpcStub<ActionApplyContext>): Promise<void>;
 
   /**
    * Indicates that an action was rejected by the user. The gatekeeper should clean up any
@@ -1211,6 +1215,42 @@ export interface ApprovalQueue extends ObservationAuthorizer {
   bindHook<Hook extends RpcTarget>(
         controller: Fetcher<HookController<Hook>>, callback: RpcStub<Hook>,
         description: HookDescription): Promise<void>;
+
+  /**
+   * Fork: who could already see everything this workspace has observed: its owner plus build
+   * collaborators who have been admitted by every in-scope gatekeeper. For information-flow checks
+   * by gatekeepers that move data between workspaces. The answer is a snapshot; call it at the
+   * moment of the decision. Optional: implementations that predate it omit it, and a caller must
+   * treat its absence as "no attestation", never as an empty audience.
+   */
+  attestAudience?(): Promise<WorkspaceAudience>;
+}
+
+/**
+ * Fork: passed to `Gatekeeper.applyAction()`, since no `ApprovalQueue` is available at apply time
+ * (approval can come long after the session that queued the action).
+ */
+export interface ActionApplyContext extends RpcTarget {
+  /** As `ApprovalQueue.attestAudience()`, answered at the moment of applying. */
+  attestAudience(): Promise<WorkspaceAudience>;
+}
+
+/** Fork: the answer to `ApprovalQueue.attestAudience()`. */
+export interface WorkspaceAudience {
+  /** `GadgetMetadata.id` of this workspace (stable, random). */
+  workspaceId: string;
+  /** The owner's profile id. */
+  owner: string;
+  /**
+   * Profile ids of collaborators whose effective role is currently "build" and whose persisted
+   * observer admission was made at "build" and covers every current build-scope gatekeeper.
+   * Sorted, deduped, never the owner; empty while sharing is prohibited.
+   */
+  collaborators: string[];
+  containsRestrictedData: boolean;
+  ownerInvitesOnly: boolean;
+  /** The fork's owner-only tier (`GadgetMetadata.sharingProhibited`). */
+  sharingProhibited: boolean;
 }
 
 export type ObservationDescription = {

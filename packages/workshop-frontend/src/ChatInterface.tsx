@@ -6560,8 +6560,8 @@ function ChatInterface({
                     onAppendTextApplied={dictationAppend.acknowledge}
                     isDictating={voice.state.mode === "dictate"}
                     conversationDraft={voice.state.pendingText || voice.state.mode === "conversation" ? {
-                      text: [voice.state.pendingText, voice.state.mode === "conversation" ? voice.state.interimTranscript : null].filter(Boolean).join("\n"),
-                      readOnly: voice.starting || voice.state.mode === "conversation" && !!voice.state.interimTranscript,
+                      text: voice.state.mode === "conversation" && !voice.state.error ? "" : voice.state.pendingText,
+                      readOnly: voice.starting || voice.state.mode === "conversation" && (!voice.state.error || !!voice.state.interimTranscript),
                       onChange: voice.setPendingText,
                       onSend: voice.sendPending,
                       canSend: !!voice.state.pendingText.trim() && !voice.submitting && !voice.state.interimTranscript && !isAgentActive && !hasPendingConnectionRequest && !hasPendingAwaitedAction,

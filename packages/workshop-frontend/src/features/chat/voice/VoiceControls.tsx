@@ -34,7 +34,7 @@ export const VoiceControls = ({
     <div className="flex min-w-0 flex-1 items-center gap-1.5">
       {active ? (
         <>
-          <span className="text-sm text-kumo-subtle" aria-live="polite">
+          <span className="sr-only" aria-live="polite">
             {state.mode === "dictate" ? "Dictating · Stop to edit or send" : `Conversation · ${state.status}`}
           </span>
           <WorkshopIconButton onClick={onMute} aria-label={state.muted ? "Unmute microphone" : "Mute microphone"}>
@@ -62,7 +62,7 @@ export const VoiceControls = ({
           </span>}
         </>
       )}
-      {!active && state.pendingText && <span className="text-sm text-kumo-subtle">Send or clear the voice draft before starting again.</span>}
+      {!active && state.pendingText && <span className="sr-only">Send or clear the voice draft before starting again.</span>}
       {state.error && <span role="alert" className="min-w-0 text-sm text-kumo-danger">{state.error}</span>}
     </div>
   );

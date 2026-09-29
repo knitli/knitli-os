@@ -243,3 +243,15 @@ microphone/hosted-model check is still required before deployment.
   bounded to 65,536 characters per spoken turn; the complete answer stays in chat.
 - No production deployment or wrapper submodule update has been performed.
 
+
+
+## Display correction accepted 2026-09-29
+
+The user wants no live transcript text in Conversation mode and no separate
+transcript box beside either voice control. Dictation writes only into the main
+composer. Keep recognized conversation text in internal state for submission;
+normal committed chat messages remain in history. Pending/failed speech must not
+be discarded: expose it for review in the main composer after End or an error,
+not as a secondary streaming input. Keep status accessible without taking up the
+composer toolbar; actionable errors remain visible. No invisible DOM transcript
+container is needed for the SDK.

@@ -302,3 +302,25 @@ PR #44 review correction: preserve the existing 16px mobile textarea and 14px
 sm-and-up font to avoid iOS Safari focus zoom; Kumo voice control/status content
 remains 14px. This restores the preexisting native-input accommodation rather
 than changing viewport scaling or adding a browser-specific workaround.
+
+
+## 2026-09-29: conversation display correction and Home deployment check
+
+User confirms conversation works well and asks which model/voices it uses.
+Current source uses the selected chat LLM, Flux STT, and the Agents 0.24.0 default
+Aura-1/Asteria TTS. There is no voice picker. User explicitly requests no live
+conversation transcript and dictation text only in the main composer, with no
+side transcript container. Preserve pending text internally and expose recovery
+in the main composer after End/error; keep actionable failures visible.
+
+The renewed Home/side-box report resembles pre-#44 code, although #44 is merged
+and backend/router deployments are newer. Check deployed assets/browser freshness
+before claiming a further Home root cause or altering working transcription code.
+
+Deployment/browser diagnosis confirmed: existing authenticated chat tab loaded
+/assets/index-B7xz_kOY.js and useDictationAppendQueue-DaijTXli.js; a freshly opened
+Home tab loaded deployed /assets/index-DAr1Aa6R.js and
+useDictationAppendQueue-DXYVpxdM.js, matching the PR44 wrapper build. The user then
+reloaded and explicitly confirmed Home dictation works. No further Home code fix
+is needed. Browser model picker showed GLM 5.3 (Workers AI); other chats may select
+other models. Continue only the requested display correction.

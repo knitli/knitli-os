@@ -122,6 +122,7 @@ it("offers named icon controls for conversation and stopping persistent dictatio
     await act(async () => root.render(render("dictate")));
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Stop dictation"]')!.click());
     expect(onEnd).toHaveBeenCalledOnce();
+    expect(container.querySelector('[aria-live="polite"]')?.classList.contains("sr-only")).toBe(true);
   } finally {
     await act(async () => root.unmount());
   }

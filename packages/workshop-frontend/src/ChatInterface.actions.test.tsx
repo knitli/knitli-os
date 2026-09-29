@@ -47,12 +47,13 @@ vi.mock('./AuthContext', () => {
 const voiceBoundary = vi.hoisted(() => ({
   start: vi.fn<(mode: string) => void>(),
   available: false,
+  state: { mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "" } as import("./features/chat/voice/VoiceControls").VoiceControlsState,
 }));
 vi.mock('./features/chat/voice/useVoiceChat', () => ({
   useVoiceChat: (props: { conversationAvailable: boolean; sendMessage: (text: string, metadata: { hasSpeech: true }) => Promise<unknown> }) => {
     voiceBoundary.available = props.conversationAvailable;
     return {
-      state: { mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "" },
+      state: voiceBoundary.state,
       start: (mode: string) => { voiceBoundary.start(mode); void props.sendMessage("First spoken request", { hasSpeech: true }); }, end: () => {}, toggleMute: () => {}, setPendingText: () => {}, sendPending: () => {},
     };
   },
@@ -68,6 +69,7 @@ const testRoot = makeTestRoot()
 
 afterEach(() => {
   testRoot.cleanup()
+  voiceBoundary.state = { mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "" }
   vi.restoreAllMocks()
 })
 
@@ -331,4 +333,30 @@ it('starts initial voice once after subscription and models are ready, preservin
   flushFrames();
   expect(voiceBoundary.available).toBe(true);
   expect(voiceBoundary.start).toHaveBeenCalledOnce();
+});
+
+
+it('hides live conversation speech and restores unsent instructions in the main composer after End or failure', async () => {
+  const server = makeOverseer();
+  withChatApi(server);
+  voiceBoundary.state = { mode: "conversation", status: "listening", muted: false,
+    interimTranscript: "Still speaking", pendingText: "Queued instruction", error: null };
+  await renderChat(server.overseer, { selectedChatId: 0 });
+  const editor = () => document.body.querySelector<HTMLTextAreaElement>('textarea[role="combobox"]')!;
+  expect(editor().value).toBe("");
+  expect(editor().readOnly).toBe(true);
+  expect(document.body.textContent).not.toContain("Still speaking");
+  expect(document.body.textContent).not.toContain("Queued instruction");
+
+  voiceBoundary.state = { ...voiceBoundary.state, mode: null, interimTranscript: null,
+    pendingText: "Queued instruction\nStill speaking" };
+  await renderChat(server.overseer, { selectedChatId: 0 });
+  expect(editor().value).toBe("Queued instruction\nStill speaking");
+  expect(editor().readOnly).toBe(false);
+
+  voiceBoundary.state = { ...voiceBoundary.state, mode: "conversation", error: "Message was not sent" };
+  await renderChat(server.overseer, { selectedChatId: 0 });
+  expect(editor().value).toBe("Queued instruction\nStill speaking");
+  expect(editor().readOnly).toBe(false);
+  expect(document.body.querySelector('[role="alert"]')?.textContent).toBe("Message was not sent");
 });

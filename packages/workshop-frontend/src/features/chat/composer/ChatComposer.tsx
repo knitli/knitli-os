@@ -156,7 +156,7 @@ export const ChatComposer = ({
     requireConfirm: boolean;
   };
   /** Voice controls owned by the chat session, placed beside the composer actions. */
-  voiceControls?: ReactNode;
+  voiceControls?: ReactNode | ((draft: { canStartConversation: () => boolean }) => ReactNode);
   pendingConsoleLogCount?: number;
   consoleLogPreview?: string;
   consoleLogSeverity?: "error" | "warn" | "info";
@@ -200,7 +200,8 @@ export const ChatComposer = ({
   const toasts = useKumoToastManager();
   const {
     attachments: pendingAttachments,
-    addFiles,
+    hasAttachments,
+    addFiles: prepareFiles,
     clearSentAttachments,
     removeAttachment,
   } = useComposerAttachments({
@@ -208,6 +209,16 @@ export const ChatComposer = ({
     modelId: selectedModel,
     onError: (message) => toasts.add({ title: message, variant: "error" }),
   });
+  const [preparingFiles, setPreparingFiles] = useState(0);
+  const preparingFilesRef = useRef(0);
+  const addFiles = async (files: FileList | File[]) => {
+    setPreparingFiles(++preparingFilesRef.current);
+    try {
+      await prepareFiles(files);
+    } finally {
+      setPreparingFiles(--preparingFilesRef.current);
+    }
+  };
   const {
     beginSend: beginDraftSend,
     commitDocumentEdit,
@@ -718,6 +729,14 @@ export const ChatComposer = ({
   const hasUnreadyAttachment = pendingAttachments.some(
     (attachment) => attachment.uploadState !== "ready",
   );
+  const conversationResourcesReadyRef = useRef(false);
+  conversationResourcesReadyRef.current = preparingFiles === 0 && !isCreatingResource && !attachModalOpen;
+  const canStartConversation = () => {
+    const draft = getDocumentSnapshot().document;
+    return !draft.text.trim() && draft.capsules.length === 0 && draft.formats.length === 0
+      && draft.command === null && !sendInFlightRef.current && preparingFilesRef.current === 0
+      && !hasAttachments() && conversationResourcesReadyRef.current;
+  };
   const canSend = !isSending && !isAgentActive && !isBlocked &&
     (inputValue.trim().length > 0 || selectedSlashCommand !== null || hasReadyAttachment) &&
     !hasUnreadyAttachment && !isCreatingResource;
@@ -980,7 +999,9 @@ export const ChatComposer = ({
         {/* Footer row: connection/options left, model + send right */}
         <div className="flex items-center justify-between gap-1.5 px-3 pb-1.5">
           <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
-            {voiceControls}
+            {typeof voiceControls === "function" ? voiceControls({
+              canStartConversation,
+            }) : voiceControls}
             <ComposerAddMenu
               anchorRef={promptCardRef}
               catalogVersion={catalogVersion}

@@ -2454,6 +2454,7 @@ interface ChatInterfaceProps {
   // Latched actions are never auto-approved, so the always-approve affordance is hidden.
   restricted?: boolean;
   selectedChatId: number | null;
+  initialVoice?: { chatId: number; modelId: string; onConsumed: () => void };
   onNavigateToChat: (
     chatId: number | null,
     options?: { replace?: boolean },
@@ -2669,6 +2670,7 @@ function ChatInterface({
   overseer,
   restricted,
   selectedChatId,
+  initialVoice,
   onNavigateToChat,
   onChatChangesChange,
   onLiveRowsChange,
@@ -2695,6 +2697,8 @@ function ChatInterface({
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
   const { currentUser, authenticatedApi } = useAuthenticatedApi();
+  const initialVoiceModelRef = useRef(initialVoice);
+  if (initialVoiceModelRef.current?.chatId !== selectedChatId) initialVoiceModelRef.current = undefined;
   const getOverseer = useCallback(() => overseer, [overseer]);
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -2727,7 +2731,7 @@ function ChatInterface({
   const lastStreamGenerationRef = useRef<number | undefined>(undefined);
 
   // UI state
-  const [_isSubscribed, setIsSubscribed] = useState(false);
+  const [isSubscribed, setIsSubscribed] = useState(false);
   const [chatListReady, setChatListReady] = useState(false);
   // Out-of-credits modal (free-tier limit reached). `usageModalShownFor` tracks the error sequence
   // we've already auto-opened for, so dismissing it doesn't immediately reopen.
@@ -3389,7 +3393,12 @@ function ChatInterface({
       // For existing threads:
       // 1. If an AI agent is currently active, use that agent's model
       if (activeAgent) {
+        initialVoiceModelRef.current = undefined;
         setSelectedModel(activeAgent.id);
+      } else if (initialVoiceModelRef.current?.chatId === selectedChatId &&
+          !currentMessages.some((message) => message.author.type === "agent") &&
+          availableModels.some((model) => model.id === initialVoiceModelRef.current?.modelId)) {
+        setSelectedModel(initialVoiceModelRef.current.modelId);
       } else {
         // 2. Otherwise, derive the model from the most recent agent message or agent error.
         setSelectedModel(
@@ -4119,6 +4128,17 @@ function ChatInterface({
     submissionAvailable: !hasPendingConnectionRequest && !hasPendingAwaitedAction,
   });
 
+  const voiceStartRequest = initialVoice?.chatId;
+  const startedVoiceRequestRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (voiceStartRequest === undefined || startedVoiceRequestRef.current === voiceStartRequest ||
+        selectedChatId !== voiceStartRequest || !isSubscribed || !chatListReady || selectedModel !== initialVoice?.modelId ||
+        !availableModels.some((model) => model.id === selectedModel)) return;
+    startedVoiceRequestRef.current = voiceStartRequest;
+    initialVoice!.onConsumed();
+    voice.start("conversation");
+  }, [voiceStartRequest, selectedChatId, isSubscribed, chatListReady, selectedModel, availableModels, initialVoice, voice.start]);
+
   // Handle creating a new chat from the sidebar (always creates, never sends to existing)
   const handleNewChatSend = async (
     messageText?: string | SlashCommandRequest,
@@ -4146,6 +4166,8 @@ function ChatInterface({
 
   // Handle model change
   const handleModelChange = (modelId: string | null) => {
+    initialVoiceModelRef.current = undefined;
+    initialVoice?.onConsumed();
     setSelectedModel(modelId);
     persistSelectedModel(modelId);
   };

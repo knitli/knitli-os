@@ -156,3 +156,93 @@ The reported new-chat dictation race is not applicable to current UI: the only
 VoiceControls are inside the selectedChatId !== null render branch; the sidebar
 new-chat composer has neither voice controls nor dictation append input. No
 speculative new-chat voice feature was added. Backend unchanged this round.
+
+
+## Post-deployment repair — 2026-09-29
+
+User reported both modes briefly listening and returning idle without output after
+microphone permission. They also requested controls on the initial composer, a
+conversation icon, and dictation that stays active until explicitly stopped.
+Work continues on `fix/voice-session-start`, based on merged main `5a7043d1`.
+
+Root cause: the actual Agents 0.24 VoiceClient emits `connectionchange` inside its
+socket-open handler, then checks whether it should recover an existing call.
+Starting a call synchronously in our listener sets the SDK's in-call flag before
+that recovery check, sending two `start_call` frames. Our single-call server
+correctly rejects the second and revokes the connection. Defer our startup until
+the open handler completes; retain ownership checks before the deferred call.
+Unexpected disconnects should leave a visible error.
+
+Reuse the existing continuous transcription path: finalized segments append to
+the composer without ending dictation. Home conversation creates an empty chat
+before starting capture, so the first spoken prompt and reply use the ordinary
+chat subscription/receipt path. Preserve speech provenance for Home and new-chat
+composer submissions. The initial launch must be one-shot, never a reload or
+back-navigation microphone restart.
+
+Remaining hosted-provider acceptance: stopping during an unfinished utterance
+may discard words not yet finalized by Flux. The pinned SDK exposes no graceful
+flush operation; do not claim final-utterance draining is verified. Test multiple
+utterances, pause/resume speech, explicit Stop, and the last phrase at Stop during
+the next live microphone trial.
+
+Home handoff details: router history carries the new chat and chosen model once,
+then removes the intent from history. Navigation away invalidates pending launch.
+The chat waits for its subscription, chat list, and exact available model before
+starting. Its initial model survives intent consumption and the first user-message
+broadcast until authoritative agent state arrives; manual model changes cancel
+the pending launch. Independent review found and resolved both lifecycle gaps and
+the empty-chat model reset.
+
+Repair validation: all 720 frontend tests (82 files), 11 voice backend tests, and
+full lint/types/build passed. The real VoiceClient test observed two start frames
+before the fix and exactly one afterward; it also covers multiple dictated
+segments and explicit stop. Removing disconnect feedback failed its regression.
+Ten narrow UI mutations failed the relevant assertions (speech provenance, empty
+chat creation, error feedback, launch cancellation, history consumption, handoff
+invalidation, Stop label, initial model, first-user gap, and exact-model startup),
+then all affected files passed after restoration. No hosted microphone trial or
+deployment was performed for this repair.
+
+PR #43 review follow-up: cache the in-flight/successful Home voice-chat creation
+on its provisional workspace. Metadata/navigation retries now reuse that chat,
+including when metadata fails before creation settles. Replacing the workspace
+would abandon draft resource references and would not delete its persisted record.
+A rejected creation clears only the cached promise. Three partial-failure tests
+failed with duplicate creation before the fix; removing rejection reset failed
+retry recovery independently. Restoration passed all eight Home tests, all 723
+frontend tests, and full lint/types/build. Backend code is unchanged.
+
+Further Home review follow-up: block Conversation while a draft/resource, resource
+picker, file preparation/upload, or send is active. Dictation remains available.
+A live composer eligibility getter is checked both before launch and after RPCs;
+this prevents navigation from discarding resources staged during a slow launch.
+Model changes invalidate pending launch. A regular Home submission also cancels
+launch and sends into the cached voice chat with its full resource/format/speech
+payload, rather than creating another empty thread.
+
+Integrated validation: all 731 frontend tests (82 files) and full lint/types/build
+passed. Five Home regressions failed before their cancellation/reuse/live-draft
+fixes. Removing composer/control guards caused four named failures, and forcing
+the authoritative attachment accessor false independently failed its before-render
+assertion; all passed after restoration. Scoped independent review found no
+remaining blocker. Backend production source is unchanged.
+
+Backend follow-up from PR review: Home's empty-chat creation was rejected by the
+shared message preparation guard. Permit an empty initial chat only when no
+resources would be discarded; ordinary empty sends still fail. Do not request a
+title until the first committed content arrives, and preserve explicit chat and
+workspace titles while inference is pending. Keep external commit authorization
+and attachment-only/command behavior intact.
+
+The reported StrictMode double-mount issue was checked with the full ChatInterface
+and real voice hook: readiness starts false and resolves after mount replay, so
+startup occurs once. Consuming the handoff keeps the session alive; actual unmount
+closes it. No production lifecycle change was required for that review finding.
+
+Backend follow-up validation: 1,169 tests passed across the main and integration
+suites (four existing integration skips); full lint/types/build passed. Targeted
+red/green checks proved empty creation, deferred first-message title generation,
+and protection against a manual rename during inference. The existing external
+commit authorization regression also passed. Independent backend review found no
+remaining blocker.

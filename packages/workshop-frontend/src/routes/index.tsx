@@ -23,6 +23,12 @@ import { useDocumentTitle } from "../useDocumentTitle";
 import { homePromptFromSearch } from "../homePrompt";
 import { composerDraftStorageKey } from "../features/chat/composer/draft/composerDraft";
 
+import { VoiceControls } from "../features/chat/voice/VoiceControls";
+import { useVoiceChat } from "../features/chat/voice/useVoiceChat";
+import { useDictationAppendQueue } from "../features/chat/composer/useDictationAppendQueue";
+
+const subscribeToNoChatEvents = () => () => {};
+
 type HomeSearch = { prompt?: string };
 
 export const Route = createFileRoute("/")({
@@ -78,14 +84,18 @@ export function HomePageContent({ prompt }: HomeSearch) {
     };
   }, [authenticatedApi]);
 
+  const voiceLaunchGeneration = useRef(0);
+  const [startingConversation, setStartingConversation] = useState(false);
   const handleModelChange = useCallback((value: string | null) => {
+    voiceLaunchGeneration.current++;
+    setStartingConversation(false);
     setSelectedModel(value);
     persistSelectedModel(value);
   }, []);
 
   // Pre-create a provisional gadget as soon as the user starts interacting, so that navigation
   // after submit is instant. Same pattern as before — disposed on unmount if never consumed.
-  const provisionalOverseerRef = useRef<{ stub: RpcStub<Overseer> } | null>(null);
+  const provisionalOverseerRef = useRef<{ stub: RpcStub<Overseer>; voiceChat?: Promise<number> } | null>(null);
 
   const ensureProvisionalGadget = useCallback(() => {
     if (!provisionalOverseerRef.current) {
@@ -108,13 +118,22 @@ export function HomePageContent({ prompt }: HomeSearch) {
       capsules?: CapsuleSpecifier[],
       attachments?: ChatAttachmentHandle[],
       formats?: MessageFormatRef[],
+      submissionMeta?: { hasSpeech: boolean },
     ) => {
       try {
         ensureProvisionalGadget();
-        const overseer = provisionalOverseerRef.current!.stub;
+        voiceLaunchGeneration.current++;
+        setStartingConversation(false);
+        const provisional = provisionalOverseerRef.current!;
+        const overseer = provisional.stub;
+        const submittedMessage = submissionMeta?.hasSpeech && typeof message !== "string" ? { ...message, hasSpeech: true as const } : message;
+        const hasSpeech = submissionMeta?.hasSpeech && typeof message === "string" ? true : undefined;
+        const existingChat = provisional.voiceChat ? await provisional.voiceChat : undefined;
         // Pipeline both independent calls in one batch, but settle both before releasing the stub.
         const [chat, {id}] = await Promise.all([
-          overseer.newChat(message, modelId, capsules, attachments, formats),
+          existingChat !== undefined
+            ? overseer.sendChatMessage(existingChat, submittedMessage, modelId, capsules, attachments, formats, hasSpeech).then(() => existingChat)
+            : overseer.newChat(submittedMessage, modelId, capsules, attachments, formats, undefined, undefined, hasSpeech),
           overseer.getMetadata(),
         ]);
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
@@ -137,6 +156,48 @@ export function HomePageContent({ prompt }: HomeSearch) {
     },
     [ensureProvisionalGadget, navigate, toasts],
   );
+
+  const dictationAppend = useDictationAppendQueue();
+  const voice = useVoiceChat({
+    authenticatedApi,
+    chatId: null,
+    agentActive: false,
+    onDictation: (text) => dictationAppend.enqueue(text, null),
+    sendMessage: async () => undefined,
+    subscribeToEvents: subscribeToNoChatEvents,
+    conversationAvailable: false,
+  });
+  useEffect(() => () => { voiceLaunchGeneration.current++; }, [authenticatedApi]);
+  const startVoice = async (mode: "dictate" | "conversation", canStartConversation: () => boolean) => {
+    if (mode === "dictate") return voice.start(mode);
+    if (startingConversation || selectedModel === null || !canStartConversation()) return;
+    const generation = ++voiceLaunchGeneration.current;
+    setStartingConversation(true);
+    try {
+      ensureProvisionalGadget();
+      const provisional = provisionalOverseerRef.current!;
+      // Retain a pending or created chat when metadata/navigation fails; draft references
+      // still belong to this workspace, so retrying must not replace either resource.
+      provisional.voiceChat ??= Promise.resolve(provisional.stub.newChat("", selectedModel)).catch((error) => {
+        provisional.voiceChat = undefined;
+        throw error;
+      });
+      const [chat, { id }] = await Promise.all([
+        provisional.voiceChat,
+        provisional.stub.getMetadata(),
+      ]);
+      if (generation !== voiceLaunchGeneration.current || !canStartConversation()) return;
+      await navigate({ to: "/workspace/$id", params: { id }, search: { chat },
+        state: (previous) => ({ ...previous, startVoiceChat: { chatId: chat, modelId: selectedModel } }) });
+    } catch (error) {
+      if (generation !== voiceLaunchGeneration.current) return;
+      if (!logRpcFailure("Failed to start conversation:", error)) {
+        toasts.add({ title: "Failed to start conversation", variant: "error" });
+      }
+    } finally {
+      if (generation === voiceLaunchGeneration.current) setStartingConversation(false);
+    }
+  };
 
   const getOverseer = useCallback((): RpcStub<Overseer> => {
     ensureProvisionalGadget();
@@ -185,6 +246,19 @@ export function HomePageContent({ prompt }: HomeSearch) {
           createCapsuleGatekeeper={createCapsuleGatekeeper}
           getOverseer={getOverseer}
           onSend={handleSend}
+          appendText={dictationAppend.appendForChat(null)}
+          onAppendTextApplied={dictationAppend.acknowledge}
+          voiceControls={({ canStartConversation }) => <VoiceControls
+            state={voice.state}
+            disabled={startingConversation}
+            onStart={(mode) => { void startVoice(mode, canStartConversation); }}
+            onEnd={voice.end}
+            onMute={voice.toggleMute}
+            onPendingTextChange={voice.setPendingText}
+            onSendPending={voice.sendPending}
+            conversationBlockedReason={canStartConversation() ? undefined : "Send or clear the draft before starting a conversation."}
+            conversationAvailable={selectedModel !== null}
+          />}
           isAgentActive={false}
           models={models}
           selectedModel={selectedModel}

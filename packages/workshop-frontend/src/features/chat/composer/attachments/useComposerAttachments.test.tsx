@@ -64,6 +64,7 @@ describe("useComposerAttachments", () => {
     let currentOverseer = firstOverseer;
     const onError = vi.fn<(message: string) => void>();
     let attachments: ComposerAttachment[] = [];
+    let hasAttachments!: () => boolean;
     let addFiles: ((files: File[]) => Promise<void>) | undefined;
     let clearSentAttachments: ((sent: readonly ComposerAttachment[]) => void) | undefined;
     let removeAttachment: ((id: string) => void) | undefined;
@@ -76,6 +77,7 @@ describe("useComposerAttachments", () => {
         onError,
       });
       attachments = attachmentState.attachments;
+      hasAttachments ??= attachmentState.hasAttachments;
       addFiles = attachmentState.addFiles;
       clearSentAttachments = attachmentState.clearSentAttachments;
       removeAttachment = attachmentState.removeAttachment;
@@ -86,9 +88,12 @@ describe("useComposerAttachments", () => {
     root = createRoot(container);
     await act(async () => root!.render(<Harness />));
 
-    await act(async () => addFiles!([
-      new File(["one"], "one.txt", { type: "text/plain" }),
-    ]));
+    expect(hasAttachments()).toBe(false);
+    await act(async () => {
+      await addFiles!([new File(["one"], "one.txt", { type: "text/plain" })]);
+      expect(attachments).toHaveLength(0);
+      expect(hasAttachments()).toBe(true);
+    });
     await waitFor(() => attachments[0]?.uploadState === "ready");
     const sentSnapshot = [...attachments];
 
@@ -104,7 +109,10 @@ describe("useComposerAttachments", () => {
     expect(onError).not.toHaveBeenCalled();
 
     currentOverseer = secondOverseer;
-    act(() => removeAttachment!(attachments[0].id));
+    act(() => {
+      removeAttachment!(attachments[0].id);
+      expect(hasAttachments()).toBe(false);
+    });
     await waitFor(() => deleteFromFirst.mock.calls.length === 1);
     expect(deleteFromSecond).not.toHaveBeenCalled();
   });

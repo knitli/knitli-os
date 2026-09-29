@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
@@ -76,6 +76,87 @@ it("returns the committed prompt sequence, not an earlier message or a command e
           "Cannot send an empty chat message.");
     } finally {
       (overseer as unknown as {[Symbol.dispose]?(): void})[Symbol.dispose]?.();
+    }
+  });
+}, 30000);
+
+
+it("defers an empty chat title until its first message and preserves explicit titles", async () => {
+  const stub = env.TEST_OVERSEER.getByName(`title-${crypto.randomUUID()}`);
+  await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+    const impl = (instance as unknown as {impl: any}).impl;
+    const user = {type: "user", id: "title-owner", name: "Owner"};
+    const client = {id: {toString: () => user.id}};
+    const context = {profile: user, quickModel: {provider: "openai", model: "unused"}};
+    const title = vi.fn<(...args: unknown[]) => Promise<void>>(async () => {});
+    impl.generateThreadTitle = title;
+    await expect(impl.newChat(client, context, "", [{gatekeeperId: 99}])).rejects.toThrow(
+        "Cannot send an empty chat message.");
+    const chatId = await impl.newChat(client, context, "");
+    expect(title).not.toHaveBeenCalled();
+    expect(impl.nextChatSequencePeek(chatId)).toBe(0);
+    expect(impl.getChatMetaOrThrow(chatId)).toMatchObject({title: "New Chat"});
+    await impl.sendChatMessage(client, context, chatId, "Plan the garden");
+    expect(title).toHaveBeenCalledExactlyOnceWith(
+        chatId, "Plan the garden", context.quickModel, user);
+    await impl.sendChatMessage(client, context, chatId, "Add tomatoes");
+    expect(title).toHaveBeenCalledTimes(1);
+
+    const renamedId = await impl.newChat(client, context, "   ");
+    impl.storage.chatMeta.put({...impl.getChatMetaOrThrow(renamedId), title: "My garden"});
+    await impl.sendChatMessage(client, context, renamedId, "Plan flowers");
+    expect(title).toHaveBeenCalledTimes(1);
+    expect(impl.getChatMetaOrThrow(renamedId).title).toBe("My garden");
+
+    for (const deferred of [false, true]) {
+      const id = crypto.randomUUID();
+      impl.storage.chatAttachmentContent.put({
+        fileId: id, data: new Uint8Array([65]),
+        state: {type: "staged", uploadedAt: Date.now(), mimeType: "text/plain", name: "notes.txt"},
+      });
+      const attachmentChat = await impl.newChat(
+          client, context, "", undefined, deferred ? undefined : [{id}]);
+      if (deferred) await impl.sendChatMessage(
+          client, context, attachmentChat, "", undefined, [{id}]);
+      expect(title).toHaveBeenLastCalledWith(
+          attachmentChat, "[user attached 1 attachment(s)]", context.quickModel, user);
+    }
+
+    const immediateId = await impl.newChat(client, context, "Plan the kitchen");
+    expect(title).toHaveBeenLastCalledWith(
+        immediateId, "Plan the kitchen", context.quickModel, user);
+    await expect(impl.sendChatMessage(client, context, immediateId, "")).rejects.toThrow(
+        "Cannot send an empty chat message.");
+  });
+}, 30000);
+
+
+it("preserves a manual rename while the generated title is pending", async () => {
+  const stub = env.TEST_OVERSEER.getByName(`title-race-${crypto.randomUUID()}`);
+  await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+    const impl = (instance as unknown as {impl: any}).impl;
+    const user = {type: "user", id: "title-owner", name: "Owner"};
+    const chatId = await impl.newChat({id: {toString: () => user.id}}, {profile: user}, "");
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      impl.storage.chatMeta.put({...impl.getChatMetaOrThrow(chatId), title: "My title"});
+      const chunk = {choices: [{index: 0, delta: {role: "assistant", content: "Generated title"},
+        finish_reason: "stop"}]};
+      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+        headers: {"content-type": "text/event-stream"},
+      });
+    }) as typeof fetch;
+    try {
+      await impl.generateThreadTitle(chatId, "Plan a garden", {
+        provider: "cloudflare", model: "@cf/zai-org/glm-5.3-flash",
+        accountId: "test-account", apiToken: "test-token",
+      }, user);
+      expect(calls).toBe(1);
+      expect(impl.getChatMetaOrThrow(chatId).title).toBe("My title");
+    } finally {
+      globalThis.fetch = realFetch;
     }
   });
 }, 30000);

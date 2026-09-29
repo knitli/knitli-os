@@ -1,5 +1,5 @@
-import { useRef } from "react";
-import { Microphone, PhoneDisconnect, SpeakerHigh, SpeakerSlash } from "@phosphor-icons/react";
+import { useId, useRef } from "react";
+import { ChatCircleDots, Microphone, PhoneDisconnect, Stop, SpeakerHigh, SpeakerSlash } from "@phosphor-icons/react";
 import type { SpeechTextSelection } from "../composer/draft/speechRanges";
 import { WorkshopIconButton } from "../../../components/WorkshopControls";
 
@@ -21,6 +21,7 @@ export const VoiceControls = ({
   onPendingTextChange,
   onSendPending,
   conversationAvailable = true,
+  conversationBlockedReason,
   canSendPending = true,
 }: {
   state: VoiceControlsState;
@@ -31,8 +32,10 @@ export const VoiceControls = ({
   onPendingTextChange: (text: string, selection?: SpeechTextSelection) => void;
   onSendPending: () => void;
   conversationAvailable?: boolean;
+  conversationBlockedReason?: string;
   canSendPending?: boolean;
 }) => {
+  const blockedReasonId = useId();
   const active = state.mode !== null;
   const pendingSelectionRef = useRef<SpeechTextSelection | undefined>(undefined);
   return (
@@ -45,8 +48,8 @@ export const VoiceControls = ({
           <WorkshopIconButton onClick={onMute} aria-label={state.muted ? "Unmute microphone" : "Mute microphone"}>
             {state.muted ? <SpeakerSlash size={16} /> : <SpeakerHigh size={16} />}
           </WorkshopIconButton>
-          <WorkshopIconButton onClick={onEnd} danger aria-label="End voice call">
-            <PhoneDisconnect size={16} />
+          <WorkshopIconButton onClick={onEnd} danger aria-label={state.mode === "dictate" ? "Stop dictation" : "End voice call"}>
+            {state.mode === "dictate" ? <Stop size={16} /> : <PhoneDisconnect size={16} />}
           </WorkshopIconButton>
         </>
       ) : (
@@ -54,14 +57,17 @@ export const VoiceControls = ({
           <WorkshopIconButton disabled={disabled} onClick={() => onStart("dictate")} aria-label="Start dictation">
             <Microphone size={16} />
           </WorkshopIconButton>
-          {conversationAvailable && <button
-            type="button"
-            disabled={disabled}
+          {conversationAvailable && <WorkshopIconButton
+            disabled={disabled || !!conversationBlockedReason}
+            aria-describedby={conversationBlockedReason ? blockedReasonId : undefined}
             onClick={() => onStart("conversation")}
-            className="cursor-pointer rounded-md px-2 py-1 text-[12px] font-medium text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default disabled:cursor-not-allowed disabled:opacity-40"
+            aria-label="Start conversation"
           >
-            Conversation
-          </button>}
+            <ChatCircleDots size={16} />
+          </WorkshopIconButton>}
+          {conversationAvailable && conversationBlockedReason && <span id={blockedReasonId} className="text-[12px] text-kumo-subtle">
+            {conversationBlockedReason}
+          </span>}
         </>
       )}
       {state.interimTranscript && <span className="min-w-0 truncate text-[12px] text-kumo-inactive">{state.interimTranscript}</span>}

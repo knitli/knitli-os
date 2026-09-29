@@ -297,3 +297,8 @@ raw root vitest invocation was invalid for the per-package Workers configuration
 it was stopped and is not acceptance evidence. Correct package commands above pass.
 Independent review's startup ownership and hidden-draft findings were repaired and
 covered by failing-then-passing checks. No hosted deployment performed.
+
+PR #44 review correction: preserve the existing 16px mobile textarea and 14px
+sm-and-up font to avoid iOS Safari focus zoom; Kumo voice control/status content
+remains 14px. This restores the preexisting native-input accommodation rather
+than changing viewport scaling or adding a browser-specific workaround.

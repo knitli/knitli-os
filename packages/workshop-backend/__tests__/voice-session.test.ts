@@ -22,18 +22,22 @@ describe("voice audio capability", () => {
     const { secret, hash } = await newSecretToken();
     await runInDurableObject(stub, async (instance: VoiceSession) => {
       using live = new RpcStub(new VoiceLiveness(() => true));
+      const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
       const timeout = vi.spyOn(globalThis, "setTimeout");
       const interval = vi.spyOn(globalThis, "setInterval");
       try {
-        await instance.initialize("unused", "dictate", hash, Date.now() + 60_000, live);
+        expect(Date.now()).toBe(1_000_000);
+        now.mockClear();
+        await instance.initialize("unused", "dictate", hash, 1_045_000, live);
+        expect(now).toHaveBeenCalled();
         expect(interval).not.toHaveBeenCalled();
-        expect(timeout).toHaveBeenCalledWith(expect.any(Function), 60_000);
+        expect(timeout).toHaveBeenCalledWith(expect.any(Function), 45_000);
         const expire = timeout.mock.calls[0][0] as () => void;
         expire();
         expect((await instance.fetch(upgrade(secret.toHex()))).status).toBe(403);
       } finally {
         await instance.revoke();
-        timeout.mockRestore(); interval.mockRestore();
+        timeout.mockRestore(); interval.mockRestore(); now.mockRestore();
       }
     });
   });

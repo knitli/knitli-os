@@ -101,6 +101,8 @@ export const ChatComposer = ({
   minRows = 2,
   seedText,
   seedNonce,
+  appendText,
+  onAppendTextApplied,
   draftStorageKey,
   draftUpdateBanner,
   blockedReason,
@@ -110,6 +112,7 @@ export const ChatComposer = ({
   onToggleThinkingTraces,
   effortControl,
   promptControl,
+  voiceControls,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -126,7 +129,8 @@ export const ChatComposer = ({
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
     formats?: MessageFormatRef[],
-  ) => Promise<void> | void;
+    submissionMeta?: { hasSpeech: boolean },
+  ) => Promise<unknown> | void;
   isAgentActive: boolean;
   models: AiChatAuthorInfo[];
   selectedModel: string | null;
@@ -151,6 +155,8 @@ export const ChatComposer = ({
     onPromptChange: (prompt: PromptSelection | null) => void;
     requireConfirm: boolean;
   };
+  /** Voice controls owned by the chat session, placed beside the composer actions. */
+  voiceControls?: ReactNode;
   pendingConsoleLogCount?: number;
   consoleLogPreview?: string;
   consoleLogSeverity?: "error" | "warn" | "info";
@@ -170,6 +176,9 @@ export const ChatComposer = ({
    * whenever `seedNonce` changes, so the same text can be re-seeded by bumping the nonce. */
   seedText?: string;
   seedNonce?: number;
+  /** Text finalized by Dictate. It joins the existing editable draft without sending it. */
+  appendText?: { token: number; text: string; chatKey: number | null } | null;
+  onAppendTextApplied?: (token: number) => void;
   /** Session-storage key used to recover this composer's draft prompt after a page refresh. */
   draftStorageKey?: string;
   /** Optional label for the attach menu item. */
@@ -202,11 +211,13 @@ export const ChatComposer = ({
   const {
     beginSend: beginDraftSend,
     commitDocumentEdit,
+    clearSpeechOriginWhenEmpty,
     completeSend: completeDraftSend,
     document: composerDocument,
     getDocumentSnapshot,
     presentationRequest: draftPresentationRequest,
     recordEdit: recordDraftEdit,
+    markSpeechOrigin,
     replaceDocument: replaceComposerDocument,
     updateDocument: updateComposerDocument,
   } = useComposerDraft({
@@ -357,6 +368,23 @@ export const ChatComposer = ({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seedNonce]);
+  useEffect(() => {
+    if (!appendText?.text || appendText.chatKey !== chatKey) return;
+    recordDraftEdit();
+    updateComposerDocument((previous) => ({
+      ...previous,
+      text: previous.text ? `${previous.text}\n${appendText.text}` : appendText.text,
+    }));
+    markSpeechOrigin();
+    onAppendTextApplied?.(appendText.token);
+    requestAnimationFrame(() => {
+      const textarea = composerTextareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      textarea.setSelectionRange(inputValueRef.current.length, inputValueRef.current.length);
+      resizeTextarea(textarea);
+    });
+  }, [appendText?.token, chatKey, onAppendTextApplied]);
   const capsulesRef = useRef(capsules);
   capsulesRef.current = capsules;
   // Reset overlay selection when the overlay appears or changes URL, preferring a connected account
@@ -518,7 +546,8 @@ export const ChatComposer = ({
       await onSend(message, selectedModel,
           capsuleSpecifiers,
           readyAttachments.length ? readyAttachments : undefined,
-          formatRefs);
+          formatRefs,
+          ...(draftSend.hasSpeech ? [{ hasSpeech: true }] : []));
       clearSentAttachments(attachmentsSnapshot);
       if (!completeDraftSend(draftSend)) return;
       replaceComposerDocument({ text: "", capsules: [], formats: [], command: null });
@@ -578,6 +607,7 @@ export const ChatComposer = ({
     }
 
     recordDraftEdit();
+    clearSpeechOriginWhenEmpty(newValue);
     commitComposerDocument(transition.document);
     if (transition.caret !== undefined) {
       const caret = transition.caret;
@@ -927,6 +957,7 @@ export const ChatComposer = ({
         {/* Footer row: connection/options left, model + send right */}
         <div className="flex items-center justify-between gap-1.5 px-3 pb-1.5">
           <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+            {voiceControls}
             <ComposerAddMenu
               anchorRef={promptCardRef}
               catalogVersion={catalogVersion}

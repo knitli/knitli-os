@@ -237,6 +237,12 @@ describe("composer drafts", () => {
     expect(sessionStorage.getItem(key)).toBeNull();
   });
 
+  it("retains dictated provenance across draft recovery", () => {
+    const key = composerDraftStorageKey("user-a", "chat:1");
+    writeComposerDraft(key, { ...draft, hasSpeech: true });
+    expect(readComposerDraft(key)?.hasSpeech).toBe(true);
+  });
+
   it("tolerates unavailable browser storage", () => {
     vi.stubGlobal("sessionStorage", {
       getItem: () => { throw new Error("blocked"); },

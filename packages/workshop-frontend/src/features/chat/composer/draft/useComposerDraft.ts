@@ -46,7 +46,7 @@ export const composerDocumentFromDraft = (
     : null,
 });
 
-const storedDraftFromDocument = (document: ComposerDocument): StoredComposerDraft =>
+const storedDraftFromDocument = (document: ComposerDocument, hasSpeech = false): StoredComposerDraft =>
   serializeComposerDraft(
     document.text,
     document.capsules.map(({ start, length, description }) => ({
@@ -55,7 +55,7 @@ const storedDraftFromDocument = (document: ComposerDocument): StoredComposerDraf
       url: description.url,
     })),
     document.formats,
-    document.command ?? undefined,
+    document.command ?? undefined, hasSpeech,
   );
 
 const documentMatchesStoredDraft = (
@@ -108,6 +108,7 @@ export const useComposerDraft = ({
   const skipWriteRef = useRef(false);
   const restoreGenerationRef = useRef(0);
   const presentationIdRef = useRef(0);
+  const hasSpeechRef = useRef(initialDraft?.hasSpeech === true);
   documentRef.current = document;
 
   const setCurrentDocument = (nextDocument: ComposerDocument) => {
@@ -175,12 +176,13 @@ export const useComposerDraft = ({
     const preserveLocalDraft = previousKey === undefined &&
       (editedRef.current || currentDocument.text.length > 0);
     if (preserveLocalDraft) {
-      writeComposerDraft(storageKey, storedDraftFromDocument(currentDocument));
+      writeComposerDraft(storageKey, storedDraftFromDocument(currentDocument, hasSpeechRef.current));
       skipWriteRef.current = false;
       return;
     }
 
     if (previousKey !== undefined) editedRef.current = false;
+    hasSpeechRef.current = storedDraft?.hasSpeech === true;
     const nextDocument = {
       ...composerDocumentFromDraft(storedDraft),
       capsules: previousKey === undefined ? currentDocument.capsules : [],
@@ -199,7 +201,7 @@ export const useComposerDraft = ({
       skipWriteRef.current = false;
       return;
     }
-    writeComposerDraft(storageKey, storedDraftFromDocument(document));
+    writeComposerDraft(storageKey, storedDraftFromDocument(document, hasSpeechRef.current));
   }, [document, storageKey]);
 
   const recordEdit = () => {
@@ -209,10 +211,11 @@ export const useComposerDraft = ({
     setPresentationRequest(undefined);
   };
 
-  const beginSend = () => ({
+  const beginSend = (): { key: string | undefined; editRevision: number; draft: StoredComposerDraft; hasSpeech?: boolean } => ({
     key: loadedKeyRef.current,
     editRevision: editRevisionRef.current,
-    draft: storedDraftFromDocument(documentRef.current),
+    draft: storedDraftFromDocument(documentRef.current, hasSpeechRef.current),
+    ...(hasSpeechRef.current && { hasSpeech: true }),
   });
 
   const completeSend = (send: ReturnType<typeof beginSend>): boolean => {
@@ -224,6 +227,7 @@ export const useComposerDraft = ({
     }
     if (editRevisionRef.current !== send.editRevision) return false;
     writeComposerDraft(send.key, undefined);
+    hasSpeechRef.current = false;
     editedRef.current = false;
     return true;
   };
@@ -234,6 +238,11 @@ export const useComposerDraft = ({
 
   const replaceDocument = (nextDocument: ComposerDocument) => {
     setCurrentDocument(nextDocument);
+  };
+
+  const markSpeechOrigin = () => { hasSpeechRef.current = true; };
+  const clearSpeechOriginWhenEmpty = (text: string) => {
+    if (text === "") hasSpeechRef.current = false;
   };
 
   const getDocumentSnapshot = (): ComposerDocumentSnapshot => ({
@@ -277,5 +286,7 @@ export const useComposerDraft = ({
     recordEdit,
     replaceDocument,
     updateDocument,
+    markSpeechOrigin,
+    clearSpeechOriginWhenEmpty,
   };
 };

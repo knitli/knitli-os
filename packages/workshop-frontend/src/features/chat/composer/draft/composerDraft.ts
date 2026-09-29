@@ -38,6 +38,7 @@ export type StoredComposerDraft = {
   text: string;
   formats: MessageFormatRef[];
   command?: StoredComposerDraftSlashCommand;
+  hasSpeech?: boolean;
 };
 
 export type RestoredComposerDraft = {
@@ -55,6 +56,7 @@ export function serializeComposerDraft(
   capsules: readonly ComposerDraftCapsule[],
   formats: readonly ComposerDraftFormat[],
   command?: ComposerDraftSlashCommand,
+  hasSpeech?: boolean,
 ): StoredComposerDraft {
   const tokens: Array<
     | (ComposerDraftCapsule & { kind: "capsule" })
@@ -106,6 +108,7 @@ export function serializeComposerDraft(
     text: normalized,
     formats: storedFormats,
     ...(storedCommand && { command: storedCommand }),
+    ...(hasSpeech && { hasSpeech: true }),
   };
 }
 
@@ -237,7 +240,9 @@ export function readComposerDraft(key: string | undefined): StoredComposerDraft 
       }
       command = { position, length, choice };
     }
-    return { version: 1, text: record.text, formats, ...(command && { command }) };
+    if (record.hasSpeech !== undefined && record.hasSpeech !== true) return undefined;
+    return { version: 1, text: record.text, formats, ...(command && { command }),
+      ...(record.hasSpeech === true && { hasSpeech: true }) };
   } catch {
     return undefined;
   }

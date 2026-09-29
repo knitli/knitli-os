@@ -117,6 +117,9 @@ import { formatAttachmentSize } from "./features/chat/attachmentFormatting";
 import { ChatComposer } from "./features/chat/composer/ChatComposer";
 import type { PromptPresetOption } from "./features/chat/controls/ComposerPromptSelector";
 import { composerDraftStorageKey } from "./features/chat/composer/draft/composerDraft";
+import { VoiceControls } from "./features/chat/voice/VoiceControls";
+import { useVoiceChat } from "./features/chat/voice/useVoiceChat";
+import { withTranscriptionContext } from "./features/chat/voice/voiceProtocol";
 
 /**
  * The selected chat's live (accepted but not yet materialized) change row stream, delivered via
@@ -2713,6 +2716,11 @@ function ChatInterface({
   const editPreviewsRef = useRef<Map<number, StreamingEditPreview>>(new Map());
   const editPreviewListenersRef =
       useRef<Map<number, Set<(event: EditPreviewEvent) => void>>>(new Map());
+  const chatEventListenersRef = useRef(new Set<(event:
+      | { type: "message"; message: AiChatMessage }
+      | { type: "activity"; chatId: number; active: boolean }
+      | { type: "generation"; chatId: number }) => void>());
+  const [dictationAppend, setDictationAppend] = useState<{ token: number; text: string; chatKey: number | null } | null>(null);
   // Last server-instance generation seen (survives reconnects). Used to detect a full DO restart,
   // in which case in-flight provisional streams were lost and must be discarded. See
   // AiChatSubscriber.streamGeneration.
@@ -3487,6 +3495,7 @@ function ChatInterface({
         forceUpdate();
       }
       lastStreamGenerationRef.current = generation;
+      chatEventListenersRef.current.forEach((listener) => listener({ type: "generation", chatId: selectedChatIdRef.current ?? -1 }));
     }
 
     metadata(chat: AiChatMetadata) {
@@ -3496,6 +3505,11 @@ function ChatInterface({
       // when the finalized changes arrive, but doing this final clear will "mop up" if there
       // were any inconsistencies in the streaming.
       const prevChat = cacheRef.current.chats.get(chat.id);
+      if (!!prevChat?.activeAgent !== !!chat.activeAgent) {
+        chatEventListenersRef.current.forEach((listener) => listener({
+          type: "activity", chatId: chat.id, active: !!chat.activeAgent,
+        }));
+      }
       if (prevChat?.activeAgent && !chat.activeAgent) {
         provisionalRef.current.delete(chat.id);
         resetEditPreviews(chat.id);
@@ -3608,6 +3622,7 @@ function ChatInterface({
 
       // Set message at sequence index (idempotent)
       messages[msg.sequence] = msg;
+      chatEventListenersRef.current.forEach((listener) => listener({ type: "message", message: msg }));
       indexActionMessage(msg);
 
       // Update last message timestamp
@@ -4029,7 +4044,8 @@ function ChatInterface({
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
     formats?: MessageFormatRef[],
-  ) => {
+    submissionMeta?: { hasSpeech: boolean },
+  ): Promise<number | undefined> => {
     const message = typeof messageText === "string" ? messageText.trim() : messageText ?? "";
     if (!message && (!attachments || attachments.length === 0)) return;
 
@@ -4039,23 +4055,27 @@ function ChatInterface({
     try {
       // Selections made just before sending must land before the turn starts.
       await Promise.all([effortWriteRef.current, promptWriteRef.current]);
+      const modelMessage = submissionMeta?.hasSpeech && typeof message === "string"
+        ? withTranscriptionContext(message)
+        : message;
       if (selectedChatId === null) {
         // Create a new chat (with optional capsules).
         const newChatId = await overseer.newChat(
-            message, model, capsules, attachments, formats, pendingEffort, pendingPrompt);
+            modelMessage, model, capsules, attachments, formats, pendingEffort, pendingPrompt);
         setPendingEffort(null);
         setPendingPrompt(null);
         onNavigateToChatRef.current(newChatId);
       } else {
         // Send message to existing chat.
-        await overseer.sendChatMessage(
+        const receipt = await overseer.sendChatMessage(
           selectedChatId,
-          message,
+          modelMessage,
           model,
           capsules || undefined,
           attachments || undefined,
           formats,
         );
+        return receipt;
       }
     } catch (err) {
       if (!logRpcFailure("Failed to send message:", err, { reportSite: "chat.send" })) {
@@ -4064,6 +4084,27 @@ function ChatInterface({
       throw err;
     }
   };
+
+  const subscribeToChatEvents = useCallback((listener: (event:
+      | { type: "message"; message: AiChatMessage }
+      | { type: "activity"; chatId: number; active: boolean }
+      | { type: "generation"; chatId: number }) => void) => {
+    chatEventListenersRef.current.add(listener);
+    return () => chatEventListenersRef.current.delete(listener);
+  }, []);
+  const sendVoiceMessage = async (text: string) => {
+    return handleSend(text, undefined, undefined, undefined, undefined, { hasSpeech: true });
+  };
+  const voice = useVoiceChat({
+    authenticatedApi,
+    chatId: selectedChatId,
+    agentActive: isAgentActive,
+    onDictation: (text) => {
+      setDictationAppend((current) => ({ token: (current?.token ?? 0) + 1, text, chatKey: selectedChatId }));
+    },
+    sendMessage: sendVoiceMessage,
+    subscribeToEvents: subscribeToChatEvents,
+  });
 
   // Handle creating a new chat from the sidebar (always creates, never sends to existing)
   const handleNewChatSend = async (
@@ -6480,6 +6521,9 @@ function ChatInterface({
                     }
                     getOverseer={getOverseer}
                     onSend={handleSend}
+                    appendText={dictationAppend}
+                    onAppendTextApplied={(token) => setDictationAppend((current) =>
+                      current?.token === token ? null : current)}
                     isAgentActive={isAgentActive}
                     models={availableModels}
                     selectedModel={selectedModel}
@@ -6504,6 +6548,19 @@ function ChatInterface({
                     onStop={handleStop}
                     showThinkingTraces={showThinkingTraces}
                     onToggleThinkingTraces={toggleShowThinkingTraces}
+                    voiceControls={(
+                      <VoiceControls
+                        state={voice.state}
+                        disabled={hasPendingConnectionRequest || hasPendingAwaitedAction}
+                        onStart={voice.start}
+                        onEnd={voice.end}
+                        onMute={voice.toggleMute}
+                        onPendingTextChange={voice.setPendingText}
+                        onSendPending={voice.sendPending}
+                        conversationAvailable={selectedChatId !== null && selectedModel !== null}
+                        canSendPending={!isAgentActive}
+                      />
+                    )}
                     draftStorageKey={currentUser && workspaceId && selectedChatId !== null
                       ? composerDraftStorageKey(
                           currentUser.id,

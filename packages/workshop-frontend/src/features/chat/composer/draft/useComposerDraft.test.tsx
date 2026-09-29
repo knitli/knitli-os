@@ -31,6 +31,7 @@ type DraftControls = {
     key: string | undefined;
     editRevision: number;
     draft: StoredComposerDraft;
+    hasSpeech?: boolean;
   };
   completeSend: (send: {
     key: string | undefined;
@@ -49,6 +50,8 @@ type DraftControls = {
   document: ComposerDocument;
   getDocumentSnapshot: () => ComposerDocumentSnapshot;
   recordEdit: () => void;
+  markSpeechOrigin: () => void;
+  clearSpeechOriginWhenEmpty: (text: string) => void;
   replaceDocument: (document: ComposerDocument) => void;
 };
 
@@ -76,6 +79,8 @@ describe("useComposerDraft", () => {
       document: draft.document,
       getDocumentSnapshot: draft.getDocumentSnapshot,
       recordEdit: draft.recordEdit,
+      markSpeechOrigin: draft.markSpeechOrigin,
+      clearSpeechOriginWhenEmpty: draft.clearSpeechOriginWhenEmpty,
       replaceDocument: draft.replaceDocument,
     };
     return null;
@@ -102,6 +107,36 @@ describe("useComposerDraft", () => {
 
     expect(controls.document.text).toBe("local prompt");
     expect(readComposerDraft("draft:user-a")?.text).toBe("local prompt");
+  });
+
+  it("persists, clears, and sends speech provenance with the draft lifecycle", async () => {
+    container = document.createElement("div");
+    root = createRoot(container);
+    await act(async () => root!.render(<Harness storageKey="draft:voice" />));
+    act(() => {
+      controls.recordEdit();
+      controls.replaceDocument(emptyDocument("dictated words"));
+      controls.markSpeechOrigin();
+    });
+    await act(async () => root!.unmount());
+    root = createRoot(container);
+    await act(async () => root!.render(<Harness storageKey="draft:voice" />));
+    expect(controls.beginSend().hasSpeech).toBe(true);
+
+    act(() => {
+      controls.recordEdit();
+      controls.replaceDocument(emptyDocument());
+      controls.clearSpeechOriginWhenEmpty("");
+      controls.replaceDocument(emptyDocument("typed only"));
+    });
+    expect(controls.beginSend().hasSpeech).toBeUndefined();
+
+    act(() => controls.markSpeechOrigin());
+    const send = controls.beginSend();
+    expect(send.hasSpeech).toBe(true);
+    expect(controls.completeSend(send)).toBe(true);
+    controls.replaceDocument(emptyDocument("next typed message"));
+    expect(controls.beginSend().hasSpeech).toBeUndefined();
   });
 
   it("preserves the document revision when a late storage key is structurally identical", async () => {

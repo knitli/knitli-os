@@ -125,3 +125,11 @@ Removing persisted provenance caused the real receipt regression to fail; removi
 context application caused the conversion helper test to fail; both passed after
 restoration. Full agent-pass wiring was source-reviewed, not exercised by that
 helper test. Independent reviews found no remaining blockers in these changes.
+
+Fourth review follow-up: session callbacks reject events for a different owning
+chat before passive cleanup; finalized dictation segments use an acknowledged
+queue so batching cannot replace earlier speech; failed queue reconciliation uses
+untrimmed text; every release clears interim speech. Regression tests reproduced
+all four defects and passed after fixes, including cross-chat queued dictation.
+Validation: 693 frontend tests and full lint/build passed. Backend unchanged from
+the third follow-up. Independent hook review found no new blocker.

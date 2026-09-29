@@ -119,6 +119,7 @@ import type { PromptPresetOption } from "./features/chat/controls/ComposerPrompt
 import { composerDraftStorageKey } from "./features/chat/composer/draft/composerDraft";
 import { VoiceControls } from "./features/chat/voice/VoiceControls";
 import { useVoiceChat } from "./features/chat/voice/useVoiceChat";
+import { useDictationAppendQueue } from "./features/chat/composer/useDictationAppendQueue";
 
 /**
  * The selected chat's live (accepted but not yet materialized) change row stream, delivered via
@@ -2719,7 +2720,7 @@ function ChatInterface({
       | { type: "message"; message: AiChatMessage }
       | { type: "activity"; chatId: number; active: boolean }
       | { type: "generation"; chatId: number }) => void>());
-  const [dictationAppend, setDictationAppend] = useState<{ token: number; text: string; chatKey: number | null } | null>(null);
+  const dictationAppend = useDictationAppendQueue();
   // Last server-instance generation seen (survives reconnects). Used to detect a full DO restart,
   // in which case in-flight provisional streams were lost and must be discarded. See
   // AiChatSubscriber.streamGeneration.
@@ -4103,7 +4104,7 @@ function ChatInterface({
     chatId: selectedChatId,
     agentActive: isAgentActive,
     onDictation: (text) => {
-      setDictationAppend((current) => ({ token: (current?.token ?? 0) + 1, text, chatKey: selectedChatId }));
+      dictationAppend.enqueue(text, selectedChatId);
     },
     sendMessage: sendVoiceMessage,
     subscribeToEvents: subscribeToChatEvents,
@@ -6525,9 +6526,8 @@ function ChatInterface({
                     }
                     getOverseer={getOverseer}
                     onSend={handleSend}
-                    appendText={dictationAppend}
-                    onAppendTextApplied={(token) => setDictationAppend((current) =>
-                      current?.token === token ? null : current)}
+                    appendText={dictationAppend.appendForChat(selectedChatId)}
+                    onAppendTextApplied={dictationAppend.acknowledge}
                     isAgentActive={isAgentActive}
                     models={availableModels}
                     selectedModel={selectedModel}

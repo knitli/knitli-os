@@ -75,6 +75,7 @@ export const useVoiceChat = ({
     sessionIdRef.current = null;
     modeRef.current = null;
     responseRelayRef.current = new VoiceResponseRelay();
+    setState((current) => ({ ...current, interimTranscript: null }));
     if (lease) {
       void lease.close().catch(() => {});
       try { lease[Symbol.dispose]?.(); } catch { /* connection may already be gone */ }
@@ -92,7 +93,8 @@ export const useVoiceChat = ({
     const sessionId = sessionIdRef.current;
     const generation = generationRef.current;
     const targetChatId = chatIdRef.current;
-    const pendingText = text.trim();
+    const submittedText = text;
+    const pendingText = submittedText.trim();
     if (!pendingText || targetChatId === null || activeRef.current ||
         (automatic && modeRef.current !== "conversation")) return false;
     const shouldRelay = turnSessionId === sessionId && modeRef.current === "conversation";
@@ -118,7 +120,7 @@ export const useVoiceChat = ({
           queued.automaticAttempted = true;
         } else if (queued) {
           queued.automaticAttempted = true;
-          const retainedText = submittedQueue && queued.text.startsWith(`${pendingText}\n`)
+          const retainedText = submittedQueue && queued.text.startsWith(`${submittedText}\n`)
             ? queued.text
             : submittedQueue || queuedAtSubmission
               ? `${queued.text}\n${pendingText}`
@@ -200,6 +202,7 @@ export const useVoiceChat = ({
     startingRef.current = true;
     startingModeRef.current = mode;
     const generation = ++generationRef.current;
+    const sessionChatId = chatId;
     void (async () => {
       try {
         const connection = await authenticatedApi.createVoiceSession(mode);
@@ -220,10 +223,10 @@ export const useVoiceChat = ({
         });
         clientRef.current = client;
         client.addEventListener("connectionchange", (connected) => {
-          if (generation !== generationRef.current) return;
+          if (generation !== generationRef.current || chatIdRef.current !== sessionChatId) return;
           if (connected) {
             void client.startCall().catch((error) => {
-              if (generation !== generationRef.current || clientRef.current !== client) return;
+              if (generation !== generationRef.current || chatIdRef.current !== sessionChatId || clientRef.current !== client) return;
               release();
               setState((current) => ({
                 ...current, mode: null, status: "idle",
@@ -237,12 +240,12 @@ export const useVoiceChat = ({
             setState((current) => ({ ...current, mode: null, status: "idle" }));
           }
         });
-        client.addEventListener("statuschange", (status) => generation === generationRef.current && setState((current) => ({ ...current, status })));
-        client.addEventListener("mutechange", (muted) => generation === generationRef.current && setState((current) => ({ ...current, muted })));
-        client.addEventListener("interimtranscript", (interimTranscript) => generation === generationRef.current && setState((current) => ({ ...current, interimTranscript })));
-        client.addEventListener("error", (error) => generation === generationRef.current && setState((current) => ({ ...current, error })));
+        client.addEventListener("statuschange", (status) => generation === generationRef.current && chatIdRef.current === sessionChatId && setState((current) => ({ ...current, status })));
+        client.addEventListener("mutechange", (muted) => generation === generationRef.current && chatIdRef.current === sessionChatId && setState((current) => ({ ...current, muted })));
+        client.addEventListener("interimtranscript", (interimTranscript) => generation === generationRef.current && chatIdRef.current === sessionChatId && setState((current) => ({ ...current, interimTranscript })));
+        client.addEventListener("error", (error) => generation === generationRef.current && chatIdRef.current === sessionChatId && setState((current) => ({ ...current, error })));
         client.addEventListener("custommessage", (raw) => {
-          if (generation !== generationRef.current) return;
+          if (generation !== generationRef.current || chatIdRef.current !== sessionChatId) return;
           const event = raw as { type?: string; sessionId?: string; turnId?: string; text?: string; mode?: VoiceMode };
           if (event.type === "voice_interrupt_ack" && event.sessionId === connection.id) {
             responseRelayRef.current.interrupt(event.turnId ?? null);

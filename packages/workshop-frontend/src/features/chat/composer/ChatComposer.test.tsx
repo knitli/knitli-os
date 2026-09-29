@@ -36,6 +36,7 @@ vi.mock("../../../GatekeeperModal", () => ({
 }));
 
 import { ChatComposer } from "./ChatComposer";
+import { useDictationAppendQueue } from "./useDictationAppendQueue";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 Element.prototype.scrollIntoView ??= () => {};
@@ -57,6 +58,73 @@ describe("ChatComposer", () => {
     sessionStorage.clear();
     testState.addToast.mockClear();
     testState.gatekeeperModalProps = undefined;
+  });
+
+  it("appends two finalized dictation segments batched before the composer effect", async () => {
+    let dictation: ReturnType<typeof useDictationAppendQueue> | undefined;
+    const DictationComposer = () => {
+      dictation = useDictationAppendQueue();
+      return <ChatComposer
+        chatKey={7}
+        createCapsuleGatekeeper={async () => null}
+        getOverseer={() => ({} as RpcStub<Overseer>)}
+        onSend={() => {}}
+        appendText={dictation.appendForChat(7)}
+        onAppendTextApplied={dictation.acknowledge}
+        isAgentActive={false}
+        models={[]}
+        selectedModel="model-a"
+        onModelChange={() => {}}
+      />;
+    };
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(<DictationComposer />));
+
+    await act(async () => {
+      dictation!.enqueue("First dictated segment.", 7);
+      dictation!.enqueue("Second dictated segment.", 7);
+    });
+
+    expect(container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!.value)
+      .toBe("First dictated segment.\nSecond dictated segment.");
+  });
+
+  it("keeps a late dictation segment with its originating chat", async () => {
+    let dictation: ReturnType<typeof useDictationAppendQueue> | undefined;
+    const DictationComposer = ({ chatKey }: { chatKey: number }) => {
+      dictation = useDictationAppendQueue();
+      return <ChatComposer
+        key={chatKey}
+        chatKey={chatKey}
+        createCapsuleGatekeeper={async () => null}
+        getOverseer={() => ({} as RpcStub<Overseer>)}
+        onSend={() => {}}
+        appendText={dictation.appendForChat(chatKey)}
+        onAppendTextApplied={dictation.acknowledge}
+        isAgentActive={false}
+        models={[]}
+        selectedModel="model-a"
+        onModelChange={() => {}}
+      />;
+    };
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(<DictationComposer chatKey={7} />));
+
+    await act(async () => {
+      dictation!.enqueue("For chat seven.", 7);
+      root!.render(<DictationComposer chatKey={8} />);
+    });
+    await act(async () => dictation!.enqueue("For chat eight.", 8));
+    expect(container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!.value)
+      .toBe("For chat eight.");
+
+    await act(async () => root!.render(<DictationComposer chatKey={7} />));
+    expect(container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!.value)
+      .toBe("For chat seven.");
   });
 
   it("sends on Enter without clearing document changes made while sending", async () => {

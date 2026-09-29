@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 
-import { act, useEffect } from "react";
+import { act, useEffect, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiChatMessage, VoiceMode } from "@gadgets/workshop-shared/api";
@@ -55,10 +55,12 @@ describe("useVoiceChat", () => {
   let listener: (event: VoiceChatEvent) => void;
   let sendMessage: ReturnType<typeof vi.fn<Props["sendMessage"]>>;
   let sessionNumber: number;
+  let onLayout: (() => void) | undefined;
 
   function Probe() {
     const result = useVoiceChat(props);
     useEffect(() => { controls = result; });
+    useLayoutEffect(() => { onLayout?.(); });
     return null;
   }
   const render = async (patch: Partial<Props> = {}) => {
@@ -73,6 +75,7 @@ describe("useVoiceChat", () => {
   };
   beforeEach(async () => {
     voice.clients.length = 0;
+    onLayout = undefined;
     voice.startCall.mockReset().mockResolvedValue(undefined);
     sessionNumber = 0;
     sendMessage = vi.fn<Props["sendMessage"]>().mockResolvedValue(10);
@@ -112,6 +115,65 @@ describe("useVoiceChat", () => {
     await transcript("Only this new request", "new-turn");
     expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Only this new request");
     expect(controls.state.pendingText).toBe("Keep this draft");
+  });
+
+  it("ignores a stale dictation transcript emitted during a chat-switch layout effect", async () => {
+    const onDictation = vi.fn<Props["onDictation"]>();
+    await render({ onDictation });
+    const client = await start("dictate");
+    onLayout = () => {
+      client.emit("custommessage", {
+        type: "voice_transcript", mode: "dictate", sessionId: "session-1", text: "Wrong chat",
+      });
+    };
+    await render({ chatId: 8 });
+    expect(onDictation).not.toHaveBeenCalled();
+  });
+
+  it("ignores a stale idle conversation transcript emitted during a chat-switch layout effect", async () => {
+    await render({ agentActive: false });
+    const client = await start();
+    onLayout = () => {
+      client.emit("custommessage", {
+        type: "voice_transcript", mode: "conversation", sessionId: "session-1", text: "Wrong chat", turnId: "turn-1",
+      });
+    };
+    await render({ chatId: 8 });
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("retains whitespace in a failed queued transcript with later speech", async () => {
+    let reject!: (error: Error) => void;
+    sendMessage.mockImplementationOnce(() => new Promise<number>((_, fail) => { reject = fail; }));
+    await start();
+    await transcript("first", "turn-1");
+    act(() => controls.setPendingText("  first  "));
+    await render({ agentActive: false });
+    await render({ agentActive: true });
+    await transcript("second", "turn-2");
+    await act(async () => { reject(new Error("Connection lost")); });
+    expect(controls.state.pendingText).toBe("  first  \nsecond");
+  });
+
+  it("clears interim transcripts when a call ends or disconnects", async () => {
+    const client = await start();
+    act(() => client.emit("interimtranscript", "partial"));
+    expect(controls.state.interimTranscript).toBe("partial");
+    act(() => controls.end());
+    expect(controls.state.interimTranscript).toBeNull();
+    const replacement = await start();
+    act(() => replacement.emit("interimtranscript", "partial again"));
+    act(() => replacement.emit("connectionchange", false));
+    expect(controls.state.interimTranscript).toBeNull();
+  });
+
+  it("clears interim transcripts when starting a call fails", async () => {
+    let reject!: (error: Error) => void;
+    voice.startCall.mockImplementationOnce(() => new Promise<void>((_, fail) => { reject = fail; }));
+    const client = await start();
+    act(() => client.emit("interimtranscript", "partial"));
+    await act(async () => { reject(new Error("Microphone unavailable")); });
+    expect(controls.state.interimTranscript).toBeNull();
   });
 
   it("reports a failed call start and releases its session", async () => {

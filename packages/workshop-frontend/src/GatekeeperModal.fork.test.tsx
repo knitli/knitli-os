@@ -414,7 +414,7 @@ describe('GatekeeperModal ambient resource connections', () => {
     const rendered = await render(
       testApi.api,
       vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue(
-        { getAmbientGatekeeper, ambientVendorStatus: ownerStatus('absent') } as unknown as RpcStub<Overseer>),
+        { getAmbientGatekeeper, ambientVendorStatus: ownerStatus('ownerAbsent') } as unknown as RpcStub<Overseer>),
       { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL },
     )
     await settle()
@@ -561,6 +561,38 @@ describe('GatekeeperModal ambient resource connections', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('offers a collaborator no Connect for an always-on vendor the owner lacks', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: true, vendorId: 'memory' })
+    const rendered = await render(testApi.api, requestOverseer({ ambientVendorStatus: ownerStatus('ownerAbsent') }),
+      { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL })
+    await settle()
+
+    expect(rendered.container.querySelector('[role="status"]')?.textContent)
+      .toBe('This workspace\'s owner doesn\'t have Knitli Memory, so it can\'t be added to this chat.')
+    expect(buttonNamed(rendered.container, 'Connect Knitli Memory')).toBeUndefined()
+    expect(buttonNamed(rendered.container, 'Add to this chat')).toBeUndefined()
+  })
+
+  it('still offers the owner Connect for an always-on vendor they lack', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: true, vendorId: 'memory' })
+    const rendered = await render(testApi.api, requestOverseer({ ambientVendorStatus: ownerStatus('absent') }),
+      { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL })
+    await settle()
+
+    expect(buttonNamed(rendered.container, 'Connect Knitli Memory')).toBeDefined()
+    expect(rendered.container.querySelector('[role="status"]')).toBeNull()
+  })
+
+  it('still offers a collaborator Connect for a regular vendor', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false })
+    const rendered = await render(testApi.api, requestOverseer({ ambientVendorStatus: ownerStatus('ownerAbsent') }),
+      { initialVendorId: 'google', initialResourceUrlPattern: PROFILE_URL })
+    await settle()
+
+    expect(buttonNamed(rendered.container, 'Connect Google')).toBeDefined()
+    expect(rendered.container.querySelector('[role="status"]')).toBeNull()
   })
 
   it('forgets a singleton account that is gone when the picker reopens', async () => {

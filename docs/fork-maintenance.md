@@ -710,12 +710,15 @@ ids are facet-local, not Activity ids.
   non-singleton account of the vendor, which can't be ambient, so its configurator starts at once;
   an answer that takes over 5 s is treated like a failed query. An owner whose singleton expired keeps
   the chooser's Reconnect, a collaborator is told the owner must reconnect, a viewer whose own
-  singleton the owner lacks is told so, and a failed query falls back to the viewer's own
+  singleton the owner lacks is told so (as is a collaborator with no account of an
+  auto-provisioning vendor the owner lacks -- "ownerAbsent"; the owner still gets Connect), and a failed query falls back to the viewer's own
   accounts (the add itself is authoritative). The status is re-asked when the viewer's accounts
   of the vendor change, so an owner who connects the singleton in the modal can then add it.
   `ensureAmbientCapsules()` queues each run behind the previous one (upstream runs them
   concurrently), so overlapping runs can't provision two capsules for one vendor; the queue link
-  gives up on a run after 30 s, so one hung run can't wedge later reconciles.
+  gives up on a run after 30 s, so one hung run can't wedge later reconciles. The reconcile binds
+  one account per vendor and prefers a valid one (upstream: the vendor's last account, and every
+  unbound account is added), so it binds the account `ambientVendorStatus` calls "available".
 - **Collaborator path:** build scope includes every ambient capsule, and the ambient step of
   `ensureObserver` requires a build collaborator's own account of the vendor to open the
   workspace. So a collaborator clicking "Add to this chat" when the capsule is new triggers the

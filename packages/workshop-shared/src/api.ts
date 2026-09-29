@@ -4934,8 +4934,9 @@ export type ShareLinkInfo = {
 
 /**
  * Fork: the owner's always-on availability of a vendor, from Overseer.ambientVendorStatus():
- * "available" (a usable singleton account), "absent" (none), or -- when the owner's only such
- * accounts have expired -- "reconnect" to the owner (who can reconnect it) and
- * "ownerMustReconnect" to a collaborator (who can't).
+ * "available" (a usable singleton account); with none, "absent" to the owner (who can add it) and
+ * "ownerAbsent" to a collaborator (who can't); when the owner's only such accounts have expired,
+ * "reconnect" to the owner (who can reconnect it) and "ownerMustReconnect" to a collaborator.
  */
-export type AmbientVendorStatus = "available" | "absent" | "reconnect" | "ownerMustReconnect";
+export type AmbientVendorStatus =
+    "available" | "absent" | "ownerAbsent" | "reconnect" | "ownerMustReconnect";

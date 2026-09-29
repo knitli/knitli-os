@@ -7807,9 +7807,12 @@ class OverseerImpl implements AgentHooks {
     // record is keyed to a specific accountId; if that account is gone (disconnected) or was replaced
     // (an optional account removed and re-added with a new accountId), the record is stale and would
     // point the capsule at a deleted account — so remove it. Snapshot the list since we mutate it.
-    // ponytail: (upstream) the vendor's last account wins, valid or not, while ambientVendorStatus
-    // says "available" if any is valid; prefer a valid one here if owners ever hold several.
-    let currentAccountId = new Map(accounts.map(account => [account.vendorId, account.accountId]));
+    // Fork: one account per vendor, a valid one when there is one (sorted last, so it wins) -- the
+    // account ambientVendorStatus calls "available". Only an owner holding several accounts of a
+    // vendor, one expired, sees a difference from upstream's last-account-wins.
+    let currentAccountId = new Map(accounts
+        .toSorted((a, b) => Number(a.credentialsValid !== false) - Number(b.credentialsValid !== false))
+        .map(account => [account.vendorId, account.accountId]));
     let bound = new Set<string>();
     // Snapshot before iterating, since removeGatekeeper() mutates the collection.
     let existingGatekeepers = Array.from(this.storage.gatekeepers.list());
@@ -7821,7 +7824,8 @@ class OverseerImpl implements AgentHooks {
         this.removeGatekeeper(gk.id);
       }
     }
-    let toAdd = accounts.filter(account => !bound.has(account.vendorId));
+    let toAdd = accounts.filter(account =>
+        !bound.has(account.vendorId) && currentAccountId.get(account.vendorId) === account.accountId);
     if (toAdd.length === 0) return;
 
     // Each singleton account provides a normal Gatekeeper class (imbued via ctx.props with whatever
@@ -11525,8 +11529,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async ambientVendorStatus(vendorId: string): Promise<AmbientVendorStatus> {
     let status = await this.impl.ownerAmbientVendorStatus(vendorId);
-    if (status !== "expired") return status;
-    return this.isOwner ? "reconnect" : "ownerMustReconnect";
+    if (status === "expired") return this.isOwner ? "reconnect" : "ownerMustReconnect";
+    return status === "absent" && !this.isOwner ? "ownerAbsent" : status;
   }
 
   // Fork: reconcile first, after this open's own reconcile, so a singleton the owner connected

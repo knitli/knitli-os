@@ -335,7 +335,12 @@ export default function GatekeeperModal({
   const addsAmbientToChat = requestedVendorSelected &&
     (ownerStatus === 'available' || (ownerStatus === 'unknown' && viewerAlwaysOn))
   const ownerMustReconnect = requestedVendorSelected && ownerStatus === 'ownerMustReconnect'
-  const ownerLacksAmbient = requestedVendorSelected && ownerStatus === 'absent' && viewerAlwaysOn
+  // A collaborator can't add the owner's missing singleton, so gets no Connect for an ambient-type
+  // (auto-provisioning) vendor they hold no account of; the owner ("absent") still does.
+  const ownerLacksAmbient = requestedVendorSelected && (
+    ((ownerStatus === 'absent' || ownerStatus === 'ownerAbsent') && viewerAlwaysOn) ||
+    (ownerStatus === 'ownerAbsent' && viewerVendorAccounts.length === 0 &&
+      Boolean(selectedConnection?.autoProvisionsAccount)))
   // For the requested vendor the owner's status decides; its "reconnect" (the viewer is the owner)
   // leaves the chooser's Reconnect in place, as does "absent" for a vendor the viewer lacks.
   const selectedAlwaysOn = (viewerAlwaysOn && !requestedVendorSelected) || checkingOwnerAmbient ||

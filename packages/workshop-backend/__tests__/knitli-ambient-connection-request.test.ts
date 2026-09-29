@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { OverseerDurableObject } from "../src/overseer.js";
 import type { UserDurableObject } from "../src/user.js";
+import type { Overseer } from "@gadgets/workshop-shared/api";
 import { makeActionStorage, openFakeOverseer } from "./fixtures.js";
 
 declare module "cloudflare:workers" {
@@ -90,6 +91,20 @@ async function withImpl<T>(
   });
 }
 
+async function askStatuses(client: Overseer) {
+  return {
+    memory: await client.ambientVendorStatus("memory"),
+    messaging: await client.ambientVendorStatus("messaging"),
+    notes: await client.ambientVendorStatus("notes"),
+  };
+}
+
+function ambientAccountIds(impl: any): number[] {
+  return [...impl.storage.gatekeepers.list()]
+      .filter((gk: any) => gk.creationSpec?.type === "ambient")
+      .map((gk: any) => gk.creationSpec.accountId);
+}
+
 function ambientVendors(impl: any): string[] {
   return [...impl.storage.gatekeepers.list()]
       .filter((gk: any) => gk.creationSpec?.type === "ambient")
@@ -105,6 +120,24 @@ describe("ensureAmbientCapsules", () => {
       return ambientVendors(impl);
     }, 10);
     expect(vendors).toEqual(["messaging"]);
+  });
+
+  it("binds a vendor's valid account when the owner holds an expired one too", async () => {
+    let valid = { ...MESSAGING_ACCOUNT, accountId: 8, credentialsValid: true };
+    let expired = { ...MESSAGING_ACCOUNT, accountId: 9, credentialsValid: false };
+    let accountIds = await withImpl(async () => [valid, expired], async impl => {
+      await impl.ensureAmbientCapsules();
+      let fresh = ambientAccountIds(impl);
+      // A capsule already bound to the expired account is moved to the valid one.
+      for (let id of Array.from(impl.storage.gatekeepers.list(), (gk: any) => gk.id)) {
+        impl.storage.gatekeepers.delete(id);
+      }
+      impl.storage.gatekeepers.put({ id: 50, class: {} as never, resourceTitle: "Knitli Messaging",
+        creationSpec: { type: "ambient", vendorId: "messaging", accountId: 9 } });
+      await impl.ensureAmbientCapsules();
+      return { fresh, rebound: ambientAccountIds(impl) };
+    });
+    expect(accountIds).toEqual({ fresh: [8], rebound: [8] });
   });
 
   it("still runs later reconciles after one fails", async () => {
@@ -140,18 +173,20 @@ describe("ambientVendorStatus", () => {
     expect(result).toEqual({ messaging: "available", memory: "expired", notes: "absent", vendors: [] });
   });
 
-  it("tells the owner to reconnect an expired singleton and a collaborator that the owner must", async () => {
-    let expired = { ownerAmbientVendorStatus: async () => "expired" };
-    let owner = await openFakeOverseer(seed(), { implOverrides: expired });
+  it("tells the owner what they can fix and a collaborator what only the owner can", async () => {
+    let statuses = { memory: "expired", messaging: "absent", notes: "available" } as Record<string, string>;
+    let ownerAmbientVendorStatus = async (vendorId: string) => statuses[vendorId];
+    let owner = await openFakeOverseer(seed(), { implOverrides: { ownerAmbientVendorStatus } });
     let collaborator = await openFakeOverseer(seed(), {
       role: "use", implOverrides: {
-        ...expired,
+        ownerAmbientVendorStatus,
         authorizeCollaborator: async () => "build",
         getSharingManager: async () => ({ getEffectiveRole: () => "build" }),
       },
     });
-    expect(await owner.ambientVendorStatus("memory")).toBe("reconnect");
-    expect(await collaborator.ambientVendorStatus("memory")).toBe("ownerMustReconnect");
+    expect(await askStatuses(owner)).toEqual({ memory: "reconnect", messaging: "absent", notes: "available" });
+    expect(await askStatuses(collaborator))
+        .toEqual({ memory: "ownerMustReconnect", messaging: "ownerAbsent", notes: "available" });
   });
 
   it("is denied to a use collaborator", async () => {

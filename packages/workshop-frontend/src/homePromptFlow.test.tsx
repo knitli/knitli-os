@@ -16,7 +16,7 @@ const testState = vi.hoisted(() => {
     authenticatedApi: { listModels, newGadget },
     currentUser: { id: "user-a", name: "User A" },
     listModels,
-    navigate: vi.fn<(options: unknown) => void>(),
+    navigate: vi.fn<(options: unknown) => void | Promise<void>>(),
     newGadget,
     seeds: [] as Array<{ text?: string; nonce?: number }>,
     draftStorageKeys: [] as Array<string | undefined>,
@@ -126,7 +126,8 @@ describe("Home prompt route flow", () => {
 
   it("keeps capture off and reports a failed conversation creation", async () => {
     testState.listModels.mockResolvedValue([{ id: "model" }]);
-    testState.newGadget.mockReturnValue({ newChat: vi.fn<() => Promise<number>>().mockRejectedValue(new Error("Creation failed")), getMetadata: async () => ({ id: "workspace" }), [Symbol.dispose]: vi.fn<() => void>() });
+    const newChat = vi.fn<() => Promise<number>>().mockRejectedValueOnce(new Error("Creation failed")).mockResolvedValue(0);
+    testState.newGadget.mockReturnValue({ newChat, getMetadata: async () => ({ id: "workspace" }), [Symbol.dispose]: vi.fn<() => void>() });
     container = document.createElement("div");
     root = createRoot(container);
     await act(async () => root!.render(<HomePageContent />));
@@ -134,6 +135,37 @@ describe("Home prompt route flow", () => {
     expect(testState.navigate).not.toHaveBeenCalled();
     expect(testState.startVoice).not.toHaveBeenCalled();
     expect(testState.addToast).toHaveBeenCalledWith({ title: "Failed to start conversation", variant: "error" });
+    await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Start conversation"]')!.click());
+    expect(newChat).toHaveBeenCalledTimes(2);
+    expect(testState.newGadget).toHaveBeenCalledTimes(1);
+    expect(testState.navigate).toHaveBeenLastCalledWith(expect.objectContaining({ search: { chat: 0 } }));
+  });
+
+  it.each(["metadata", "navigation", "pending chat"])("reuses the provisional workspace and voice chat after failed %s", async (failure) => {
+    testState.listModels.mockResolvedValue([{ id: "model" }]);
+    let resolveChat!: (id: number) => void;
+    const newChat = vi.fn<() => Promise<number>>().mockImplementation(() =>
+      failure === "pending chat" ? new Promise<number>((resolve) => { resolveChat = resolve; }) : Promise.resolve(0));
+    const getMetadata = vi.fn<() => Promise<{ id: string }>>().mockResolvedValue({ id: "workspace" });
+    const dispose = vi.fn<() => void>();
+    const overseer = { newChat, getMetadata, [Symbol.dispose]: dispose };
+    testState.newGadget.mockReturnValue(overseer);
+    if (failure === "navigation") testState.navigate.mockRejectedValueOnce(new Error("Navigation failed"));
+    else getMetadata.mockRejectedValueOnce(new Error("Metadata failed"));
+    container = document.createElement("div");
+    root = createRoot(container);
+    await act(async () => root!.render(<HomePageContent />));
+    // A draft may already have attachments or capsules scoped to this workspace.
+    expect(testState.composerProps.getOverseer!()).toBe(overseer);
+    await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Start conversation"]')!.click());
+    expect(testState.addToast).toHaveBeenCalledWith({ title: "Failed to start conversation", variant: "error" });
+    await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Start conversation"]')!.click());
+    if (failure === "pending chat") await act(async () => resolveChat(0));
+    expect(testState.newGadget).toHaveBeenCalledTimes(1);
+    expect(newChat).toHaveBeenCalledExactlyOnceWith("", "model");
+    expect(dispose).not.toHaveBeenCalled();
+    expect(testState.composerProps.getOverseer!()).toBe(overseer);
+    expect(testState.navigate).toHaveBeenLastCalledWith(expect.objectContaining({ params: { id: "workspace" }, search: { chat: 0 } }));
   });
 
   it("does not navigate or start capture if Home unmounts while creating the chat", async () => {

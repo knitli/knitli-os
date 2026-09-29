@@ -203,3 +203,12 @@ chat creation, error feedback, launch cancellation, history consumption, handoff
 invalidation, Stop label, initial model, first-user gap, and exact-model startup),
 then all affected files passed after restoration. No hosted microphone trial or
 deployment was performed for this repair.
+
+PR #43 review follow-up: cache the in-flight/successful Home voice-chat creation
+on its provisional workspace. Metadata/navigation retries now reuse that chat,
+including when metadata fails before creation settles. Replacing the workspace
+would abandon draft resource references and would not delete its persisted record.
+A rejected creation clears only the cached promise. Three partial-failure tests
+failed with duplicate creation before the fix; removing rejection reset failed
+retry recovery independently. Restoration passed all eight Home tests, all 723
+frontend tests, and full lint/types/build. Backend code is unchanged.

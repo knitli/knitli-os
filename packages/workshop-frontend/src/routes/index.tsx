@@ -91,7 +91,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
 
   // Pre-create a provisional gadget as soon as the user starts interacting, so that navigation
   // after submit is instant. Same pattern as before — disposed on unmount if never consumed.
-  const provisionalOverseerRef = useRef<{ stub: RpcStub<Overseer> } | null>(null);
+  const provisionalOverseerRef = useRef<{ stub: RpcStub<Overseer>; voiceChat?: Promise<number> } | null>(null);
 
   const ensureProvisionalGadget = useCallback(() => {
     if (!provisionalOverseerRef.current) {
@@ -169,10 +169,16 @@ export function HomePageContent({ prompt }: HomeSearch) {
     setStartingConversation(true);
     try {
       ensureProvisionalGadget();
-      const overseer = provisionalOverseerRef.current!.stub;
+      const provisional = provisionalOverseerRef.current!;
+      // Retain a pending or created chat when metadata/navigation fails; draft references
+      // still belong to this workspace, so retrying must not replace either resource.
+      provisional.voiceChat ??= Promise.resolve(provisional.stub.newChat("", selectedModel)).catch((error) => {
+        provisional.voiceChat = undefined;
+        throw error;
+      });
       const [chat, { id }] = await Promise.all([
-        overseer.newChat("", selectedModel),
-        overseer.getMetadata(),
+        provisional.voiceChat,
+        provisional.stub.getMetadata(),
       ]);
       if (generation !== voiceLaunchGeneration.current) return;
       await navigate({ to: "/workspace/$id", params: { id }, search: { chat },

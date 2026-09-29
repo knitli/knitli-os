@@ -1,7 +1,7 @@
 import { createExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { newWebSocketRpcSession } from "capnweb";
-import type { PublicApi, VoiceSessionConnection } from "@gadgets/workshop-shared/api";
+import type { PublicApi, VoiceMode, VoiceSessionConnection } from "@gadgets/workshop-shared/api";
 import { expect, it } from "vitest";
 import server from "../src/server";
 
@@ -91,4 +91,15 @@ it("closes the audio socket when its authenticated RPC transport disconnects", a
   await bounded("audio close event", closed);
   expect((await upgrade(session)).status).toBe(403);
   audio.close();
+});
+
+
+it("rejects invalid voice modes at the authenticated RPC boundary", async () => {
+  const connection = await connect();
+  using _api = connection.api;
+  using authenticated = connection.authenticated;
+  try {
+    await expect(bounded("invalid voice mode", authenticated.createVoiceSession("invalid" as VoiceMode)))
+      .rejects.toThrow(/capnweb-validate: at AuthenticatedApi(?:Impl)?\.createVoiceSession\[0\]: expected union, got string/);
+  } finally { connection.socket.close(); }
 });

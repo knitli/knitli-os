@@ -136,10 +136,7 @@ export class VoiceSession extends withVoice(Agent)<Cloudflare.Env> {
     if (this.mode || this.closed) throw new Error("Voice session already initialized");
     this.sessionId = id; this.mode = mode; this.credential = { hash, expiresAt };
     this.liveness = liveness.dup();
-    this.expiry = setTimeout(() => { void this.revoke(); }, 60 * 60 * 1000);
-    this.heartbeat = setInterval(() => {
-      void this.liveness?.check().catch(() => this.revoke());
-    }, 5000);
+    this.expiry = setTimeout(() => { void this.revoke(); }, Math.max(0, expiresAt - Date.now()));
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -153,12 +150,24 @@ export class VoiceSession extends withVoice(Agent)<Cloudflare.Env> {
     this.credential = undefined;
     try { await this.liveness!.check(); } catch { await this.revoke(); return new Response("Voice session closed", { status: 403 }); }
     if (this.closed) return new Response("Voice session closed", { status: 403 });
-    return super.fetch(request);
+    try {
+      const response = await super.fetch(request);
+      if (response.status !== 101) await this.revoke();
+      return response;
+    } catch (error) {
+      await this.revoke();
+      throw error;
+    }
   }
 
   onConnect(connection: Connection): void {
     if (this.closed || this.connectionId) { connection.close(1008, "Voice session closed"); return; }
     this.connectionId = connection.id;
+    clearTimeout(this.expiry);
+    this.expiry = setTimeout(() => { void this.revoke(); }, 60 * 60 * 1000);
+    this.heartbeat = setInterval(() => {
+      void this.liveness?.check().catch(() => this.revoke());
+    }, 5000);
   }
   async beforeCallStart(): Promise<boolean> {
     if (this.closed || !this.mode || !this.env.WORKERS_AI) return false;

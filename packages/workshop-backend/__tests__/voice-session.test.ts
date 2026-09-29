@@ -1,5 +1,5 @@
 import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RpcStub } from "cloudflare:workers";
 import { VoiceLiveness, VoiceResponseStream, VoiceSession } from "../src/voice-session";
 import { newSecretToken } from "../src/connect-handoff";
@@ -17,6 +17,72 @@ function upgrade(token: string) {
   return new Request(`https://voice.example/api/voice/test?token=${token}`, { headers: { Upgrade: "websocket" } });
 }
 describe("voice audio capability", () => {
+  it("expires an unredeemed ticket without starting a heartbeat", async () => {
+    const stub = voices.getByName(crypto.randomUUID());
+    const { secret, hash } = await newSecretToken();
+    await runInDurableObject(stub, async (instance: VoiceSession) => {
+      using live = new RpcStub(new VoiceLiveness(() => true));
+      const timeout = vi.spyOn(globalThis, "setTimeout");
+      const interval = vi.spyOn(globalThis, "setInterval");
+      try {
+        await instance.initialize("unused", "dictate", hash, Date.now() + 60_000, live);
+        expect(interval).not.toHaveBeenCalled();
+        expect(timeout).toHaveBeenCalledWith(expect.any(Function), 60_000);
+        const expire = timeout.mock.calls[0][0] as () => void;
+        expire();
+        expect((await instance.fetch(upgrade(secret.toHex()))).status).toBe(403);
+      } finally {
+        await instance.revoke();
+        timeout.mockRestore(); interval.mockRestore();
+      }
+    });
+  });
+  it("promotes the ticket deadline to a call lifetime only on connection", async () => {
+    const current = await session();
+    try {
+      await runInDurableObject(current.stub, async (instance: VoiceSession) => {
+        const timeout = vi.spyOn(globalThis, "setTimeout");
+        const interval = vi.spyOn(globalThis, "setInterval");
+        const clear = vi.spyOn(globalThis, "clearTimeout");
+        try {
+          const response = await instance.fetch(upgrade(current.token));
+          expect(response.status).toBe(101);
+          response.webSocket!.accept();
+          expect(clear).toHaveBeenCalled();
+          expect(timeout).toHaveBeenCalledWith(expect.any(Function), 60 * 60 * 1000);
+          expect(interval).toHaveBeenCalledWith(expect.any(Function), 5000);
+          response.webSocket!.close();
+        } finally {
+          await instance.revoke();
+          timeout.mockRestore(); interval.mockRestore(); clear.mockRestore();
+        }
+      });
+    } finally { await current.stub.revoke(); current.live[Symbol.dispose](); }
+  });
+  it.each(["response", "throw"])("revokes a redeemed ticket when transport acceptance fails with %s", async failure => {
+    const current = await session();
+    try {
+      await runInDurableObject(current.stub, async (instance: VoiceSession) => {
+        const sdkFetch = vi.spyOn(Object.getPrototypeOf(VoiceSession.prototype), "fetch");
+        const revoke = vi.spyOn(instance, "revoke");
+        try {
+          if (failure === "throw") {
+            sdkFetch.mockRejectedValueOnce(new Error("Transport unavailable"));
+            await expect(instance.fetch(upgrade(current.token))).rejects.toThrow("Transport unavailable");
+          } else {
+            sdkFetch.mockResolvedValueOnce(new Response("Transport unavailable", { status: 503 }));
+            expect((await instance.fetch(upgrade(current.token))).status).toBe(503);
+          }
+          expect(sdkFetch).toHaveBeenCalledOnce();
+          expect(revoke).toHaveBeenCalledOnce();
+          expect((await instance.fetch(upgrade(current.token))).status).toBe(403);
+        } finally {
+          sdkFetch.mockRestore(); revoke.mockRestore();
+          await instance.revoke();
+        }
+      });
+    } finally { await current.stub.revoke(); current.live[Symbol.dispose](); }
+  });
   it("rejects wrong-session credentials, consumes once, and rejects replay", async () => {
     const first = await session();
     const second = await session();

@@ -98,7 +98,6 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async createVoiceSession(mode: VoiceMode): Promise<VoiceSessionConnection> {
-    if (mode !== "dictate" && mode !== "conversation") throw new Error("Invalid voice mode");
     if (!this.env.WORKERS_AI) throw new Error("Voice is not available on this deployment");
     const namespace = this.ctx.exports.VoiceSession;
     const id = crypto.getRandomValues(new Uint8Array(32)).toHex();

@@ -234,3 +234,73 @@ for (const mode of ["dictate", "conversation"] as const) {
     } finally { await current.stub.revoke(); current.live[Symbol.dispose](); }
   });
 }
+
+for (const mode of ["dictate", "conversation"] as const) {
+  it(`routes real Flux events through repeated ${mode} turns`, async () => {
+    const current = await session(mode);
+    try {
+      await runInDurableObject(current.stub, async (instance: VoiceSession) => {
+        const bindings = Reflect.get(instance, "env") as Cloudflare.Env;
+        const originalAi = bindings.WORKERS_AI;
+        const pair = new WebSocketPair();
+        const provider = pair[0];
+        provider.binaryType = "arraybuffer";
+        provider.accept();
+        const run = vi.fn(async () => new Response(null, { status: 101, webSocket: pair[1] }));
+        // Only the network boundary is fake; the Flux adapter and withVoice stay real.
+        Object.assign(bindings, { WORKERS_AI: { run } });
+        instance.tts = { synthesize: async () => new ArrayBuffer(4) };
+        try {
+          const response = await instance.fetch(upgrade(current.token));
+          const socket = response.webSocket!;
+          const next = frames(socket);
+          const finalTexts: string[] = [];
+          socket.addEventListener("message", event => {
+            if (typeof event.data !== "string") return;
+            const frame = JSON.parse(event.data);
+            if (frame.type === "voice_transcript") finalTexts.push(frame.text);
+          });
+          socket.accept();
+          await next(frame => !(frame instanceof ArrayBuffer) && frame.type === "welcome");
+          socket.send(JSON.stringify({ type: "start_call" }));
+          await next(frame => !(frame instanceof ArrayBuffer) && frame.type === "status" && frame.status === "listening");
+          expect(run).toHaveBeenCalledExactlyOnceWith("@cf/deepgram/flux", {
+            encoding: "linear16", sample_rate: "16000",
+          }, { websocket: true });
+          let sequence = 0;
+          for (const [turnIndex, text] of ["First sentence.", "Second sentence."].entries()) {
+            const send = (event: string, transcript: string) => provider.send(JSON.stringify({
+              type: "TurnInfo", event, transcript, turn_index: turnIndex, sequence_id: sequence++,
+            }));
+            const audio = new Promise<MessageEvent>(resolve => provider.addEventListener("message", resolve, { once: true }));
+            socket.send(new ArrayBuffer(320));
+            expect((await audio).data).toBeInstanceOf(ArrayBuffer);
+            send("StartOfTurn", "");
+            send("Update", text);
+            await next(frame => !(frame instanceof ArrayBuffer) && frame.type === "transcript_interim" && frame.text === text);
+            expect(finalTexts).toHaveLength(turnIndex);
+            send("EndOfTurn", text);
+            const final = await next(frame => !(frame instanceof ArrayBuffer) && frame.type === "voice_transcript");
+            expect(final).toMatchObject({ type: "voice_transcript", mode, text });
+            if (mode === "conversation" && !(final instanceof ArrayBuffer)) {
+              socket.send(JSON.stringify({ type: "voice_response", sessionId: final.sessionId,
+                turnId: final.turnId, sequence: 0, text: "Acknowledged.", done: true }));
+              await next(frame => frame instanceof ArrayBuffer);
+            }
+            expect(await next(frame => !(frame instanceof ArrayBuffer) && frame.type === "turn_metrics"))
+              .toMatchObject({ outcome: mode === "dictate" ? "skipped" : "completed" });
+            expect(finalTexts).toEqual(["First sentence.", "Second sentence."].slice(0, turnIndex + 1));
+          }
+          // Provider resets must surface as failure instead of silently freezing the call.
+          provider.close(1011, "Durable Object reset because its code was updated.");
+          expect(await next(frame => !(frame instanceof ArrayBuffer) && frame.type === "error"))
+            .toMatchObject({ code: "stt_connection_lost", stage: "stt", retryable: true });
+          socket.close();
+        } finally {
+          await instance.revoke();
+          Object.assign(bindings, { WORKERS_AI: originalAi });
+        }
+      });
+    } finally { await current.stub.revoke(); current.live[Symbol.dispose](); }
+  });
+}

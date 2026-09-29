@@ -5,6 +5,8 @@ export type DictationAppend = {
   token: number;
   text: string;
   chatKey: number | null;
+  segmentId?: number;
+  final?: boolean;
 };
 
 /**
@@ -16,11 +18,13 @@ export const useDictationAppendQueue = () => {
   const [appends, setAppends] = useState<readonly DictationAppend[]>([]);
   const nextToken = useRef(0);
 
-  const enqueue = useCallback((text: string, chatKey: number | null) => {
+  const enqueue = useCallback((text: string, chatKey: number | null, segmentId?: number, final = true) => {
     const append = {
       token: ++nextToken.current,
       text,
       chatKey,
+      segmentId,
+      final,
     };
     setAppends((current) => [...current, append]);
   }, []);

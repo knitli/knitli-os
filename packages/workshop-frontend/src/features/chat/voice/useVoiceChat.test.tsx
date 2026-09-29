@@ -25,8 +25,20 @@ const voice = vi.hoisted(() => {
 vi.mock("agents/voice/client", () => ({ VoiceClient: voice.Client }));
 
 import { useVoiceChat } from "./useVoiceChat";
-import { VoiceControls } from "./VoiceControls";
 import type { VoiceChatEvent } from "./voiceResponseRelay";
+
+vi.mock("@cloudflare/kumo", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@cloudflare/kumo")>()),
+  useKumoToastManager: () => ({ add: () => {} }),
+}));
+vi.mock("../../../AuthContext", () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }));
+vi.mock("../../../useVendorBranding", () => ({ useVendorBranding: () => new Map() }));
+vi.mock("../../../GatekeeperModal", () => ({ default: () => null }));
+import { ChatComposer } from "../composer/ChatComposer";
+import type { RpcStub } from "capnweb";
+import type { Overseer } from "@gadgets/workshop-shared/api";
+Element.prototype.scrollIntoView ??= () => {};
+vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -63,15 +75,12 @@ describe("useVoiceChat", () => {
     const result = useVoiceChat(props);
     useEffect(() => { controls = result; });
     useLayoutEffect(() => { onLayout?.(); });
-    return showVoiceControls ? <VoiceControls
-        state={result.state}
-        disabled={false}
-        onStart={result.start}
-        onEnd={result.end}
-        onMute={result.toggleMute}
-        onPendingTextChange={result.setPendingText}
-        onSendPending={result.sendPending}
-      /> : null;
+    return showVoiceControls ? <ChatComposer
+      createCapsuleGatekeeper={async () => null} getOverseer={() => ({} as RpcStub<Overseer>)}
+      onSend={() => {}} isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+      conversationDraft={{ text: result.state.pendingText, readOnly: false, canSend: true,
+        onChange: result.setPendingText, onSend: result.sendPending }}
+    /> : null;
   }
   const render = async (patch: Partial<Props> = {}) => {
     props = { ...props, ...patch };
@@ -115,6 +124,88 @@ describe("useVoiceChat", () => {
     container.remove();
   });
 
+  it("retains unfinished conversation text after Stop without automatically sending it", async () => {
+    const client = await start();
+    act(() => client.emit("interimtranscript", "Unfinished instruction"));
+    act(() => controls.end());
+    expect(controls.state.pendingText).toBe("Unfinished instruction");
+    await render({ agentActive: false });
+    expect(sendMessage).not.toHaveBeenCalled();
+    await act(async () => controls.sendPending());
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Unfinished instruction", { hasSpeech: true });
+  });
+
+  it("releases a failed speech provider and preserves recognized text for review", async () => {
+    const client = await start();
+    act(() => client.emit("interimtranscript", "Keep this instruction"));
+    act(() => client.emit("voiceerror", { message: "Durable Object reset because its code was updated.", stage: "stt" }));
+    expect(client.disconnect).toHaveBeenCalledOnce();
+    expect(controls.state.mode).toBeNull();
+    expect(controls.state.pendingText).toBe("Keep this instruction");
+    expect(controls.state.error).toContain("Durable Object reset");
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not copy unfinished conversation text into another chat", async () => {
+    const client = await start();
+    act(() => client.emit("interimtranscript", "For chat seven only"));
+    await render({ chatId: 8 });
+    expect(controls.state.pendingText).toBe("");
+    await render({ chatId: 7, agentActive: false });
+    expect(controls.state.pendingText).toBe("For chat seven only");
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("sends the latest edit once when Send is pressed twice before its receipt", async () => {
+    await start();
+    await transcript("Original words", "turn-1");
+    act(() => controls.end());
+    await render({ agentActive: false });
+    let finish!: (receipt: number) => void;
+    sendMessage.mockImplementation(() => new Promise<number>((resolve) => { finish = resolve; }));
+    act(() => {
+      controls.setPendingText("Edited words", { start: 0, end: 14 });
+      controls.sendPending();
+      controls.sendPending();
+    });
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Edited words", undefined);
+    await act(async () => finish(10));
+    expect(controls.state.pendingText).toBe("");
+  });
+
+  it("keeps interim conversation visible until the matching final arrives", async () => {
+    const client = await start();
+    act(() => client.emit("interimtranscript", "Visible words"));
+    act(() => client.emit("interimtranscript", null));
+    expect(controls.state.interimTranscript).toBe("Visible words");
+    await transcript("Visible words.", "turn-1");
+    expect(controls.state.interimTranscript).toBeNull();
+    expect(controls.state.pendingText).toBe("Visible words.");
+  });
+
+  it("keeps typed conversation text and subsequent speech together for review", async () => {
+    await render({ agentActive: false });
+    await start();
+    act(() => controls.setPendingText("Typed context"));
+    await transcript("Spoken detail", "turn-1");
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(controls.state.pendingText).toBe("Typed context\nSpoken detail");
+    await act(async () => controls.sendPending());
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Typed context\nSpoken detail", { hasSpeech: true });
+  });
+
+  it("reserves the requested composer mode while session creation is pending", async () => {
+    let fail!: (error: Error) => void;
+    await render({ authenticatedApi: {
+      createVoiceSession: () => new Promise((_, reject) => { fail = reject; }),
+    } as unknown as Props["authenticatedApi"] });
+    act(() => controls.start("conversation"));
+    expect(controls.state.mode).toBe("conversation");
+    await act(async () => fail(new Error("Session unavailable")));
+    expect(controls.state.mode).toBeNull();
+    expect(controls.state.error).toBe("Session unavailable");
+  });
+
   it("keeps ended-call text for explicit review across mode changes without auto-submitting it", async () => {
     const oldClient = await start();
     await transcript("Keep this draft", "old-turn");
@@ -138,7 +229,7 @@ describe("useVoiceChat", () => {
     act(() => controls.end());
     await render({ agentActive: false });
     await renderVoiceControls();
-    const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="Pending voice instruction"]')!;
+    const editor = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
     const setValue = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(editor), "value")!.set!;
     editor.focus();
     editor.setSelectionRange(0, editor.value.length);
@@ -148,7 +239,7 @@ describe("useVoiceChat", () => {
       editor.dispatchEvent(new Event("input", { bubbles: true }));
     });
     await act(async () => {
-      Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Send")!.click();
+      container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.click();
     });
     expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Typed words", undefined);
   });
@@ -536,7 +627,7 @@ describe("useVoiceChat", () => {
     expect(sendMessage).toHaveBeenLastCalledWith("Earlier request\nNewer request", { hasSpeech: true });
   });
 
-  it("retains a second failed idle transcript after an earlier explicit-only draft", async () => {
+  it("keeps later speech with a failed instruction until explicit retry", async () => {
     sendMessage.mockRejectedValueOnce(new Error("First failure")).mockRejectedValueOnce(new Error("Second failure"));
     await render({ agentActive: false });
     await start();
@@ -545,7 +636,11 @@ describe("useVoiceChat", () => {
     expect(controls.state.pendingText).toBe("First request\nSecond request");
     await render({ agentActive: true });
     await render({ agentActive: false });
+    expect(sendMessage).toHaveBeenCalledOnce();
+    await act(async () => controls.sendPending());
     expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenLastCalledWith("First request\nSecond request", { hasSpeech: true });
+    expect(controls.state.pendingText).toBe("First request\nSecond request");
   });
 
   it("does not duplicate a queued transcript when it fails after later speech", async () => {

@@ -246,3 +246,54 @@ red/green checks proved empty creation, deferred first-message title generation,
 and protection against a manual rename during inference. The existing external
 commit authorization regression also passed. Independent backend review found no
 remaining blocker.
+
+## 2026-09-29: transcript delivery and composer repair
+
+User report after deploying #43: Home and workspace showed only a narrow interim
+transcript; conversation surfaced a Durable Object code-update reset. User wants
+recognized text in the main chat box and dictation running until explicit Stop.
+Follow the Kumo design skill at apps/os/.agents/skills/kumo-design in knitli-site.
+
+Confirmed Home defect: its append queue uses chatKey null, while the composer had
+an omitted/undefined chatKey and rejected every transcript. A real Home + composer
++ voice hook + SDK decoder test reproduced the empty textarea before fixing the
+identity. Other tests previously mocked away this boundary.
+
+Interim dictation now updates one segment in the actual composer, and final results
+replace that segment rather than duplicating it. Stop retains the latest recognized
+text even without provider EndOfTurn. Recording leaves the composer selectable but
+read-only and disables Send/resource edits; explicit Stop enables editing/sending.
+This avoids concurrent typing or failed sends dropping later recognition updates.
+Conversation owns the main composer throughout startup/listening/queued states;
+typed context and subsequent speech remain together for explicit review. Failed
+submissions are retained and require explicit Send; additional speech does not
+independently retry a failed instruction. Duplicate in-flight sends are blocked.
+No speech interrupts or cancels running agent work. Session capabilities remain
+single-use; a failed provider is released and a new call requires a fresh session.
+
+Diagnosis beyond fixtures: agents 0.24.0 WorkersAIFluxSTT was exercised against the
+real Workers AI @cf/deepgram/flux model with synthetic audio, no deployment or user
+data. Actual on-wire rate is 16kHz (SDK resamples the 48kHz capture). Matched 16kHz
+and 48kHz checks finalized, and two separated 16kHz turns finalized at 6.585s and
+18.710s. Scratch harness and assertions: /tmp/knitli-voice-live-check; server stopped.
+Production backend deployments bracketed recorded voice sessions (17:55:03Z and
+18:02:22Z, sessions around 17:59–18:00Z), making a deployment reset plausible, but
+logs did not identify the exact error's origin. Do not claim its source was proven.
+Live provider verification is not a hosted end-to-end microphone/LLM/TTS trial.
+
+Regression evidence: real Home test red before null identity fix, green after;
+real SDK interim delivery red before segment forwarding; Stop/late-event retention
+checks; typed conversation context and duplicate/stale sends red then green;
+composer recording lock and caret preservation red then green. Actual backend Flux
+adapter tests substitute only Ai.run's WebSocket boundary and verify two provider
+EndOfTurn events in each mode. Replacing EndOfTurn with Update makes only those two
+new tests fail; restored file passes 13/13. Existing editor tests were adapted to
+exercise the real main composer, with selection/provenance assertions preserved.
+
+Final local verification for this repair: 743 frontend tests across 83 files;
+1,171 backend tests (1,139 main plus 32 integration), four existing integration
+skips; required root pnpm lint (lint, script types, full build) passed. An accidental
+raw root vitest invocation was invalid for the per-package Workers configurations;
+it was stopped and is not acceptance evidence. Correct package commands above pass.
+Independent review's startup ownership and hidden-draft findings were repaired and
+covered by failing-then-passing checks. No hosted deployment performed.

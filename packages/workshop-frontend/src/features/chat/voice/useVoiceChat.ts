@@ -2,12 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import { VoiceClient } from "agents/voice/client";
 import type { RpcStub } from "capnweb";
 import type { AuthenticatedApi, VoiceMode } from "@gadgets/workshop-shared/api";
+import {
+  speechRangesAfterTextEdit,
+  type SpeechRange,
+  type SpeechTextSelection,
+} from "../composer/draft/speechRanges";
 import { VoiceSessionTransport, voiceWebSocketUrl } from "./voiceProtocol";
 import type { VoiceControlsState } from "./VoiceControls";
 import { VoiceResponseRelay, type VoiceChatEvent, type VoiceResponseFrame } from "./voiceResponseRelay";
 
 type QueuedConversation = {
   text: string;
+  speechRanges: SpeechRange[];
   turnId: string;
   sessionId: string;
   chatId: number;
@@ -28,7 +34,7 @@ export const useVoiceChat = ({
   chatId: number | null;
   agentActive: boolean;
   onDictation: (text: string) => void;
-  sendMessage: (text: string) => Promise<number | undefined>;
+  sendMessage: (text: string, metadata?: { hasSpeech?: boolean }) => Promise<number | undefined>;
   subscribeToEvents: (listener: (event: VoiceChatEvent) => void) => () => void;
   conversationAvailable?: boolean;
   submissionAvailable?: boolean;
@@ -93,7 +99,10 @@ export const useVoiceChat = ({
   };
 
   const submitConversation = async (text: string, turnId: string, automatic = true, turnSessionId = sessionIdRef.current,
-    submittedQueue: typeof queuedConversationRef.current = null): Promise<boolean> => {
+    submittedQueue: typeof queuedConversationRef.current = null,
+    submittedSpeechRanges: readonly SpeechRange[] = automatic
+      ? [{ start: 0, end: text.length }]
+      : submittedQueue?.speechRanges ?? []): Promise<boolean> => {
     const sessionId = sessionIdRef.current;
     const generation = generationRef.current;
     const targetChatId = chatIdRef.current;
@@ -103,13 +112,16 @@ export const useVoiceChat = ({
         (automatic && modeRef.current !== "conversation")) return false;
     const shouldRelay = turnSessionId === sessionId && modeRef.current === "conversation";
     const relay = shouldRelay ? new VoiceResponseRelay() : null;
-    const queuedAtSubmission = queuedConversationRef.current;
+    const queuedAtSubmission = queuedConversationsRef.current.get(targetChatId) ?? null;
     if (relay) {
       responseRelayRef.current = relay;
       relay.beginSubmission(targetChatId, turnId);
     }
     try {
-      const receipt = await callbacksRef.current.sendMessage(pendingText);
+      const receipt = await callbacksRef.current.sendMessage(
+        pendingText,
+        submittedSpeechRanges.length > 0 ? { hasSpeech: true } : undefined,
+      );
       if (receipt === undefined) return false;
       if (!relay) return true;
       if (generation !== generationRef.current || sessionId !== sessionIdRef.current ||
@@ -121,21 +133,42 @@ export const useVoiceChat = ({
       if (automatic && turnSessionId !== null) {
         const queued = queuedConversationsRef.current.get(targetChatId) ?? null;
         if (queued && queued === submittedQueue) {
-          queued.automaticAttempted = true;
+          rememberQueuedConversation({ ...queued, automaticAttempted: true });
         } else if (queued) {
-          queued.automaticAttempted = true;
-          const retainedText = submittedQueue && queued.text.startsWith(`${submittedText}\n`)
-            ? queued.text
-            : submittedQueue || queuedAtSubmission
-              ? `${queued.text}\n${pendingText}`
-              : `${pendingText}\n${queued.text}`;
-          const retained = { ...queued, text: retainedText };
+          const alreadyRetained = submittedQueue !== null && queued.text.startsWith(`${submittedText}\n`);
+          const submittedFirst = queuedAtSubmission === null;
+          const retainedText = alreadyRetained ? queued.text : submittedFirst
+            ? `${submittedText}\n${queued.text}`
+            : `${queued.text}\n${submittedText}`;
+          const retained = {
+            ...queued,
+            text: retainedText,
+            speechRanges: alreadyRetained
+              ? queued.speechRanges
+              : submittedFirst
+                ? [
+                    ...submittedSpeechRanges,
+                    ...queued.speechRanges.map((range) => ({
+                      start: range.start + submittedText.length + 1,
+                      end: range.end + submittedText.length + 1,
+                    })),
+                  ]
+                : [
+                    ...queued.speechRanges,
+                    ...submittedSpeechRanges.map((range) => ({
+                      start: range.start + queued.text.length + 1,
+                      end: range.end + queued.text.length + 1,
+                    })),
+                  ],
+            automaticAttempted: true,
+          };
           rememberQueuedConversation(retained);
           if (targetChatId === chatIdRef.current) setState((current) => ({ ...current, pendingText: retainedText }));
         } else {
-          const retainedText = pendingText;
+          const retainedText = submittedText;
           rememberQueuedConversation({
-            text: retainedText, turnId, sessionId: turnSessionId, chatId: targetChatId, automaticAttempted: true,
+            text: retainedText, speechRanges: [...submittedSpeechRanges],
+            turnId, sessionId: turnSessionId, chatId: targetChatId, automaticAttempted: true,
           });
           if (targetChatId === chatIdRef.current) setState((current) => ({ ...current, pendingText: retainedText }));
         }
@@ -162,7 +195,13 @@ export const useVoiceChat = ({
       }
     } else if (current.text.startsWith(`${submittedText}\n`)) {
       const pendingText = current.text.slice(submittedText.length + 1);
-      rememberQueuedConversation({ ...current, text: pendingText, automaticAttempted: false });
+      const speechRanges = speechRangesAfterTextEdit(
+        current.speechRanges,
+        current.text,
+        pendingText,
+        { start: 0, end: submittedText.length + 1 },
+      );
+      rememberQueuedConversation({ ...current, text: pendingText, speechRanges, automaticAttempted: false });
       if (current.chatId === chatIdRef.current) setState((current) => ({ ...current, pendingText }));
     }
   };
@@ -176,10 +215,14 @@ export const useVoiceChat = ({
     const queued = queuedConversationRef.current;
     if (submissionAvailable && !agentActive && state.mode === "conversation" && queued &&
         !queued.automaticAttempted && queued.sessionId === sessionId && queued.chatId === chatId) {
-      queued.automaticAttempted = true;
-      const submittedText = queued.text;
-      void submitConversation(submittedText, queued.turnId, true, queued.sessionId, queued).then((sent) => {
-        finishSubmittedQueue(sent, queued, submittedText);
+      const submittedQueue = { ...queued, automaticAttempted: true };
+      rememberQueuedConversation(submittedQueue);
+      const submittedText = submittedQueue.text;
+      void submitConversation(
+        submittedText, submittedQueue.turnId, true, submittedQueue.sessionId, submittedQueue,
+        submittedQueue.speechRanges,
+      ).then((sent) => {
+        finishSubmittedQueue(sent, submittedQueue, submittedText);
       });
     }
   }, [agentActive, chatId, state.mode, state.pendingText, submissionAvailable]);
@@ -260,15 +303,49 @@ export const useVoiceChat = ({
           else if (event.mode === "conversation" && event.turnId) {
             if (activeRef.current || !submissionAvailableRef.current) {
               const previous = queuedConversationRef.current;
+              const transcript = event.text.trim();
               const queued = previous && previous.sessionId === connection.id && previous.chatId === chatId
-                ? { ...previous, text: `${previous.text}\n${event.text.trim()}`, turnId: event.turnId, automaticAttempted: previous.automaticAttempted }
+                ? {
+                    ...previous,
+                    text: `${previous.text}\n${transcript}`,
+                    speechRanges: [
+                      ...previous.speechRanges,
+                      { start: previous.text.length + 1, end: previous.text.length + 1 + transcript.length },
+                    ],
+                    turnId: event.turnId,
+                    automaticAttempted: previous.automaticAttempted,
+                  }
                 : previous && previous.chatId === chatId
-                  ? { ...previous, text: `${previous.text}\n${event.text.trim()}`, turnId: event.turnId, sessionId: connection.id, automaticAttempted: true }
-                  : { text: event.text.trim(), turnId: event.turnId, sessionId: connection.id, chatId: chatId! };
+                  ? {
+                      ...previous,
+                      text: `${previous.text}\n${transcript}`,
+                      speechRanges: [
+                        ...previous.speechRanges,
+                        { start: previous.text.length + 1, end: previous.text.length + 1 + transcript.length },
+                      ],
+                      turnId: event.turnId,
+                      sessionId: connection.id,
+                      automaticAttempted: true,
+                    }
+                  : {
+                      text: transcript,
+                      speechRanges: [{ start: 0, end: transcript.length }],
+                      turnId: event.turnId,
+                      sessionId: connection.id,
+                      chatId: chatId!,
+                    };
               rememberQueuedConversation(queued);
               setState((current) => ({ ...current, pendingText: queued.text }));
             } else {
-              void submitConversation(event.text.trim(), event.turnId, true, connection.id);
+              const transcript = event.text.trim();
+              void submitConversation(
+                transcript,
+                event.turnId,
+                true,
+                connection.id,
+                null,
+                [{ start: 0, end: transcript.length }],
+              );
             }
           }
         });
@@ -287,13 +364,17 @@ export const useVoiceChat = ({
     start,
     end: () => { release(); setState((current) => ({ ...current, mode: null, status: "idle", muted: false })); },
     toggleMute: () => clientRef.current?.toggleMute(),
-    setPendingText: (pendingText: string) => {
+    setPendingText: (pendingText: string, selection?: SpeechTextSelection) => {
       const queued = queuedConversationRef.current;
       if (!pendingText.trim() && queued) {
         queuedConversationsRef.current.delete(queued.chatId);
         queuedConversationRef.current = null;
       } else if (queued) {
-        rememberQueuedConversation({ ...queued, text: pendingText });
+        rememberQueuedConversation({
+          ...queued,
+          text: pendingText,
+          speechRanges: speechRangesAfterTextEdit(queued.speechRanges, queued.text, pendingText, selection),
+        });
       }
       setState((current) => ({ ...current, pendingText: pendingText.trim() ? pendingText : "" }));
     },
@@ -301,7 +382,14 @@ export const useVoiceChat = ({
       const queued = queuedConversationRef.current;
       if (!submissionAvailableRef.current || !queued || queued.chatId !== chatIdRef.current) return;
       const submittedText = pendingTextRef.current;
-      void submitConversation(submittedText, queued.turnId, false, queued.sessionId).then((sent) => {
+      void submitConversation(
+        submittedText,
+        queued.turnId,
+        false,
+        queued.sessionId,
+        queued,
+        queued.speechRanges,
+      ).then((sent) => {
         finishSubmittedQueue(sent, queued, submittedText);
       });
     },

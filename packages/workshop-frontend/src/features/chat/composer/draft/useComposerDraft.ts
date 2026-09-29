@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { formatIconDataUrl } from "../../../../components/format/formatIconImage";
 import { slashCommandKey } from "../../../../components/chat/slash-command-catalog";
-import type { ComposerDocument, ComposerTextEdit } from "../composerDocument";
+import type { ComposerDocument } from "../composerDocument";
 import {
   decorateComposerDraft,
   readComposerDraft,
@@ -9,6 +9,11 @@ import {
   writeComposerDraft,
   type StoredComposerDraft,
 } from "./composerDraft";
+import {
+  speechRangesAfterTextEdit,
+  type SpeechRange,
+  type SpeechTextSelection,
+} from "./speechRanges";
 
 export type DraftPresentationRequest = {
   id: number;
@@ -26,65 +31,12 @@ export type CommitDocumentEditOptions = {
   allowPresentationChanges?: boolean;
 };
 
-type SpeechRange = {
-  start: number;
-  end: number;
-};
-
 const speechRangesFromDraft = (draft: StoredComposerDraft | undefined): SpeechRange[] => {
   if (draft?.hasSpeech !== true) return [];
   return draft.speechRanges?.map(({ position, length }) => ({
     start: position,
     end: position + length,
   })) ?? (draft.text ? [{ start: 0, end: draft.text.length }] : []);
-};
-
-type TextSelection = ComposerTextEdit;
-
-const speechRangesAfterTextEdit = (
-  ranges: readonly SpeechRange[],
-  previousText: string,
-  nextText: string,
-  selection?: TextSelection,
-): SpeechRange[] => {
-  let editStart: number;
-  let previousEnd: number;
-  let nextEnd: number;
-  const selectionReplacementEnd = selection === undefined ? undefined : selection.start + nextText.length -
-    (previousText.length - (selection.end - selection.start));
-  if (selection !== undefined && selection.start >= 0 && selection.end >= selection.start &&
-      selection.end <= previousText.length && selectionReplacementEnd !== undefined &&
-      selectionReplacementEnd >= selection.start &&
-      previousText.slice(0, selection.start) === nextText.slice(0, selection.start) &&
-      previousText.slice(selection.end) === nextText.slice(selectionReplacementEnd)) {
-    editStart = selection.start;
-    previousEnd = selection.end;
-    nextEnd = selectionReplacementEnd;
-  } else {
-    editStart = 0;
-    while (editStart < previousText.length && editStart < nextText.length &&
-        previousText[editStart] === nextText[editStart]) {
-      editStart++;
-    }
-    previousEnd = previousText.length;
-    nextEnd = nextText.length;
-    while (previousEnd > editStart && nextEnd > editStart &&
-        previousText[previousEnd - 1] === nextText[nextEnd - 1]) {
-      previousEnd--;
-      nextEnd--;
-    }
-  }
-  const shift = nextEnd - previousEnd;
-  return ranges.flatMap((range) => {
-    if (range.end <= editStart) return [range];
-    if (range.start >= previousEnd) return [{ start: range.start + shift, end: range.end + shift }];
-    const survivors: SpeechRange[] = [];
-    if (range.start < editStart) survivors.push({ start: range.start, end: editStart });
-    if (range.end > previousEnd) {
-      survivors.push({ start: nextEnd, end: nextEnd + range.end - previousEnd });
-    }
-    return survivors;
-  });
 };
 
 export const composerDocumentFromDraft = (
@@ -180,9 +132,9 @@ export const useComposerDraft = ({
   const reconcileSpeechOriginAfterTextEdit = (
     previousText: string,
     nextText: string,
-    selection?: TextSelection,
+    selection?: SpeechTextSelection,
   ) => {
-    if (!hasSpeechRef.current || previousText === nextText) return;
+    if (!hasSpeechRef.current || (previousText === nextText && selection === undefined)) return;
     speechRangesRef.current = speechRangesAfterTextEdit(
       speechRangesRef.current, previousText, nextText, selection,
     );
@@ -191,7 +143,7 @@ export const useComposerDraft = ({
 
   const setCurrentDocument = (
     nextDocument: ComposerDocument,
-    selection?: TextSelection,
+    selection?: SpeechTextSelection,
     preserveSpeechRanges = false,
   ) => {
     if (!preserveSpeechRanges) {
@@ -341,7 +293,7 @@ export const useComposerDraft = ({
     setCurrentDocument(update(documentRef.current));
   };
 
-  const replaceDocument = (nextDocument: ComposerDocument, selection?: TextSelection) => {
+  const replaceDocument = (nextDocument: ComposerDocument, selection?: SpeechTextSelection) => {
     setCurrentDocument(nextDocument, selection);
   };
 
@@ -365,7 +317,7 @@ export const useComposerDraft = ({
     presentationRevision: presentationRevisionRef.current,
   });
 
-  const commitDocumentEdit = <T extends { document: ComposerDocument; textEdit?: ComposerTextEdit }>(
+  const commitDocumentEdit = <T extends { document: ComposerDocument; textEdit?: SpeechTextSelection }>(
     snapshot: ComposerDocumentSnapshot,
     transition: (current: ComposerDocument) => T | null,
     options?: CommitDocumentEditOptions,

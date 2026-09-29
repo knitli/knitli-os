@@ -144,3 +144,15 @@ Validation: 706 frontend tests, 1,135 backend unit tests, 32 backend integration
 tests (four existing skips), and full lint/build passed. New tests failed for the
 named defects before repair, including two-logo restoration and token edits.
 Independent reviews found the reported blockers resolved. No deployment performed.
+
+Sixth review follow-up: pending conversation edits reuse the composer speech-range
+logic, so fully typed replacements omit transcription context while surviving or
+newly appended speech retains it. The pending editor retains native keyboard focus
+indication. A failed independent transcript is not confused with matching text in
+an unrelated pending draft. Validation: 711 frontend tests, full lint/build, and
+focused red/green provenance and queue-ownership proofs passed.
+
+The reported new-chat dictation race is not applicable to current UI: the only
+VoiceControls are inside the selectedChatId !== null render branch; the sidebar
+new-chat composer has neither voice controls nor dictation append input. No
+speculative new-chat voice feature was added. Backend unchanged this round.

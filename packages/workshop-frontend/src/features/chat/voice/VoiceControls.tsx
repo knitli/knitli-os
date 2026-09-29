@@ -1,4 +1,6 @@
+import { useRef } from "react";
 import { Microphone, PhoneDisconnect, SpeakerHigh, SpeakerSlash } from "@phosphor-icons/react";
+import type { SpeechTextSelection } from "../composer/draft/speechRanges";
 import { WorkshopIconButton } from "../../../components/WorkshopControls";
 
 export type VoiceControlsState = {
@@ -26,12 +28,13 @@ export const VoiceControls = ({
   onStart: (mode: "dictate" | "conversation") => void;
   onEnd: () => void;
   onMute: () => void;
-  onPendingTextChange: (text: string) => void;
+  onPendingTextChange: (text: string, selection?: SpeechTextSelection) => void;
   onSendPending: () => void;
   conversationAvailable?: boolean;
   canSendPending?: boolean;
 }) => {
   const active = state.mode !== null;
+  const pendingSelectionRef = useRef<SpeechTextSelection | undefined>(undefined);
   return (
     <div className="flex min-w-0 flex-1 items-center gap-1.5">
       {active ? (
@@ -68,9 +71,25 @@ export const VoiceControls = ({
           <textarea
             rows={2}
             value={state.pendingText}
-            onChange={(event) => onPendingTextChange(event.target.value)}
+            onBeforeInput={(event) => {
+              pendingSelectionRef.current = {
+                start: event.currentTarget.selectionStart,
+                end: event.currentTarget.selectionEnd,
+              };
+            }}
+            onSelect={(event) => {
+              pendingSelectionRef.current = {
+                start: event.currentTarget.selectionStart,
+                end: event.currentTarget.selectionEnd,
+              };
+            }}
+            onChange={(event) => {
+              const selection = pendingSelectionRef.current;
+              pendingSelectionRef.current = undefined;
+              onPendingTextChange(event.target.value, selection);
+            }}
             aria-label="Pending voice instruction"
-            className="min-w-0 flex-1 resize-y bg-transparent text-[12px] text-kumo-default outline-none"
+            className="min-w-0 flex-1 resize-y bg-transparent text-[12px] text-kumo-default"
           />
           <button type="button" disabled={!canSendPending} onClick={onSendPending} className="text-[12px] font-medium text-kumo-subtle hover:text-kumo-default disabled:opacity-40">
             Send

@@ -4096,8 +4096,15 @@ function ChatInterface({
     chatEventListenersRef.current.add(listener);
     return () => chatEventListenersRef.current.delete(listener);
   }, []);
-  const sendVoiceMessage = async (text: string) => {
-    return handleSend(text, undefined, undefined, undefined, undefined, { hasSpeech: true });
+  const sendVoiceMessage = async (text: string, metadata?: { hasSpeech?: boolean }) => {
+    return handleSend(
+      text,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      metadata?.hasSpeech ? { hasSpeech: true } : undefined,
+    );
   };
   const voice = useVoiceChat({
     authenticatedApi,

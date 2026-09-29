@@ -25,6 +25,7 @@ const voice = vi.hoisted(() => {
 vi.mock("agents/voice/client", () => ({ VoiceClient: voice.Client }));
 
 import { useVoiceChat } from "./useVoiceChat";
+import { VoiceControls } from "./VoiceControls";
 import type { VoiceChatEvent } from "./voiceResponseRelay";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -56,15 +57,28 @@ describe("useVoiceChat", () => {
   let sendMessage: ReturnType<typeof vi.fn<Props["sendMessage"]>>;
   let sessionNumber: number;
   let onLayout: (() => void) | undefined;
+  let showVoiceControls: boolean;
 
   function Probe() {
     const result = useVoiceChat(props);
     useEffect(() => { controls = result; });
     useLayoutEffect(() => { onLayout?.(); });
-    return null;
+    return showVoiceControls ? <VoiceControls
+        state={result.state}
+        disabled={false}
+        onStart={result.start}
+        onEnd={result.end}
+        onMute={result.toggleMute}
+        onPendingTextChange={result.setPendingText}
+        onSendPending={result.sendPending}
+      /> : null;
   }
   const render = async (patch: Partial<Props> = {}) => {
     props = { ...props, ...patch };
+    await act(async () => { root.render(<Probe />); });
+  };
+  const renderVoiceControls = async () => {
+    showVoiceControls = true;
     await act(async () => { root.render(<Probe />); });
   };
   const start = async (mode: VoiceMode = "conversation") => {
@@ -76,6 +90,7 @@ describe("useVoiceChat", () => {
   beforeEach(async () => {
     voice.clients.length = 0;
     onLayout = undefined;
+    showVoiceControls = false;
     voice.startCall.mockReset().mockResolvedValue(undefined);
     sessionNumber = 0;
     sendMessage = vi.fn<Props["sendMessage"]>().mockResolvedValue(10);
@@ -113,8 +128,49 @@ describe("useVoiceChat", () => {
     expect(sendMessage).not.toHaveBeenCalled();
     expect(controls.state.pendingText).toBe("Keep this draft");
     await transcript("Only this new request", "new-turn");
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Only this new request");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Only this new request", { hasSpeech: true });
     expect(controls.state.pendingText).toBe("Keep this draft");
+  });
+
+  it("does not mark a select-all replacement in the pending editor as speech", async () => {
+    await start();
+    await transcript("Spoken words", "turn-1");
+    act(() => controls.end());
+    await render({ agentActive: false });
+    await renderVoiceControls();
+    const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="Pending voice instruction"]')!;
+    const setValue = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(editor), "value")!.set!;
+    editor.focus();
+    editor.setSelectionRange(0, editor.value.length);
+    await act(async () => {
+      document.dispatchEvent(new Event("selectionchange", { bubbles: true }));
+      setValue.call(editor, "Typed words");
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Send")!.click();
+    });
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Typed words", undefined);
+  });
+
+  it("keeps speech provenance when a pending edit leaves dictated text", async () => {
+    await start();
+    await transcript("Spoken words", "turn-1");
+    act(() => controls.end());
+    await render({ agentActive: false });
+    act(() => controls.setPendingText("Spoken words!", { start: 12, end: 12 }));
+    await act(async () => { controls.sendPending(); });
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Spoken words!", { hasSpeech: true });
+  });
+
+  it("clears speech provenance when a select-all replacement keeps the same text", async () => {
+    await start();
+    await transcript("Spoken words", "turn-1");
+    act(() => controls.end());
+    await render({ agentActive: false });
+    act(() => controls.setPendingText("Spoken words", { start: 0, end: 12 }));
+    await act(async () => { controls.sendPending(); });
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Spoken words", undefined);
   });
 
   it("ignores a stale dictation transcript emitted during a chat-switch layout effect", async () => {
@@ -150,7 +206,7 @@ describe("useVoiceChat", () => {
     expect(sendMessage).not.toHaveBeenCalled();
     expect(controls.state.pendingText).toBe("Wait for approval");
     await render({ submissionAvailable: true });
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Wait for approval");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Wait for approval", { hasSpeech: true });
   });
 
   it("does not send a retained draft while submission is blocked", async () => {
@@ -161,7 +217,7 @@ describe("useVoiceChat", () => {
     expect(sendMessage).not.toHaveBeenCalled();
     expect(controls.state.pendingText).toBe("Retained draft");
     await render({ submissionAvailable: true });
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Retained draft");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Retained draft", { hasSpeech: true });
   });
 
   it("queues a transcript emitted during a blocked-submission layout effect", async () => {
@@ -189,6 +245,21 @@ describe("useVoiceChat", () => {
     await transcript("second", "turn-2");
     await act(async () => { reject(new Error("Connection lost")); });
     expect(controls.state.pendingText).toBe("  first  \nsecond");
+  });
+
+  it("retains failed speech that matches the prefix of a typed pending draft", async () => {
+    sendMessage.mockRejectedValueOnce(new Error("Connection lost"));
+    await start();
+    await transcript("Old speech", "old-turn");
+    act(() => controls.setPendingText("A\nB", { start: 0, end: 10 }));
+    act(() => controls.end());
+    await start();
+    await render({ agentActive: false });
+    await transcript("A", "new-turn");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("A", { hasSpeech: true });
+    expect(controls.state.pendingText).toBe("A\nB\nA");
+    await act(async () => { controls.sendPending(); });
+    expect(sendMessage).toHaveBeenLastCalledWith("A\nB\nA", { hasSpeech: true });
   });
 
   it("clears interim transcripts when a call ends or disconnects", async () => {
@@ -331,7 +402,7 @@ describe("useVoiceChat", () => {
     await transcript("Fresh speech", "fresh-turn");
     expect(controls.state.pendingText).toBe("Fresh speech");
     await render({ agentActive: false });
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Fresh speech");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Fresh speech", { hasSpeech: true });
   });
 
   it("submits edited busy text with appended speech once, forwarding the answer to the newest voice turn", async () => {
@@ -342,7 +413,7 @@ describe("useVoiceChat", () => {
     expect(controls.state.pendingText).toBe("Edited words\nAnd this");
     expect(sendMessage).not.toHaveBeenCalled();
     await render({ agentActive: false });
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Edited words\nAnd this");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Edited words\nAnd this", { hasSpeech: true });
     act(() => {
       listener({ type: "message", message: user(10) });
       listener({ type: "message", message: assistant(11) });
@@ -383,7 +454,7 @@ describe("useVoiceChat", () => {
     act(() => controls.setPendingText("Edited before sending"));
     sendMessage.mockRejectedValueOnce(new Error("Connection lost; result unknown"));
     await act(async () => { controls.sendPending(); });
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Edited before sending");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Edited before sending", undefined);
     expect(controls.state.pendingText).toBe("Edited before sending");
     expect(controls.state.error).toBe("Connection lost; result unknown");
     await start();
@@ -405,7 +476,7 @@ describe("useVoiceChat", () => {
     await transcript("Do not lose this", "turn-1");
     sendMessage.mockRejectedValueOnce(new Error("Send outcome unknown"));
     await render({ agentActive: false });
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Do not lose this");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Do not lose this", { hasSpeech: true });
     expect(controls.state.pendingText).toBe("Do not lose this");
     expect(controls.state.error).toBe("Send outcome unknown");
     await render({ agentActive: true });
@@ -418,7 +489,7 @@ describe("useVoiceChat", () => {
     await render({ agentActive: false });
     await start();
     await transcript("Do not lose this", "turn-1");
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Do not lose this");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Do not lose this", { hasSpeech: true });
     expect(controls.state.pendingText).toBe("Do not lose this");
     expect(controls.state.error).toBe("Connection lost; result unknown");
     await render({ agentActive: true });
@@ -446,7 +517,7 @@ describe("useVoiceChat", () => {
     await render({ agentActive: false });
     expect(sendMessage).toHaveBeenCalledOnce();
     await act(async () => { controls.sendPending(); });
-    expect(sendMessage).toHaveBeenLastCalledWith("Earlier request\nNewer request");
+    expect(sendMessage).toHaveBeenLastCalledWith("Earlier request\nNewer request", { hasSpeech: true });
   });
 
   it("retains a second failed idle transcript after an earlier explicit-only draft", async () => {
@@ -534,7 +605,7 @@ describe("useVoiceChat", () => {
     await render({ sendMessage: currentSend });
     await transcript("Use current model", "turn-1");
     expect(sendMessage).not.toHaveBeenCalled();
-    expect(currentSend).toHaveBeenCalledExactlyOnceWith("Use current model");
+    expect(currentSend).toHaveBeenCalledExactlyOnceWith("Use current model", { hasSpeech: true });
   });
 
   it("does not relay a retained turn through a newer dictation session", async () => {
@@ -546,7 +617,7 @@ describe("useVoiceChat", () => {
     await act(async () => {
       controls.sendPending();
     });
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Keep this draft");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Keep this draft", { hasSpeech: true });
     act(() => {
       listener({ type: "message", message: user(10) });
       listener({ type: "message", message: assistant(11) });
@@ -563,7 +634,7 @@ describe("useVoiceChat", () => {
     await act(async () => {
       controls.sendPending();
     });
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Keep this draft");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Keep this draft", { hasSpeech: true });
     act(() => {
       listener({ type: "message", message: user(10) });
       listener({ type: "message", message: assistant(11) });

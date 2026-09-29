@@ -66,3 +66,34 @@ it("announces an asynchronous startup error when no voice session is active", as
     container.remove();
   }
 });
+
+it("reports the pending editor selection from before a replacement", async () => {
+  const onPendingTextChange = vi.fn<(text: string, selection?: { start: number; end: number }) => void>();
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<VoiceControls
+      state={{ mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "Spoken words" }}
+      disabled={false}
+      onStart={() => {}}
+      onEnd={() => {}}
+      onMute={() => {}}
+      onPendingTextChange={onPendingTextChange}
+      onSendPending={() => {}}
+    />));
+    const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="Pending voice instruction"]')!;
+    const setValue = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(editor), "value")!.set!;
+    editor.focus();
+    editor.setSelectionRange(0, editor.value.length);
+    await act(async () => {
+      document.dispatchEvent(new Event("selectionchange", { bubbles: true }));
+      setValue.call(editor, "Typed words");
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(onPendingTextChange).toHaveBeenCalledExactlyOnceWith("Typed words", { start: 0, end: 12 });
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

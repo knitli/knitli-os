@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import React, { act, useState } from "react";
+import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import { VoiceControls } from "./VoiceControls";
@@ -9,7 +9,7 @@ import { VoiceControls } from "./VoiceControls";
 it("preserves utterance separators when editing and sending pending voice instructions", async () => {
   const onSend = vi.fn<(text: string) => void>();
   const Harness = () => {
-    const [pendingText, setPendingText] = useState("First request\nSecond request");
+    const [pendingText, setPendingText] = React.useState("First request\nSecond request");
     return <VoiceControls
       state={{ mode: "conversation", status: "thinking", muted: false, interimTranscript: null, error: null, pendingText }}
       disabled={false}

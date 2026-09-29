@@ -212,3 +212,18 @@ A rejected creation clears only the cached promise. Three partial-failure tests
 failed with duplicate creation before the fix; removing rejection reset failed
 retry recovery independently. Restoration passed all eight Home tests, all 723
 frontend tests, and full lint/types/build. Backend code is unchanged.
+
+Further Home review follow-up: block Conversation while a draft/resource, resource
+picker, file preparation/upload, or send is active. Dictation remains available.
+A live composer eligibility getter is checked both before launch and after RPCs;
+this prevents navigation from discarding resources staged during a slow launch.
+Model changes invalidate pending launch. A regular Home submission also cancels
+launch and sends into the cached voice chat with its full resource/format/speech
+payload, rather than creating another empty thread.
+
+Integrated validation: all 731 frontend tests (82 files) and full lint/types/build
+passed. Five Home regressions failed before their cancellation/reuse/live-draft
+fixes. Removing composer/control guards caused four named failures, and forcing
+the authoritative attachment accessor false independently failed its before-render
+assertion; all passed after restoration. Scoped independent review found no
+remaining blocker. Backend production source is unchanged.

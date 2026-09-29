@@ -60,6 +60,75 @@ describe("ChatComposer", () => {
     testState.gatekeeperModalProps = undefined;
   });
 
+  it("reads current draft eligibility even through a getter captured before an edit", async () => {
+    let canStartConversation: (() => boolean) | undefined;
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(<ChatComposer
+      createCapsuleGatekeeper={async () => null}
+      getOverseer={() => ({} as RpcStub<Overseer>)} onSend={() => {}}
+      isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+      voiceControls={(draft) => { canStartConversation ??= draft.canStartConversation; return null; }}
+    />));
+    expect(canStartConversation!()).toBe(true);
+    const textarea = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
+    for (const value of ["Keep this draft", "   "]) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, value);
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        expect(canStartConversation!()).toBe(value.trim() === "");
+      });
+    }
+  });
+
+  it("blocks conversation while an attachment is prepared and uploaded, until removed", async () => {
+    let canStartConversation: (() => boolean) | undefined;
+    let finishPreparation: ((bitmap: ImageBitmap) => void) | undefined;
+    let finishUpload: ((value: { id: string; mimeType: string; size: number }) => void) | undefined;
+    const bitmap = { width: 10, height: 10, close: vi.fn<() => void>() } as unknown as ImageBitmap;
+    vi.stubGlobal("createImageBitmap", vi.fn<() => Promise<ImageBitmap>>(() => new Promise<ImageBitmap>((resolve) => { finishPreparation = resolve; })));
+    const createUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
+    const revokeUrl = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const upload = vi.fn<() => Promise<{ id: string; mimeType: string; size: number }>>(() => new Promise<{ id: string; mimeType: string; size: number }>((resolve) => { finishUpload = resolve; }));
+    const remove = vi.fn<(id: string) => Promise<void>>(async () => {});
+    const file = new File(["image"], "draft.png", { type: "image/png" });
+    Object.defineProperty(file, "arrayBuffer", { value: async () => new ArrayBuffer(5) });
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    try {
+      await act(async () => root!.render(<ChatComposer
+        createCapsuleGatekeeper={async () => null}
+        getOverseer={() => ({ uploadChatAttachment: upload, deleteChatAttachment: remove }) as unknown as RpcStub<Overseer>}
+        onSend={() => {}} isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+        voiceControls={(draft) => { canStartConversation ??= draft.canStartConversation; return null; }}
+      />));
+      expect(canStartConversation!()).toBe(true);
+      const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+      Object.defineProperty(input, "files", { value: [file] });
+      await act(async () => {
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        expect(canStartConversation!()).toBe(false);
+      });
+      expect(upload).not.toHaveBeenCalled();
+      await act(async () => finishPreparation!(bitmap));
+      expect(upload).toHaveBeenCalledOnce();
+      expect(canStartConversation!()).toBe(false);
+      await act(async () => finishUpload!({ id: "staged", mimeType: "image/png", size: 5 }));
+      expect(canStartConversation!()).toBe(false);
+      expect(remove).not.toHaveBeenCalled();
+      await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Remove attachment"]')!.click());
+      expect(canStartConversation!()).toBe(true);
+      expect(remove).toHaveBeenCalledExactlyOnceWith("staged");
+    } finally {
+      createUrl.mockRestore();
+      revokeUrl.mockRestore();
+      vi.unstubAllGlobals();
+      vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    }
+  });
+
   it("appends two finalized dictation segments batched before the composer effect", async () => {
     let dictation: ReturnType<typeof useDictationAppendQueue> | undefined;
     const DictationComposer = () => {
@@ -459,6 +528,7 @@ describe("ChatComposer", () => {
   });
 
   it("invalidates and refetches skills after adding a connection", async () => {
+    let canStartConversation: (() => boolean) | undefined;
     const firstSkill = {
       selection: { gatekeeperId: 1, commandId: "first" },
       name: "first skill",
@@ -478,6 +548,7 @@ describe("ChatComposer", () => {
     root = createRoot(container);
     await act(async () => root!.render(
       <ChatComposer
+        voiceControls={(draft) => { canStartConversation ??= draft.canStartConversation; return null; }}
         createCapsuleGatekeeper={async () => null}
         getOverseer={() => overseer}
         onSend={() => {}}
@@ -488,6 +559,7 @@ describe("ChatComposer", () => {
       />,
     ));
 
+    expect(canStartConversation!()).toBe(true);
     const add = container.querySelector<HTMLButtonElement>('[aria-label="Add to conversation"]')!;
     await act(async () => add.click());
     await act(async () => vi.waitFor(() => expect(document.body.textContent).toContain("first skill")));
@@ -495,6 +567,7 @@ describe("ChatComposer", () => {
       .find((option) => option.textContent?.includes("Add a new connection"))!;
     await act(async () => connect.click());
     expect(testState.gatekeeperModalProps?.open).toBe(true);
+    expect(canStartConversation!()).toBe(false);
 
     catalog = [firstSkill, nextSkill];
     const gatekeeper = {
@@ -508,6 +581,7 @@ describe("ChatComposer", () => {
       await new Promise(requestAnimationFrame);
     });
 
+    expect(canStartConversation!()).toBe(false);
     const textarea = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
     const resourceEnd = textarea.value.indexOf("Project") + "Project".length;
     textarea.setSelectionRange(resourceEnd, resourceEnd);

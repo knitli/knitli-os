@@ -179,6 +179,7 @@ export const useComposerAttachments = ({
 
   return {
     attachments,
+    hasAttachments: () => attachmentsRef.current.length > 0,
     addFiles,
     clearSentAttachments,
     removeAttachment,

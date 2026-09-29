@@ -84,7 +84,11 @@ export function HomePageContent({ prompt }: HomeSearch) {
     };
   }, [authenticatedApi]);
 
+  const voiceLaunchGeneration = useRef(0);
+  const [startingConversation, setStartingConversation] = useState(false);
   const handleModelChange = useCallback((value: string | null) => {
+    voiceLaunchGeneration.current++;
+    setStartingConversation(false);
     setSelectedModel(value);
     persistSelectedModel(value);
   }, []);
@@ -118,14 +122,18 @@ export function HomePageContent({ prompt }: HomeSearch) {
     ) => {
       try {
         ensureProvisionalGadget();
-        const overseer = provisionalOverseerRef.current!.stub;
+        voiceLaunchGeneration.current++;
+        setStartingConversation(false);
+        const provisional = provisionalOverseerRef.current!;
+        const overseer = provisional.stub;
+        const submittedMessage = submissionMeta?.hasSpeech && typeof message !== "string" ? { ...message, hasSpeech: true as const } : message;
+        const hasSpeech = submissionMeta?.hasSpeech && typeof message === "string" ? true : undefined;
+        const existingChat = provisional.voiceChat ? await provisional.voiceChat : undefined;
         // Pipeline both independent calls in one batch, but settle both before releasing the stub.
         const [chat, {id}] = await Promise.all([
-          overseer.newChat(
-            submissionMeta?.hasSpeech && typeof message !== "string" ? { ...message, hasSpeech: true } : message,
-            modelId, capsules, attachments, formats, undefined, undefined,
-            submissionMeta?.hasSpeech && typeof message === "string" ? true : undefined,
-          ),
+          existingChat !== undefined
+            ? overseer.sendChatMessage(existingChat, submittedMessage, modelId, capsules, attachments, formats, hasSpeech).then(() => existingChat)
+            : overseer.newChat(submittedMessage, modelId, capsules, attachments, formats, undefined, undefined, hasSpeech),
           overseer.getMetadata(),
         ]);
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
@@ -159,12 +167,10 @@ export function HomePageContent({ prompt }: HomeSearch) {
     subscribeToEvents: subscribeToNoChatEvents,
     conversationAvailable: false,
   });
-  const voiceLaunchGeneration = useRef(0);
   useEffect(() => () => { voiceLaunchGeneration.current++; }, [authenticatedApi]);
-  const [startingConversation, setStartingConversation] = useState(false);
-  const startVoice = async (mode: "dictate" | "conversation") => {
+  const startVoice = async (mode: "dictate" | "conversation", canStartConversation: () => boolean) => {
     if (mode === "dictate") return voice.start(mode);
-    if (startingConversation || selectedModel === null) return;
+    if (startingConversation || selectedModel === null || !canStartConversation()) return;
     const generation = ++voiceLaunchGeneration.current;
     setStartingConversation(true);
     try {
@@ -180,7 +186,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
         provisional.voiceChat,
         provisional.stub.getMetadata(),
       ]);
-      if (generation !== voiceLaunchGeneration.current) return;
+      if (generation !== voiceLaunchGeneration.current || !canStartConversation()) return;
       await navigate({ to: "/workspace/$id", params: { id }, search: { chat },
         state: (previous) => ({ ...previous, startVoiceChat: { chatId: chat, modelId: selectedModel } }) });
     } catch (error) {
@@ -242,14 +248,15 @@ export function HomePageContent({ prompt }: HomeSearch) {
           onSend={handleSend}
           appendText={dictationAppend.appendForChat(null)}
           onAppendTextApplied={dictationAppend.acknowledge}
-          voiceControls={<VoiceControls
+          voiceControls={({ canStartConversation }) => <VoiceControls
             state={voice.state}
             disabled={startingConversation}
-            onStart={(mode) => { void startVoice(mode); }}
+            onStart={(mode) => { void startVoice(mode, canStartConversation); }}
             onEnd={voice.end}
             onMute={voice.toggleMute}
             onPendingTextChange={voice.setPendingText}
             onSendPending={voice.sendPending}
+            conversationBlockedReason={canStartConversation() ? undefined : "Send or clear the draft before starting a conversation."}
             conversationAvailable={selectedModel !== null}
           />}
           isAgentActive={false}

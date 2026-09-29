@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useId, useRef } from "react";
 import { ChatCircleDots, Microphone, PhoneDisconnect, Stop, SpeakerHigh, SpeakerSlash } from "@phosphor-icons/react";
 import type { SpeechTextSelection } from "../composer/draft/speechRanges";
 import { WorkshopIconButton } from "../../../components/WorkshopControls";
@@ -21,6 +21,7 @@ export const VoiceControls = ({
   onPendingTextChange,
   onSendPending,
   conversationAvailable = true,
+  conversationBlockedReason,
   canSendPending = true,
 }: {
   state: VoiceControlsState;
@@ -31,8 +32,10 @@ export const VoiceControls = ({
   onPendingTextChange: (text: string, selection?: SpeechTextSelection) => void;
   onSendPending: () => void;
   conversationAvailable?: boolean;
+  conversationBlockedReason?: string;
   canSendPending?: boolean;
 }) => {
+  const blockedReasonId = useId();
   const active = state.mode !== null;
   const pendingSelectionRef = useRef<SpeechTextSelection | undefined>(undefined);
   return (
@@ -55,12 +58,16 @@ export const VoiceControls = ({
             <Microphone size={16} />
           </WorkshopIconButton>
           {conversationAvailable && <WorkshopIconButton
-            disabled={disabled}
+            disabled={disabled || !!conversationBlockedReason}
+            aria-describedby={conversationBlockedReason ? blockedReasonId : undefined}
             onClick={() => onStart("conversation")}
             aria-label="Start conversation"
           >
             <ChatCircleDots size={16} />
           </WorkshopIconButton>}
+          {conversationAvailable && conversationBlockedReason && <span id={blockedReasonId} className="text-[12px] text-kumo-subtle">
+            {conversationBlockedReason}
+          </span>}
         </>
       )}
       {state.interimTranscript && <span className="min-w-0 truncate text-[12px] text-kumo-inactive">{state.interimTranscript}</span>}

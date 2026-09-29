@@ -191,12 +191,217 @@ describe("useVoiceChat", () => {
     expect(sendMessage).toHaveBeenCalledOnce();
   });
 
+  it("keeps a failed idle transcript available for explicit retry", async () => {
+    sendMessage.mockRejectedValueOnce(new Error("Connection lost; result unknown"));
+    await render({ agentActive: false });
+    await start();
+    await transcript("Do not lose this", "turn-1");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Do not lose this");
+    expect(controls.state.pendingText).toBe("Do not lose this");
+    expect(controls.state.error).toBe("Connection lost; result unknown");
+    await render({ agentActive: true });
+    await render({ agentActive: false });
+    expect(sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it("does not replace a newer queued instruction when an earlier idle send fails", async () => {
+    let reject!: (error: Error) => void;
+    sendMessage.mockImplementationOnce(
+      () =>
+        new Promise<number>((_, fail) => {
+          reject = fail;
+        }),
+    );
+    await render({ agentActive: false });
+    await start();
+    await transcript("Earlier request", "turn-1");
+    await render({ agentActive: true });
+    await act(async () => {
+      reject(new Error("Connection lost"));
+    });
+    await transcript("Newer request", "turn-2");
+    expect(controls.state.pendingText).toBe("Earlier request\nNewer request");
+    await render({ agentActive: false });
+    expect(sendMessage).toHaveBeenCalledOnce();
+    await act(async () => { controls.sendPending(); });
+    expect(sendMessage).toHaveBeenLastCalledWith("Earlier request\nNewer request");
+  });
+
+  it("retains a second failed idle transcript after an earlier explicit-only draft", async () => {
+    sendMessage.mockRejectedValueOnce(new Error("First failure")).mockRejectedValueOnce(new Error("Second failure"));
+    await render({ agentActive: false });
+    await start();
+    await transcript("First request", "turn-1");
+    await transcript("Second request", "turn-2");
+    expect(controls.state.pendingText).toBe("First request\nSecond request");
+    await render({ agentActive: true });
+    await render({ agentActive: false });
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not duplicate a queued transcript when it fails after later speech", async () => {
+    let reject!: (error: Error) => void;
+    sendMessage.mockImplementationOnce(() => new Promise<number>((_, fail) => { reject = fail; }));
+    await start();
+    await transcript("First request", "turn-1");
+    await render({ agentActive: false });
+    await render({ agentActive: true });
+    await transcript("Second request", "turn-2");
+    await act(async () => { reject(new Error("Connection lost")); });
+    expect(controls.state.pendingText).toBe("First request\nSecond request");
+    await render({ agentActive: false });
+    expect(sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it("keeps later speech queued when an earlier automatic send succeeds", async () => {
+    let resolve!: (receipt: number) => void;
+    sendMessage.mockImplementationOnce(() => new Promise<number>((next) => { resolve = next; }));
+    await start();
+    await transcript("First request", "turn-1");
+    await render({ agentActive: false });
+    await render({ agentActive: true });
+    await transcript("Second request", "turn-2");
+    await act(async () => { resolve(10); });
+    expect(controls.state.pendingText).toBe("Second request");
+  });
+
+  it("keeps an edit made while an automatic send is in flight", async () => {
+    let resolve!: (receipt: number) => void;
+    sendMessage.mockImplementationOnce(() => new Promise<number>((next) => { resolve = next; }));
+    await start();
+    await transcript("First request", "turn-1");
+    await render({ agentActive: false });
+    act(() => controls.setPendingText("Edited request"));
+    await act(async () => { resolve(10); });
+    expect(controls.state.pendingText).toBe("Edited request");
+  });
+
+  it("keeps an edit made while an explicit send is in flight", async () => {
+    let resolve!: (receipt: number) => void;
+    await start();
+    await transcript("First request", "turn-1");
+    act(() => controls.end());
+    await render({ agentActive: false });
+    sendMessage.mockImplementationOnce(() => new Promise<number>((next) => { resolve = next; }));
+    act(() => controls.sendPending());
+    act(() => controls.setPendingText("Edited request"));
+    await act(async () => { resolve(10); });
+    expect(controls.state.pendingText).toBe("Edited request");
+  });
+
+  it("keeps only later speech when an explicit send succeeds", async () => {
+    let reject!: (error: Error) => void;
+    let resolve!: (receipt: number) => void;
+    sendMessage.mockImplementationOnce(() => new Promise<number>((_, fail) => { reject = fail; }));
+    await render({ agentActive: false });
+    await start();
+    await transcript("First request", "turn-1");
+    await act(async () => { reject(new Error("Connection lost")); });
+    sendMessage.mockImplementationOnce(() => new Promise<number>((next) => { resolve = next; }));
+    act(() => controls.sendPending());
+    await render({ agentActive: true });
+    await transcript("Second request", "turn-2");
+    await act(async () => { resolve(10); });
+    expect(controls.state.pendingText).toBe("Second request");
+  });
+
+  it("uses the latest send callback for later voice turns", async () => {
+    const currentSend = vi.fn<Props["sendMessage"]>().mockResolvedValue(10);
+    await render({ agentActive: false });
+    await start();
+    await render({ sendMessage: currentSend });
+    await transcript("Use current model", "turn-1");
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(currentSend).toHaveBeenCalledExactlyOnceWith("Use current model");
+  });
+
+  it("does not relay a retained turn through a newer dictation session", async () => {
+    await start();
+    await transcript("Keep this draft", "old-turn");
+    act(() => controls.end());
+    const dictation = await start("dictate");
+    await render({ agentActive: false });
+    await act(async () => {
+      controls.sendPending();
+    });
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Keep this draft");
+    act(() => {
+      listener({ type: "message", message: user(10) });
+      listener({ type: "message", message: assistant(11) });
+    });
+    expect(dictation.sendJSON).not.toHaveBeenCalled();
+  });
+
+  it("does not relay a retained turn through a newer conversation session", async () => {
+    await start();
+    await transcript("Keep this draft", "old-turn");
+    act(() => controls.end());
+    const conversation = await start();
+    await render({ agentActive: false });
+    await act(async () => {
+      controls.sendPending();
+    });
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Keep this draft");
+    act(() => {
+      listener({ type: "message", message: user(10) });
+      listener({ type: "message", message: assistant(11) });
+    });
+    expect(conversation.sendJSON).not.toHaveBeenCalled();
+  });
+
+  it("releases an abandoned session capability even when close rejects", async () => {
+    let resolve!: (
+      connection: Awaited<ReturnType<Props["authenticatedApi"]["createVoiceSession"]>>,
+    ) => void;
+    const close = vi.fn<() => Promise<void>>().mockRejectedValue(new Error("Already closed"));
+    const dispose = vi.fn<() => void>();
+    await render({
+      authenticatedApi: {
+        createVoiceSession: () =>
+          new Promise((next) => {
+            resolve = next;
+          }),
+      } as unknown as Props["authenticatedApi"],
+    });
+    act(() => controls.start("conversation"));
+    await render({ chatId: 8 });
+    await act(async () => {
+      resolve({
+        id: "late-session",
+        url: "/api/voice/session",
+        expiresAt: Date.now() + 60_000,
+        session: { close, [Symbol.dispose]: dispose },
+      } as unknown as Awaited<ReturnType<Props["authenticatedApi"]["createVoiceSession"]>>);
+    });
+    expect(close).toHaveBeenCalledOnce();
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it("accepts a ticket that only the server can declare expired", async () => {
+    const close = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    await render({
+      authenticatedApi: {
+        createVoiceSession: async () => ({
+          id: "server-authoritative",
+          url: "/api/voice/session",
+          expiresAt: 0,
+          session: { close, [Symbol.dispose]: () => {} },
+        }),
+      } as unknown as Props["authenticatedApi"],
+    });
+    const client = await start();
+    expect(client.startCall).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
+  });
+
   it("does not send the previous chat's preserved instruction into a different chat", async () => {
     await start();
     await transcript("For chat seven", "turn-1");
     await render({ chatId: 8, agentActive: false });
     expect(controls.state.mode).toBeNull();
-    await act(async () => { controls.sendPending(); });
+    await act(async () => {
+      controls.sendPending();
+    });
     expect(sendMessage).not.toHaveBeenCalled();
     expect(controls.state.pendingText).toBe("For chat seven");
   });

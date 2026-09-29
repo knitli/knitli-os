@@ -32,12 +32,14 @@ export const useVoiceChat = ({
   const responseRelayRef = useRef(new VoiceResponseRelay());
   const queuedConversationRef = useRef<{ text: string; turnId: string; sessionId: string; chatId: number; automaticAttempted?: boolean } | null>(null);
   const pendingTextRef = useRef("");
+  const callbacksRef = useRef({ onDictation, sendMessage });
   const activeRef = useRef(agentActive);
   const generationRef = useRef(0);
   const startingRef = useRef(false);
   chatIdRef.current = chatId;
   activeRef.current = agentActive;
   pendingTextRef.current = state.pendingText;
+  callbacksRef.current = { onDictation, sendMessage };
 
   const release = () => {
     generationRef.current++;
@@ -62,26 +64,71 @@ export const useVoiceChat = ({
     for (const frame of frames) client.sendJSON({ type: "voice_response", sessionId, ...frame });
   };
 
-  const submitConversation = async (text: string, turnId: string, automatic = true): Promise<boolean> => {
+  const submitConversation = async (text: string, turnId: string, automatic = true, turnSessionId = sessionIdRef.current,
+    submittedQueue: typeof queuedConversationRef.current = null): Promise<boolean> => {
     const sessionId = sessionIdRef.current;
     const generation = generationRef.current;
     const targetChatId = chatIdRef.current;
-    if (!text.trim() || targetChatId === null || activeRef.current ||
+    const pendingText = text.trim();
+    if (!pendingText || targetChatId === null || activeRef.current ||
         (automatic && modeRef.current !== "conversation")) return false;
-    const relay = new VoiceResponseRelay();
-    responseRelayRef.current = relay;
-    relay.beginSubmission(targetChatId, turnId);
+    const shouldRelay = turnSessionId === sessionId && modeRef.current === "conversation";
+    const relay = shouldRelay ? new VoiceResponseRelay() : null;
+    const queuedAtSubmission = queuedConversationRef.current;
+    if (relay) {
+      responseRelayRef.current = relay;
+      relay.beginSubmission(targetChatId, turnId);
+    }
     try {
-      const receipt = await sendMessage(text.trim());
-      if (receipt === undefined || generation !== generationRef.current || sessionId !== sessionIdRef.current ||
-          targetChatId !== chatIdRef.current || responseRelayRef.current !== relay ||
-          (automatic && modeRef.current !== "conversation")) return false;
+      const receipt = await callbacksRef.current.sendMessage(pendingText);
+      if (receipt === undefined || targetChatId !== chatIdRef.current) return false;
+      if (!relay) return true;
+      if (generation !== generationRef.current || sessionId !== sessionIdRef.current ||
+          responseRelayRef.current !== relay || (automatic && modeRef.current !== "conversation")) return false;
       sendFrames(relay.acceptReceipt(receipt), sessionId);
       return true;
     } catch (error) {
-      if (responseRelayRef.current === relay) responseRelayRef.current = new VoiceResponseRelay();
+      if (relay && responseRelayRef.current === relay) responseRelayRef.current = new VoiceResponseRelay();
+      if (automatic && turnSessionId !== null && targetChatId === chatIdRef.current) {
+        const queued = queuedConversationRef.current;
+        if (queued && queued === submittedQueue) {
+          queued.automaticAttempted = true;
+        } else if (queued) {
+          queued.automaticAttempted = true;
+          const retainedText = submittedQueue && queued.text.startsWith(`${pendingText}\n`)
+            ? queued.text
+            : submittedQueue || queuedAtSubmission
+              ? `${queued.text}\n${pendingText}`
+              : `${pendingText}\n${queued.text}`;
+          queued.text = retainedText;
+          setState((current) => ({ ...current, pendingText: retainedText }));
+        } else {
+          const retainedText = pendingTextRef.current ? `${pendingText}\n${pendingTextRef.current}` : pendingText;
+          queuedConversationRef.current = {
+            text: retainedText, turnId, sessionId: turnSessionId, chatId: targetChatId, automaticAttempted: true,
+          };
+          setState((current) => ({ ...current, pendingText: retainedText }));
+        }
+      }
       setState((current) => ({ ...current, error: error instanceof Error ? error.message : "Voice message was not sent." }));
       return false;
+    }
+  };
+
+  const finishSubmittedQueue = (
+    sent: boolean,
+    submittedQueue: NonNullable<typeof queuedConversationRef.current>,
+    submittedText: string,
+  ) => {
+    const current = queuedConversationRef.current;
+    if (!sent || !current) return;
+    if (current === submittedQueue) {
+      queuedConversationRef.current = null;
+      setState((current) => ({ ...current, pendingText: "" }));
+    } else if (current.text.startsWith(`${submittedText}\n`)) {
+      const pendingText = current.text.slice(submittedText.length + 1);
+      queuedConversationRef.current = { ...current, text: pendingText, automaticAttempted: false };
+      setState((current) => ({ ...current, pendingText }));
     }
   };
 
@@ -95,10 +142,9 @@ export const useVoiceChat = ({
     if (!agentActive && state.mode === "conversation" && queued &&
         !queued.automaticAttempted && queued.sessionId === sessionId && queued.chatId === chatId) {
       queued.automaticAttempted = true;
-      void submitConversation(queued.text, queued.turnId).then((sent) => {
-        if (!sent || queuedConversationRef.current !== queued) return;
-        queuedConversationRef.current = null;
-        setState((current) => ({ ...current, pendingText: "" }));
+      const submittedText = queued.text;
+      void submitConversation(submittedText, queued.turnId, true, queued.sessionId, queued).then((sent) => {
+        finishSubmittedQueue(sent, queued, submittedText);
       });
     }
   }, [agentActive, chatId, state.mode, state.pendingText]);
@@ -115,8 +161,10 @@ export const useVoiceChat = ({
     void (async () => {
       try {
         const connection = await authenticatedApi.createVoiceSession(mode);
-        if (generation !== generationRef.current || chatIdRef.current !== chatId || modeRef.current !== null || connection.expiresAt <= Date.now()) {
-          void connection.session.close();
+        if (generation !== generationRef.current || chatIdRef.current !== chatId || modeRef.current !== null) {
+          void connection.session.close().catch(() => {}).finally(() => {
+            try { connection.session[Symbol.dispose]?.(); } catch { /* connection may already be gone */ }
+          });
           if (generation === generationRef.current) startingRef.current = false;
           return;
         }
@@ -151,17 +199,17 @@ export const useVoiceChat = ({
             return;
           }
           if (event.type !== "voice_transcript" || event.sessionId !== connection.id || !event.text?.trim()) return;
-          if (event.mode === "dictate") onDictation(event.text.trim());
+          if (event.mode === "dictate") callbacksRef.current.onDictation(event.text.trim());
           else if (event.mode === "conversation" && event.turnId) {
             if (activeRef.current) {
               const previous = queuedConversationRef.current;
               const queued = previous && previous.sessionId === connection.id && previous.chatId === chatId
-                ? { ...previous, text: `${previous.text}\n${event.text.trim()}`, turnId: event.turnId, automaticAttempted: false }
+                ? { ...previous, text: `${previous.text}\n${event.text.trim()}`, turnId: event.turnId, automaticAttempted: previous.automaticAttempted }
                 : { text: event.text.trim(), turnId: event.turnId, sessionId: connection.id, chatId: chatId! };
               queuedConversationRef.current = queued;
               setState((current) => ({ ...current, pendingText: queued.text }));
             } else {
-              void submitConversation(event.text.trim(), event.turnId);
+              void submitConversation(event.text.trim(), event.turnId, true, connection.id);
             }
           }
         });
@@ -181,16 +229,15 @@ export const useVoiceChat = ({
     end: () => { release(); setState((current) => ({ ...current, mode: null, status: "idle", muted: false })); },
     toggleMute: () => clientRef.current?.toggleMute(),
     setPendingText: (pendingText: string) => {
-      if (queuedConversationRef.current) queuedConversationRef.current.text = pendingText;
+      if (queuedConversationRef.current) queuedConversationRef.current = { ...queuedConversationRef.current, text: pendingText };
       setState((current) => ({ ...current, pendingText }));
     },
     sendPending: () => {
       const queued = queuedConversationRef.current;
       if (!queued || queued.chatId !== chatIdRef.current) return;
-      void submitConversation(pendingTextRef.current, queued.turnId, false).then((sent) => {
-        if (!sent || queuedConversationRef.current !== queued) return;
-        queuedConversationRef.current = null;
-        setState((current) => ({ ...current, pendingText: "" }));
+      const submittedText = pendingTextRef.current;
+      void submitConversation(submittedText, queued.turnId, false, queued.sessionId).then((sent) => {
+        finishSubmittedQueue(sent, queued, submittedText);
       });
     },
   };

@@ -85,4 +85,23 @@ first-audio latency before deciding whether provisional token forwarding is need
 Do not update the deployment wrapper pin or deploy until this live acceptance is
 complete. The plan and spec now belong to knitli-os, not the deployment wrapper.
 
-Local implementation commits: `1074f717` (backend/API) and `5712b2f6` (frontend). Both are signed with the configured Git signing identity. No push or deployment was performed.
+Local implementation commits: `1074f717` (backend/API) and `5712b2f6` (frontend). Both are signed with the configured Git signing identity. Published in PR #42 (https://github.com/knitli/knitli-os/pull/42); no deployment was performed.
+
+
+### PR review follow-up (2026-09-29)
+
+The first Codex review identified failed-transcript retention, stale callbacks,
+response relaying into replacement sessions, abandoned capability disposal, and
+browser/server clock skew. The follow-up fixes these and preserves draft edits
+and appended speech across successful or failed in-flight submissions. Uncertain
+submissions remain explicit-only.
+
+Validation: 21 focused voice tests and all 675 frontend tests passed; frontend
+types and full `pnpm lint`/build passed. New tests failed against the original
+behaviors; additional concurrent-send tests caught lost and duplicated text before
+the fixes. Independent review found no remaining blocker in the follow-up patch.
+
+Initial-head CI and Codex security review passed. Codacy and Codacy-production
+have no checks on this or recent PRs; the authenticated Codacy repository lookup
+returns not found. Their analysis is unavailable, not a passing result. Continue
+monitoring CI and Codex after each push until the current head is clear.

@@ -424,8 +424,32 @@ export type UserDirectoryRecord = {
   name: string;
 };
 
+/** The fixed behavior of one authenticated audio session. */
+export type VoiceMode = "dictate" | "conversation";
+
+/** Audio-only session lease. Dispose this capability when ending the call. */
+export interface VoiceSessionLease extends RpcTarget {
+  /** Close the audio transport without cancelling chat work. */
+  close(): Promise<void>;
+}
+
+/** A single-use connection URL and its authenticated RPC lifetime lease. */
+export interface VoiceSessionConnection {
+  /** Opaque audio session identifier, independent of workspace/chat IDs. */
+  id: string;
+  /** Relative WebSocket URL containing a short-lived, single-use audio credential. */
+  url: string;
+  /** Deadline for redeeming the URL, in epoch milliseconds. */
+  expiresAt: number;
+  /** Retain this capability until call end; disposal revokes the audio connection. */
+  session: VoiceSessionLease;
+}
+
 /** Top-level API exposed to the user after they have authenticated. */
 export interface AuthenticatedApi extends RpcTarget {
+  /** Create a single-use audio connection tied to this authenticated RPC session. */
+  createVoiceSession(mode: VoiceMode): Promise<VoiceSessionConnection>;
+
   /** Get profile info for the user who is logged in. */
   whoami(): Promise<AiChatAuthorInfo>;
 
@@ -2517,11 +2541,13 @@ export interface Overseer extends RpcTarget {
    *
    * `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
    * (useful when using chat to talk between humans).
-   *
+   * Returns the committed prompt message sequence, or undefined when a slash command produces
+   * no prompt. The receipt identifies this submission even when subscription events arrive
+   * before the RPC resolves; it does not indicate that the agent has finished.
    */
   sendChatMessage(chatId: number, message: string | SlashCommandRequest, modelId: string | null,
                   capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-                  formats?: MessageFormatRef[]): Promise<void>;
+                  formats?: MessageFormatRef[]): Promise<number | undefined>;
 
   /**
    * Upload an attachment for use in a future chat message. This way by the time the user wants to

@@ -49,6 +49,7 @@ export default defineConfig({
         workerLoaders: { LOADER: {} },
         serviceBindings: { PUBLISHER_TEST_EGRESS: async () => new Response('EGRESS_ALLOWED') },
         durableObjects: {
+          TEST_VOICE: { className: 'VoiceSession', useSQLite: true },
           TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
           TEST_USER: { className: 'UserDurableObject', useSQLite: true },
           TEST_PENDING_LOGIN: { className: 'PendingLogin', useSQLite: true },

@@ -6938,11 +6938,11 @@ class OverseerImpl implements AgentHooks {
     attachments?: ChatAttachmentHandle[],
     responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
     formats?: MessageFormatRef[],
-  ): Promise<void> {
+  ): Promise<number | undefined> {
     if (responseTargetRegistration) {
       responseTargetRegistration.commitGuard();
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
-      if (decision.reuseExisting) return;
+      if (decision.reuseExisting) return decision.record.promptSequence;
     }
     if (typeof message !== "string" && (capsules?.length || attachments?.length)) {
       throw new Error("Slash commands cannot include resources or attachments.");
@@ -6969,9 +6969,10 @@ class OverseerImpl implements AgentHooks {
     if (runsAgentTurn && userMeta.aiModel) {
       meta.activeAgent = userMeta.aiModel.profile;
     }
+    let promptSequence: number | undefined;
     this.ctx.storage.transactionSync(() => {
       this.storage.chatMeta.put(meta);
-      let promptSequence = this.#commitPreparedChatMessage(
+      promptSequence = this.#commitPreparedChatMessage(
           chatId, meta.lastActive, userMeta.profile, prepared, capsules, canonicalAttachments,
           formats);
       if (responseTargetRegistration) {
@@ -6998,6 +6999,7 @@ class OverseerImpl implements AgentHooks {
       chat_id: chatId,
       interaction_type: "chat_message_sent",
     });
+    return promptSequence;
   }
 
   registerExternalMessageResponseTarget(
@@ -12318,7 +12320,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async sendChatMessage(
       chatId: number, message: string | SlashCommandRequest, chosenModelId: string | null,
       capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-      formats?: MessageFormatRef[]): Promise<void> {
+      formats?: MessageFormatRef[]): Promise<number | undefined> {
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
     return this.impl.sendChatMessage(
@@ -13038,7 +13040,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async sendChatMessage(_chatId: number, _message: string | SlashCommandRequest,
                         _modelId: string | null,
-                        _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<void> {
+                        _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<number | undefined> {
     this.#deny();
   }
   async uploadChatAttachment(

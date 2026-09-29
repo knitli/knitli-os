@@ -1,3 +1,6 @@
+import { VoiceSession, VoiceLease, VoiceLiveness } from "./voice-session";
+import type { VoiceMode, VoiceSessionConnection } from "@gadgets/workshop-shared/api";
+export { VoiceSession };
 import { handleOpenApiPublisher } from "./openapi-publisher";
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -92,6 +95,19 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     this.overseers = this.ctx.exports.OverseerDurableObject;
     this.adminSettings = this.ctx.exports.AdminSettings;
     this.users = this.ctx.exports.UserDurableObject;
+  }
+
+  async createVoiceSession(mode: VoiceMode): Promise<VoiceSessionConnection> {
+    if (mode !== "dictate" && mode !== "conversation") throw new Error("Invalid voice mode");
+    if (!this.env.WORKERS_AI) throw new Error("Voice is not available on this deployment");
+    const namespace = this.ctx.exports.VoiceSession;
+    const id = crypto.getRandomValues(new Uint8Array(32)).toHex();
+    const voice = namespace.getByName(id);
+    const { secret, hash } = await newSecretToken();
+    const expiresAt = Date.now() + 60_000;
+    const session = new VoiceLease(this.ctx, voice);
+    await voice.initialize(id, mode, hash, expiresAt, new VoiceLiveness(() => session.alive));
+    return { id, url: `/api/voice/${id}?token=${secret.toHex()}`, expiresAt, session };
   }
 
   private overseers: DurableObjectNamespace<OverseerDurableObject>;
@@ -885,6 +901,19 @@ export default {
     if (url.pathname === "/api/mcp" || url.pathname.startsWith("/api/mcp/")) {
       return handleOpenApiPublisher(req, env, ctx,
           (abort, payload) => new PublicApiImpl(ctx, env, abort, payload));
+    }
+
+    if (url.pathname.startsWith("/api/voice/")) {
+      if (req.headers.get("Origin") !== url.origin) {
+        return new Response("Cross-origin API access not allowed.", { status: 403 });
+      }
+      if (env.CF_ACCESS_AUD) {
+        const payload = await verifyCfAccessJwt(req, env);
+        if (!payload?.email) return new Response("Invalid CF access JWT.", { status: 403 });
+      }
+      const id = url.pathname.slice("/api/voice/".length);
+      if (!/^[0-9a-f]{64}$/.test(id)) return new Response("Invalid voice session", { status: 404 });
+      return ctx.exports.VoiceSession.getByName(id).fetch(req);
     }
 
     if (url.pathname === "/api") {

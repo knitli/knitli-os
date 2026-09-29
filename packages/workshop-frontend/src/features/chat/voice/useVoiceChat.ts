@@ -104,10 +104,10 @@ export const useVoiceChat = ({
     }
     try {
       const receipt = await callbacksRef.current.sendMessage(pendingText);
-      if (receipt === undefined || targetChatId !== chatIdRef.current) return false;
+      if (receipt === undefined) return false;
       if (!relay) return true;
       if (generation !== generationRef.current || sessionId !== sessionIdRef.current ||
-          responseRelayRef.current !== relay || (automatic && modeRef.current !== "conversation")) return false;
+          responseRelayRef.current !== relay || (automatic && modeRef.current !== "conversation")) return true;
       sendFrames(relay.acceptReceipt(receipt), sessionId);
       return true;
     } catch (error) {
@@ -146,16 +146,18 @@ export const useVoiceChat = ({
     submittedQueue: NonNullable<typeof queuedConversationRef.current>,
     submittedText: string,
   ) => {
-    const current = queuedConversationRef.current;
+    const current = queuedConversationsRef.current.get(submittedQueue.chatId) ?? null;
     if (!sent || !current) return;
     if (current === submittedQueue) {
-      queuedConversationRef.current = null;
       queuedConversationsRef.current.delete(current.chatId);
-      setState((current) => ({ ...current, pendingText: "" }));
+      if (current.chatId === chatIdRef.current) {
+        queuedConversationRef.current = null;
+        setState((current) => ({ ...current, pendingText: "" }));
+      }
     } else if (current.text.startsWith(`${submittedText}\n`)) {
       const pendingText = current.text.slice(submittedText.length + 1);
       rememberQueuedConversation({ ...current, text: pendingText, automaticAttempted: false });
-      setState((current) => ({ ...current, pendingText }));
+      if (current.chatId === chatIdRef.current) setState((current) => ({ ...current, pendingText }));
     }
   };
 
@@ -279,8 +281,14 @@ export const useVoiceChat = ({
     end: () => { release(); setState((current) => ({ ...current, mode: null, status: "idle", muted: false })); },
     toggleMute: () => clientRef.current?.toggleMute(),
     setPendingText: (pendingText: string) => {
-      if (queuedConversationRef.current) rememberQueuedConversation({ ...queuedConversationRef.current, text: pendingText });
-      setState((current) => ({ ...current, pendingText }));
+      const queued = queuedConversationRef.current;
+      if (!pendingText.trim() && queued) {
+        queuedConversationsRef.current.delete(queued.chatId);
+        queuedConversationRef.current = null;
+      } else if (queued) {
+        rememberQueuedConversation({ ...queued, text: pendingText });
+      }
+      setState((current) => ({ ...current, pendingText: pendingText.trim() ? pendingText : "" }));
     },
     sendPending: () => {
       const queued = queuedConversationRef.current;

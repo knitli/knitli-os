@@ -2,7 +2,6 @@ import type {RpcStub} from "cloudflare:workers";
 import type {
   Gatekeeper, ObservationAuthorizer, SlashCommandResult,
 } from "@gadgets/workshop-shared/gatekeeper";
-import {withTranscriptionContext} from "@gadgets/workshop-shared/api";
 import type {
   SlashCommandChoice, SlashCommandRequest,
 } from "@gadgets/workshop-shared/api";
@@ -50,8 +49,5 @@ export async function invokeSlashCommand(
     gatekeeper: Fetcher<Gatekeeper<any>>, request: SlashCommandRequest,
     authorizer: RpcStub<ObservationAuthorizer>): Promise<SlashCommandResult> {
   using provider = await (gatekeeper as SlashCommandGatekeeper).getSlashCommandProvider();
-  let result = await provider.invoke(request.id.commandId, request.args, authorizer);
-  return request.hasSpeech === true && result.message?.trim()
-    ? {...result, message: withTranscriptionContext(result.message)}
-    : result;
+  return await provider.invoke(request.id.commandId, request.args, authorizer);
 }

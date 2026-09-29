@@ -114,3 +114,14 @@ existing empty-message rejection; built-in compact does not send its arguments t
 a model. Validation: 683 frontend tests, seven focused slash-command tests, full
 lint/build and backend/shared/frontend types passed. New regressions failed before
 the fixes; independent hook review passed. Live microphone acceptance remains open.
+
+Third review follow-up: preserve raw text in stored/displayed chat messages and
+persist optional speech provenance; append the ambiguity note during actual agent
+input reconstruction. Confirmed receipts now clear the owning chat's submitted
+queue after navigation; empty edits remove queue records; async errors announce
+via an alert. Validation: 686 frontend tests, 1,131 backend unit tests, and 31
+backend integration tests passed (four existing skips); full lint/build passed.
+Removing persisted provenance caused the real receipt regression to fail; removing
+context application caused the conversion helper test to fail; both passed after
+restoration. Full agent-pass wiring was source-reviewed, not exercised by that
+helper test. Independent reviews found no remaining blockers in these changes.

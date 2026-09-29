@@ -119,7 +119,6 @@ import type { PromptPresetOption } from "./features/chat/controls/ComposerPrompt
 import { composerDraftStorageKey } from "./features/chat/composer/draft/composerDraft";
 import { VoiceControls } from "./features/chat/voice/VoiceControls";
 import { useVoiceChat } from "./features/chat/voice/useVoiceChat";
-import { withTranscriptionContext } from "./features/chat/voice/voiceProtocol";
 
 /**
  * The selected chat's live (accepted but not yet materialized) change row stream, delivered via
@@ -4055,15 +4054,16 @@ function ChatInterface({
     try {
       // Selections made just before sending must land before the turn starts.
       await Promise.all([effortWriteRef.current, promptWriteRef.current]);
-      const modelMessage = submissionMeta?.hasSpeech
-        ? typeof message === "string"
-          ? withTranscriptionContext(message)
-          : {...message, hasSpeech: true as const}
+      const hasSpeech = submissionMeta?.hasSpeech === true;
+      const submittedMessage = hasSpeech && typeof message !== "string"
+        ? {...message, hasSpeech: true as const}
         : message;
+      const textHasSpeech = hasSpeech && typeof message === "string" ? true : undefined;
       if (selectedChatId === null) {
         // Create a new chat (with optional capsules).
         const newChatId = await overseer.newChat(
-            modelMessage, model, capsules, attachments, formats, pendingEffort, pendingPrompt);
+            submittedMessage, model, capsules, attachments, formats, pendingEffort, pendingPrompt,
+            textHasSpeech);
         setPendingEffort(null);
         setPendingPrompt(null);
         onNavigateToChatRef.current(newChatId);
@@ -4071,11 +4071,12 @@ function ChatInterface({
         // Send message to existing chat.
         const receipt = await overseer.sendChatMessage(
           selectedChatId,
-          modelMessage,
+          submittedMessage,
           model,
           capsules || undefined,
           attachments || undefined,
           formats,
+          textHasSpeech,
         );
         return receipt;
       }

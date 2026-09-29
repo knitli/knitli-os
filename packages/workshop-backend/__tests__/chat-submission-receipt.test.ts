@@ -47,6 +47,31 @@ it("returns the committed prompt sequence, not an earlier message or a command e
       expect(await overseer.getChatMessage(chatId, second!)).toMatchObject({
         sequence: second, type: "message", message: "same text",
       });
+      const dictated = await overseer.sendChatMessage(
+        chatId, "Keep this visible.", null, undefined, undefined, undefined, true,
+      );
+      expect(await overseer.getChatMessage(chatId, dictated!)).toMatchObject({
+        type: "message", message: "Keep this visible.", hasSpeech: true,
+      });
+      impl.storage.gatekeepers.put({id: 99, class: {}, hasSlashCommands: true});
+      impl.getGatekeeperFacet = () => ({
+        getSlashCommandProvider() {
+          let provider = {
+            invoke: async () => ({message: "Deploy production."}),
+            [Symbol.dispose]() {},
+          };
+          return Object.assign(Promise.resolve(provider), {[Symbol.dispose]() {}});
+        },
+      });
+      const slash = await overseer.sendChatMessage(chatId, {
+        id: {gatekeeperId: 99, commandId: "deploy"}, args: "now", hasSpeech: true,
+      }, null);
+      expect(await overseer.getChatMessage(chatId, slash! - 1)).toMatchObject({
+        type: "slashCommand", request: {args: "now", hasSpeech: true},
+      });
+      expect(await overseer.getChatMessage(chatId, slash!)).toMatchObject({
+        type: "message", message: "Deploy production.", hasSpeech: true,
+      });
       await expect(overseer.sendChatMessage(chatId, "", null)).rejects.toThrow(
           "Cannot send an empty chat message.");
     } finally {

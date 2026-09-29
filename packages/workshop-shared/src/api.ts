@@ -2526,11 +2526,14 @@ export interface Overseer extends RpcTarget {
    *
    * `prompt` seeds the new chat's system prompt the same way (as if setChatPrompt() had
    * been called first). Absent or null runs the built-in default.
+   *
+   * `hasSpeech` marks a plain-text initial message as transcribed speech. Slash commands carry
+   * the same marker on their request.
    */
   newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
           capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
           formats?: MessageFormatRef[], effort?: string | null,
-          prompt?: PromptSelection | null): Promise<number>;
+          prompt?: PromptSelection | null, hasSpeech?: true): Promise<number>;
 
   /**
    * Send a message to the chat from this client. Sending a message causes the LLM to start
@@ -2544,10 +2547,12 @@ export interface Overseer extends RpcTarget {
    * Returns the committed prompt message sequence, or undefined when a slash command produces
    * no prompt. The receipt identifies this submission even when subscription events arrive
    * before the RPC resolves; it does not indicate that the agent has finished.
+   * `hasSpeech` marks a plain-text message as transcribed speech. Slash commands carry the same
+   * marker on their request.
    */
   sendChatMessage(chatId: number, message: string | SlashCommandRequest, modelId: string | null,
                   capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-                  formats?: MessageFormatRef[]): Promise<number | undefined>;
+                  formats?: MessageFormatRef[], hasSpeech?: true): Promise<number | undefined>;
 
   /**
    * Upload an attachment for use in a future chat message. This way by the time the user wants to
@@ -3224,6 +3229,12 @@ export type AiChatMessageBody = {
   /** A regular chat message. */
   type: "message";
   message: string;
+
+  /**
+   * Set when speech supplied the message. The transcript retains `message` unchanged; Workshop
+   * adds transcription context only while reconstructing model input.
+   */
+  hasSpeech?: true;
 
   /**
    * The message may contain "capsules", which are embedded capabilities that reference external

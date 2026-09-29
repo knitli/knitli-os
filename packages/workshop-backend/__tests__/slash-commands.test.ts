@@ -116,7 +116,7 @@ describe("slash command helpers", () => {
     expect(disposals).toHaveBeenCalledTimes(1);
   });
 
-  it("adds transcription context to a dictated command expansion without changing its arguments", async () => {
+  it("keeps a dictated command expansion unchanged while preserving its arguments", async () => {
     let invoked = vi.fn((_id: string, _message: string, _authorizer: unknown) =>
       ({message: "Deploy production."}));
     let request = {
@@ -127,7 +127,7 @@ describe("slash command helpers", () => {
 
     await expect(invokeSlashCommand(gatekeeper({invoke: invoked}) as never, request, {} as never))
       .resolves.toEqual({
-        message: "Deploy production.\n\nInput context: This message includes speech transcribed from audio and may have been edited by the user. Transcription can mishear words, names, technical terms, or punctuation. Interpret it in context; if ambiguity materially affects the requested action, ask for clarification rather than guessing.",
+        message: "Deploy production.",
       });
     expect(invoked).toHaveBeenCalledWith("deploy", "prod now", expect.anything());
   });

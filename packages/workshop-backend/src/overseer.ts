@@ -229,6 +229,7 @@ type PreparedChatMessage = {
   slashCommand?: SlashCommandRequest;
   message?: string;
   skillName?: string;
+  hasSpeech?: true;
 };
 
 // A call made on a callable agent (the `self` object or a spawnCallable() stub) that has not yet
@@ -6707,7 +6708,7 @@ class OverseerImpl implements AgentHooks {
   // message. A result without a message suppresses only the generated message, not the invocation.
   async #prepareChatMessage(
       message: string | SlashCommandRequest,
-      hasAttachments: boolean): Promise<PreparedChatMessage> {
+      hasAttachments: boolean, hasSpeech?: true): Promise<PreparedChatMessage> {
     if (typeof message !== "string") {
       // A built-in command is handled by the Workshop, not a Gatekeeper: there is nothing to invoke
       // here. Committing the event is what makes the turn a compaction turn (see isCompactionTurn).
@@ -6726,7 +6727,12 @@ class OverseerImpl implements AgentHooks {
       // behalf of a session the reset is about to sever.
       this.assertGatekeeperUsable(gatekeeperId);
       // Display-only, and from the browser, so a bad value is dropped rather than refused.
-      message = {...message, commandPosition: sanitizeCommandPosition(message)};
+      message = {
+        id: message.id,
+        args: message.args,
+        commandPosition: sanitizeCommandPosition(message),
+        ...(message.hasSpeech === true && {hasSpeech: true}),
+      };
       using authorizer = new NativeRpcStub<ObservationAuthorizer>(
           new SlashCommandAuthorizerImpl(this, gatekeeperId, {from: "user"}));
       let result = await invokeSlashCommand(
@@ -6737,12 +6743,17 @@ class OverseerImpl implements AgentHooks {
       if (!result.message.trim() && !hasAttachments) {
         throw new Error("Slash command returned an empty message.");
       }
-      return {slashCommand: message, message: result.message, skillName: result.skillName};
+      return {
+        slashCommand: message,
+        message: result.message,
+        skillName: result.skillName,
+        ...(message.hasSpeech === true && {hasSpeech: true}),
+      };
     }
     if (!message.trim() && !hasAttachments) {
       throw new Error("Cannot send an empty chat message.");
     }
-    return {message};
+    return {message, ...(hasSpeech === true && {hasSpeech: true})};
   }
 
   // Validate client-supplied capsules before they are persisted: each must reference an existing
@@ -6802,6 +6813,7 @@ class OverseerImpl implements AgentHooks {
         author,
         type: "message",
         message: prepared.message,
+        ...(prepared.hasSpeech === true && {hasSpeech: true}),
         generatedBySlashCommandSequence: slashCommandSequence,
         capsules,
         attachments,
@@ -6821,6 +6833,7 @@ class OverseerImpl implements AgentHooks {
       author,
       type: "message",
       message: prepared.message,
+      ...(prepared.hasSpeech === true && {hasSpeech: true}),
       capsules,
       attachments,
       formats,
@@ -6839,6 +6852,7 @@ class OverseerImpl implements AgentHooks {
     formats?: MessageFormatRef[],
     effort?: string | null,
     prompt?: PromptSelection | null,
+    hasSpeech?: true,
   ): Promise<number> {
     if (responseTargetRegistration) {
       responseTargetRegistration.commitGuard();
@@ -6860,6 +6874,7 @@ class OverseerImpl implements AgentHooks {
       () => this.#prepareChatMessage(
         initialMessage,
         (canonicalAttachments?.length ?? 0) > 0,
+        hasSpeech,
       ),
       responseTargetRegistration?.commitGuard,
     );
@@ -6938,6 +6953,7 @@ class OverseerImpl implements AgentHooks {
     attachments?: ChatAttachmentHandle[],
     responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
     formats?: MessageFormatRef[],
+    hasSpeech?: true,
   ): Promise<number | undefined> {
     if (responseTargetRegistration) {
       responseTargetRegistration.commitGuard();
@@ -6955,6 +6971,7 @@ class OverseerImpl implements AgentHooks {
       () => this.#prepareChatMessage(
         message,
         (canonicalAttachments?.length ?? 0) > 0,
+        hasSpeech,
       ),
       responseTargetRegistration?.commitGuard,
     );
@@ -12310,21 +12327,22 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
                 formats?: MessageFormatRef[], effort?: string | null,
-                prompt?: PromptSelection | null): Promise<number> {
+                prompt?: PromptSelection | null, hasSpeech?: true): Promise<number> {
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
     return this.impl.newChat(this.#clientUser, userMeta, initialMessage, capsules, attachments,
-                             undefined, undefined, formats, effort, prompt);
+                             undefined, undefined, formats, effort, prompt, hasSpeech);
   }
 
   async sendChatMessage(
       chatId: number, message: string | SlashCommandRequest, chosenModelId: string | null,
       capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-      formats?: MessageFormatRef[]): Promise<number | undefined> {
+      formats?: MessageFormatRef[], hasSpeech?: true): Promise<number | undefined> {
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
     return this.impl.sendChatMessage(
-        this.#clientUser, userMeta, chatId, message, capsules, attachments, undefined, formats);
+        this.#clientUser, userMeta, chatId, message, capsules, attachments, undefined, formats,
+        hasSpeech);
   }
 
   async setChatTitle(chatId: number, title: string): Promise<void> {
@@ -13035,12 +13053,13 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async newChat(_initialMessage: string | SlashCommandRequest, _modelId: string | null,
                  _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[],
                  _formats?: MessageFormatRef[], _effort?: string | null,
-                 _prompt?: PromptSelection | null): Promise<number> {
+                 _prompt?: PromptSelection | null, _hasSpeech?: true): Promise<number> {
     this.#deny();
   }
   async sendChatMessage(_chatId: number, _message: string | SlashCommandRequest,
                         _modelId: string | null,
-                        _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<number | undefined> {
+                        _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[],
+                        _formats?: MessageFormatRef[], _hasSpeech?: true): Promise<number | undefined> {
     this.#deny();
   }
   async uploadChatAttachment(

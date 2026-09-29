@@ -62,7 +62,7 @@ export const VoiceControls = ({
         </>
       )}
       {state.interimTranscript && <span className="min-w-0 truncate text-[12px] text-kumo-inactive">{state.interimTranscript}</span>}
-      {state.error && <span className="min-w-0 truncate text-[12px] text-kumo-danger">{state.error}</span>}
+      {state.error && <span role="alert" className="min-w-0 truncate text-[12px] text-kumo-danger">{state.error}</span>}
       {state.pendingText && (
         <div className="flex min-w-0 flex-1 items-center gap-1">
           <textarea

@@ -42,3 +42,27 @@ it("preserves utterance separators when editing and sending pending voice instru
     container.remove();
   }
 });
+
+it("announces an asynchronous startup error when no voice session is active", async () => {
+  const renderControls = (error: string | null) => <VoiceControls
+    state={{ mode: null, status: "idle", muted: false, interimTranscript: null, error, pendingText: "" }}
+    disabled={false}
+    onStart={() => {}}
+    onEnd={() => {}}
+    onMute={() => {}}
+    onPendingTextChange={() => {}}
+    onSendPending={() => {}}
+  />;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(renderControls(null)));
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => root.render(renderControls("Microphone permission denied")));
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Microphone permission denied");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

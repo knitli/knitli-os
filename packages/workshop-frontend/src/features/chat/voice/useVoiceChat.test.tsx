@@ -207,6 +207,35 @@ describe("useVoiceChat", () => {
     expect(controls.state.pendingText).toBe("Keep chat seven");
   });
 
+  it("clears a successful old-chat submission after navigating away", async () => {
+    let resolve!: (receipt: number) => void;
+    sendMessage.mockImplementationOnce(() => new Promise<number>((next) => { resolve = next; }));
+    await start();
+    await transcript("Chat seven request", "turn-7");
+    await render({ agentActive: false });
+    await render({ chatId: 8, agentActive: true });
+    await start();
+    await transcript("Keep chat eight", "turn-8");
+    await act(async () => { resolve(10); });
+    expect(controls.state.pendingText).toBe("Keep chat eight");
+    await render({ chatId: 7 });
+    expect(controls.state.pendingText).toBe("");
+    await render({ chatId: 8 });
+    expect(controls.state.pendingText).toBe("Keep chat eight");
+  });
+
+  it("deletes an empty draft before fresh speech in a replacement session", async () => {
+    await start();
+    await transcript("Old draft", "old-turn");
+    act(() => controls.setPendingText(""));
+    act(() => controls.end());
+    await start();
+    await transcript("Fresh speech", "fresh-turn");
+    expect(controls.state.pendingText).toBe("Fresh speech");
+    await render({ agentActive: false });
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Fresh speech");
+  });
+
   it("submits edited busy text with appended speech once, forwarding the answer to the newest voice turn", async () => {
     const client = await start();
     await transcript("Original words", "turn-1");

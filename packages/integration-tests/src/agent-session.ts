@@ -663,8 +663,8 @@ class WorkshopAgentSessionImpl implements WorkshopAgentSession {
     observer.attach(this.#chatId);
   }
 
-  async #awaitRpc(
-      operation: RpcPromise<void>, chatId: number, observer: TurnObserver): Promise<void> {
+  async #awaitRpc<T>(
+      operation: RpcPromise<T>, chatId: number, observer: TurnObserver): Promise<void> {
     this.#pendingRpcs.add(operation);
     operation.then(() => {
       const status = observer.outcome?.status;

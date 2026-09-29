@@ -33,11 +33,19 @@ type StoredComposerDraftSlashCommand = {
   choice: SlashCommandChoice;
 };
 
+export type StoredComposerDraftSpeechRange = {
+  position: number;
+  length: number;
+};
+
 export type StoredComposerDraft = {
   version: 1;
   text: string;
   formats: MessageFormatRef[];
   command?: StoredComposerDraftSlashCommand;
+  hasSpeech?: boolean;
+  /** Exact text spans originating in Dictate; absent records use the legacy whole-text marker. */
+  speechRanges?: StoredComposerDraftSpeechRange[];
 };
 
 export type RestoredComposerDraft = {
@@ -55,6 +63,8 @@ export function serializeComposerDraft(
   capsules: readonly ComposerDraftCapsule[],
   formats: readonly ComposerDraftFormat[],
   command?: ComposerDraftSlashCommand,
+  hasSpeech?: boolean,
+  speechRanges?: readonly { start: number; end: number }[],
 ): StoredComposerDraft {
   const tokens: Array<
     | (ComposerDraftCapsule & { kind: "capsule" })
@@ -70,6 +80,7 @@ export function serializeComposerDraft(
   let cursor = 0;
   const storedFormats: MessageFormatRef[] = [];
   let storedCommand: StoredComposerDraftSlashCommand | undefined;
+  const replacements: Array<{ start: number; end: number; normalizedStart: number; normalizedEnd: number }> = [];
   for (const token of tokens) {
     if (token.start < cursor || token.start < 0 || token.length < 0 ||
         token.start + token.length > text.length) {
@@ -82,6 +93,7 @@ export function serializeComposerDraft(
       : token.kind === "format"
         ? token.noun
         : `/${token.choice.name}`;
+    const normalizedStart = normalized.length;
     if (token.kind === "format") {
       storedFormats.push({
         position: normalized.length,
@@ -97,15 +109,43 @@ export function serializeComposerDraft(
       };
     }
     normalized += replacement;
+    replacements.push({
+      start: token.start,
+      end: token.start + token.length,
+      normalizedStart,
+      normalizedEnd: normalized.length,
+    });
     cursor = token.start + token.length;
   }
   normalized += text.slice(cursor);
+
+  const mapSpeechPosition = (position: number, edge: "start" | "end") => {
+    let delta = 0;
+    for (const replacement of replacements) {
+      if (position <= replacement.start) return position + delta;
+      if (position < replacement.end) {
+        return edge === "start" ? replacement.normalizedStart : replacement.normalizedEnd;
+      }
+      delta += replacement.normalizedEnd - replacement.normalizedStart -
+        (replacement.end - replacement.start);
+    }
+    return position + delta;
+  };
+  const storedSpeechRanges = !hasSpeech ? [] : speechRanges?.flatMap((range) => {
+    const start = Math.max(0, Math.min(range.start, text.length));
+    const end = Math.max(start, Math.min(range.end, text.length));
+    const position = mapSpeechPosition(start, "start");
+    const mappedEnd = mapSpeechPosition(end, "end");
+    return mappedEnd > position ? [{ position, length: mappedEnd - position }] : [];
+  }) ?? [];
 
   return {
     version: 1,
     text: normalized,
     formats: storedFormats,
     ...(storedCommand && { command: storedCommand }),
+    ...(hasSpeech && { hasSpeech: true }),
+    ...(storedSpeechRanges.length > 0 && { speechRanges: storedSpeechRanges }),
   };
 }
 
@@ -237,7 +277,29 @@ export function readComposerDraft(key: string | undefined): StoredComposerDraft 
       }
       command = { position, length, choice };
     }
-    return { version: 1, text: record.text, formats, ...(command && { command }) };
+    if (record.hasSpeech !== undefined && record.hasSpeech !== true) return undefined;
+    let speechRanges: StoredComposerDraftSpeechRange[] | undefined;
+    if (record.speechRanges !== undefined) {
+      if (record.hasSpeech !== true || !Array.isArray(record.speechRanges)) return undefined;
+      let previousEnd = 0;
+      speechRanges = [];
+      for (const candidate of record.speechRanges) {
+        if (!candidate || typeof candidate !== "object") return undefined;
+        const range = candidate as Record<string, unknown>;
+        if (!Number.isInteger(range.position) || !Number.isInteger(range.length)) return undefined;
+        const position = range.position as number;
+        const length = range.length as number;
+        if (position < previousEnd || length <= 0 || position + length > record.text.length) {
+          return undefined;
+        }
+        speechRanges.push({ position, length });
+        previousEnd = position + length;
+      }
+      if (speechRanges.length === 0) return undefined;
+    }
+    return { version: 1, text: record.text, formats, ...(command && { command }),
+      ...(record.hasSpeech === true && { hasSpeech: true }),
+      ...(speechRanges && { speechRanges }) };
   } catch {
     return undefined;
   }

@@ -424,8 +424,32 @@ export type UserDirectoryRecord = {
   name: string;
 };
 
+/** The fixed behavior of one authenticated audio session. */
+export type VoiceMode = "dictate" | "conversation";
+
+/** Audio-only session lease. Dispose this capability when ending the call. */
+export interface VoiceSessionLease extends RpcTarget {
+  /** Close the audio transport without cancelling chat work. */
+  close(): Promise<void>;
+}
+
+/** A single-use connection URL and its authenticated RPC lifetime lease. */
+export interface VoiceSessionConnection {
+  /** Opaque audio session identifier, independent of workspace/chat IDs. */
+  id: string;
+  /** Relative WebSocket URL containing a short-lived, single-use audio credential. */
+  url: string;
+  /** Deadline for redeeming the URL, in epoch milliseconds. */
+  expiresAt: number;
+  /** Retain this capability until call end; disposal revokes the audio connection. */
+  session: VoiceSessionLease;
+}
+
 /** Top-level API exposed to the user after they have authenticated. */
 export interface AuthenticatedApi extends RpcTarget {
+  /** Create a single-use audio connection tied to this authenticated RPC session. */
+  createVoiceSession(mode: VoiceMode): Promise<VoiceSessionConnection>;
+
   /** Get profile info for the user who is logged in. */
   whoami(): Promise<AiChatAuthorInfo>;
 
@@ -2502,11 +2526,14 @@ export interface Overseer extends RpcTarget {
    *
    * `prompt` seeds the new chat's system prompt the same way (as if setChatPrompt() had
    * been called first). Absent or null runs the built-in default.
+   *
+   * `hasSpeech` marks a plain-text initial message as transcribed speech. Slash commands carry
+   * the same marker on their request.
    */
   newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
           capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
           formats?: MessageFormatRef[], effort?: string | null,
-          prompt?: PromptSelection | null): Promise<number>;
+          prompt?: PromptSelection | null, hasSpeech?: true): Promise<number>;
 
   /**
    * Send a message to the chat from this client. Sending a message causes the LLM to start
@@ -2517,11 +2544,15 @@ export interface Overseer extends RpcTarget {
    *
    * `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
    * (useful when using chat to talk between humans).
-   *
+   * Returns the committed prompt message sequence, or undefined when a slash command produces
+   * no prompt. The receipt identifies this submission even when subscription events arrive
+   * before the RPC resolves; it does not indicate that the agent has finished.
+   * `hasSpeech` marks a plain-text message as transcribed speech. Slash commands carry the same
+   * marker on their request.
    */
   sendChatMessage(chatId: number, message: string | SlashCommandRequest, modelId: string | null,
                   capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-                  formats?: MessageFormatRef[]): Promise<void>;
+                  formats?: MessageFormatRef[], hasSpeech?: true): Promise<number | undefined>;
 
   /**
    * Upload an attachment for use in a future chat message. This way by the time the user wants to
@@ -3198,6 +3229,12 @@ export type AiChatMessageBody = {
   /** A regular chat message. */
   type: "message";
   message: string;
+
+  /**
+   * Set when speech supplied the message. The transcript retains `message` unchanged; Workshop
+   * adds transcription context only while reconstructing model input.
+   */
+  hasSpeech?: true;
 
   /**
    * The message may contain "capsules", which are embedded capabilities that reference external
@@ -3985,6 +4022,12 @@ export type SlashCommandId = {
   commandId: "compact";
 };
 
+/** Model-only context appended to speech-transcribed input. */
+export const TRANSCRIPTION_CONTEXT = "Input context: This message includes speech transcribed from audio and may have been edited by the user. Transcription can mishear words, names, technical terms, or punctuation. Interpret it in context; if ambiguity materially affects the requested action, ask for clarification rather than guessing.";
+
+/** Append the transcription ambiguity context without changing the user-visible input. */
+export const withTranscriptionContext = (text: string) => `${text}\n\n${TRANSCRIPTION_CONTEXT}`;
+
 /** A slash command invocation parsed by the client. */
 export type SlashCommandRequest = {
   id: SlashCommandId;
@@ -4000,6 +4043,12 @@ export type SlashCommandRequest = {
    * rather than implying it led the line. Display only.
    */
   commandPosition?: number;
+
+  /**
+   * Set when speech supplied the command arguments. Workshop adds transcription context only to
+   * the expanded model prompt; the provider and visible command keep the original arguments.
+   */
+  hasSpeech?: true;
 };
 
 /** One slash command as shown in the Workshop picker. */

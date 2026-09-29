@@ -79,6 +79,7 @@ describe("composer document transitions", () => {
         command: null,
       },
       caret: 4,
+      textEdit: { start: 4, end: 5 },
     });
   });
 
@@ -97,6 +98,7 @@ describe("composer document transitions", () => {
         command: null,
       },
       caret: 0,
+      textEdit: { start: 0, end: 4 },
     });
   });
 
@@ -115,6 +117,7 @@ describe("composer document transitions", () => {
         command: { start: 4, length: 7, choice: commandChoice },
       },
       caret: 12,
+      textEdit: { start: 4, end: 8 },
     });
   });
 
@@ -134,6 +137,7 @@ describe("composer document transitions", () => {
         command: { start: 18, length: 7, choice: commandChoice },
       },
       caret: 9,
+      textEdit: { start: 0, end: 0 },
     });
   });
 
@@ -151,6 +155,7 @@ describe("composer document transitions", () => {
         command: null,
       },
       caret: 9,
+      textEdit: { start: 4, end: 4 },
     });
   });
 
@@ -174,6 +179,7 @@ describe("composer document transitions", () => {
         command: null,
       },
       caret: 5,
+      textEdit: { start: 0, end: url.length },
     });
   });
 
@@ -208,6 +214,7 @@ describe("composer document transitions", () => {
       },
       activeUrl: { text: newUrl, start: 0, end: newUrl.length },
       selection: { start: newUrl.indexOf("PROJECT_ID"), end: newUrl.length },
+      textEdit: { start: 0, end: url.length },
     });
   });
 });

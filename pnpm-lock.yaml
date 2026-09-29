@@ -1276,6 +1276,9 @@ importers:
       '@tanstack/react-router':
         specifier: ^1.170.33
         version: 1.170.33(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      agents:
+        specifier: 0.24.0
+        version: 0.24.0(@babel/core@8.0.6)(@babel/runtime@7.29.7)(@cloudflare/codemode@0.5.2(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(zod@4.5.4))(@modelcontextprotocol/client@2.0.0)(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.5.4))(@modelcontextprotocol/server@2.0.0)(react@19.2.8)(rolldown@1.2.11)(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.49.2)(yaml@2.9.0))(zod@4.5.4)
       capnweb:
         specifier: 'catalog:'
         version: 0.12.0

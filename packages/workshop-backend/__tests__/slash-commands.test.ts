@@ -116,6 +116,34 @@ describe("slash command helpers", () => {
     expect(disposals).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a dictated command expansion unchanged while preserving its arguments", async () => {
+    let invoked = vi.fn((_id: string, _message: string, _authorizer: unknown) =>
+      ({message: "Deploy production."}));
+    let request = {
+      id: {gatekeeperId: 1, commandId: "deploy"},
+      args: "prod now",
+      hasSpeech: true,
+    };
+
+    await expect(invokeSlashCommand(gatekeeper({invoke: invoked}) as never, request, {} as never))
+      .resolves.toEqual({
+        message: "Deploy production.",
+      });
+    expect(invoked).toHaveBeenCalledWith("deploy", "prod now", expect.anything());
+  });
+
+  it("leaves a blank dictated expansion for the overseer's empty-message guard", async () => {
+    let request = {
+      id: {gatekeeperId: 1, commandId: "deploy"},
+      args: "prod now",
+      hasSpeech: true,
+    };
+
+    await expect(invokeSlashCommand(
+      gatekeeper({invoke: () => ({message: "  "})}) as never, request, {} as never,
+    )).resolves.toEqual({message: "  "});
+  });
+
   it("keeps the provider alive until listing completes", async () => {
     let release!: (commands: SlashCommandDescriptor[]) => void;
     let disposals = vi.fn();

@@ -237,6 +237,39 @@ describe("composer drafts", () => {
     expect(sessionStorage.getItem(key)).toBeNull();
   });
 
+  it("retains dictated provenance across draft recovery", () => {
+    const key = composerDraftStorageKey("user-a", "chat:1");
+    writeComposerDraft(key, { ...draft, hasSpeech: true });
+    expect(readComposerDraft(key)?.hasSpeech).toBe(true);
+  });
+
+  it("maps dictated ranges through draft token normalization", () => {
+    const text = "Use Q3 Plan. Dictated words.";
+    const stored = serializeComposerDraft(
+      text,
+      [{ start: 4, length: "Q3 Plan".length, url: "https://example.com/q3" }],
+      [],
+      undefined,
+      true,
+      [{ start: text.indexOf("Dictated"), end: text.length }],
+    );
+
+    expect(stored.speechRanges).toEqual([{
+      position: stored.text.indexOf("Dictated"), length: "Dictated words.".length,
+    }]);
+  });
+
+  it("rejects invalid persisted dictated ranges", () => {
+    const key = composerDraftStorageKey("user-a", "chat:1");
+    sessionStorage.setItem(key, JSON.stringify({
+      ...draft,
+      hasSpeech: true,
+      speechRanges: [{ position: 0, length: 0 }],
+    }));
+
+    expect(readComposerDraft(key)).toBeUndefined();
+  });
+
   it("tolerates unavailable browser storage", () => {
     vi.stubGlobal("sessionStorage", {
       getItem: () => { throw new Error("blocked"); },

@@ -1,4 +1,4 @@
-import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, WorkpieceId, type AiModelConfig, type PromptRef, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
+import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, WorkpieceId, type AiModelConfig, type PromptRef, isTextLikeAttachmentMimeType, validateBindingName, withTranscriptionContext } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type CodeContent,
   type CodeChange, type FileChange } from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
@@ -31,6 +31,12 @@ import {
 import { formatGrep, type GrepScan } from "./grep";
 
 const logger = createWorkshopLogger("workshop.agent");
+
+/** @internal Builds the text the model sees for one persisted chat message. */
+export function modelContentForChatMessage(
+    message: Extract<AiChatMessage, {type: "message"}>, content = message.message): string {
+  return message.hasSpeech === true ? withTranscriptionContext(content) : content;
+}
 
 /**
  * Byte bound on one "changes" message's composed change for the *user* edit path.
@@ -1939,6 +1945,8 @@ async function runAgentPass(
           parts.push(content.slice(pos));
           content = parts.join("");
         }
+
+        content = modelContentForChatMessage(msg, content);
 
         // The step's persisted model-facing snapshot, if it has one (agent steps persisted since
         // snapshots existed). Fetched before the empty-message check below: a step whose only

@@ -6708,7 +6708,7 @@ class OverseerImpl implements AgentHooks {
   // message. A result without a message suppresses only the generated message, not the invocation.
   async #prepareChatMessage(
       message: string | SlashCommandRequest,
-      hasAttachments: boolean, hasSpeech?: true): Promise<PreparedChatMessage> {
+      hasAttachments: boolean, hasSpeech?: true, allowEmpty = false): Promise<PreparedChatMessage> {
     if (typeof message !== "string") {
       // A built-in command is handled by the Workshop, not a Gatekeeper: there is nothing to invoke
       // here. Committing the event is what makes the turn a compaction turn (see isCompactionTurn).
@@ -6751,6 +6751,7 @@ class OverseerImpl implements AgentHooks {
       };
     }
     if (!message.trim() && !hasAttachments) {
+      if (allowEmpty) return {};
       throw new Error("Cannot send an empty chat message.");
     }
     return {message, ...(hasSpeech === true && {hasSpeech: true})};
@@ -6872,10 +6873,7 @@ class OverseerImpl implements AgentHooks {
         attachments, userMeta.aiModel?.config.provider);
     let prepared = await prepareAuthorizedChatCommit(
       () => this.#prepareChatMessage(
-        initialMessage,
-        (canonicalAttachments?.length ?? 0) > 0,
-        hasSpeech,
-      ),
+          initialMessage, !!canonicalAttachments?.length, hasSpeech, !capsules?.length),
       responseTargetRegistration?.commitGuard,
     );
 
@@ -6927,12 +6925,7 @@ class OverseerImpl implements AgentHooks {
                       clientUser.id.toString(), false, needsAgentTurnKeepAlive);
     }
 
-    if (userMeta.quickModel) {
-      let titleMessage = prepared.message?.trim() || prepared.slashCommand?.args.trim() ||
-        prepared.skillName || (prepared.slashCommand ? "Slash command" : "") ||
-        `[user attached ${canonicalAttachments?.length ?? 0} attachment(s)]`;
-      this.generateThreadTitle(chatId, titleMessage, userMeta.quickModel, userMeta.profile);
-    }
+    this.#titlePreparedChat(chatId, prepared, canonicalAttachments, userMeta);
 
     this.recordGadgetAnalytics({
       event_name: "gadget_interaction",
@@ -6977,6 +6970,7 @@ class OverseerImpl implements AgentHooks {
     );
 
     let meta = this.assertChatNotActive(chatId, true);
+    let needsTitle = this.nextChatSequencePeek(chatId) === 0 && meta.title === "New Chat";
     let result = this.materializeChatChanges(chatId, meta);
     if (result) meta = result.meta;
     meta.lastActive = this.getChatTimestamp();
@@ -7010,6 +7004,7 @@ class OverseerImpl implements AgentHooks {
       this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
                       clientUser.id.toString(), false, needsAgentTurnKeepAlive);
     }
+    if (needsTitle) this.#titlePreparedChat(chatId, prepared, canonicalAttachments, userMeta);
     this.recordGadgetAnalytics({
       event_name: "gadget_interaction",
       user_id: clientUser.id.toString(),
@@ -8673,6 +8668,15 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
+  #titlePreparedChat(chatId: number, prepared: PreparedChatMessage,
+                     attachments: ChatAttachmentRef[] | undefined, userMeta: UserChatContext): void {
+    if (!userMeta.quickModel || prepared.message === undefined && !prepared.slashCommand) return;
+    let titleMessage = prepared.message?.trim() || prepared.slashCommand?.args.trim() ||
+      prepared.skillName || (prepared.slashCommand ? "Slash command" : "") ||
+      `[user attached ${attachments?.length ?? 0} attachment(s)]`;
+    this.generateThreadTitle(chatId, titleMessage, userMeta.quickModel, userMeta.profile);
+  }
+
   // Auto-generate a title for the given
   async generateThreadTitle(chatId: number, initialMessage: string,
                             modelConfig: AiModelConfig,
@@ -8696,10 +8700,8 @@ class OverseerImpl implements AgentHooks {
       });
 
       let meta = this.storage.chatMeta.get(chatId);
-      if (!meta) {
-        // Chat thread deleted?
-        return;
-      }
+      // The chat may have been deleted or explicitly renamed while inference was pending.
+      if (!meta || meta.title !== "New Chat") return;
 
       meta.lastActive = this.getChatTimestamp();
       meta.title = result;

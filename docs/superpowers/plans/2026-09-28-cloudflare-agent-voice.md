@@ -227,3 +227,22 @@ fixes. Removing composer/control guards caused four named failures, and forcing
 the authoritative attachment accessor false independently failed its before-render
 assertion; all passed after restoration. Scoped independent review found no
 remaining blocker. Backend production source is unchanged.
+
+Backend follow-up from PR review: Home's empty-chat creation was rejected by the
+shared message preparation guard. Permit an empty initial chat only when no
+resources would be discarded; ordinary empty sends still fail. Do not request a
+title until the first committed content arrives, and preserve explicit chat and
+workspace titles while inference is pending. Keep external commit authorization
+and attachment-only/command behavior intact.
+
+The reported StrictMode double-mount issue was checked with the full ChatInterface
+and real voice hook: readiness starts false and resolves after mount replay, so
+startup occurs once. Consuming the handoff keeps the session alive; actual unmount
+closes it. No production lifecycle change was required for that review finding.
+
+Backend follow-up validation: 1,169 tests passed across the main and integration
+suites (four existing integration skips); full lint/types/build passed. Targeted
+red/green checks proved empty creation, deferred first-message title generation,
+and protection against a manual rename during inference. The existing external
+commit authorization regression also passed. Independent backend review found no
+remaining blocker.

@@ -37,11 +37,11 @@ export const VoiceControls = ({
           <span className="sr-only" aria-live="polite">
             {state.mode === "dictate" ? "Dictating · Stop to edit or send" : `Conversation · ${state.status}`}
           </span>
-          <WorkshopIconButton onClick={onMute} aria-label={state.muted ? "Unmute microphone" : "Mute microphone"}>
-            {state.muted ? <SpeakerSlash size={16} /> : <SpeakerHigh size={16} />}
-          </WorkshopIconButton>
           <WorkshopIconButton onClick={onEnd} danger aria-label={state.mode === "dictate" ? "Stop dictation" : "End voice call"}>
             {state.mode === "dictate" ? <Stop size={16} /> : <PhoneDisconnect size={16} />}
+          </WorkshopIconButton>
+          <WorkshopIconButton onClick={onMute} aria-label={state.muted ? "Unmute microphone" : "Mute microphone"}>
+            {state.muted ? <SpeakerSlash size={16} /> : <SpeakerHigh size={16} />}
           </WorkshopIconButton>
         </>
       ) : (

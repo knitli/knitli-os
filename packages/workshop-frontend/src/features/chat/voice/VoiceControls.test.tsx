@@ -115,11 +115,13 @@ it("offers named icon controls for conversation and stopping persistent dictatio
   />;
   try {
     await act(async () => root.render(render(null)));
+    expect(container.querySelector("button")?.getAttribute("aria-label")).toBe("Start dictation");
     const conversation = container.querySelector<HTMLButtonElement>('[aria-label="Start conversation"]')!;
     expect(conversation.querySelector("svg")).not.toBeNull();
     await act(async () => conversation.click());
     expect(onStart).toHaveBeenCalledExactlyOnceWith("conversation");
     await act(async () => root.render(render("dictate")));
+    expect(container.querySelector("button")?.getAttribute("aria-label")).toBe("Stop dictation");
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Stop dictation"]')!.click());
     expect(onEnd).toHaveBeenCalledOnce();
     expect(container.querySelector('[aria-live="polite"]')?.classList.contains("sr-only")).toBe(true);

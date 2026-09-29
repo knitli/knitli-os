@@ -7807,6 +7807,8 @@ class OverseerImpl implements AgentHooks {
     // record is keyed to a specific accountId; if that account is gone (disconnected) or was replaced
     // (an optional account removed and re-added with a new accountId), the record is stale and would
     // point the capsule at a deleted account — so remove it. Snapshot the list since we mutate it.
+    // ponytail: (upstream) the vendor's last account wins, valid or not, while ambientVendorStatus
+    // says "available" if any is valid; prefer a valid one here if owners ever hold several.
     let currentAccountId = new Map(accounts.map(account => [account.vendorId, account.accountId]));
     let bound = new Set<string>();
     // Snapshot before iterating, since removeGatekeeper() mutates the collection.

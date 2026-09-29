@@ -194,6 +194,10 @@ function isAlwaysOn(connection: ConnectionType, alwaysOnVendorIds: ReadonlySet<s
   return connection.vendorId !== undefined && alwaysOnVendorIds.has(connection.vendorId)
 }
 
+// Fork: how long the connection-request modal waits on the owner's always-on availability before
+// falling back as if the query failed.
+const OWNER_AMBIENT_TIMEOUT_MS = 5_000
+
 function disposeConfiguratorFrame(frame: ResourceConfiguratorFrame | null) {
   const uiDisposable = frame?.ui as any
   uiDisposable?.[Symbol.dispose]?.()
@@ -294,7 +298,8 @@ export default function GatekeeperModal({
   // an owner who connects (or reconnects) the singleton here changes the answer.
   const [ownerAmbient, setOwnerAmbient] =
     useState<{ accountsKey: string, status: AmbientVendorStatus | 'unknown' } | null>(null)
-  const requestedVendorAccounts = accounts.filter(account => account.vendorId === initialVendorId)
+  const viewerVendorAccounts = accounts.filter(account => account.vendorId === initialVendorId)
+  const requestedVendorAccounts = viewerVendorAccounts
     .map(account => `${account.id}:${account.credentialsValid}`).join(',')
   const getOverseerRef = useRef(getOverseer)
   getOverseerRef.current = getOverseer
@@ -305,10 +310,16 @@ export default function GatekeeperModal({
     const settle = (status: AmbientVendorStatus | 'unknown') => {
       if (!cancelled) setOwnerAmbient({ accountsKey: requestedVendorAccounts, status })
     }
+    // An answer that never comes is treated like a failed one; a late answer still replaces it.
+    const timeout = setTimeout(() => settle('unknown'), OWNER_AMBIENT_TIMEOUT_MS)
     Promise.resolve().then(() => getOverseerRef.current())
       .then(overseer => overseer.ambientVendorStatus(initialVendorId))
       .then(settle, () => settle('unknown'))
-    return () => { cancelled = true }
+      .finally(() => clearTimeout(timeout))
+    return () => {
+      cancelled = true
+      clearTimeout(timeout)
+    }
   }, [open, initialVendorId, requestedVendorAccounts])
   const requestedVendorSelected = initialVendorId !== undefined && selectedConnection?.vendorId === initialVendorId
   const viewerAlwaysOn = selectedConnection !== null && isAlwaysOn(selectedConnection, alwaysOnVendorIds)
@@ -316,7 +327,10 @@ export default function GatekeeperModal({
   // singleton themselves, which is when the owner's answer is what the modal must show.
   const ownerStatus = ownerAmbient === null ||
     (ownerAmbient.accountsKey !== requestedVendorAccounts && viewerAlwaysOn) ? null : ownerAmbient.status
-  const checkingOwnerAmbient = requestedVendorSelected && ownerStatus === null
+  // Only a vendor that may be ambient waits: a viewer's non-singleton account of it means it can't be.
+  const mayBeAmbient = viewerVendorAccounts.length === 0 ||
+    viewerVendorAccounts.some(account => account.description.singleton)
+  const checkingOwnerAmbient = requestedVendorSelected && ownerStatus === null && mayBeAmbient
   // A failed query falls back to the viewer's own accounts; handleAddAmbientToChat is authoritative.
   const addsAmbientToChat = requestedVendorSelected &&
     (ownerStatus === 'available' || (ownerStatus === 'unknown' && viewerAlwaysOn))

@@ -530,6 +530,39 @@ describe('GatekeeperModal ambient resource connections', () => {
     expect(buttonNamed(rendered.container, 'Add to this chat')).toBeUndefined()
   })
 
+  it('starts a regular vendor\'s configurator without waiting on the owner\'s availability', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, initialAccount: true })
+    const ambientVendorStatus = vi.fn<(vendorId: string) => Promise<AmbientVendorStatus>>()
+      .mockReturnValue(new Promise(() => {}))
+    const rendered = await render(testApi.api, requestOverseer({ ambientVendorStatus }),
+      { initialVendorId: 'google', initialResourceUrlPattern: PROFILE_URL })
+    await settle()
+
+    expect(rendered.container.textContent).not.toContain('Checking')
+    expect(testApi.startResourceConfigurator).toHaveBeenCalledWith(42, PROFILE_URL)
+    expect(rendered.container.textContent).toContain('Profile URL ready')
+  })
+
+  it('falls back as if the availability query failed when it never answers', async () => {
+    vi.useFakeTimers()
+    try {
+      const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
+      const ambientVendorStatus = vi.fn<(vendorId: string) => Promise<AmbientVendorStatus>>()
+        .mockReturnValue(new Promise(() => {}))
+      const rendered = await render(testApi.api, requestOverseer({ ambientVendorStatus }),
+        { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL })
+      await settle()
+      expect(rendered.container.querySelector('[role="status"]')?.textContent)
+        .toBe('Checking whether this workspace has Knitli Memory…')
+
+      await act(async () => { vi.advanceTimersByTime(5_000) })
+
+      expect(buttonNamed(rendered.container, 'Add to this chat')?.disabled).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('forgets a singleton account that is gone when the picker reopens', async () => {
     const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
     const getOverseer = vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({} as RpcStub<Overseer>)

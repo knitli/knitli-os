@@ -706,7 +706,9 @@ ids are facet-local, not Activity ids.
   `onCreated` -> `acceptConnectionRequest` path, so the chat gets it under the requested binding
   name. Upstream says "nothing to add here" and the request can only be denied. The owner's
   status decides, not the viewer's accounts: the capsule comes from the owner's account. While
-  the status is in flight the modal says it is checking; an owner whose singleton expired keeps
+  the status is in flight the modal says it is checking -- unless the viewer holds a
+  non-singleton account of the vendor, which can't be ambient, so its configurator starts at once;
+  an answer that takes over 5 s is treated like a failed query. An owner whose singleton expired keeps
   the chooser's Reconnect, a collaborator is told the owner must reconnect, a viewer whose own
   singleton the owner lacks is told so, and a failed query falls back to the viewer's own
   accounts (the add itself is authoritative). The status is re-asked when the viewer's accounts

@@ -22,6 +22,7 @@ export const useVoiceChat = ({
   sendMessage,
   subscribeToEvents,
   conversationAvailable = true,
+  submissionAvailable = true,
 }: {
   authenticatedApi: RpcStub<AuthenticatedApi>;
   chatId: number | null;
@@ -30,6 +31,7 @@ export const useVoiceChat = ({
   sendMessage: (text: string) => Promise<number | undefined>;
   subscribeToEvents: (listener: (event: VoiceChatEvent) => void) => () => void;
   conversationAvailable?: boolean;
+  submissionAvailable?: boolean;
 }) => {
   const [state, setState] = useState<VoiceControlsState>({
     mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "",
@@ -49,10 +51,12 @@ export const useVoiceChat = ({
   const generationRef = useRef(0);
   const startingRef = useRef(false);
   const startingModeRef = useRef<VoiceMode | null>(null);
+  const submissionAvailableRef = useRef(submissionAvailable);
   chatIdRef.current = chatId;
   activeRef.current = agentActive;
   pendingTextRef.current = state.pendingText;
   callbacksRef.current = { onDictation, sendMessage };
+  submissionAvailableRef.current = submissionAvailable;
   if (displayedChatRef.current !== chatId) {
     queuedConversationRef.current = chatId === null ? null : queuedConversationsRef.current.get(chatId) ?? null;
     displayedChatRef.current = chatId;
@@ -95,7 +99,7 @@ export const useVoiceChat = ({
     const targetChatId = chatIdRef.current;
     const submittedText = text;
     const pendingText = submittedText.trim();
-    if (!pendingText || targetChatId === null || activeRef.current ||
+    if (!pendingText || targetChatId === null || activeRef.current || !submissionAvailableRef.current ||
         (automatic && modeRef.current !== "conversation")) return false;
     const shouldRelay = turnSessionId === sessionId && modeRef.current === "conversation";
     const relay = shouldRelay ? new VoiceResponseRelay() : null;
@@ -170,7 +174,7 @@ export const useVoiceChat = ({
   useEffect(() => {
     const sessionId = sessionIdRef.current;
     const queued = queuedConversationRef.current;
-    if (!agentActive && state.mode === "conversation" && queued &&
+    if (submissionAvailable && !agentActive && state.mode === "conversation" && queued &&
         !queued.automaticAttempted && queued.sessionId === sessionId && queued.chatId === chatId) {
       queued.automaticAttempted = true;
       const submittedText = queued.text;
@@ -178,7 +182,7 @@ export const useVoiceChat = ({
         finishSubmittedQueue(sent, queued, submittedText);
       });
     }
-  }, [agentActive, chatId, state.mode, state.pendingText]);
+  }, [agentActive, chatId, state.mode, state.pendingText, submissionAvailable]);
 
   useEffect(() => () => {
     release();
@@ -254,7 +258,7 @@ export const useVoiceChat = ({
           if (event.type !== "voice_transcript" || event.sessionId !== connection.id || !event.text?.trim()) return;
           if (event.mode === "dictate") callbacksRef.current.onDictation(event.text.trim());
           else if (event.mode === "conversation" && event.turnId) {
-            if (activeRef.current) {
+            if (activeRef.current || !submissionAvailableRef.current) {
               const previous = queuedConversationRef.current;
               const queued = previous && previous.sessionId === connection.id && previous.chatId === chatId
                 ? { ...previous, text: `${previous.text}\n${event.text.trim()}`, turnId: event.turnId, automaticAttempted: previous.automaticAttempted }
@@ -295,7 +299,7 @@ export const useVoiceChat = ({
     },
     sendPending: () => {
       const queued = queuedConversationRef.current;
-      if (!queued || queued.chatId !== chatIdRef.current) return;
+      if (!submissionAvailableRef.current || !queued || queued.chatId !== chatIdRef.current) return;
       const submittedText = pendingTextRef.current;
       void submitConversation(submittedText, queued.turnId, false, queued.sessionId).then((sent) => {
         finishSubmittedQueue(sent, queued, submittedText);

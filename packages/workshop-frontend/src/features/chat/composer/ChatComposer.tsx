@@ -211,7 +211,6 @@ export const ChatComposer = ({
   const {
     beginSend: beginDraftSend,
     commitDocumentEdit,
-    clearSpeechOriginWhenEmpty,
     completeSend: completeDraftSend,
     document: composerDocument,
     getDocumentSnapshot,
@@ -279,6 +278,7 @@ export const ChatComposer = ({
   // Keep inputValue in a ref so handleCursorChange can read it without re-binding.
   const inputValueRef = useRef(inputValue);
   inputValueRef.current = inputValue;
+  const pendingTextSelectionRef = useRef<{ text: string; start: number; end: number } | null>(null);
   const {
     activeUrl,
     attachCreated,
@@ -375,7 +375,7 @@ export const ChatComposer = ({
       ...previous,
       text: previous.text ? `${previous.text}\n${appendText.text}` : appendText.text,
     }));
-    markSpeechOrigin();
+    markSpeechOrigin(appendText.text);
     onAppendTextApplied?.(appendText.token);
     requestAnimationFrame(() => {
       const textarea = composerTextareaRef.current;
@@ -447,14 +447,17 @@ export const ChatComposer = ({
     command: selectedSlashCommandRef.current,
   });
 
-  const commitComposerDocument = (document: ComposerDocument) => {
-    replaceComposerDocument(document);
+  const commitComposerDocument = (
+    document: ComposerDocument,
+    selection?: { start: number; end: number },
+  ) => {
+    replaceComposerDocument(document, selection);
   };
 
   const removeTokenAt = (range: ComposerRange) => {
     recordDraftEdit();
     const transition = removeComposerDocumentToken(currentComposerDocument(), range);
-    commitComposerDocument(transition.document);
+    commitComposerDocument(transition.document, transition.textEdit);
     requestAnimationFrame(() => moveCaret(transition.caret));
   };
 
@@ -479,7 +482,7 @@ export const ChatComposer = ({
     const transition = resolveComposerSlashCommand(
       currentComposerDocument(), choice, tokenStart, tokenEnd, commandText,
     );
-    commitComposerDocument(transition.document);
+    commitComposerDocument(transition.document, transition.textEdit);
     requestAnimationFrame(() => {
       composerTextareaRef.current?.focus();
       moveCaret(transition.caret);
@@ -594,9 +597,10 @@ export const ChatComposer = ({
   };
 
   const handleInputChange = (newValue: string, editCursorPos?: number) => {
-    const transition = applyComposerTextEdit(
-      currentComposerDocument(), newValue, editCursorPos,
-    );
+    const previousDocument = currentComposerDocument();
+    const selection = pendingTextSelectionRef.current;
+    pendingTextSelectionRef.current = null;
+    const transition = applyComposerTextEdit(previousDocument, newValue, editCursorPos);
     if (transition.rejected) {
       const textarea = composerTextareaRef.current;
       if (textarea) {
@@ -607,8 +611,10 @@ export const ChatComposer = ({
     }
 
     recordDraftEdit();
-    clearSpeechOriginWhenEmpty(newValue);
-    commitComposerDocument(transition.document);
+    commitComposerDocument(
+      transition.document,
+      selection?.text === previousDocument.text ? selection : undefined,
+    );
     if (transition.caret !== undefined) {
       const caret = transition.caret;
       requestAnimationFrame(() => moveCaret(caret));
@@ -634,6 +640,14 @@ export const ChatComposer = ({
     syncPickerCaret(cursorPos);
 
     scanForResourceUrl(cursorPos);
+  };
+
+  const captureTextSelection = (textarea: HTMLTextAreaElement) => {
+    pendingTextSelectionRef.current = {
+      text: inputValueRef.current,
+      start: textarea.selectionStart,
+      end: textarea.selectionEnd,
+    };
   };
 
   // Formats named in the message are inline tokens like capsules, addressed by the caret as one
@@ -662,7 +676,7 @@ export const ChatComposer = ({
     );
     if (!transition) return;
     recordDraftEdit();
-    commitComposerDocument(transition.document);
+    commitComposerDocument(transition.document, transition.textEdit);
     requestAnimationFrame(() => {
       composerTextareaRef.current?.focus();
       moveCaret(transition.caret);
@@ -808,7 +822,11 @@ export const ChatComposer = ({
                 resizeTextarea(e.target);
                 syncMirrorScroll(e.target);
               }}
-              onSelect={handleCursorChange}
+              onBeforeInput={(event) => captureTextSelection(event.currentTarget)}
+              onSelect={(event) => {
+                captureTextSelection(event.currentTarget);
+                handleCursorChange();
+              }}
               onClick={handleCursorChange}
               onKeyUp={handleCursorChange}
 
@@ -848,6 +866,7 @@ export const ChatComposer = ({
               autoFocus={autoFocus}
               rows={minRows}
               onPaste={(e) => {
+                captureTextSelection(e.currentTarget);
                 const files = Array.from(e.clipboardData.items)
                   .filter((item) => item.kind === "file")
                   .map((item) => item.getAsFile())
@@ -858,6 +877,10 @@ export const ChatComposer = ({
                 }
               }}
               onKeyDown={(e) => {
+                if (e.key.length === 1 || e.key === "Backspace" || e.key === "Delete" ||
+                    e.key === "Enter" && e.shiftKey) {
+                  captureTextSelection(e.currentTarget);
+                }
                 // An IME commits a composition with Enter, and the browser reports that as an
                 // ordinary keydown. Reading it as "send" truncates the message mid-word for every
                 // user who types through an IME, so hand the whole keystroke back to the IME: Enter

@@ -133,3 +133,14 @@ untrimmed text; every release clears interim speech. Regression tests reproduced
 all four defects and passed after fixes, including cross-chat queued dictation.
 Validation: 693 frontend tests and full lint/build passed. Backend unchanged from
 the third follow-up. Independent hook review found no new blocker.
+
+Fifth review follow-up: unredeemed sessions expire with their tickets and start
+heartbeat/call lifetime only after acceptance; generated RPC validation remains
+authoritative. Voice submissions and pending Send honor connection/decision
+blockers. Speech provenance now tracks surviving spans, persists validated ranges,
+and maps exact composer edits and individual restored decorations. Fully typed
+replacements drop the speech note; partial surviving dictation retains it.
+Validation: 706 frontend tests, 1,135 backend unit tests, 32 backend integration
+tests (four existing skips), and full lint/build passed. New tests failed for the
+named defects before repair, including two-logo restoration and token edits.
+Independent reviews found the reported blockers resolved. No deployment performed.

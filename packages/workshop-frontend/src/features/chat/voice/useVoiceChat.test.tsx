@@ -134,12 +134,48 @@ describe("useVoiceChat", () => {
     await render({ agentActive: false });
     const client = await start();
     onLayout = () => {
+      onLayout = undefined;
       client.emit("custommessage", {
         type: "voice_transcript", mode: "conversation", sessionId: "session-1", text: "Wrong chat", turnId: "turn-1",
       });
     };
     await render({ chatId: 8 });
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("queues idle voice speech while submission is blocked and sends it after resolution", async () => {
+    await render({ agentActive: false, submissionAvailable: false });
+    await start();
+    await transcript("Wait for approval", "turn-1");
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(controls.state.pendingText).toBe("Wait for approval");
+    await render({ submissionAvailable: true });
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Wait for approval");
+  });
+
+  it("does not send a retained draft while submission is blocked", async () => {
+    await start();
+    await transcript("Retained draft", "turn-1");
+    await render({ agentActive: false, submissionAvailable: false });
+    act(() => controls.sendPending());
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(controls.state.pendingText).toBe("Retained draft");
+    await render({ submissionAvailable: true });
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Retained draft");
+  });
+
+  it("queues a transcript emitted during a blocked-submission layout effect", async () => {
+    await render({ agentActive: false });
+    const client = await start();
+    onLayout = () => {
+      onLayout = undefined;
+      client.emit("custommessage", {
+        type: "voice_transcript", mode: "conversation", sessionId: "session-1", text: "Wait for approval", turnId: "turn-1",
+      });
+    };
+    await render({ submissionAvailable: false });
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(controls.state.pendingText).toBe("Wait for approval");
   });
 
   it("retains whitespace in a failed queued transcript with later speech", async () => {

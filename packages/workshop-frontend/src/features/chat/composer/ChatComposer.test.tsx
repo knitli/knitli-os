@@ -127,6 +127,86 @@ describe("ChatComposer", () => {
       .toBe("For chat seven.");
   });
 
+  it.each([
+    ["typing", "Typed replacement."],
+    ["pasting", "Pasted replacement."],
+  ])("does not send speech provenance after select-all %s replaces dictated text", async (
+      _method, replacement) => {
+    const onSend = vi.fn<Parameters<typeof ChatComposer>[0]["onSend"]>(async () => {});
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(
+      <ChatComposer
+        chatKey={7}
+        createCapsuleGatekeeper={async () => null}
+        getOverseer={() => ({} as RpcStub<Overseer>)}
+        onSend={onSend}
+        appendText={{ token: 1, text: "Dictated draft.", chatKey: 7 }}
+        isAgentActive={false}
+        models={[]}
+        selectedModel="model-a"
+        onModelChange={() => {}}
+      />,
+    ));
+    const textarea = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
+    expect(textarea.value).toBe("Dictated draft.");
+
+    await act(async () => {
+      textarea.setSelectionRange(0, textarea.value.length);
+      textarea.dispatchEvent(new KeyboardEvent("keydown", {
+        key: _method === "typing" ? "T" : "v", ctrlKey: _method === "pasting", bubbles: true,
+      }));
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
+        textarea, replacement,
+      );
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(onSend).toHaveBeenCalledWith(replacement, "model-a", undefined, undefined, undefined);
+  });
+
+  it("retains speech provenance after a partial edit of dictated text", async () => {
+    const onSend = vi.fn<Parameters<typeof ChatComposer>[0]["onSend"]>(async () => {});
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(
+      <ChatComposer
+        chatKey={7}
+        createCapsuleGatekeeper={async () => null}
+        getOverseer={() => ({} as RpcStub<Overseer>)}
+        onSend={onSend}
+        appendText={{ token: 1, text: "Dictated draft.", chatKey: 7 }}
+        isAgentActive={false}
+        models={[]}
+        selectedModel="model-a"
+        onModelChange={() => {}}
+      />,
+    ));
+    const textarea = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
+    await act(async () => {
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "!", bubbles: true }));
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
+        textarea, "Dictated draft!",
+      );
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(onSend).toHaveBeenCalledWith(
+      "Dictated draft!", "model-a", undefined, undefined, undefined, { hasSpeech: true },
+    );
+  });
+
   it("sends on Enter without clearing document changes made while sending", async () => {
     let finishSend: (() => void) | undefined;
     const onSend = vi.fn<Parameters<typeof ChatComposer>[0]["onSend"]>(

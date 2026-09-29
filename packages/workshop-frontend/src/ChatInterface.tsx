@@ -4109,6 +4109,7 @@ function ChatInterface({
     sendMessage: sendVoiceMessage,
     subscribeToEvents: subscribeToChatEvents,
     conversationAvailable: selectedChatId !== null && selectedModel !== null,
+    submissionAvailable: !hasPendingConnectionRequest && !hasPendingAwaitedAction,
   });
 
   // Handle creating a new chat from the sidebar (always creates, never sends to existing)
@@ -6562,7 +6563,7 @@ function ChatInterface({
                         onPendingTextChange={voice.setPendingText}
                         onSendPending={voice.sendPending}
                         conversationAvailable={selectedChatId !== null && selectedModel !== null}
-                        canSendPending={!isAgentActive}
+                        canSendPending={!isAgentActive && !hasPendingConnectionRequest && !hasPendingAwaitedAction}
                       />
                     )}
                     draftStorageKey={currentUser && workspaceId && selectedChatId !== null

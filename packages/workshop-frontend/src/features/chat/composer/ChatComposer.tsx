@@ -55,6 +55,8 @@ import { ComposerEffortSelector } from "../controls/ComposerEffortSelector";
 import {
   ComposerPromptSelector, type PromptPresetOption,
 } from "../controls/ComposerPromptSelector";
+import type { DictationAppend } from "./useDictationAppendQueue";
+import type { SpeechTextSelection } from "./draft/speechRanges";
 import { useComposerDraft } from "./draft/useComposerDraft";
 import { buildComposerSubmission } from "./composerSubmission";
 import {
@@ -113,6 +115,8 @@ export const ChatComposer = ({
   effortControl,
   promptControl,
   voiceControls,
+  conversationDraft,
+  isDictating = false,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -157,6 +161,14 @@ export const ChatComposer = ({
   };
   /** Voice controls owned by the chat session, placed beside the composer actions. */
   voiceControls?: ReactNode | ((draft: { canStartConversation: () => boolean }) => ReactNode);
+  isDictating?: boolean;
+  conversationDraft?: {
+    text: string;
+    readOnly: boolean;
+    onChange: (text: string, selection?: SpeechTextSelection) => void;
+    onSend: () => void;
+    canSend: boolean;
+  };
   pendingConsoleLogCount?: number;
   consoleLogPreview?: string;
   consoleLogSeverity?: "error" | "warn" | "info";
@@ -176,8 +188,8 @@ export const ChatComposer = ({
    * whenever `seedNonce` changes, so the same text can be re-seeded by bumping the nonce. */
   seedText?: string;
   seedNonce?: number;
-  /** Text finalized by Dictate. It joins the existing editable draft without sending it. */
-  appendText?: { token: number; text: string; chatKey: number | null } | null;
+  /** Dictate segments update the existing editable draft without sending it. */
+  appendText?: DictationAppend | null;
   onAppendTextApplied?: (token: number) => void;
   /** Session-storage key used to recover this composer's draft prompt after a page refresh. */
   draftStorageKey?: string;
@@ -212,6 +224,7 @@ export const ChatComposer = ({
   const [preparingFiles, setPreparingFiles] = useState(0);
   const preparingFilesRef = useRef(0);
   const addFiles = async (files: FileList | File[]) => {
+    if (conversationDraft || isDictating) return;
     setPreparingFiles(++preparingFilesRef.current);
     try {
       await prepareFiles(files);
@@ -227,7 +240,7 @@ export const ChatComposer = ({
     getDocumentSnapshot,
     presentationRequest: draftPresentationRequest,
     recordEdit: recordDraftEdit,
-    markSpeechOrigin,
+    applyDictation,
     replaceDocument: replaceComposerDocument,
     updateDocument: updateComposerDocument,
   } = useComposerDraft({
@@ -329,7 +342,7 @@ export const ChatComposer = ({
     textareaRef: composerTextareaRef,
     wrapperRef,
     mirrorRef,
-    text: inputValue,
+    text: conversationDraft?.text ?? inputValue,
     activeTextOffset: activeUrl?.start,
     minRows,
     maxRows: newChat ? 10 : 4,
@@ -343,7 +356,7 @@ export const ChatComposer = ({
     onDrop: handleAttachmentDrop,
   } = useComposerAttachmentDrop({
     attachmentCount: pendingAttachments.length,
-    maxAttachments: MAX_COMPOSER_ATTACHMENTS,
+    maxAttachments: conversationDraft || isDictating ? 0 : MAX_COMPOSER_ATTACHMENTS,
     onFilesDropped: (files) => void addFiles(files),
   });
 
@@ -381,18 +394,20 @@ export const ChatComposer = ({
   }, [seedNonce]);
   useEffect(() => {
     if (!appendText?.text || appendText.chatKey !== chatKey) return;
-    recordDraftEdit();
-    updateComposerDocument((previous) => ({
-      ...previous,
-      text: previous.text ? `${previous.text}\n${appendText.text}` : appendText.text,
-    }));
-    markSpeechOrigin(appendText.text);
+    const editor = composerTextareaRef.current;
+    const selection = editor && document.activeElement === editor
+      ? { start: editor.selectionStart, end: editor.selectionEnd } : null;
+    const edit = applyDictation(appendText.text, appendText.segmentId, appendText.final);
     onAppendTextApplied?.(appendText.token);
+    if (!edit) return;
     requestAnimationFrame(() => {
       const textarea = composerTextareaRef.current;
       if (!textarea) return;
       textarea.focus();
-      textarea.setSelectionRange(inputValueRef.current.length, inputValueRef.current.length);
+      const move = (position: number) => position < edit.start ? position
+        : position >= edit.end ? position + edit.nextEnd - edit.end : edit.nextEnd;
+      textarea.setSelectionRange(selection ? move(selection.start) : edit.nextEnd,
+        selection ? move(selection.end) : edit.nextEnd);
       resizeTextarea(textarea);
     });
   }, [appendText?.token, chatKey, onAppendTextApplied]);
@@ -506,7 +521,7 @@ export const ChatComposer = ({
     inputValue,
     cursorPosition,
     selectedCommand: selectedSlashCommand?.choice ?? null,
-    disabled: isBlocked,
+    disabled: isBlocked || !!conversationDraft || isDictating,
     anchorRef: promptCardRef,
     getOverseer,
     onSelect: applySlashCommandSelection,
@@ -519,6 +534,11 @@ export const ChatComposer = ({
   };
 
   const handleSend = async () => {
+    if (isDictating) return;
+    if (conversationDraft) {
+      if (conversationDraft.canSend && !conversationDraft.readOnly) conversationDraft.onSend();
+      return;
+    }
     if (sendInFlightRef.current || isSending || isBlocked) return;
     setSendHiccup(null);
     const attachmentsSnapshot = pendingAttachments;
@@ -585,12 +605,14 @@ export const ChatComposer = ({
   };
 
   const handleAttachLogs = () => {
+    if (conversationDraft || isDictating) return;
     const formatted = onConsumeConsoleLogs();
     recordDraftEdit();
     setInputValue((prev) => prev + "\n\n" + formatted);
   };
 
   const handleAttachOpen = () => {
+    if (isDictating || conversationDraft) return;
     const position = composerTextareaRef.current?.selectionStart ?? inputValueRef.current.length;
     openAttachModal(snapCaretOutOfRanges(position, currentTokenRanges(), "nearest"));
   };
@@ -608,6 +630,7 @@ export const ChatComposer = ({
   };
 
   const handleInputChange = (newValue: string, editCursorPos?: number) => {
+    if (isDictating) return;
     const previousDocument = currentComposerDocument();
     const selection = pendingTextSelectionRef.current;
     pendingTextSelectionRef.current = null;
@@ -635,6 +658,7 @@ export const ChatComposer = ({
   // Detect whether the cursor is currently inside a URL in the input text.
   // Called on every cursor movement (select, click, keyup).
   const handleCursorChange = () => {
+    if (conversationDraft || isDictating) return;
     const textarea = composerTextareaRef.current;
     if (!textarea) return;
 
@@ -655,7 +679,7 @@ export const ChatComposer = ({
 
   const captureTextSelection = (textarea: HTMLTextAreaElement) => {
     pendingTextSelectionRef.current = {
-      text: inputValueRef.current,
+      text: conversationDraft?.text ?? inputValueRef.current,
       start: textarea.selectionStart,
       end: textarea.selectionEnd,
     };
@@ -669,7 +693,7 @@ export const ChatComposer = ({
 
   // A format is only context on the message, so it coexists with everything else the composer can
   // carry, including a slash command ("/writing-review turn this into a Doc").
-  const canChooseFormat = offerFormats;
+  const canChooseFormat = offerFormats && !conversationDraft && !isDictating;
 
   // Inserted at the caret, like a capsule, so the noun lands in the sentence that needs it.
   const chooseFormat = async (format: OutputFormatOffer) => {
@@ -737,9 +761,9 @@ export const ChatComposer = ({
       && draft.command === null && !sendInFlightRef.current && preparingFilesRef.current === 0
       && !hasAttachments() && conversationResourcesReadyRef.current;
   };
-  const canSend = !isSending && !isAgentActive && !isBlocked &&
+  const canSend = !isDictating && (conversationDraft ? conversationDraft.canSend && !conversationDraft.readOnly : !isSending && !isAgentActive && !isBlocked &&
     (inputValue.trim().length > 0 || selectedSlashCommand !== null || hasReadyAttachment) &&
-    !hasUnreadyAttachment && !isCreatingResource;
+    !hasUnreadyAttachment && !isCreatingResource);
   return (
     // isolation: isolate contains z-indexes used inside the composer (the
     // captured-log floating chip with z-10, the textarea/mirror with z-[1])
@@ -782,7 +806,7 @@ export const ChatComposer = ({
               <span className={`grid h-7 w-7 place-items-center rounded-full ${canAttachMore ? "bg-kumo-brand/12 text-kumo-brand" : "bg-kumo-warning/15 text-kumo-warning"}`}>
                 <FileIcon size={16} weight="duotone" />
               </span>
-              {canAttachMore ? "Drop files to attach" : "Messages are limited to 5 attachments"}
+              {isDictating ? "Stop dictation before attaching files" : conversationDraft ? "Send or clear the voice instruction before attaching files" : canAttachMore ? "Drop files to attach" : "Messages are limited to 5 attachments"}
             </div>
           </div>
         )}
@@ -806,7 +830,7 @@ export const ChatComposer = ({
                 : "")}
           </div>
           <div ref={wrapperRef} className={styles.capsuleInputWrapper}>
-            {activeUrl && (
+            {!conversationDraft && !isDictating && activeUrl && (
               <CapsuleOverlay
                 url={activeUrl.text}
                 onSelectAccount={(accountId, vendorId) => {
@@ -822,18 +846,28 @@ export const ChatComposer = ({
             )}
             <ComposerMirror
               ref={mirrorRef}
-              value={inputValue}
-              tokens={mirrorTokens}
-              disabled={isBlocked}
+              value={conversationDraft?.text ?? inputValue}
+              tokens={conversationDraft ? [] : mirrorTokens}
+              disabled={isBlocked && !conversationDraft}
             />
             <textarea
-              value={inputValue}
+              value={conversationDraft?.text ?? inputValue}
+              readOnly={isDictating || conversationDraft?.readOnly}
               role="combobox"
               aria-autocomplete="list"
-              aria-expanded={slashCommandPicker.open}
-              aria-controls={slashCommandPicker.open ? slashCommandPicker.listboxId : undefined}
-              aria-activedescendant={slashCommandPicker.activeDescendant}
+              aria-expanded={!conversationDraft && slashCommandPicker.open}
+              aria-controls={!conversationDraft && slashCommandPicker.open ? slashCommandPicker.listboxId : undefined}
+              aria-activedescendant={conversationDraft ? undefined : slashCommandPicker.activeDescendant}
               onChange={(e) => {
+                if (conversationDraft) {
+                  const selection = pendingTextSelectionRef.current;
+                  pendingTextSelectionRef.current = null;
+                  conversationDraft.onChange(e.target.value, selection?.text === conversationDraft.text
+                    ? { start: selection.start, end: selection.end } : undefined);
+                  resizeTextarea(e.target);
+                  syncMirrorScroll(e.target);
+                  return;
+                }
                 handleInputChange(e.target.value, e.target.selectionStart ?? 0);
                 syncPickerCaret(e.target.selectionStart ?? 0);
                 requestAnimationFrame(handleCursorChange);
@@ -850,6 +884,7 @@ export const ChatComposer = ({
               onKeyUp={handleCursorChange}
 
               onMouseDown={(e) => {
+                if (conversationDraft || isDictating) return;
                 if (e.button !== 0) return;
                 const token = tokenAtPoint(e.clientX, e.clientY);
                 if (!token) return;
@@ -858,6 +893,7 @@ export const ChatComposer = ({
                 moveCaret(token.edge);
               }}
               onMouseMove={(e) => {
+                if (conversationDraft || isDictating) return;
                 const token = tokenAtPoint(e.clientX, e.clientY);
                 mirrorRef.current?.setHoveredToken(token?.start ?? null);
                 const cursor = token ? "default" : "";
@@ -872,7 +908,7 @@ export const ChatComposer = ({
               onScroll={(e) => {
                 syncMirrorScroll(e.currentTarget);
               }}
-              disabled={isBlocked}
+              disabled={isBlocked && !conversationDraft}
               placeholder={
                 isBlocked
                   ? blockedReason
@@ -886,6 +922,7 @@ export const ChatComposer = ({
               rows={minRows}
               onPaste={(e) => {
                 captureTextSelection(e.currentTarget);
+                if (conversationDraft || isDictating) return;
                 const files = Array.from(e.clipboardData.items)
                   .filter((item) => item.kind === "file")
                   .map((item) => item.getAsFile())
@@ -905,7 +942,14 @@ export const ChatComposer = ({
                 // user who types through an IME, so hand the whole keystroke back to the IME: Enter
                 // is not the only key it owns -- Escape cancels a composition and the arrows move
                 // through candidates.
-                if (isImeComposing(e)) return;
+                if (isImeComposing(e) || isDictating) return;
+                if (conversationDraft) {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    if (canSend) submitMessage();
+                  }
+                  return;
+                }
                 if (slashCommandPicker.open && e.key === "Escape") {
                   e.preventDefault();
                   slashCommandPicker.dismiss();
@@ -992,7 +1036,7 @@ export const ChatComposer = ({
 
         <ComposerAttachmentTray
           attachments={pendingAttachments}
-          disabled={isSending}
+          disabled={isSending || isDictating || !!conversationDraft}
           onRemove={removeAttachment}
         />
 
@@ -1005,7 +1049,7 @@ export const ChatComposer = ({
             <ComposerAddMenu
               anchorRef={promptCardRef}
               catalogVersion={catalogVersion}
-              disabled={isBlocked}
+              disabled={isBlocked || !!conversationDraft || isDictating}
               getOverseer={getOverseer}
               chatExists={!newChat}
               skillSelected={selectedSlashCommand !== null}

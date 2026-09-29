@@ -4119,8 +4119,8 @@ function ChatInterface({
     authenticatedApi,
     chatId: selectedChatId,
     agentActive: isAgentActive,
-    onDictation: (text) => {
-      dictationAppend.enqueue(text, selectedChatId);
+    onDictation: (text, segment) => {
+      dictationAppend.enqueue(text, selectedChatId, segment?.segmentId, segment?.final);
     },
     sendMessage: sendVoiceMessage,
     subscribeToEvents: subscribeToChatEvents,
@@ -6558,6 +6558,14 @@ function ChatInterface({
                     onSend={handleSend}
                     appendText={dictationAppend.appendForChat(selectedChatId)}
                     onAppendTextApplied={dictationAppend.acknowledge}
+                    isDictating={voice.state.mode === "dictate"}
+                    conversationDraft={voice.state.pendingText || voice.state.mode === "conversation" ? {
+                      text: [voice.state.pendingText, voice.state.mode === "conversation" ? voice.state.interimTranscript : null].filter(Boolean).join("\n"),
+                      readOnly: voice.starting || voice.state.mode === "conversation" && !!voice.state.interimTranscript,
+                      onChange: voice.setPendingText,
+                      onSend: voice.sendPending,
+                      canSend: !!voice.state.pendingText.trim() && !voice.submitting && !voice.state.interimTranscript && !isAgentActive && !hasPendingConnectionRequest && !hasPendingAwaitedAction,
+                    } : undefined}
                     isAgentActive={isAgentActive}
                     models={availableModels}
                     selectedModel={selectedModel}
@@ -6582,17 +6590,17 @@ function ChatInterface({
                     onStop={handleStop}
                     showThinkingTraces={showThinkingTraces}
                     onToggleThinkingTraces={toggleShowThinkingTraces}
-                    voiceControls={(
+                    voiceControls={({ canStartConversation }) => (
                       <VoiceControls
                         state={voice.state}
                         disabled={hasPendingConnectionRequest || hasPendingAwaitedAction}
-                        onStart={voice.start}
+                        onStart={(mode) => {
+                          if (mode === "dictate" || canStartConversation()) voice.start(mode);
+                        }}
+                        conversationBlockedReason={!canStartConversation() ? "Send or clear the draft before starting a conversation." : undefined}
                         onEnd={voice.end}
                         onMute={voice.toggleMute}
-                        onPendingTextChange={voice.setPendingText}
-                        onSendPending={voice.sendPending}
                         conversationAvailable={selectedChatId !== null && selectedModel !== null}
-                        canSendPending={!isAgentActive && !hasPendingConnectionRequest && !hasPendingAwaitedAction}
                       />
                     )}
                     draftStorageKey={currentUser && workspaceId && selectedChatId !== null

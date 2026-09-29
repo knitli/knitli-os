@@ -4,20 +4,30 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import { VoiceControls } from "./VoiceControls";
 
+vi.mock("@cloudflare/kumo", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@cloudflare/kumo")>()),
+  useKumoToastManager: () => ({ add: () => {} }),
+}));
+vi.mock("../../../AuthContext", () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }));
+vi.mock("../../../useVendorBranding", () => ({ useVendorBranding: () => new Map() }));
+vi.mock("../../../GatekeeperModal", () => ({ default: () => null }));
+import { ChatComposer } from "../composer/ChatComposer";
+import type { RpcStub } from "capnweb";
+import type { Overseer } from "@gadgets/workshop-shared/api";
+Element.prototype.scrollIntoView ??= () => {};
+vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 it("preserves utterance separators when editing and sending pending voice instructions", async () => {
   const onSend = vi.fn<(text: string) => void>();
   const Harness = () => {
     const [pendingText, setPendingText] = React.useState("First request\nSecond request");
-    return <VoiceControls
-      state={{ mode: "conversation", status: "thinking", muted: false, interimTranscript: null, error: null, pendingText }}
-      disabled={false}
-      onStart={() => {}}
-      onEnd={() => {}}
-      onMute={() => {}}
-      onPendingTextChange={setPendingText}
-      onSendPending={() => onSend(pendingText)}
+    return <ChatComposer
+      createCapsuleGatekeeper={async () => null} getOverseer={() => ({} as RpcStub<Overseer>)}
+      onSend={() => {}} isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+      conversationDraft={{ text: pendingText, readOnly: false, canSend: true,
+        onChange: setPendingText, onSend: () => onSend(pendingText) }}
     />;
   };
   const container = document.createElement("div");
@@ -25,7 +35,7 @@ it("preserves utterance separators when editing and sending pending voice instru
   const root = createRoot(container);
   try {
     await act(async () => root.render(<Harness />));
-    const editor = container.querySelector<HTMLInputElement | HTMLTextAreaElement>('[aria-label="Pending voice instruction"]')!;
+    const editor = container.querySelector<HTMLInputElement | HTMLTextAreaElement>('[role="combobox"]')!;
     // Use the native setter so React observes the same value change as a browser edit.
     const setValue = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(editor), "value")!.set!;
     await act(async () => {
@@ -33,7 +43,7 @@ it("preserves utterance separators when editing and sending pending voice instru
       editor.dispatchEvent(new Event("input", { bubbles: true }));
     });
     await act(async () => {
-      Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Send")!.click();
+      container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.click();
     });
     expect(onSend).toHaveBeenCalledWith("First request\nSecond request!");
     expect(editor.value).toBe("First request\nSecond request!");
@@ -50,8 +60,6 @@ it("announces an asynchronous startup error when no voice session is active", as
     onStart={() => {}}
     onEnd={() => {}}
     onMute={() => {}}
-    onPendingTextChange={() => {}}
-    onSendPending={() => {}}
   />;
   const container = document.createElement("div");
   document.body.append(container);
@@ -73,16 +81,13 @@ it("reports the pending editor selection from before a replacement", async () =>
   document.body.append(container);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(<VoiceControls
-      state={{ mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "Spoken words" }}
-      disabled={false}
-      onStart={() => {}}
-      onEnd={() => {}}
-      onMute={() => {}}
-      onPendingTextChange={onPendingTextChange}
-      onSendPending={() => {}}
+    await act(async () => root.render(<ChatComposer
+      createCapsuleGatekeeper={async () => null} getOverseer={() => ({} as RpcStub<Overseer>)}
+      onSend={() => {}} isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+      conversationDraft={{ text: "Spoken words", readOnly: false, canSend: true,
+        onChange: onPendingTextChange, onSend: () => {} }}
     />));
-    const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="Pending voice instruction"]')!;
+    const editor = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
     const setValue = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(editor), "value")!.set!;
     editor.focus();
     editor.setSelectionRange(0, editor.value.length);
@@ -107,7 +112,6 @@ it("offers named icon controls for conversation and stopping persistent dictatio
   const render = (mode: "dictate" | null) => <VoiceControls
     state={{ mode, status: "listening", muted: false, interimTranscript: null, error: null, pendingText: "" }}
     disabled={false} onStart={onStart} onEnd={onEnd} onMute={() => {}}
-    onPendingTextChange={() => {}} onSendPending={() => {}}
   />;
   try {
     await act(async () => root.render(render(null)));
@@ -134,8 +138,7 @@ it("explains a blocked conversation while keeping dictation available", async ()
       state={{ mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "" }}
       disabled={false} conversationBlockedReason={reason}
       onStart={onStart} onEnd={() => {}} onMute={() => {}}
-      onPendingTextChange={() => {}} onSendPending={() => {}}
-    />));
+      />));
     const conversation = container.querySelector<HTMLButtonElement>('[aria-label="Start conversation"]')!;
     expect(conversation.disabled).toBe(true);
     expect(container.querySelector(`[id="${conversation.getAttribute("aria-describedby")}"]`)?.textContent).toBe(reason);
@@ -148,4 +151,18 @@ it("explains a blocked conversation while keeping dictation available", async ()
   } finally {
     await act(async () => root.unmount());
   }
+});
+
+
+it("keeps pending speech visible for review before starting another voice mode", async () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<VoiceControls
+      state={{ mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "Review me" }}
+      disabled={false} onStart={() => {}} onEnd={() => {}} onMute={() => {}}
+    />));
+    expect(container.querySelector<HTMLButtonElement>('[aria-label="Start dictation"]')!.disabled).toBe(true);
+    expect(container.textContent).toContain("Send or clear");
+  } finally { await act(async () => root.unmount()); }
 });

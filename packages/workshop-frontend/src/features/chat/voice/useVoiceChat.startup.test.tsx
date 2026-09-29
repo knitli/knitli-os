@@ -28,7 +28,7 @@ class Socket extends EventTarget {
 it("starts one SDK call and keeps listening across finalized segments until explicit stop", async () => {
   const stopMicrophone = vi.fn<() => void>();
   const closeSession = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
-  const onDictation = vi.fn<(text: string) => void>();
+  const onDictation = vi.fn<Parameters<typeof useVoiceChat>[0]["onDictation"]>();
   const getUserMedia = vi.fn<() => Promise<{ getTracks: () => { stop: () => void }[] }>>().mockResolvedValue({ getTracks: () => [{ stop: stopMicrophone }] });
   vi.stubGlobal("WebSocket", Socket);
   vi.stubGlobal("navigator", { mediaDevices: { getUserMedia } });
@@ -81,6 +81,10 @@ it("starts one SDK call and keeps listening across finalized segments until expl
     expect(socket.frames.filter((frame) => frame.type === "start_call")).toEqual([{ type: "start_call" }]);
     expect(getUserMedia).toHaveBeenCalledOnce();
     await act(async () => { socket.receive({ type: "status", status: "listening" }); });
+    await act(async () => { socket.receive({ type: "transcript_interim", text: "First" }); });
+    expect(onDictation).toHaveBeenLastCalledWith("First", { segmentId: 1, final: false });
+    await act(async () => { socket.receive({ type: "transcript_interim", text: "First sentence" }); });
+    expect(onDictation).toHaveBeenLastCalledWith("First sentence", { segmentId: 1, final: false });
     for (const text of ["First sentence.", "Second sentence."]) {
       await act(async () => {
         socket.receive({ type: "voice_transcript", sessionId: "session-1", mode: "dictate", text });
@@ -91,9 +95,16 @@ it("starts one SDK call and keeps listening across finalized segments until expl
       expect(socket.close).not.toHaveBeenCalled();
       expect(stopMicrophone).not.toHaveBeenCalled();
     }
-    expect(onDictation.mock.calls).toEqual([["First sentence."], ["Second sentence."]]);
+    expect(onDictation.mock.calls.slice(-2)).toEqual([
+      ["First sentence.", { segmentId: 1, final: true }], ["Second sentence."],
+    ]);
+    await act(async () => { socket.receive({ type: "transcript_interim", text: "Keep unfinished words" }); });
     expect(socket.frames.some((frame) => frame.type === "end_call")).toBe(false);
     act(() => { controls.end(); });
+    expect(onDictation).toHaveBeenLastCalledWith("Keep unfinished words", { segmentId: 2, final: true });
+    const delivered = onDictation.mock.calls.length;
+    act(() => socket.receive({ type: "voice_transcript", sessionId: "session-1", mode: "dictate", text: "Late duplicate" }));
+    expect(onDictation).toHaveBeenCalledTimes(delivered);
     expect(socket.frames.filter((frame) => frame.type === "end_call")).toEqual([{ type: "end_call" }]);
     expect(socket.close).toHaveBeenCalledOnce();
     expect(stopMicrophone).toHaveBeenCalledOnce();

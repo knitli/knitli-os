@@ -162,7 +162,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
     authenticatedApi,
     chatId: null,
     agentActive: false,
-    onDictation: (text) => dictationAppend.enqueue(text, null),
+    onDictation: (text, segment) => dictationAppend.enqueue(text, null, segment?.segmentId, segment?.final),
     sendMessage: async () => undefined,
     subscribeToEvents: subscribeToNoChatEvents,
     conversationAvailable: false,
@@ -243,6 +243,8 @@ export function HomePageContent({ prompt }: HomeSearch) {
 
         {/* Composer */}
         <ChatComposer
+          chatKey={null}
+          isDictating={voice.state.mode === "dictate"}
           createCapsuleGatekeeper={createCapsuleGatekeeper}
           getOverseer={getOverseer}
           onSend={handleSend}
@@ -254,8 +256,6 @@ export function HomePageContent({ prompt }: HomeSearch) {
             onStart={(mode) => { void startVoice(mode, canStartConversation); }}
             onEnd={voice.end}
             onMute={voice.toggleMute}
-            onPendingTextChange={voice.setPendingText}
-            onSendPending={voice.sendPending}
             conversationBlockedReason={canStartConversation() ? undefined : "Send or clear the draft before starting a conversation."}
             conversationAvailable={selectedModel !== null}
           />}

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { formatIconDataUrl } from "../../../../components/format/formatIconImage";
 import { slashCommandKey } from "../../../../components/chat/slash-command-catalog";
-import type { ComposerDocument } from "../composerDocument";
+import { applyComposerTextEdit, type ComposerDocument } from "../composerDocument";
 import {
   decorateComposerDraft,
   readComposerDraft,
@@ -127,6 +127,7 @@ export const useComposerDraft = ({
   const initialSpeechRanges = speechRangesFromDraft(initialDraft);
   const hasSpeechRef = useRef(initialSpeechRanges.length > 0);
   const speechRangesRef = useRef<SpeechRange[]>(initialSpeechRanges);
+  const dictationSegmentsRef = useRef(new Map<number, SpeechRange & { closed: boolean }>());
   documentRef.current = document;
 
   const reconcileSpeechOriginAfterTextEdit = (
@@ -146,6 +147,18 @@ export const useComposerDraft = ({
     selection?: SpeechTextSelection,
     preserveSpeechRanges = false,
   ) => {
+    for (const segment of dictationSegmentsRef.current.values()) {
+      if (segment.closed) continue;
+      const ranges = speechRangesAfterTextEdit([segment], documentRef.current.text, nextDocument.text, selection);
+      const remaining = ranges[0];
+      if (ranges.length !== 1 || remaining.end - remaining.start !== segment.end - segment.start) {
+        // ponytail: human edits freeze this utterance; merge recognition revisions if live correction is needed.
+        segment.closed = true;
+      } else {
+        segment.start = remaining.start;
+        segment.end = remaining.end;
+      }
+    }
     if (!preserveSpeechRanges) {
       reconcileSpeechOriginAfterTextEdit(documentRef.current.text, nextDocument.text, selection);
     }
@@ -223,6 +236,7 @@ export const useComposerDraft = ({
     const generation = ++restoreGenerationRef.current;
     const previousKey = loadedKeyRef.current;
     loadedKeyRef.current = storageKey;
+    dictationSegmentsRef.current.clear();
     skipWriteRef.current = true;
     setPresentationRequest(undefined);
     const storedDraft = readComposerDraft(storageKey);
@@ -267,12 +281,16 @@ export const useComposerDraft = ({
     setPresentationRequest(undefined);
   };
 
-  const beginSend = (): { key: string | undefined; editRevision: number; draft: StoredComposerDraft; hasSpeech?: boolean } => ({
-    key: loadedKeyRef.current,
-    editRevision: editRevisionRef.current,
-    draft: storedDraftFromDocument(documentRef.current, speechRangesRef.current),
-    ...(hasSpeechRef.current && { hasSpeech: true }),
-  });
+  const beginSend = (): { key: string | undefined; editRevision: number; draft: StoredComposerDraft; hasSpeech?: boolean } => {
+    // A late recognition result must not resurrect speech the user has already submitted.
+    for (const segment of dictationSegmentsRef.current.values()) segment.closed = true;
+    return {
+      key: loadedKeyRef.current,
+      editRevision: editRevisionRef.current,
+      draft: storedDraftFromDocument(documentRef.current, speechRangesRef.current),
+      ...(hasSpeechRef.current && { hasSpeech: true }),
+    };
+  };
 
   const completeSend = (send: ReturnType<typeof beginSend>): boolean => {
     if (loadedKeyRef.current !== send.key) {
@@ -303,6 +321,27 @@ export const useComposerDraft = ({
     speechRangesRef.current.push({ start: end - text.length, end });
     hasSpeechRef.current = true;
   };
+  const applyDictation = (text: string, segmentId?: number, final = true) => {
+    const segment = segmentId === undefined ? undefined : dictationSegmentsRef.current.get(segmentId);
+    if (segment?.closed || !text) return;
+    const previous = documentRef.current;
+    const start = segment?.start ?? previous.text.length + (previous.text ? 1 : 0);
+    const end = segment?.end ?? previous.text.length;
+    const nextText = segment
+      ? previous.text.slice(0, start) + text + previous.text.slice(end)
+      : previous.text + (previous.text ? "\n" : "") + text;
+    const transition = applyComposerTextEdit(previous, nextText);
+    if (transition.rejected) return;
+    recordEdit();
+    setCurrentDocument(transition.document, { start: segment?.start ?? previous.text.length, end });
+    speechRangesRef.current.push({ start, end: start + text.length });
+    hasSpeechRef.current = true;
+    if (segmentId !== undefined) {
+      dictationSegmentsRef.current.set(segmentId, { start, end: start + text.length, closed: final });
+    }
+    return { start: segment?.start ?? previous.text.length, end, nextEnd: start + text.length };
+  };
+
   const clearSpeechOriginWhenEmpty = (text: string) => {
     if (text === "") {
       hasSpeechRef.current = false;
@@ -342,6 +381,7 @@ export const useComposerDraft = ({
   };
 
   return {
+    applyDictation,
     beginSend,
     commitDocumentEdit,
     completeSend,

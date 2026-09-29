@@ -15,6 +15,7 @@ import { RpcStub } from 'capnweb'
 import {
   AgentSpawnerConfig,
   AiChatAuthorInfo,
+  AmbientVendorStatus,
   GatekeeperClient,
   Overseer,
 } from '@gadgets/workshop-shared/api'
@@ -44,6 +45,9 @@ export interface GatekeeperModalProps {
   /**
    * Returns an overseer stub. Called only when actually creating a gatekeeper. This allows
    * the Home page to lazily provision a gadget on first use.
+   *
+   * Fork: also called on open when `initialVendorId` is set, to ask the owner's always-on
+   * availability, so a caller passing `initialVendorId` must supply one that doesn't provision.
    */
   getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>
   /**
@@ -190,6 +194,10 @@ function isAlwaysOn(connection: ConnectionType, alwaysOnVendorIds: ReadonlySet<s
   return connection.vendorId !== undefined && alwaysOnVendorIds.has(connection.vendorId)
 }
 
+// Fork: how long the connection-request modal waits on the owner's always-on availability before
+// falling back as if the query failed.
+const OWNER_AMBIENT_TIMEOUT_MS = 5_000
+
 function disposeConfiguratorFrame(frame: ResourceConfiguratorFrame | null) {
   const uiDisposable = frame?.ui as any
   uiDisposable?.[Symbol.dispose]?.()
@@ -280,7 +288,63 @@ export default function GatekeeperModal({
     () => allConnections.find(connection => connection.id === selectedConnectionId) ?? null,
     [allConnections, selectedConnectionId],
   )
-  const selectedAlwaysOn = selectedConnection !== null && isAlwaysOn(selectedConnection, alwaysOnVendorIds)
+  // Fork: completing an agent's connection request (only that flow passes initialVendorId) for a
+  // vendor the workspace OWNER has always on. The chat's ambient set was frozen before it had this
+  // vendor, so the request is accepted with the workspace's ambient gatekeeper -- of the requested
+  // vendor only. Availability is the owner's, not the viewer's (alwaysOnVendorIds): the capsule is
+  // provisioned from the owner's account, and a collaborator's own account is asked for separately
+  // by the host when it verifies them.
+  // 'unknown' when the query failed. Re-asked whenever the viewer's accounts of the vendor change:
+  // an owner who connects (or reconnects) the singleton here changes the answer.
+  const [ownerAmbient, setOwnerAmbient] =
+    useState<{ accountsKey: string, status: AmbientVendorStatus | 'unknown' } | null>(null)
+  const viewerVendorAccounts = accounts.filter(account => account.vendorId === initialVendorId)
+  const requestedVendorAccounts = viewerVendorAccounts
+    .map(account => `${account.id}:${account.credentialsValid}`).join(',')
+  const getOverseerRef = useRef(getOverseer)
+  getOverseerRef.current = getOverseer
+  useEffect(() => setOwnerAmbient(null), [open, initialVendorId])
+  useEffect(() => {
+    if (!open || !initialVendorId) return
+    let cancelled = false
+    const settle = (status: AmbientVendorStatus | 'unknown') => {
+      if (!cancelled) setOwnerAmbient({ accountsKey: requestedVendorAccounts, status })
+    }
+    // An answer that never comes is treated like a failed one; a late answer still replaces it.
+    const timeout = setTimeout(() => settle('unknown'), OWNER_AMBIENT_TIMEOUT_MS)
+    Promise.resolve().then(() => getOverseerRef.current())
+      .then(overseer => overseer.ambientVendorStatus(initialVendorId))
+      .then(settle, () => settle('unknown'))
+      .finally(() => clearTimeout(timeout))
+    return () => {
+      cancelled = true
+      clearTimeout(timeout)
+    }
+  }, [open, initialVendorId, requestedVendorAccounts])
+  const requestedVendorSelected = initialVendorId !== undefined && selectedConnection?.vendorId === initialVendorId
+  const viewerAlwaysOn = selectedConnection !== null && isAlwaysOn(selectedConnection, alwaysOnVendorIds)
+  // An answer from before the viewer's accounts changed still stands unless the viewer now has the
+  // singleton themselves, which is when the owner's answer is what the modal must show.
+  const ownerStatus = ownerAmbient === null ||
+    (ownerAmbient.accountsKey !== requestedVendorAccounts && viewerAlwaysOn) ? null : ownerAmbient.status
+  // Only a vendor that may be ambient waits: a viewer's non-singleton account of it means it can't be.
+  const mayBeAmbient = viewerVendorAccounts.length === 0 ||
+    viewerVendorAccounts.some(account => account.description.singleton)
+  const checkingOwnerAmbient = requestedVendorSelected && ownerStatus === null && mayBeAmbient
+  // A failed query falls back to the viewer's own accounts; handleAddAmbientToChat is authoritative.
+  const addsAmbientToChat = requestedVendorSelected &&
+    (ownerStatus === 'available' || (ownerStatus === 'unknown' && viewerAlwaysOn))
+  const ownerMustReconnect = requestedVendorSelected && ownerStatus === 'ownerMustReconnect'
+  // A collaborator can't add the owner's missing singleton, so gets no Connect for an ambient-type
+  // (auto-provisioning) vendor they hold no account of; the owner ("absent") still does.
+  const ownerLacksAmbient = requestedVendorSelected && (
+    ((ownerStatus === 'absent' || ownerStatus === 'ownerAbsent') && viewerAlwaysOn) ||
+    (ownerStatus === 'ownerAbsent' && viewerVendorAccounts.length === 0 &&
+      Boolean(selectedConnection?.autoProvisionsAccount)))
+  // For the requested vendor the owner's status decides; its "reconnect" (the viewer is the owner)
+  // leaves the chooser's Reconnect in place, as does "absent" for a vendor the viewer lacks.
+  const selectedAlwaysOn = (viewerAlwaysOn && !requestedVendorSelected) || checkingOwnerAmbient ||
+    addsAmbientToChat || ownerMustReconnect || ownerLacksAmbient
 
   // Pre-seed the selection for the agent requestConnection accept flow. Runs once per open after
   // vendors load and nothing is selected yet.
@@ -796,6 +860,34 @@ export default function GatekeeperModal({
     }
   }
 
+  const handleAddAmbientToChat = async () => {
+    if (creating || !selectedConnection?.vendorId) return
+    setCreating(true)
+    let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
+    let transferred = false
+    try {
+      const overseer = await getOverseer()
+      gatekeeper = await overseer.getAmbientGatekeeper(selectedConnection.vendorId)
+      if (gatekeeper) {
+        await onCreated(gatekeeper)
+        transferred = true
+        onClose()
+      } else {
+        toasts.add({ title: `${selectedConnection.vendor} isn't available in this workspace.`, variant: 'error' })
+      }
+    } catch (err) {
+      // Surfaces e.g. the host's retryable "restarting to apply a connection change": when this
+      // call provisions the capsule while any build collaborator is connected, the workspace
+      // restarts to re-verify them and the capsule is refused (to every caller, owner included)
+      // until it has.
+      console.error('Failed to add always-on connection to chat:', err)
+      toasts.add({ title: err instanceof Error && err.message ? err.message : 'Failed to add connection', variant: 'error' })
+    } finally {
+      if (gatekeeper && !transferred) gatekeeper[Symbol.dispose]()
+      setCreating(false)
+    }
+  }
+
   const canCreate = (() => {
     if (!selectedConnection) return false
     if (selectedConnection.id === 'ai-model') return Boolean(selectedModelId)
@@ -804,7 +896,7 @@ export default function GatekeeperModal({
     }
     // Checked here, not left to the configurator Effect's cleanup: a singleton account can arrive
     // while a frame is up, and Add must be off from that render on, not only after the Effect runs.
-    if (selectedAlwaysOn) return false
+    if (selectedAlwaysOn) return addsAmbientToChat
     if (selectedConnection.resourceUrlPattern) {
       const resourceUrlPattern = selectedConnection.resourceUrlPattern
       return Boolean(
@@ -822,7 +914,9 @@ export default function GatekeeperModal({
 
   const handleCreate = () => {
     if (!selectedConnection) return
-    if (selectedConnection.id === 'ai-model') {
+    if (addsAmbientToChat) {
+      handleAddAmbientToChat()
+    } else if (selectedConnection.id === 'ai-model') {
       handleCreateAiModel()
     } else if (selectedConnection.id === 'agent-spawner') {
       handleCreateAgentSpawner()
@@ -831,7 +925,9 @@ export default function GatekeeperModal({
     }
   }
 
-  const createLabel = selectedConnection?.resourceUrlPattern
+  const createLabel = addsAmbientToChat
+    ? 'Add to this chat'
+    : selectedConnection?.resourceUrlPattern
     ? 'Add connection'
     : 'Create connection'
 
@@ -877,7 +973,15 @@ export default function GatekeeperModal({
               <div className="space-y-4">
                 {selectedAlwaysOn && (
                   <p role="status" className="m-0 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-                    {`${selectedConnection.vendor} is added automatically to new chats in your workspaces, so there's nothing to add here.`}
+                    {checkingOwnerAmbient
+                      ? `Checking whether this workspace has ${selectedConnection.vendor}…`
+                      : addsAmbientToChat
+                      ? `${selectedConnection.vendor} is always on in new chats, but this chat may not have it yet. Add it to this chat?`
+                      : ownerMustReconnect
+                      ? `This workspace's owner needs to reconnect ${selectedConnection.vendor} before it can be added to this chat.`
+                      : ownerLacksAmbient
+                      ? `This workspace's owner doesn't have ${selectedConnection.vendor}, so it can't be added to this chat.`
+                      : `${selectedConnection.vendor} is added automatically to new chats in your workspaces, so there's nothing to add here.`}
                   </p>
                 )}
 

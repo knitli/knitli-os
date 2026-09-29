@@ -2283,6 +2283,29 @@ export interface Overseer extends RpcTarget {
   getGatekeeperById(id: WorkpieceId): Promise<GatekeeperClient<any>>;
 
   /**
+   * Fork: get this workspace's ambient (always-on) gatekeeper for `vendorId`, reconciling the
+   * owner's singleton accounts first, or null if the owner has none for that vendor. A chat's
+   * ambient set is frozen at first use; accepting an agent's connection request with this
+   * gatekeeper adds it to a chat that started without it.
+   *
+   * Throws the retryable "restarting to apply a connection change" error, to any caller (owner
+   * included), when the reconcile provisions the capsule while a build collaborator is connected:
+   * the new connection widens their verification scope, so the workspace restarts and the capsule
+   * is unusable until it has. The retry after the restart finds it.
+   */
+  getAmbientGatekeeper(vendorId: string): Promise<GatekeeperClient<any> | null>;
+
+  /**
+   * Fork: whether this workspace's owner holds an always-on (singleton) account for `vendorId`, so
+   * getAmbientGatekeeper() will find its ambient gatekeeper. Provisions no capsule; like open(), it
+   * may create the owner's admin-forced auto-provisioned accounts. This is the owner's
+   * availability, not the caller's: a collaborator's own singleton account never provides the
+   * workspace's capsule (the host asks for it separately, to verify them as an observer, when they
+   * open the workspace). See AmbientVendorStatus.
+   */
+  ambientVendorStatus(vendorId: string): Promise<AmbientVendorStatus>;
+
+  /**
    * Try to create a new gatekeeper for this URL.
    *
    * `accountId` is the user's connected account to use to access this resource. To determine an
@@ -4908,3 +4931,12 @@ export type ShareLinkInfo = {
    */
   role?: CollaboratorRole;
 };
+
+/**
+ * Fork: the owner's always-on availability of a vendor, from Overseer.ambientVendorStatus():
+ * "available" (a usable singleton account); with none, "absent" to the owner (who can add it) and
+ * "ownerAbsent" to a collaborator (who can't); when the owner's only such accounts have expired,
+ * "reconnect" to the owner (who can reconnect it) and "ownerMustReconnect" to a collaborator.
+ */
+export type AmbientVendorStatus =
+    "available" | "absent" | "ownerAbsent" | "reconnect" | "ownerMustReconnect";

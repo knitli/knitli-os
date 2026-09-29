@@ -68,6 +68,7 @@ import { createWorkshopLogger, obsContext, traced } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
 import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import type { AmbientVendorStatus } from "@gadgets/workshop-shared/api";  // Fork
 import {
   assertChatAttachmentSupportedByProvider,
   isAllowedChatAttachmentImageMimeType,
@@ -7760,7 +7761,41 @@ class OverseerImpl implements AgentHooks {
   //
   // The session is reached through the owner's stored connected account, not by asserting the owner's
   // identity to the vendor — so the capability is the account the user actually holds.
-  async ensureAmbientCapsules(): Promise<void> {
+  //
+  // Fork: runs are serialized. Two overlapping runs (e.g. two sessions' open(), or
+  // getAmbientGatekeeper beside an open) would both see a vendor unbound before either adds it,
+  // provisioning two capsules for one vendor -- and new chats would get MESSAGING and MESSAGING_2.
+  // Queued rather than shared, so every caller's run starts after its call and sees accounts
+  // connected before it.
+  //
+  // ponytail: the queue link gives up on a run after 30s, so one hung run (e.g. a stalled owner DO)
+  // can't wedge every later reconcile. Past that bound a slow run may overlap the next and add a
+  // duplicate again; acceptable only because a run that slow is genuinely hung. Only the link is
+  // bounded: the caller still awaits its own run, however long it takes.
+  ensureAmbientCapsules(): Promise<void> {
+    let run = this.#ambientReconcile.then(() => this.#reconcileAmbientCapsules());
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let bound = new Promise<void>(resolve => { timer = setTimeout(resolve, 30_000); });
+    this.#ambientReconcile = Promise.race([run, bound]).catch(() => {})
+        .finally(() => clearTimeout(timer));
+    return run;
+  }
+  #ambientReconcile: Promise<void> = Promise.resolve();
+
+  // Fork: whether the owner holds a usable singleton account for `vendorId` -- the account the
+  // reconcile provisions this workspace's ambient capsule from -- or only expired ones. Provisions
+  // no capsule; like open()'s reconcile, the account read may create the owner's admin-forced
+  // auto-provisioned accounts. See Overseer.ambientVendorStatus.
+  async ownerAmbientVendorStatus(vendorId: string): Promise<"available" | "absent" | "expired"> {
+    if (!this.ownerId) return "absent";
+    let accounts = (await retryOnDoReset(
+        () => this.#ownerUserDo().listProvidedAccounts(), this.logger))
+        .filter(account => account.vendorId === vendorId && account.description.singleton?.tsType);
+    if (accounts.length === 0) return "absent";
+    return accounts.some(account => account.credentialsValid !== false) ? "available" : "expired";
+  }
+
+  async #reconcileAmbientCapsules(): Promise<void> {
     if (!this.ownerId) return;
     let ownerDo = this.#ownerUserDo();
     // listProvidedAccounts ensures the owner's auto-provisioned singleton accounts exist first, so this
@@ -7772,7 +7807,12 @@ class OverseerImpl implements AgentHooks {
     // record is keyed to a specific accountId; if that account is gone (disconnected) or was replaced
     // (an optional account removed and re-added with a new accountId), the record is stale and would
     // point the capsule at a deleted account — so remove it. Snapshot the list since we mutate it.
-    let currentAccountId = new Map(accounts.map(account => [account.vendorId, account.accountId]));
+    // Fork: one account per vendor, a valid one when there is one (sorted last, so it wins) -- the
+    // account ambientVendorStatus calls "available". Only an owner holding several accounts of a
+    // vendor, one expired, sees a difference from upstream's last-account-wins.
+    let currentAccountId = new Map(accounts
+        .toSorted((a, b) => Number(a.credentialsValid !== false) - Number(b.credentialsValid !== false))
+        .map(account => [account.vendorId, account.accountId]));
     let bound = new Set<string>();
     // Snapshot before iterating, since removeGatekeeper() mutates the collection.
     let existingGatekeepers = Array.from(this.storage.gatekeepers.list());
@@ -7784,7 +7824,8 @@ class OverseerImpl implements AgentHooks {
         this.removeGatekeeper(gk.id);
       }
     }
-    let toAdd = accounts.filter(account => !bound.has(account.vendorId));
+    let toAdd = accounts.filter(account =>
+        !bound.has(account.vendorId) && currentAccountId.get(account.vendorId) === account.accountId);
     if (toAdd.length === 0) return;
 
     // Each singleton account provides a normal Gatekeeper class (imbued via ctx.props with whatever
@@ -11486,6 +11527,22 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         undefined, this.#mintedCapabilityKind());
   }
 
+  async ambientVendorStatus(vendorId: string): Promise<AmbientVendorStatus> {
+    let status = await this.impl.ownerAmbientVendorStatus(vendorId);
+    if (status === "expired") return this.isOwner ? "reconnect" : "ownerMustReconnect";
+    return status === "absent" && !this.isOwner ? "ownerAbsent" : status;
+  }
+
+  // Fork: reconcile first, after this open's own reconcile, so a singleton the owner connected
+  // since this session opened is found rather than reported missing.
+  async getAmbientGatekeeper(vendorId: string): Promise<GatekeeperClient<any> | null> {
+    await this.slashCommandsReady;
+    await this.impl.ensureAmbientCapsules();
+    let id = [...this.impl.storage.gatekeepers.list()].find(gk =>
+        gk.creationSpec?.type === "ambient" && gk.creationSpec.vendorId === vendorId)?.id;
+    return id === undefined ? null : this.getGatekeeperById(id);
+  }
+
   private async recordConnectionCreated(
       result: GatekeeperClient<any>, connectionType: ProductAnalyticsConnectionType,
       vendorId?: string): Promise<void> {
@@ -12920,6 +12977,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async listPreApprovableActions(): Promise<PreApprovableAction[]> { this.#deny(); }
   async getGatekeeperById(_id: number): Promise<GatekeeperClient<any>> { this.#deny(); }
+  async getAmbientGatekeeper(_vendorId: string): Promise<GatekeeperClient<any> | null> { this.#deny(); }
+  async ambientVendorStatus(_vendorId: string): Promise<AmbientVendorStatus> { this.#deny(); }
   async newGatekeeper(_accountId: number, _resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> { this.#deny(); }
   async newAiModelGatekeeper(_modelId: string): Promise<GatekeeperClient<any>> { this.#deny(); }

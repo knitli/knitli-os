@@ -1,0 +1,88 @@
+# Cloudflare Agents voice implementation plan
+
+Status: implemented on feat/workshop-voice, based on origin/main b782a364. Worktree: /opt/coder/knitli-os/.worktrees/voice. Automated checks pass; live microphone/hosted-model acceptance remains.
+
+**Goal:** Add distinct dictation and conversational voice modes to the existing Workshop chat.
+
+**Architecture:** Use installed Cloudflare Agents voice for STT/TTS, with the authenticated browser bridging to its existing Overseer capability. Preserve native chat execution, permissions, and approvals.
+
+**Spec:** [Approved design and decisions](../specs/2026-09-28-cloudflare-agent-voice-design.md).
+
+## Confirmed behavior
+
+- Dictation fills the editable composer; only explicit Send submits it. No TTS.
+- Conversation submits speech automatically and speaks assistant text.
+- Speaking over a reply stops audio while agent work continues. Explicit Stop work cancels work.
+- While busy, show an editable pending instruction; submit once on actual idle, only within the same connected session and chat. Never automatically retry an uncertain submission.
+- Mode switches, call end, and disconnect preserve drafts but revoke automatic submission.
+- Both modes append the transcription-context note from the spec exactly once at submission, including edited dictation and mixed typed/dictated drafts. Keep it out of the composer and speech; typed-only input gets no note.
+
+## Implementation sequence
+
+1. Establish a clean, isolated knitli-os worktree from the verified intended base. Do not build on the unrelated ambient-connection-request branch or edit the deployment wrapper's pinned submodule.
+2. Add authenticated, mode-bound voice session creation and a narrow voice Durable Object using the pinned SDK. Reuse existing origin checks and connection-secret helpers. Tie inference to the authenticated session lifetime and reject expired/reused connection tickets before model usage.
+3. Add the browser voice bridge and explicit Dictate/Conversation controls in Workshop chat. Reuse existing composer, submit, approval, and Stop paths. Track dictated-draft provenance for the appended note.
+4. Correlate accepted submissions with their own assistant output; implement busy queuing, abort cleanup, and an ordered audio interruption barrier. Do not infer ownership from chat ID or matching text alone.
+5. Verify with focused regressions, real authenticated RPC integration, and browser audio checks. Prove regressions fail for their named defects. Independently review kernel/API and UI changes before updating the deployment wrapper pin.
+
+## Verified source findings to retain
+
+- Backend uses agents@0.24.0. Its withVoice constructor installs an instance onMessage handler; validation must wrap that instance handler after super, rather than relying on a subclass prototype override.
+- Dictation can use afterTranscribe to emit a transcript and return null, which exits before conversation history, onTurn, and TTS. Reject conversation response messages in dictation sessions.
+- Override public saveMessage and getConversationHistory to suppress parallel SDK history. A zero history limit does not suppress writes.
+- Abort must settle a pending response iterator read, not merely mark its signal aborted.
+- Stock playback accepts untagged binary frames after interruption. Gate audio until an ordered interruption acknowledgment and a newer accepted response start. Use arraybuffer WebSocket messages to avoid asynchronous Blob conversion reordering.
+- Subscribe before submitting; reconcile provisional deltas against durable agent messages without repeating spoken text. A whole execution can span multiple assistant/tool rounds: actual idle metadata closes it.
+- sendChatMessage currently returns void, and stream events identify the chat but not the submitting turn. Before coding the bridge, determine the smallest committed submission receipt/correlation change that safely distinguishes collaborator activity and handles events arriving before the RPC result.
+- Do not use ExternalMessageGateway; its trusted-service authority and completed-response contract do not fit this browser session.
+
+## Resolved implementation contracts
+
+- sendChatMessage returns its committed prompt sequence (number | undefined; commands without a prompt return undefined). Existing callers may ignore it. The voice bridge buffers subscribed events until the receipt resolves, begins at that exact user message, and ends at idle or loss of ownership. newChat retains its existing new-chat ID return.
+- createVoiceSession(mode) returns a short-lived one-use connection URL and an RPC session capability retained for the call lifetime. The server applies existing origin/Access rules and revokes on authenticated-session loss.
+- The voice server emits voice_transcript with sessionId, turnId, text, and mode. Conversation accepts ordered voice_response frames with consecutive sequence, bounded text, and done; dictation accepts no response frames. Interruption acknowledgment separates old binary audio from a newer turn.
+- Release/deployment generators already carry the voice migration and WORKERS_AI binding. Update the release golden manifest; local development needs --use-workers-ai-binding and the existing backend host convention.
+
+## Ownership and checks
+
+- Receipt agent: shared sendChatMessage signature, overseer commit return, integration helper typing, focused committed-sequence regression.
+- Backend agent: voice session/DO, authenticated API and route, migration, runtime types, security/lifecycle and SDK checks.
+- Frontend agent: explicit mode controls, composer provenance/note, conversational bridge, interruption/queue tests.
+- Deployment agent: release golden manifest and its test.
+- Root: integration, review, build/type checks, and accurate completion report.
+
+Frontend baseline: 75 test files / 643 tests passed before feature edits. Existing jsdom scrollTo warnings do not fail the run. Dependencies installed from the frozen lockfile with pnpm 11.17.0 and Node 24.19.0. Backend browser-runtime and bundled-blueprint prerequisites generated.
+
+
+## Working context at handoff
+
+Source lives in this repository. The design was moved here from knitli-site at the user's request, with byte-for-byte verification. At handoff the checkout was on fix/ambient-connection-request at 2336c474 with unrelated .claude/settings.local.json changes; preserve them. Recheck branch/base and toolchain before implementation. This repo uses its own pnpm setup; do not import the wrapper's toolchain or root site's TypeScript constraints.
+
+## Validation and continuation
+
+- Full `pnpm lint` passed from the OS-owned worktree: lint, script types, workspace types/build.
+- Backend full suites: 1,128 unit tests and 31 integration tests passed; four pre-existing skipped integration tests remain unchanged.
+- Frontend full suite: 662 tests passed across 79 files, including the persisted draft provenance lifecycle.
+- Release manifest suite: 12 passed; v4 VoiceSession migration retained by release and wrapper generators.
+- Regression sensitivity verified by narrow, restored mutations: missing receipt, origin bypass, credential/expiry checks, outside-call input, abort settlement, response ordering, dictation entering TTS, duplicate SDK history, queue/session failures, missing native idle/receipt boundaries, and late binary playback. Each named check failed for its defect and passed after restoration.
+- Backend SDK checks use injected transcription/synthesis providers; they do not establish hosted-model latency, recognition quality, echo behavior, or microphone compatibility.
+
+The first worktree location under knitli-site leaked the parent site's lint rules.
+Moving it into knitli-os/.worktrees/voice restored OS configuration isolation; no
+product rules were weakened. Node 24.19.0 / pnpm 11.17.0 were used for checks.
+
+### Live trial
+
+With authenticated Wrangler and the repository's pnpm toolchain, run
+`pnpm dev-server --use-workers-ai-binding` and `pnpm dev-client`, then open
+localhost:3000. Voice uses the same-origin /api/voice WebSocket proxy. Select an
+agent model in an existing chat to start Conversation; Dictate only fills the
+composer. Test headphones and speakers, pauses, speaking over an answer, busy
+queued edits, ending/restarting, and microphone denial. Confirm explicit Stop
+work still cancels work, while ending/interruption only stops audio. Measure
+first-audio latency before deciding whether provisional token forwarding is needed.
+
+Do not update the deployment wrapper pin or deploy until this live acceptance is
+complete. The plan and spec now belong to knitli-os, not the deployment wrapper.
+
+Local implementation commits: `1074f717` (backend/API) and `5712b2f6` (frontend). Both are signed with the configured Git signing identity. No push or deployment was performed.

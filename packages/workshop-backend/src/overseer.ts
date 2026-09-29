@@ -68,6 +68,7 @@ import { createWorkshopLogger, obsContext, traced } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
 import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import type { AmbientVendorStatus } from "@gadgets/workshop-shared/api";  // Fork
 import {
   assertChatAttachmentSupportedByProvider,
   isAllowedChatAttachmentImageMimeType,
@@ -7769,23 +7770,29 @@ class OverseerImpl implements AgentHooks {
   //
   // ponytail: the queue link gives up on a run after 30s, so one hung run (e.g. a stalled owner DO)
   // can't wedge every later reconcile. Past that bound a slow run may overlap the next and add a
-  // duplicate again; acceptable only because a run that slow is genuinely hung.
+  // duplicate again; acceptable only because a run that slow is genuinely hung. Only the link is
+  // bounded: the caller still awaits its own run, however long it takes.
   ensureAmbientCapsules(): Promise<void> {
     let run = this.#ambientReconcile.then(() => this.#reconcileAmbientCapsules());
-    this.#ambientReconcile = Promise.race([run, scheduler.wait(30_000)]).catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let bound = new Promise<void>(resolve => { timer = setTimeout(resolve, 30_000); });
+    this.#ambientReconcile = Promise.race([run, bound]).catch(() => {})
+        .finally(() => clearTimeout(timer));
     return run;
   }
   #ambientReconcile: Promise<void> = Promise.resolve();
 
-  // Fork: whether the owner holds a singleton account for `vendorId` -- the account the reconcile
-  // provisions this workspace's ambient capsule from. The same account read open() makes; adds no
-  // capsule. See Overseer.hasAmbientGatekeeper.
-  async ownerHasAmbientVendor(vendorId: string): Promise<boolean> {
-    if (!this.ownerId) return false;
-    let accounts = await retryOnDoReset(
-        () => this.#ownerUserDo().listProvidedAccounts(), this.logger);
-    return accounts.some(account =>
-        account.vendorId === vendorId && account.description.singleton?.tsType);
+  // Fork: whether the owner holds a usable singleton account for `vendorId` -- the account the
+  // reconcile provisions this workspace's ambient capsule from -- or only expired ones. Provisions
+  // no capsule; like open()'s reconcile, the account read may create the owner's admin-forced
+  // auto-provisioned accounts. See Overseer.ambientVendorStatus.
+  async ownerAmbientVendorStatus(vendorId: string): Promise<"available" | "absent" | "expired"> {
+    if (!this.ownerId) return "absent";
+    let accounts = (await retryOnDoReset(
+        () => this.#ownerUserDo().listProvidedAccounts(), this.logger))
+        .filter(account => account.vendorId === vendorId && account.description.singleton?.tsType);
+    if (accounts.length === 0) return "absent";
+    return accounts.some(account => account.credentialsValid !== false) ? "available" : "expired";
   }
 
   async #reconcileAmbientCapsules(): Promise<void> {
@@ -11514,8 +11521,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         undefined, this.#mintedCapabilityKind());
   }
 
-  async hasAmbientGatekeeper(vendorId: string): Promise<boolean> {
-    return this.impl.ownerHasAmbientVendor(vendorId);
+  async ambientVendorStatus(vendorId: string): Promise<AmbientVendorStatus> {
+    let status = await this.impl.ownerAmbientVendorStatus(vendorId);
+    if (status !== "expired") return status;
+    return this.isOwner ? "reconnect" : "ownerMustReconnect";
   }
 
   // Fork: reconcile first, after this open's own reconcile, so a singleton the owner connected
@@ -12963,7 +12972,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async listPreApprovableActions(): Promise<PreApprovableAction[]> { this.#deny(); }
   async getGatekeeperById(_id: number): Promise<GatekeeperClient<any>> { this.#deny(); }
   async getAmbientGatekeeper(_vendorId: string): Promise<GatekeeperClient<any> | null> { this.#deny(); }
-  async hasAmbientGatekeeper(_vendorId: string): Promise<boolean> { this.#deny(); }
+  async ambientVendorStatus(_vendorId: string): Promise<AmbientVendorStatus> { this.#deny(); }
   async newGatekeeper(_accountId: number, _resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> { this.#deny(); }
   async newAiModelGatekeeper(_modelId: string): Promise<GatekeeperClient<any>> { this.#deny(); }

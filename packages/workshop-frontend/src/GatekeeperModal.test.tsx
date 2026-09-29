@@ -5,7 +5,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { AuthenticatedApi, ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
+import type { AuthenticatedApi, ConnectedAccountsSubscriber, Overseer } from '@gadgets/workshop-shared/api'
 
 const testState = vi.hoisted(() => ({
   authenticatedApi: null as RpcStub<AuthenticatedApi> | null,
@@ -116,7 +116,7 @@ describe('GatekeeperModal configurator readiness', () => {
     await act(async () => root!.render(<GatekeeperModal
       open
       onClose={() => {}}
-      getOverseer={() => { throw new Error('not called') }}
+      getOverseer={() => ({ ambientVendorStatus: async () => 'absent' }) as unknown as RpcStub<Overseer>}
       onCreated={() => Promise.resolve()}
       initialVendorId="catalog"
       initialResourceUrlPattern={RESOURCE.urlPattern}

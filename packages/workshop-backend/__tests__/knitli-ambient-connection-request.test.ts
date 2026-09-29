@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { OverseerDurableObject } from "../src/overseer.js";
+import type { UserDurableObject } from "../src/user.js";
 import { makeActionStorage, openFakeOverseer } from "./fixtures.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
     TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
+    TEST_USER: DurableObjectNamespace<UserDurableObject>;
   }
 }
 
@@ -122,22 +124,59 @@ describe("ensureAmbientCapsules", () => {
   });
 });
 
-describe("ownerHasAmbientVendor", () => {
-  it("reports the owner's singleton vendors without provisioning a capsule", async () => {
+describe("ambientVendorStatus", () => {
+  it("tells the owner's usable singleton from an expired one, provisioning no capsule", async () => {
     let result = await withImpl(async () => [
       MESSAGING_ACCOUNT,
+      { ...MESSAGING_ACCOUNT, vendorId: "memory", accountId: 9, credentialsValid: false },
       // A non-singleton provided account (e.g. one that only provides a UI) is no ambient vendor.
-      { vendorId: "memory", accountId: 9, description: { displayName: "Knitli Memory" } },
+      { vendorId: "notes", accountId: 10, description: { displayName: "Notes" } },
     ], async impl => ({
-      messaging: await impl.ownerHasAmbientVendor("messaging"),
-      memory: await impl.ownerHasAmbientVendor("memory"),
+      messaging: await impl.ownerAmbientVendorStatus("messaging"),
+      memory: await impl.ownerAmbientVendorStatus("memory"),
+      notes: await impl.ownerAmbientVendorStatus("notes"),
       vendors: ambientVendors(impl),
     }));
-    expect(result).toEqual({ messaging: true, memory: false, vendors: [] });
+    expect(result).toEqual({ messaging: "available", memory: "expired", notes: "absent", vendors: [] });
+  });
+
+  it("tells the owner to reconnect an expired singleton and a collaborator that the owner must", async () => {
+    let expired = { ownerAmbientVendorStatus: async () => "expired" };
+    let owner = await openFakeOverseer(seed(), { implOverrides: expired });
+    let collaborator = await openFakeOverseer(seed(), {
+      role: "use", implOverrides: {
+        ...expired,
+        authorizeCollaborator: async () => "build",
+        getSharingManager: async () => ({ getEffectiveRole: () => "build" }),
+      },
+    });
+    expect(await owner.ambientVendorStatus("memory")).toBe("reconnect");
+    expect(await collaborator.ambientVendorStatus("memory")).toBe("ownerMustReconnect");
   });
 
   it("is denied to a use collaborator", async () => {
     let client = await openFakeOverseer(seed(), { role: "use" });
-    await expect(client.hasAmbientGatekeeper("memory")).rejects.toThrow("Unauthorized: this collaborator only has permission to use the gadget's UI.");
+    await expect(client.ambientVendorStatus("memory")).rejects.toThrow("Unauthorized: this collaborator only has permission to use the gadget's UI.");
+  });
+});
+
+describe("listProvidedAccounts", () => {
+  it("reports whether each account's credentials are valid", async () => {
+    let stub = env.TEST_USER.getByName(`knitli-provided-accounts-${crypto.randomUUID()}`);
+    let accounts = await runInDurableObject(stub, async (user: UserDurableObject) => {
+      let internals = user as unknown as { storage: any, env: object };
+      // The test env has no admin-config KV; an empty one reads as the defaults.
+      internals.env = { ...internals.env, BLUEPRINTS: { get: async () => null } };
+      internals.storage.nextAccountId.put(2);
+      for (let [id, expired] of [[0, false], [1, true]] as const) {
+        internals.storage.connectedAccounts.put({
+          id, account: {} as never, vendorId: `v${id}`, credentialsExpired: expired,
+          description: { displayName: `v${id}`, singleton: { tsType: "S" } },
+        });
+      }
+      return await user.listProvidedAccounts();
+    });
+    expect(accounts.map(account => [account.vendorId, account.credentialsValid]))
+        .toEqual([["v0", true], ["v1", false]]);
   });
 });

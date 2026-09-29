@@ -15,6 +15,7 @@ import { RpcStub } from 'capnweb'
 import {
   AgentSpawnerConfig,
   AiChatAuthorInfo,
+  AmbientVendorStatus,
   GatekeeperClient,
   Overseer,
 } from '@gadgets/workshop-shared/api'
@@ -44,6 +45,9 @@ export interface GatekeeperModalProps {
   /**
    * Returns an overseer stub. Called only when actually creating a gatekeeper. This allows
    * the Home page to lazily provision a gadget on first use.
+   *
+   * Fork: also called on open when `initialVendorId` is set, to ask the owner's always-on
+   * availability, so a caller passing `initialVendorId` must supply one that doesn't provision.
    */
   getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>
   /**
@@ -286,21 +290,42 @@ export default function GatekeeperModal({
   // vendor only. Availability is the owner's, not the viewer's (alwaysOnVendorIds): the capsule is
   // provisioned from the owner's account, and a collaborator's own account is asked for separately
   // by the host when it verifies them.
-  const [ownerHasAmbient, setOwnerHasAmbient] = useState<boolean | null>(null)
+  // 'unknown' when the query failed. Re-asked whenever the viewer's accounts of the vendor change:
+  // an owner who connects (or reconnects) the singleton here changes the answer.
+  const [ownerAmbient, setOwnerAmbient] =
+    useState<{ accountsKey: string, status: AmbientVendorStatus | 'unknown' } | null>(null)
+  const requestedVendorAccounts = accounts.filter(account => account.vendorId === initialVendorId)
+    .map(account => `${account.id}:${account.credentialsValid}`).join(',')
+  const getOverseerRef = useRef(getOverseer)
+  getOverseerRef.current = getOverseer
+  useEffect(() => setOwnerAmbient(null), [open, initialVendorId])
   useEffect(() => {
-    setOwnerHasAmbient(null)
     if (!open || !initialVendorId) return
     let cancelled = false
-    // Only the request flow reaches here, whose getOverseer (ChatInterface's) provisions nothing.
-    Promise.resolve().then(() => getOverseer())
-      .then(overseer => overseer.hasAmbientGatekeeper(initialVendorId))
-      .then(has => { if (!cancelled) setOwnerHasAmbient(has) },
-            () => { if (!cancelled) setOwnerHasAmbient(false) })
+    const settle = (status: AmbientVendorStatus | 'unknown') => {
+      if (!cancelled) setOwnerAmbient({ accountsKey: requestedVendorAccounts, status })
+    }
+    Promise.resolve().then(() => getOverseerRef.current())
+      .then(overseer => overseer.ambientVendorStatus(initialVendorId))
+      .then(settle, () => settle('unknown'))
     return () => { cancelled = true }
-  }, [open, initialVendorId, getOverseer])
+  }, [open, initialVendorId, requestedVendorAccounts])
   const requestedVendorSelected = initialVendorId !== undefined && selectedConnection?.vendorId === initialVendorId
-  const addsAmbientToChat = requestedVendorSelected && ownerHasAmbient === true
-  const selectedAlwaysOn = (selectedConnection !== null && isAlwaysOn(selectedConnection, alwaysOnVendorIds)) || addsAmbientToChat
+  const viewerAlwaysOn = selectedConnection !== null && isAlwaysOn(selectedConnection, alwaysOnVendorIds)
+  // An answer from before the viewer's accounts changed still stands unless the viewer now has the
+  // singleton themselves, which is when the owner's answer is what the modal must show.
+  const ownerStatus = ownerAmbient === null ||
+    (ownerAmbient.accountsKey !== requestedVendorAccounts && viewerAlwaysOn) ? null : ownerAmbient.status
+  const checkingOwnerAmbient = requestedVendorSelected && ownerStatus === null
+  // A failed query falls back to the viewer's own accounts; handleAddAmbientToChat is authoritative.
+  const addsAmbientToChat = requestedVendorSelected &&
+    (ownerStatus === 'available' || (ownerStatus === 'unknown' && viewerAlwaysOn))
+  const ownerMustReconnect = requestedVendorSelected && ownerStatus === 'ownerMustReconnect'
+  const ownerLacksAmbient = requestedVendorSelected && ownerStatus === 'absent' && viewerAlwaysOn
+  // For the requested vendor the owner's status decides; its "reconnect" (the viewer is the owner)
+  // leaves the chooser's Reconnect in place, as does "absent" for a vendor the viewer lacks.
+  const selectedAlwaysOn = (viewerAlwaysOn && !requestedVendorSelected) || checkingOwnerAmbient ||
+    addsAmbientToChat || ownerMustReconnect || ownerLacksAmbient
 
   // Pre-seed the selection for the agent requestConnection accept flow. Runs once per open after
   // vendors load and nothing is selected yet.
@@ -929,9 +954,13 @@ export default function GatekeeperModal({
               <div className="space-y-4">
                 {selectedAlwaysOn && (
                   <p role="status" className="m-0 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-                    {addsAmbientToChat
+                    {checkingOwnerAmbient
+                      ? `Checking whether this workspace has ${selectedConnection.vendor}…`
+                      : addsAmbientToChat
                       ? `${selectedConnection.vendor} is always on in new chats, but this chat may not have it yet. Add it to this chat?`
-                      : requestedVendorSelected && ownerHasAmbient === false
+                      : ownerMustReconnect
+                      ? `This workspace's owner needs to reconnect ${selectedConnection.vendor} before it can be added to this chat.`
+                      : ownerLacksAmbient
                       ? `This workspace's owner doesn't have ${selectedConnection.vendor}, so it can't be added to this chat.`
                       : `${selectedConnection.vendor} is added automatically to new chats in your workspaces, so there's nothing to add here.`}
                   </p>

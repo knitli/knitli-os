@@ -5,7 +5,7 @@ import { act, type ComponentProps, type ReactNode, useEffect, useState } from 'r
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { AuthenticatedApi, ConnectedAccountsSubscriber, ConnectFlowStart, Overseer } from '@gadgets/workshop-shared/api'
+import type { AmbientVendorStatus, AuthenticatedApi, ConnectedAccountsSubscriber, ConnectFlowStart, Overseer } from '@gadgets/workshop-shared/api'
 import type { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -190,9 +190,22 @@ const MEMORY_ACCOUNT = {
   singleton: { tsType: 'MemorySession' },
 } as AccountDescription
 
-function ownerHas(has: boolean) {
-  return vi.fn<(vendorId: string) => Promise<boolean>>().mockResolvedValue(has)
+function ownerStatus(status: AmbientVendorStatus) {
+  return vi.fn<(vendorId: string) => Promise<AmbientVendorStatus>>().mockResolvedValue(status)
 }
+
+// Lets the modal's owner-availability query (ambientVendorStatus) land.
+async function settle() {
+  await act(async () => {
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+  })
+}
+
+function requestOverseer(overseer: object) {
+  return vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue(overseer as unknown as RpcStub<Overseer>)
+}
+const buttonNamed = (rendered: HTMLElement, name: string) =>
+  [...rendered.querySelectorAll('button')].find(button => button.textContent === name)
 
 function alwaysOnSection(rendered: HTMLElement) {
   return [...rendered.querySelectorAll('h2')]
@@ -249,13 +262,6 @@ describe('GatekeeperModal ambient resource connections', () => {
       await Promise.resolve()
     })
     return { container, getOverseer }
-  }
-
-  // Lets the modal's owner-availability query (hasAmbientGatekeeper) land.
-  async function settle() {
-    await act(async () => {
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-    })
   }
 
   async function chooseResource(rendered: HTMLDivElement, vendorName: string) {
@@ -339,7 +345,7 @@ describe('GatekeeperModal ambient resource connections', () => {
     const onCreated = vi.fn<ComponentProps<typeof GatekeeperModal>['onCreated']>().mockResolvedValue(undefined)
     const rendered = await render(
       testApi.api,
-      vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({ getAmbientGatekeeper, hasAmbientGatekeeper: ownerHas(true) } as unknown as RpcStub<Overseer>),
+      vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({ getAmbientGatekeeper, ambientVendorStatus: ownerStatus('available') } as unknown as RpcStub<Overseer>),
       { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL, onCreated },
     )
     await settle()
@@ -363,7 +369,7 @@ describe('GatekeeperModal ambient resource connections', () => {
     const rendered = await render(
       testApi.api,
       vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue(
-        { getAmbientGatekeeper, hasAmbientGatekeeper: ownerHas(true) } as unknown as RpcStub<Overseer>),
+        { getAmbientGatekeeper, ambientVendorStatus: ownerStatus('available') } as unknown as RpcStub<Overseer>),
       { initialVendorId: 'google' },
     )
     await settle()
@@ -384,17 +390,17 @@ describe('GatekeeperModal ambient resource connections', () => {
     const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory' })
     const capability = { [Symbol.dispose]() {} }
     const getAmbientGatekeeper = vi.fn<(vendorId: string) => Promise<typeof capability>>().mockResolvedValue(capability)
-    const hasAmbientGatekeeper = ownerHas(true)
+    const ambientVendorStatus = ownerStatus('available')
     const onCreated = vi.fn<ComponentProps<typeof GatekeeperModal>['onCreated']>().mockResolvedValue(undefined)
     const rendered = await render(
       testApi.api,
       vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue(
-        { getAmbientGatekeeper, hasAmbientGatekeeper } as unknown as RpcStub<Overseer>),
+        { getAmbientGatekeeper, ambientVendorStatus } as unknown as RpcStub<Overseer>),
       { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL, onCreated },
     )
     await settle()
 
-    expect(hasAmbientGatekeeper).toHaveBeenCalledExactlyOnceWith('memory')
+    expect(ambientVendorStatus).toHaveBeenCalledExactlyOnceWith('memory')
     expect(rendered.container.textContent).not.toContain('Connect Knitli Memory')
     const add = [...rendered.container.querySelectorAll('button')].find(button => button.textContent === 'Add to this chat')
     expect(add?.disabled).toBe(false)
@@ -408,7 +414,7 @@ describe('GatekeeperModal ambient resource connections', () => {
     const rendered = await render(
       testApi.api,
       vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue(
-        { getAmbientGatekeeper, hasAmbientGatekeeper: ownerHas(false) } as unknown as RpcStub<Overseer>),
+        { getAmbientGatekeeper, ambientVendorStatus: ownerStatus('absent') } as unknown as RpcStub<Overseer>),
       { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL },
     )
     await settle()
@@ -426,7 +432,7 @@ describe('GatekeeperModal ambient resource connections', () => {
     const onCreated = vi.fn<ComponentProps<typeof GatekeeperModal>['onCreated']>().mockResolvedValue(undefined)
     const rendered = await render(
       testApi.api,
-      vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({ getAmbientGatekeeper, hasAmbientGatekeeper: ownerHas(true) } as unknown as RpcStub<Overseer>),
+      vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({ getAmbientGatekeeper, ambientVendorStatus: ownerStatus('available') } as unknown as RpcStub<Overseer>),
       { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL, onCreated },
     )
     await settle()
@@ -444,7 +450,7 @@ describe('GatekeeperModal ambient resource connections', () => {
     const onCreated = vi.fn<ComponentProps<typeof GatekeeperModal>['onCreated']>().mockResolvedValue(undefined)
     const rendered = await render(
       testApi.api,
-      vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({ getAmbientGatekeeper, hasAmbientGatekeeper: ownerHas(true) } as unknown as RpcStub<Overseer>),
+      vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({ getAmbientGatekeeper, ambientVendorStatus: ownerStatus('available') } as unknown as RpcStub<Overseer>),
       { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL, onCreated },
     )
     await settle()
@@ -455,6 +461,73 @@ describe('GatekeeperModal ambient resource connections', () => {
     expect(toastAdd).toHaveBeenCalledWith({ title: restarting, variant: 'error' })
     expect(onCreated).not.toHaveBeenCalled()
     expect(add()?.disabled).toBe(false)
+  })
+
+  it('re-asks the owner\'s availability once the owner connects the singleton here', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory' })
+    const ambientVendorStatus = vi.fn<(vendorId: string) => Promise<AmbientVendorStatus>>()
+      .mockResolvedValueOnce('absent').mockResolvedValue('available')
+    const rendered = await render(testApi.api, requestOverseer({ ambientVendorStatus }),
+      { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL })
+    await settle()
+    expect(rendered.container.textContent).toContain('Connect Knitli Memory')
+
+    await act(async () => {
+      testApi.subscriber()!.add(42, MEMORY_ACCOUNT, vendor(false, 'memory'), [RESOURCE], true, 'memory')
+    })
+    await settle()
+
+    expect(ambientVendorStatus).toHaveBeenCalledTimes(2)
+    expect(buttonNamed(rendered.container, 'Add to this chat')?.disabled).toBe(false)
+  })
+
+  it('keeps Reconnect for an owner whose singleton has expired', async () => {
+    const testApi = buildApi({
+      autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true, credentialsValid: false,
+    })
+    const rendered = await render(testApi.api, requestOverseer({ ambientVendorStatus: ownerStatus('reconnect') }),
+      { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL })
+    await settle()
+
+    expect(buttonNamed(rendered.container, 'Reconnect')).toBeDefined()
+    expect(buttonNamed(rendered.container, 'Add to this chat')).toBeUndefined()
+  })
+
+  it('tells a collaborator the owner must reconnect an expired singleton', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
+    const rendered = await render(testApi.api, requestOverseer({ ambientVendorStatus: ownerStatus('ownerMustReconnect') }),
+      { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL })
+    await settle()
+
+    expect(rendered.container.querySelector('[role="status"]')?.textContent)
+      .toBe('This workspace\'s owner needs to reconnect Knitli Memory before it can be added to this chat.')
+    expect(buttonNamed(rendered.container, 'Add to this chat')).toBeUndefined()
+  })
+
+  it('still offers the ambient gatekeeper when the availability query fails', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
+    const ambientVendorStatus = vi.fn<(vendorId: string) => Promise<never>>().mockRejectedValue(new Error('offline'))
+    const rendered = await render(testApi.api, requestOverseer({ ambientVendorStatus }),
+      { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL })
+    await settle()
+
+    expect(rendered.container.textContent).not.toContain('owner doesn\'t have')
+    expect(buttonNamed(rendered.container, 'Add to this chat')?.disabled).toBe(false)
+  })
+
+  it('shows a neutral status while the owner\'s availability is being checked', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory' })
+    const ambientVendorStatus = vi.fn<(vendorId: string) => Promise<AmbientVendorStatus>>()
+      .mockReturnValue(new Promise(() => {}))
+    const rendered = await render(testApi.api, requestOverseer({ ambientVendorStatus }),
+      { initialVendorId: 'memory', initialResourceUrlPattern: PROFILE_URL })
+    await settle()
+
+    expect(rendered.container.querySelector('[role="status"]')?.textContent)
+      .toBe('Checking whether this workspace has Knitli Memory…')
+    expect(rendered.container.textContent).not.toContain('Connect Knitli Memory')
+    expect(rendered.container.textContent).not.toContain('nothing to add here')
+    expect(buttonNamed(rendered.container, 'Add to this chat')).toBeUndefined()
   })
 
   it('forgets a singleton account that is gone when the picker reopens', async () => {

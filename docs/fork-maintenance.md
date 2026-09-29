@@ -690,25 +690,35 @@ ids are facet-local, not Activity ids.
 
 ### Always-on vendors can complete a connection request
 
-- **Where:** `Overseer.getAmbientGatekeeper()` and `Overseer.hasAmbientGatekeeper()` in
-  `packages/workshop-shared/src/api.ts`; their implementations on `OverseerClientInterface`
-  (default-deny on `UseOverseerInterface`), `OverseerImpl.ownerHasAmbientVendor()`, and a queue in
-  front of `OverseerImpl.ensureAmbientCapsules()` in `packages/workshop-backend/src/overseer.ts`;
-  `ownerHasAmbient`/`addsAmbientToChat` in `packages/workshop-frontend/src/GatekeeperModal.tsx`
+- **Where:** `Overseer.getAmbientGatekeeper()`, `Overseer.ambientVendorStatus()` and
+  `AmbientVendorStatus` in `packages/workshop-shared/src/api.ts`; their implementations on
+  `OverseerClientInterface` (default-deny on `UseOverseerInterface`),
+  `OverseerImpl.ownerAmbientVendorStatus()`, and a queue in front of
+  `OverseerImpl.ensureAmbientCapsules()` in `packages/workshop-backend/src/overseer.ts`;
+  `ProvidedAccountInfo.credentialsValid` in `packages/workshop-backend/src/user.ts`;
+  `ownerAmbient`/`addsAmbientToChat` in `packages/workshop-frontend/src/GatekeeperModal.tsx`
 - **Introduced:** knitli-os #41
-- **What:** when the connection-request accept modal lands on the requested vendor and the
-  workspace **owner** holds a singleton account for it (`hasAmbientGatekeeper`, read-only), it
-  offers "Add to this chat": the workspace's ambient gatekeeper for that vendor (reconciled first
-  via `ensureAmbientCapsules()`) is passed to the unchanged `onCreated` -> `acceptConnectionRequest`
-  path, so the chat gets it under the requested binding name. Upstream says "nothing to add here"
-  and the request can only be denied. The decision is the owner's availability, not the viewer's
-  accounts: the capsule comes from the owner's account, and a build collaborator's own account of
-  the vendor is what the host separately requires at `open()` to verify them as an observer of the
-  capsule (the ambient step of `ensureObserver`), so the modal need not ask for it. A viewer
-  whose own singleton the owner lacks is told the owner doesn't have it.
+- **What:** when the connection-request accept modal lands on the requested vendor, it asks the
+  workspace **owner's** availability (`ambientVendorStatus`: it provisions no capsule; like
+  `open()`, it may create the owner's admin-forced auto-provisioned accounts) and, when the owner
+  holds a usable singleton account, offers "Add to this chat": the workspace's ambient gatekeeper
+  for that vendor (reconciled first via `ensureAmbientCapsules()`) is passed to the unchanged
+  `onCreated` -> `acceptConnectionRequest` path, so the chat gets it under the requested binding
+  name. Upstream says "nothing to add here" and the request can only be denied. The owner's
+  status decides, not the viewer's accounts: the capsule comes from the owner's account. While
+  the status is in flight the modal says it is checking; an owner whose singleton expired keeps
+  the chooser's Reconnect, a collaborator is told the owner must reconnect, a viewer whose own
+  singleton the owner lacks is told so, and a failed query falls back to the viewer's own
+  accounts (the add itself is authoritative). The status is re-asked when the viewer's accounts
+  of the vendor change, so an owner who connects the singleton in the modal can then add it.
   `ensureAmbientCapsules()` queues each run behind the previous one (upstream runs them
   concurrently), so overlapping runs can't provision two capsules for one vendor; the queue link
   gives up on a run after 30 s, so one hung run can't wedge later reconciles.
+- **Collaborator path:** build scope includes every ambient capsule, and the ambient step of
+  `ensureObserver` requires a build collaborator's own account of the vendor to open the
+  workspace. So a collaborator clicking "Add to this chat" when the capsule is new triggers the
+  restart below; on reopen the host prompts them to connect their own account of the vendor;
+  then the retry succeeds.
 - **Why:** `prepareChatBindings` freezes a chat's ambient set at first use, so a chat started
   before the owner connected e.g. Knitli Messaging never gets `env.MESSAGING`; the agent's
   `requestConnection` for it was a dead end.
@@ -722,8 +732,9 @@ ids are facet-local, not Activity ids.
   throws the host's retryable message to every caller, owner included; the modal shows it. The
   request card stays pending, and the retry after reconnecting finds the capsule already there.
   A reconcile run hung past the 30 s queue bound may overlap the next and add a duplicate again.
+  Each request-modal open costs one read of the owner's accounts.
 - **Test:** `packages/workshop-backend/__tests__/knitli-ambient-connection-request.test.ts` and the
-  "always-on vendor"/collaborator cases in `packages/workshop-frontend/src/GatekeeperModal.fork.test.tsx`.
+  always-on/owner-availability cases in `packages/workshop-frontend/src/GatekeeperModal.fork.test.tsx`.
 - **At sync:** Tier 2. If upstream reshapes the modal's always-on branch or the accept flow, keep
   the request case offering the ambient gatekeeper rather than a dead end.
 

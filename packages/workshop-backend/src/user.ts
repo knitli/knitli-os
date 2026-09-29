@@ -67,6 +67,9 @@ export type ProvidedAccountInfo = {
   accountId: number;
   vendorId: string;
   description: AccountDescription;   // carries `singleton` / `providesUi` declarations
+  // Fork: the same notion the connected-accounts subscription reports, so the overseer can tell an
+  // owner's expired singleton from a usable one (Overseer.ambientVendorStatus).
+  credentialsValid?: boolean;
 };
 
 // The singleton/UI methods (createAccount on GatekeeperVendor; getSingletonGatekeeperClass /
@@ -1462,7 +1465,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       // A "disabled" ambient gatekeeper's account stays dormant: don't surface its singleton capsule
       // or management UI. (Its data is preserved, so re-enabling restores it.)
       if (rec.autoProvisioned && ambientGatekeeperMode(config, rec.vendorId) === "disabled") continue;
-      result.push({ accountId: rec.id, vendorId: rec.vendorId, description: rec.description });
+      result.push({ accountId: rec.id, vendorId: rec.vendorId, description: rec.description,
+                    credentialsValid: areCredentialsValid(rec) });
     }
     return result;
   }

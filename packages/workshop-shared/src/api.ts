@@ -2297,12 +2297,13 @@ export interface Overseer extends RpcTarget {
 
   /**
    * Fork: whether this workspace's owner holds an always-on (singleton) account for `vendorId`, so
-   * getAmbientGatekeeper() will find its ambient gatekeeper. Read-only: provisions no capsule. This
-   * is the owner's availability, not the caller's: a collaborator's own singleton account never
-   * provides the workspace's capsule (the host asks for it separately, to verify them as an
-   * observer, when they open the workspace).
+   * getAmbientGatekeeper() will find its ambient gatekeeper. Provisions no capsule; like open(), it
+   * may create the owner's admin-forced auto-provisioned accounts. This is the owner's
+   * availability, not the caller's: a collaborator's own singleton account never provides the
+   * workspace's capsule (the host asks for it separately, to verify them as an observer, when they
+   * open the workspace). See AmbientVendorStatus.
    */
-  hasAmbientGatekeeper(vendorId: string): Promise<boolean>;
+  ambientVendorStatus(vendorId: string): Promise<AmbientVendorStatus>;
 
   /**
    * Try to create a new gatekeeper for this URL.
@@ -4930,3 +4931,11 @@ export type ShareLinkInfo = {
    */
   role?: CollaboratorRole;
 };
+
+/**
+ * Fork: the owner's always-on availability of a vendor, from Overseer.ambientVendorStatus():
+ * "available" (a usable singleton account), "absent" (none), or -- when the owner's only such
+ * accounts have expired -- "reconnect" to the owner (who can reconnect it) and
+ * "ownerMustReconnect" to a collaborator (who can't).
+ */
+export type AmbientVendorStatus = "available" | "absent" | "reconnect" | "ownerMustReconnect";

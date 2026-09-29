@@ -262,6 +262,22 @@ describe("useVoiceChat", () => {
     expect(sendMessage).toHaveBeenLastCalledWith("A\nB\nA", { hasSpeech: true });
   });
 
+  it("explains an unexpected disconnect and preserves provider errors", async () => {
+    const client = await start("dictate");
+    act(() => client.emit("connectionchange", false));
+    expect(controls.state.mode).toBeNull();
+    expect(controls.state.error).toBe("Voice connection closed. Start again to reconnect.");
+    const replacement = await start("dictate");
+    act(() => {
+      replacement.emit("error", "Transcription unavailable");
+      replacement.emit("connectionchange", false);
+    });
+    expect(controls.state.error).toBe("Transcription unavailable");
+    await start("dictate");
+    act(() => controls.end());
+    expect(controls.state.error).toBeNull();
+  });
+
   it("clears interim transcripts when a call ends or disconnects", async () => {
     const client = await start();
     act(() => client.emit("interimtranscript", "partial"));

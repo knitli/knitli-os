@@ -155,6 +155,8 @@ function frames(socket: WebSocket) {
   socket.binaryType = "arraybuffer";
   const messages: Array<Record<string, unknown> | ArrayBuffer> = [];
   let notify: (() => void) | undefined;
+  let closed = false;
+  socket.addEventListener("close", () => { closed = true; notify?.(); notify = undefined; });
   socket.addEventListener("message", event => {
     messages.push(typeof event.data === "string" ? JSON.parse(event.data) : event.data);
     notify?.(); notify = undefined;
@@ -163,6 +165,7 @@ function frames(socket: WebSocket) {
     for (;;) {
       const index = messages.findIndex(matches);
       if (index >= 0) return messages.splice(index, 1)[0];
+      if (closed) throw new Error("Voice socket closed before the expected frame");
       await new Promise<void>(resolve => { notify = resolve; });
     }
   };
@@ -209,6 +212,16 @@ for (const mode of ["dictate", "conversation"] as const) {
         expect(await next(frame => !(frame instanceof ArrayBuffer) && frame.type === "turn_metrics")).toMatchObject({ outcome: "skipped" });
         expect(turns).toBe(0);
         expect(synthesized).toBe(0);
+        expect(released).toBe(false);
+        socket.send(new ArrayBuffer(320));
+        expect(await next(frame => !(frame instanceof ArrayBuffer) && frame.type === "voice_transcript"))
+          .toMatchObject({ mode: "dictate", text: "A dictated request." });
+        await next(frame => !(frame instanceof ArrayBuffer) && frame.type === "turn_metrics");
+        expect(released).toBe(false);
+        const closed = new Promise<CloseEvent>(resolve => socket.addEventListener("close", resolve, { once: true }));
+        socket.send(JSON.stringify({ type: "end_call" }));
+        expect((await closed).code).toBe(1000);
+        expect(released).toBe(true);
       }
       await runInDurableObject(current.stub, async (instance: VoiceSession, state) => {
         expect(instance.getConversationHistory()).toEqual([]);

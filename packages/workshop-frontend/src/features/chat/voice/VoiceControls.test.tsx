@@ -97,3 +97,28 @@ it("reports the pending editor selection from before a replacement", async () =>
     container.remove();
   }
 });
+
+
+it("offers named icon controls for conversation and stopping persistent dictation", async () => {
+  const onStart = vi.fn<(mode: "dictate" | "conversation") => void>();
+  const onEnd = vi.fn<() => void>();
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const render = (mode: "dictate" | null) => <VoiceControls
+    state={{ mode, status: "listening", muted: false, interimTranscript: null, error: null, pendingText: "" }}
+    disabled={false} onStart={onStart} onEnd={onEnd} onMute={() => {}}
+    onPendingTextChange={() => {}} onSendPending={() => {}}
+  />;
+  try {
+    await act(async () => root.render(render(null)));
+    const conversation = container.querySelector<HTMLButtonElement>('[aria-label="Start conversation"]')!;
+    expect(conversation.querySelector("svg")).not.toBeNull();
+    await act(async () => conversation.click());
+    expect(onStart).toHaveBeenCalledExactlyOnceWith("conversation");
+    await act(async () => root.render(render("dictate")));
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Stop dictation"]')!.click());
+    expect(onEnd).toHaveBeenCalledOnce();
+  } finally {
+    await act(async () => root.unmount());
+  }
+});

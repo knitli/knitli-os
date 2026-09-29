@@ -5,7 +5,7 @@ import { act } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type {
-  ActionLogEntry, AiChatMessage, AiChatMetadata, AiChatSubscriber, Overseer,
+  ActionLogEntry, AiChatAuthorInfo, AiChatMessage, AiChatMetadata, AiChatSubscriber, Overseer,
 } from '@gadgets/workshop-shared/api'
 
 vi.stubGlobal('ResizeObserver', class {
@@ -35,7 +35,7 @@ vi.mock('@cloudflare/kumo', async (importOriginal) => {
 
 vi.mock('./AuthContext', () => {
   const context = {
-    authenticatedApi: { listGatekeeperVendors: async () => [] },
+    authenticatedApi: { listGatekeeperVendors: async () => [], listLibraryBlueprints: async () => [], getModelReasoning: async () => null },
     currentUser: null,
   }
   return {
@@ -44,7 +44,21 @@ vi.mock('./AuthContext', () => {
   }
 })
 
-import { entry, makeOverseer, makeTestRoot } from './action-test-harness'
+const voiceBoundary = vi.hoisted(() => ({
+  start: vi.fn<(mode: string) => void>(),
+  available: false,
+}));
+vi.mock('./features/chat/voice/useVoiceChat', () => ({
+  useVoiceChat: (props: { conversationAvailable: boolean; sendMessage: (text: string, metadata: { hasSpeech: true }) => Promise<unknown> }) => {
+    voiceBoundary.available = props.conversationAvailable;
+    return {
+      state: { mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "" },
+      start: (mode: string) => { voiceBoundary.start(mode); void props.sendMessage("First spoken request", { hasSpeech: true }); }, end: () => {}, toggleMute: () => {}, setPendingText: () => {}, sendPending: () => {},
+    };
+  },
+}));
+
+import { entry, flushFrames, makeOverseer, makeTestRoot } from './action-test-harness'
 import ChatInterface from './ChatInterface'
 import { INCOMPLETE_DESCRIPTION_COPY } from './components/IncompleteDescriptionNotice'
 import { RESTRICTED_APPROVAL_COPY } from './components/RestrictedApprovalNotice'
@@ -68,6 +82,7 @@ function withChatApi(
     getChatHistory: async () => ({ messages: [] }),
     listChats: async () => chats,
     listModels: async () => [],
+    listPromptPresets: async () => [],
     onRpcBroken: () => {},
     subscribeToChat: (next: AiChatSubscriber) => {
       subscriber = next
@@ -84,7 +99,7 @@ function withChatApi(
 
 function renderChat(
   overseer: RpcStub<Overseer>,
-  props: { restricted?: boolean, selectedChatId?: number } = {},
+  props: { restricted?: boolean, selectedChatId?: number, initialVoice?: { chatId: number; modelId: string; onConsumed: () => void } } = {},
 ) {
   return testRoot.render(
     <ChatInterface
@@ -92,6 +107,7 @@ function renderChat(
       overseer={overseer}
       restricted={props.restricted}
       selectedChatId={props.selectedChatId ?? null}
+      initialVoice={props.initialVoice}
       onNavigateToChat={() => {}}
       pendingConsoleLogCount={0}
       consoleLogPreview=""
@@ -289,3 +305,30 @@ describe('action fields', () => {
     })
   }
 })
+
+
+it('starts initial voice once after subscription and models are ready, preserving the chosen model for an empty chat', async () => {
+  voiceBoundary.start.mockClear();
+  const server = makeOverseer();
+  const chat = withChatApi(server, undefined, [{ id: 0, title: "New Chat", started: new Date(), lastActive: new Date() }]);
+  const sendChatMessage = vi.fn<Overseer["sendChatMessage"]>().mockResolvedValue(0);
+  let resolveModels!: (models: AiChatAuthorInfo[]) => void;
+  Object.assign(server.overseer, {
+    sendChatMessage,
+    listModels: () => new Promise<AiChatAuthorInfo[]>((resolve) => { resolveModels = resolve; }),
+  });
+  const consumed = vi.fn<() => void>();
+  await renderChat(server.overseer, { selectedChatId: 0, initialVoice: { chatId: 0, modelId: "voice-model", onConsumed: consumed } });
+  expect(voiceBoundary.start).not.toHaveBeenCalled();
+  await act(async () => resolveModels([{ id: "default-model", name: "Default", type: "agent" }, { id: "voice-model", name: "Voice model", type: "agent" }]));
+  expect(voiceBoundary.start).toHaveBeenCalledExactlyOnceWith("conversation");
+  expect(consumed).toHaveBeenCalledOnce();
+  expect(sendChatMessage).toHaveBeenCalledExactlyOnceWith(0, "First spoken request", "voice-model", undefined, undefined, undefined, true);
+  await renderChat(server.overseer, { selectedChatId: 0 });
+  expect(voiceBoundary.available).toBe(true);
+  chat.emitMessage({ chatId: 0, sequence: 0, timestamp: new Date(), type: "message",
+    message: "First spoken request", author: { type: "user", id: "user", name: "User" }, hasSpeech: true });
+  flushFrames();
+  expect(voiceBoundary.available).toBe(true);
+  expect(voiceBoundary.start).toHaveBeenCalledOnce();
+});

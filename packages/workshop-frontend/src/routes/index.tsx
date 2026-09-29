@@ -23,6 +23,12 @@ import { useDocumentTitle } from "../useDocumentTitle";
 import { homePromptFromSearch } from "../homePrompt";
 import { composerDraftStorageKey } from "../features/chat/composer/draft/composerDraft";
 
+import { VoiceControls } from "../features/chat/voice/VoiceControls";
+import { useVoiceChat } from "../features/chat/voice/useVoiceChat";
+import { useDictationAppendQueue } from "../features/chat/composer/useDictationAppendQueue";
+
+const subscribeToNoChatEvents = () => () => {};
+
 type HomeSearch = { prompt?: string };
 
 export const Route = createFileRoute("/")({
@@ -108,13 +114,18 @@ export function HomePageContent({ prompt }: HomeSearch) {
       capsules?: CapsuleSpecifier[],
       attachments?: ChatAttachmentHandle[],
       formats?: MessageFormatRef[],
+      submissionMeta?: { hasSpeech: boolean },
     ) => {
       try {
         ensureProvisionalGadget();
         const overseer = provisionalOverseerRef.current!.stub;
         // Pipeline both independent calls in one batch, but settle both before releasing the stub.
         const [chat, {id}] = await Promise.all([
-          overseer.newChat(message, modelId, capsules, attachments, formats),
+          overseer.newChat(
+            submissionMeta?.hasSpeech && typeof message !== "string" ? { ...message, hasSpeech: true } : message,
+            modelId, capsules, attachments, formats, undefined, undefined,
+            submissionMeta?.hasSpeech && typeof message === "string" ? true : undefined,
+          ),
           overseer.getMetadata(),
         ]);
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
@@ -137,6 +148,44 @@ export function HomePageContent({ prompt }: HomeSearch) {
     },
     [ensureProvisionalGadget, navigate, toasts],
   );
+
+  const dictationAppend = useDictationAppendQueue();
+  const voice = useVoiceChat({
+    authenticatedApi,
+    chatId: null,
+    agentActive: false,
+    onDictation: (text) => dictationAppend.enqueue(text, null),
+    sendMessage: async () => undefined,
+    subscribeToEvents: subscribeToNoChatEvents,
+    conversationAvailable: false,
+  });
+  const voiceLaunchGeneration = useRef(0);
+  useEffect(() => () => { voiceLaunchGeneration.current++; }, [authenticatedApi]);
+  const [startingConversation, setStartingConversation] = useState(false);
+  const startVoice = async (mode: "dictate" | "conversation") => {
+    if (mode === "dictate") return voice.start(mode);
+    if (startingConversation || selectedModel === null) return;
+    const generation = ++voiceLaunchGeneration.current;
+    setStartingConversation(true);
+    try {
+      ensureProvisionalGadget();
+      const overseer = provisionalOverseerRef.current!.stub;
+      const [chat, { id }] = await Promise.all([
+        overseer.newChat("", selectedModel),
+        overseer.getMetadata(),
+      ]);
+      if (generation !== voiceLaunchGeneration.current) return;
+      await navigate({ to: "/workspace/$id", params: { id }, search: { chat },
+        state: (previous) => ({ ...previous, startVoiceChat: { chatId: chat, modelId: selectedModel } }) });
+    } catch (error) {
+      if (generation !== voiceLaunchGeneration.current) return;
+      if (!logRpcFailure("Failed to start conversation:", error)) {
+        toasts.add({ title: "Failed to start conversation", variant: "error" });
+      }
+    } finally {
+      if (generation === voiceLaunchGeneration.current) setStartingConversation(false);
+    }
+  };
 
   const getOverseer = useCallback((): RpcStub<Overseer> => {
     ensureProvisionalGadget();
@@ -185,6 +234,18 @@ export function HomePageContent({ prompt }: HomeSearch) {
           createCapsuleGatekeeper={createCapsuleGatekeeper}
           getOverseer={getOverseer}
           onSend={handleSend}
+          appendText={dictationAppend.appendForChat(null)}
+          onAppendTextApplied={dictationAppend.acknowledge}
+          voiceControls={<VoiceControls
+            state={voice.state}
+            disabled={startingConversation}
+            onStart={(mode) => { void startVoice(mode); }}
+            onEnd={voice.end}
+            onMute={voice.toggleMute}
+            onPendingTextChange={voice.setPendingText}
+            onSendPending={voice.sendPending}
+            conversationAvailable={selectedModel !== null}
+          />}
           isAgentActive={false}
           models={models}
           selectedModel={selectedModel}

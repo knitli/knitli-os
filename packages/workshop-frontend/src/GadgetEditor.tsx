@@ -1,3 +1,4 @@
+import { useInitialVoiceChat } from "./features/chat/voice/useInitialVoiceChat";
 import { useState, useEffect, useCallback, useMemo, useRef, type PointerEvent as ReactPointerEvent } from 'react'
 import { useParams, useNavigate, useSearch, Link } from '@tanstack/react-router'
 import { DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
@@ -679,6 +680,7 @@ export default function GadgetEditor() {
   const pinInitialChatSelection =
     singleInitialChat && !hasCommittedCode && !userNavigatedToList
   const effectiveSelectedChatId = selectedChatId ?? (pinInitialChatSelection ? 0 : null)
+  const { request: voiceStartRequest, consume: consumeVoiceStart } = useInitialVoiceChat(id, effectiveSelectedChatId)
 
   // ── workpiece selection ──────────────────────────────────────────────────────
 
@@ -1764,6 +1766,7 @@ export default function GadgetEditor() {
                   overseer={overseer.stub}
                   restricted={metadata?.containsRestrictedData === true}
                   selectedChatId={effectiveSelectedChatId}
+                  initialVoice={voiceStartRequest === undefined ? undefined : { ...voiceStartRequest, onConsumed: consumeVoiceStart }}
                   onNavigateToChat={navigateToChat}
                   onChatChangesChange={setChatChanges}
                   onLiveRowsChange={setLiveRows}

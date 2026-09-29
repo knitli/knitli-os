@@ -272,7 +272,12 @@ export const useVoiceChat = ({
         client.addEventListener("connectionchange", (connected) => {
           if (generation !== generationRef.current || chatIdRef.current !== sessionChatId) return;
           if (connected) {
-            void client.startCall().catch((error) => {
+            // VoiceClient checks reconnect recovery after dispatching connectionchange.
+            // Starting synchronously here makes that check send a second start_call.
+            void Promise.resolve().then(() => {
+              if (generation !== generationRef.current || chatIdRef.current !== sessionChatId || clientRef.current !== client) return;
+              return client.startCall();
+            }).catch((error) => {
               if (generation !== generationRef.current || chatIdRef.current !== sessionChatId || clientRef.current !== client) return;
               release();
               setState((current) => ({
@@ -284,7 +289,10 @@ export const useVoiceChat = ({
           }
           if (!connected) {
             release();
-            setState((current) => ({ ...current, mode: null, status: "idle" }));
+            setState((current) => ({
+              ...current, mode: null, status: "idle",
+              error: current.error ?? "Voice connection closed. Start again to reconnect.",
+            }));
           }
         });
         client.addEventListener("statuschange", (status) => generation === generationRef.current && chatIdRef.current === sessionChatId && setState((current) => ({ ...current, status })));

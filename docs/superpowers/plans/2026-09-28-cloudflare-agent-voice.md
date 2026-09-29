@@ -156,3 +156,50 @@ The reported new-chat dictation race is not applicable to current UI: the only
 VoiceControls are inside the selectedChatId !== null render branch; the sidebar
 new-chat composer has neither voice controls nor dictation append input. No
 speculative new-chat voice feature was added. Backend unchanged this round.
+
+
+## Post-deployment repair — 2026-09-29
+
+User reported both modes briefly listening and returning idle without output after
+microphone permission. They also requested controls on the initial composer, a
+conversation icon, and dictation that stays active until explicitly stopped.
+Work continues on `fix/voice-session-start`, based on merged main `5a7043d1`.
+
+Root cause: the actual Agents 0.24 VoiceClient emits `connectionchange` inside its
+socket-open handler, then checks whether it should recover an existing call.
+Starting a call synchronously in our listener sets the SDK's in-call flag before
+that recovery check, sending two `start_call` frames. Our single-call server
+correctly rejects the second and revokes the connection. Defer our startup until
+the open handler completes; retain ownership checks before the deferred call.
+Unexpected disconnects should leave a visible error.
+
+Reuse the existing continuous transcription path: finalized segments append to
+the composer without ending dictation. Home conversation creates an empty chat
+before starting capture, so the first spoken prompt and reply use the ordinary
+chat subscription/receipt path. Preserve speech provenance for Home and new-chat
+composer submissions. The initial launch must be one-shot, never a reload or
+back-navigation microphone restart.
+
+Remaining hosted-provider acceptance: stopping during an unfinished utterance
+may discard words not yet finalized by Flux. The pinned SDK exposes no graceful
+flush operation; do not claim final-utterance draining is verified. Test multiple
+utterances, pause/resume speech, explicit Stop, and the last phrase at Stop during
+the next live microphone trial.
+
+Home handoff details: router history carries the new chat and chosen model once,
+then removes the intent from history. Navigation away invalidates pending launch.
+The chat waits for its subscription, chat list, and exact available model before
+starting. Its initial model survives intent consumption and the first user-message
+broadcast until authoritative agent state arrives; manual model changes cancel
+the pending launch. Independent review found and resolved both lifecycle gaps and
+the empty-chat model reset.
+
+Repair validation: all 720 frontend tests (82 files), 11 voice backend tests, and
+full lint/types/build passed. The real VoiceClient test observed two start frames
+before the fix and exactly one afterward; it also covers multiple dictated
+segments and explicit stop. Removing disconnect feedback failed its regression.
+Ten narrow UI mutations failed the relevant assertions (speech provenance, empty
+chat creation, error feedback, launch cancellation, history consumption, handoff
+invalidation, Stop label, initial model, first-user gap, and exact-model startup),
+then all affected files passed after restoration. No hosted microphone trial or
+deployment was performed for this repair.

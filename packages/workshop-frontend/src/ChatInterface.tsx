@@ -4055,8 +4055,10 @@ function ChatInterface({
     try {
       // Selections made just before sending must land before the turn starts.
       await Promise.all([effortWriteRef.current, promptWriteRef.current]);
-      const modelMessage = submissionMeta?.hasSpeech && typeof message === "string"
-        ? withTranscriptionContext(message)
+      const modelMessage = submissionMeta?.hasSpeech
+        ? typeof message === "string"
+          ? withTranscriptionContext(message)
+          : {...message, hasSpeech: true as const}
         : message;
       if (selectedChatId === null) {
         // Create a new chat (with optional capsules).
@@ -4104,6 +4106,7 @@ function ChatInterface({
     },
     sendMessage: sendVoiceMessage,
     subscribeToEvents: subscribeToChatEvents,
+    conversationAvailable: selectedChatId !== null && selectedModel !== null,
   });
 
   // Handle creating a new chat from the sidebar (always creates, never sends to existing)

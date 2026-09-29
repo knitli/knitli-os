@@ -4011,6 +4011,12 @@ export type SlashCommandId = {
   commandId: "compact";
 };
 
+/** Model-only context appended to speech-transcribed input. */
+export const TRANSCRIPTION_CONTEXT = "Input context: This message includes speech transcribed from audio and may have been edited by the user. Transcription can mishear words, names, technical terms, or punctuation. Interpret it in context; if ambiguity materially affects the requested action, ask for clarification rather than guessing.";
+
+/** Append the transcription ambiguity context without changing the user-visible input. */
+export const withTranscriptionContext = (text: string) => `${text}\n\n${TRANSCRIPTION_CONTEXT}`;
+
 /** A slash command invocation parsed by the client. */
 export type SlashCommandRequest = {
   id: SlashCommandId;
@@ -4026,6 +4032,12 @@ export type SlashCommandRequest = {
    * rather than implying it led the line. Display only.
    */
   commandPosition?: number;
+
+  /**
+   * Set when speech supplied the command arguments. Workshop adds transcription context only to
+   * the expanded model prompt; the provider and visible command keep the original arguments.
+   */
+  hasSpeech?: true;
 };
 
 /** One slash command as shown in the Workshop picker. */

@@ -1,8 +1,5 @@
 import type { VoiceTransport } from "agents/voice/client";
-
-export const TRANSCRIPTION_CONTEXT = "Input context: This message includes speech transcribed from audio and may have been edited by the user. Transcription can mishear words, names, technical terms, or punctuation. Interpret it in context; if ambiguity materially affects the requested action, ask for clarification rather than guessing.";
-
-export const withTranscriptionContext = (text: string) => `${text}\n\n${TRANSCRIPTION_CONTEXT}`;
+export {withTranscriptionContext} from "@gadgets/workshop-shared/api";
 
 export class VoiceAudioGate {
   #waitingForAck = false;

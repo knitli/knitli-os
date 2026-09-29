@@ -116,6 +116,34 @@ describe("slash command helpers", () => {
     expect(disposals).toHaveBeenCalledTimes(1);
   });
 
+  it("adds transcription context to a dictated command expansion without changing its arguments", async () => {
+    let invoked = vi.fn((_id: string, _message: string, _authorizer: unknown) =>
+      ({message: "Deploy production."}));
+    let request = {
+      id: {gatekeeperId: 1, commandId: "deploy"},
+      args: "prod now",
+      hasSpeech: true,
+    };
+
+    await expect(invokeSlashCommand(gatekeeper({invoke: invoked}) as never, request, {} as never))
+      .resolves.toEqual({
+        message: "Deploy production.\n\nInput context: This message includes speech transcribed from audio and may have been edited by the user. Transcription can mishear words, names, technical terms, or punctuation. Interpret it in context; if ambiguity materially affects the requested action, ask for clarification rather than guessing.",
+      });
+    expect(invoked).toHaveBeenCalledWith("deploy", "prod now", expect.anything());
+  });
+
+  it("leaves a blank dictated expansion for the overseer's empty-message guard", async () => {
+    let request = {
+      id: {gatekeeperId: 1, commandId: "deploy"},
+      args: "prod now",
+      hasSpeech: true,
+    };
+
+    await expect(invokeSlashCommand(
+      gatekeeper({invoke: () => ({message: "  "})}) as never, request, {} as never,
+    )).resolves.toEqual({message: "  "});
+  });
+
   it("keeps the provider alive until listing completes", async () => {
     let release!: (commands: SlashCommandDescriptor[]) => void;
     let disposals = vi.fn();

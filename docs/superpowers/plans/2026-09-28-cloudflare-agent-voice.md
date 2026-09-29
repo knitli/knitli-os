@@ -105,3 +105,12 @@ Initial-head CI and Codex security review passed. Codacy and Codacy-production
 have no checks on this or recent PRs; the authenticated Codacy repository lookup
 returns not found. Their analysis is unavailable, not a passing result. Continue
 monitoring CI and Codex after each push until the current head is clear.
+
+Second review follow-up: end conversations when no agent is selected (including
+pending session starts), clean up microphone-start failures, retain pending drafts
+per chat and across replacement calls, preserve newline editing, and carry speech
+provenance through slash-command expansion. Blank command results still reach the
+existing empty-message rejection; built-in compact does not send its arguments to
+a model. Validation: 683 frontend tests, seven focused slash-command tests, full
+lint/build and backend/shared/frontend types passed. New regressions failed before
+the fixes; independent hook review passed. Live microphone acceptance remains open.

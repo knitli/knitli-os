@@ -7,11 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiChatMessage, VoiceMode } from "@gadgets/workshop-shared/api";
 
 const voice = vi.hoisted(() => {
+  const startCall = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
   class Client {
     listeners = new Map<string, (value: unknown) => void>();
     sendJSON = vi.fn<(frame: Record<string, unknown>) => void>();
     disconnect = vi.fn<() => void>();
-    startCall = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    startCall = vi.fn<() => Promise<void>>(() => startCall());
     toggleMute() {}
     constructor() { clients.push(this); }
     addEventListener(event: string, listener: (value: unknown) => void) { this.listeners.set(event, listener); }
@@ -19,7 +20,7 @@ const voice = vi.hoisted(() => {
     connect() { this.emit("connectionchange", true); }
   }
   const clients: Client[] = [];
-  return { Client, clients };
+  return { Client, clients, startCall };
 });
 vi.mock("agents/voice/client", () => ({ VoiceClient: voice.Client }));
 
@@ -72,6 +73,7 @@ describe("useVoiceChat", () => {
   };
   beforeEach(async () => {
     voice.clients.length = 0;
+    voice.startCall.mockReset().mockResolvedValue(undefined);
     sessionNumber = 0;
     sendMessage = vi.fn<Props["sendMessage"]>().mockResolvedValue(10);
     props = {
@@ -110,6 +112,99 @@ describe("useVoiceChat", () => {
     await transcript("Only this new request", "new-turn");
     expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Only this new request");
     expect(controls.state.pendingText).toBe("Keep this draft");
+  });
+
+  it("reports a failed call start and releases its session", async () => {
+    voice.startCall.mockRejectedValueOnce(new Error("Microphone unavailable"));
+    const client = await start();
+    await act(async () => {});
+    expect(client.disconnect).toHaveBeenCalledOnce();
+    expect(controls.state.mode).toBeNull();
+    expect(controls.state.error).toBe("Microphone unavailable");
+  });
+
+  it("does not end a replacement call when an old start rejects", async () => {
+    let reject!: (error: Error) => void;
+    voice.startCall.mockImplementationOnce(() => new Promise<void>((_, fail) => { reject = fail; }));
+    const oldClient = await start();
+    act(() => controls.end());
+    const newClient = await start();
+    await act(async () => { reject(new Error("Old call failed")); });
+    expect(oldClient.disconnect).toHaveBeenCalledOnce();
+    expect(newClient.disconnect).not.toHaveBeenCalled();
+    expect(controls.state.mode).toBe("conversation");
+  });
+
+  it("retains an old same-chat draft when a replacement session transcribes more speech", async () => {
+    await start();
+    await transcript("Old draft", "old-turn");
+    act(() => controls.end());
+    await start();
+    await transcript("New speech", "new-turn");
+    expect(controls.state.pendingText).toBe("Old draft\nNew speech");
+    await render({ agentActive: false });
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("restores each chat's pending draft after switching chats", async () => {
+    await start();
+    await transcript("Chat seven", "turn-7");
+    await render({ chatId: 8 });
+    await start();
+    await transcript("Chat eight", "turn-8");
+    await render({ chatId: 7 });
+    expect(controls.state.pendingText).toBe("Chat seven");
+    await render({ chatId: 8 });
+    expect(controls.state.pendingText).toBe("Chat eight");
+  });
+
+  it("ends conversation voice when conversation becomes unavailable but keeps dictation running", async () => {
+    const conversation = await start();
+    await render({ conversationAvailable: false });
+    expect(conversation.disconnect).toHaveBeenCalledOnce();
+    expect(controls.state.mode).toBeNull();
+    const dictation = await start("dictate");
+    await render({ conversationAvailable: false });
+    expect(dictation.disconnect).not.toHaveBeenCalled();
+    expect(controls.state.mode).toBe("dictate");
+  });
+
+  it("disposes a conversation session that resolves after conversation becomes unavailable", async () => {
+    let resolve!: (connection: Awaited<ReturnType<Props["authenticatedApi"]["createVoiceSession"]>>) => void;
+    const close = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    const dispose = vi.fn<() => void>();
+    await render({
+      authenticatedApi: {
+        createVoiceSession: () => new Promise((next) => { resolve = next; }),
+      } as unknown as Props["authenticatedApi"],
+    });
+    act(() => controls.start("conversation"));
+    await render({ conversationAvailable: false });
+    await act(async () => {
+      resolve({
+        id: "late-session", url: "/api/voice/session", expiresAt: Date.now() + 60_000,
+        session: { close, [Symbol.dispose]: dispose },
+      } as unknown as Awaited<ReturnType<Props["authenticatedApi"]["createVoiceSession"]>>);
+    });
+    expect(voice.clients).toHaveLength(0);
+    expect(close).toHaveBeenCalledOnce();
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it("restores a failed idle draft after switching away before its rejection", async () => {
+    let reject!: (error: Error) => void;
+    sendMessage.mockImplementationOnce(() => new Promise<number>((_, fail) => { reject = fail; }));
+    await render({ agentActive: false });
+    await start();
+    await transcript("Keep chat seven", "turn-7");
+    await render({ chatId: 8, agentActive: true });
+    await start();
+    await transcript("Keep chat eight", "turn-8");
+    await act(async () => { reject(new Error("Connection lost")); });
+    expect(controls.state.pendingText).toBe("Keep chat eight");
+    expect(controls.state.error).toBeNull();
+    await render({ chatId: 7 });
+    expect(controls.state.pendingText).toBe("Keep chat seven");
   });
 
   it("submits edited busy text with appended speech once, forwarding the answer to the newest voice turn", async () => {
@@ -394,7 +489,7 @@ describe("useVoiceChat", () => {
     expect(close).not.toHaveBeenCalled();
   });
 
-  it("does not send the previous chat's preserved instruction into a different chat", async () => {
+  it("does not show the previous chat's preserved instruction in a different chat", async () => {
     await start();
     await transcript("For chat seven", "turn-1");
     await render({ chatId: 8, agentActive: false });
@@ -403,7 +498,7 @@ describe("useVoiceChat", () => {
       controls.sendPending();
     });
     expect(sendMessage).not.toHaveBeenCalled();
-    expect(controls.state.pendingText).toBe("For chat seven");
+    expect(controls.state.pendingText).toBe("");
   });
 
   it("finishes a response whose native active and idle events arrived before its receipt", async () => {

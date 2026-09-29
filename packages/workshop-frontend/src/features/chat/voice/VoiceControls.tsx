@@ -65,11 +65,12 @@ export const VoiceControls = ({
       {state.error && <span className="min-w-0 truncate text-[12px] text-kumo-danger">{state.error}</span>}
       {state.pendingText && (
         <div className="flex min-w-0 flex-1 items-center gap-1">
-          <input
+          <textarea
+            rows={2}
             value={state.pendingText}
             onChange={(event) => onPendingTextChange(event.target.value)}
             aria-label="Pending voice instruction"
-            className="min-w-0 flex-1 bg-transparent text-[12px] text-kumo-default outline-none"
+            className="min-w-0 flex-1 resize-y bg-transparent text-[12px] text-kumo-default outline-none"
           />
           <button type="button" disabled={!canSendPending} onClick={onSendPending} className="text-[12px] font-medium text-kumo-subtle hover:text-kumo-default disabled:opacity-40">
             Send

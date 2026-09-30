@@ -15,6 +15,7 @@ The project structure is:
     * Runs on Cloudflare Workers.
     * This is the **kernel**: it defines the architecture and is held to a higher bar than UI/gatekeeper code. Reviewers read *every line* of `workshop-backend` and of API changes in `workshop-shared`, so keep diffs here small and elegant. Concretely: doc-comment **every** exported member of the `workshop-shared` public API (types, consts, and functions — not just interfaces); never introduce a hand-written interface that mirrors an RPC interface plus an `as unknown as` cast (derive from the real type instead, or rethink the design); and prefer reusing existing mechanisms over adding parallel ones. Capability-based security note: a resource becomes "ambient" (auto-injected) only by user/admin configuration — a gatekeeper must never assert its own ambience. When a change to this package is large, split it by concern into separate PRs (and at minimum group commits so `workshop-backend`/`workshop-shared` can be reviewed apart from UI), since fewer kernel lines = easier review.
     * Installs the **bundled blueprints** from `@gadgets/bundled-blueprints` on a deployment's first `/api` request, and offers them as the deployment's standard output formats. `scripts/build-bundled-blueprints.ts` generates the gitignored `src/generated/bundled-blueprints.ts` they are installed from (`BUNDLED_BLUEPRINTS_DIR` overrides the source directory), so `build` and `test` both run the generator first; `pnpm import:bundled-blueprint` updates or adds a blueprint from a Workshop export.
+    * Agent turns emit the Workers trace spans Cloudflare's Agents dashboard reads (`src/agent-tracing.ts`): `invoke_agent` per turn, `chat` per model request, `execute_tool` per tool call, and `tool_approval` when an agent's action waits for a manual decision and when it is approved or denied. They carry token counts, including cache reads and writes, but never prompts, responses or tool data. A span belongs to the invocation that opened it, and once a Durable Object invocation has returned, the next event the object receives ends its trace. So a turn keeps all its spans only while the request that started it (usually the browser session) stays open.
 * packages/bundled-blueprints: The blueprints the deployment ships with, `blueprints/<name>/` holds each blueprint's `blueprint.json` plus its gadget code under `files/`, which may be TypeScript.
 * packages/workshop-shared: Shared API definitions between client and server.
     * This defines the application's RPC interface.
@@ -101,7 +102,7 @@ To test changes:
 - `build:app:dev` is the same build with `minify: false`, run by the `pnpm dev-server` pre-flight so its `app.txt` matches what the watcher's un-skippable initial build will write — otherwise `emitAppText` rewrites the file and Wrangler restarts the worker mid-startup. It captures only `app.txt`, since `dist-app/` has no reader outside `vite.app.config.ts`. `build` and `deploy` still use `build:app`, so nothing unminified ships, and `build-app.ts` always sets `GATEKEEPER_APP_UNMINIFIED` explicitly — an inherited value would otherwise make a production build unminified and get it cached that way.
 
   Two structural constraints explain the file layout. Vite+ reads per-package settings only from `vite.config.*`, which the SPA's own build config occupied, so that moved to `vite.app.config.ts` (referenced by `build-app.ts -c`, `tsconfig.vite.json` and gatekeeper-context's `__tests__/vite-config.test.ts`). And a task may not share a name with a package.json script, so the `build:app` script is gone and `build` calls `vp run --cache build:app` instead, `deploy` the same with `--no-cache`. Don't define the task in the workspace-root config: it gets created for *every* package, including the root, which then fails.
-- The packages whose tests run in workerd (`router`, `typed-storage`, `backend-utils`, `workshop-backend`, `gatekeeper-scheduler`, `gatekeeper-cloudflare`, `gatekeeper-kit`) load `scripts/assert-workerd.ts` as a `setupFiles` entry. It throws unless `navigator.userAgent` is `Cloudflare-Workers`, so a `@cloudflare/vitest-pool-workers` pool that fails to start fails the suite instead of silently falling back to Node — which otherwise looks like a pass in the packages that import no `cloudflare:*` module. Don't remove it to make a suite green.
+- The packages whose tests run in workerd (`router`, `typed-storage`, `observability`, `workshop-backend`, `gatekeeper-scheduler`, `gatekeeper-cloudflare`, `gatekeeper-kit`) load `scripts/assert-workerd.ts` as a `setupFiles` entry. It throws unless `navigator.userAgent` is `Cloudflare-Workers`, so a `@cloudflare/vitest-pool-workers` pool that fails to start fails the suite instead of silently falling back to Node — which otherwise looks like a pass in the packages that import no `cloudflare:*` module. Don't remove it to make a suite green.
 
 Linting (oxlint, via Vite+):
 - `pnpm lint` runs what CI enforces: `lint:check` (oxlint), `types:scripts` and `types:check`. Run this before pushing.
@@ -124,7 +125,7 @@ IMPORTANT: RPC stubs must be disposed to prevent resource leaks on the server si
 
 IMPORTANT: All RPC interface implementations should use the annotation `@validateRpc()` to apply capnweb-validate, which installs auto-generated runtime type validation matching the interface's TypeScript signatures. Do not write redundant validation code that duplicates the checks capnweb-validate already covers.
 
-IMPORTANT: Server-side logging uses `@gadgets/backend-utils/logger` (frontend browser `console.*` is out of scope):
+IMPORTANT: Server-side logging uses `@gadgets/observability/logger` (frontend browser `console.*` is out of scope):
 - Define a package-owned field type and module-scoped logger with a stable dot-separated `component`
   and, for gatekeepers, `vendorId`:
   `const logger = createLogger<GitHubLogFields>({ component: "gatekeeper.github", vendorId: VENDOR_ID });`.
@@ -135,7 +136,7 @@ IMPORTANT: Server-side logging uses `@gadgets/backend-utils/logger` (frontend br
   over logger parameters, and do not replace a shallow child logger with ambient context just to
   remove a local variable.
 - For bounded operation context needed by deep helpers, independent loggers, or other observability
-  consumers, use `createObservabilityContext` from `@gadgets/backend-utils/observability-context`.
+  consumers, use `createObservabilityContext` from `@gadgets/observability/observability-context`.
   Re-establish it per operation;
   it does not cross RPC, hibernation, or restart, and requires `nodejs_als` or `nodejs_compat`.
 - Pass caught values as `error`. The helper stringifies `Error` instances and primitives, uses an
@@ -146,12 +147,15 @@ IMPORTANT: Server-side logging uses `@gadgets/backend-utils/logger` (frontend br
   tokens, or request/response bodies.
 - To also dispatch a failure to the optional external issue Reporter (in addition to logging it),
   call `reportIssue(failureSite, caught, options?)` from
-  `@gadgets/backend-utils/error-reporting`. Attach ambient fields from the package's observability
+  `@gadgets/observability/error-reporting`. Attach ambient fields from the package's observability
   context and augment them with capture-site fields:
   `reportIssue("overseer.catalog-fallback", err, { handled: true, attributes: { ...obsContext.get(), gatekeeperId } });`.
   It is a no-op when the `ERROR_REPORTER` binding is absent (local dev / deployments without an issue
   destination). Only bounded scalars are retained as attributes; reported context obeys the same
   no-secrets rules as log fields.
+- Usage metrics go to the optional `METRICS` Analytics Engine dataset through
+  `@gadgets/observability/metrics`, whose column layout (`metrics-schema.ts`) is also what
+  dashboards query; Workshop product events reach it through `recordAnalytics`.
 
 IMPORTANT: Frontend error reporting is a separate, opt-in path:
 - `@gadgets/error-reporting` owns the vendor-neutral browser/Worker event contract and tolerant,

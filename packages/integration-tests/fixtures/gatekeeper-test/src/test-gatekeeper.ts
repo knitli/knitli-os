@@ -19,28 +19,19 @@
 // is one control knob here, `allow`, and the reason string is what carries the distinction to the
 // user. Tests exercise both narratives by choosing reason text.
 
-import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
-
+import {
+  DurableObject, RpcTarget, WorkerEntrypoint, restore, type RpcStub,
+} from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
+import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import type {
-  AccountDescription,
-  ActionKind,
-  AgentCatalog,
-  ApprovalQueue,
-  Gatekeeper,
-  GatekeeperConnectCallback,
-  GatekeeperUser,
-  GatekeeperUserVerifier,
-  HookController,
-  HookInitiator,
-  HookTargetMetadata,
-  ResourceConfiguratorFrame,
-  ResourceDescription,
-  SupportedResource,
+  AccountDescription, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
+  GatekeeperConnectCallback, GatekeeperUser, GatekeeperUserVerifier, HookController, HookInitiator,
+  HookTargetMetadata, ResourceDescription, ResourceConfiguratorFrame, SupportedResource,
   VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type {
-  ChatGatewayRpcTarget, GadgetResponse,
+  ChatGatewayRpcTarget, GadgetResponse, SubmitExternalMessageInput, SubmitExternalMessageResult,
 } from "@gadgets/workshop-shared/external-message-gateway";
 
 // Nothing but classes and the default handler may be exported from a Worker entry module: workerd
@@ -64,6 +55,11 @@ interface TestThing {
   act(): Promise<void>;
   bindHook(): Promise<void>;
   writeValues(values: number[]): Promise<number[]>;
+  /** Binds a hook the integration test fires through \`/control/fire-hook\`. */
+  watch(key: string, callback: ValueHook): Promise<void>;
+}
+interface ValueHook {
+  onValueRequested(value: number): Promise<void>;
 }
 `;
 
@@ -108,8 +104,18 @@ type TestActionState = {
   applyCount: number;
 };
 
+type HookState = {
+  initiator?: Fetcher<HookInitiator<ValueHook>>;
+  target?: HookTargetMetadata;
+  disableCount: number;
+};
+
 function outcomeKey(label: string, resourceUrl?: string): string {
   return resourceUrl ? `outcome:${label}:${resourceUrl}` : `outcome:${label}`;
+}
+
+function newAccountLabel(): string {
+  return `test-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}@${VENDOR_HOST}`;
 }
 
 @validateRpc()
@@ -238,6 +244,15 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     started.approvalQueue[Symbol.dispose]?.();
   }
 
+  recordRevocation(label: string): void {
+    const key = `revocations:${label}`;
+    this.ctx.storage.kv.put(key, (this.ctx.storage.kv.get<number>(key) ?? 0) + 1);
+  }
+
+  getRevocationCount(label: string): number {
+    return this.ctx.storage.kv.get<number>(`revocations:${label}`) ?? 0;
+  }
+
   getActionState(label: string): TestActionState {
     return this.ctx.storage.kv.get<TestActionState>(`actions:${label}`) ?? {
       nextId: 1,
@@ -268,6 +283,112 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     state.value = action.value;
     state.applyCount++;
     this.ctx.storage.kv.put(`actions:${label}`, state);
+  }
+
+  failNextApply(label: string, reason: string): void {
+    this.ctx.storage.kv.put(`fail-next-apply:${label}`, reason);
+  }
+
+  /** Returns rather than throws, so consuming the failure commits. */
+  takeApplyFailure(label: string): string | null {
+    const key = `fail-next-apply:${label}`;
+    const reason = this.ctx.storage.kv.get<string>(key);
+    if (reason === undefined) return null;
+    this.ctx.storage.kv.delete(key);
+    return reason;
+  }
+
+  enableHook(
+      key: string, initiator: Fetcher<HookInitiator<ValueHook>>, target: HookTargetMetadata): void {
+    this.ctx.storage.kv.put(`hook:${key}`, { ...this.#hook(key), initiator, target });
+  }
+
+  /**
+   * Keeps the initiator, like a gatekeeper that ignores disable(), so `/control/fire-hook` probes
+   * the Workshop's own startHook() re-check, which live firings rely on.
+   */
+  recordHookDisable(key: string): void {
+    const hook = this.#hook(key);
+    this.ctx.storage.kv.put(`hook:${key}`, { ...hook, disableCount: hook.disableCount + 1 });
+  }
+
+  getHookState(key: string) {
+    const { initiator, target, disableCount } = this.#hook(key);
+    return { enabled: initiator !== undefined, target, disableCount };
+  }
+
+  async fireHook(key: string, value: number): Promise<{ fired: true } | { error: string }> {
+    const { initiator } = this.#hook(key);
+    if (!initiator) return { error: "hook was never enabled" };
+    try {
+      const { callback, approvalQueue } = await initiator.startHook();
+      try {
+        await approvalQueue.authorizeObservation({
+          title: `Hook ${key} requested ${value}`,
+          description: "The integration test fired this hook.",
+        });
+        await callback.onValueRequested(value);
+      } finally {
+        callback[Symbol.dispose]();
+        approvalQueue[Symbol.dispose]();
+      }
+      return { fired: true };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  #hook(key: string): HookState {
+    return this.ctx.storage.kv.get<HookState>(`hook:${key}`) ?? { disableCount: 0 };
+  }
+
+  openConnect(label: string, callback: Fetcher<GatekeeperConnectCallback>): void {
+    this.ctx.storage.kv.put(`connect:${label}`, callback);
+  }
+
+  async finishConnect(label: string): Promise<ConnectHandoff | null> {
+    const key = `connect:${label}`;
+    const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>(key);
+    if (callback === undefined) return null;
+    this.ctx.storage.kv.delete(key);
+    return callback.complete(this.ctx.exports.TestAccount({ props: { label } }));
+  }
+
+  recordGadgetResponse(messageKey: string, response: GadgetResponse): void {
+    const key = `gadget-responses:${messageKey}`;
+    this.ctx.storage.kv.put(key, [...this.getGadgetResponses(messageKey), response]);
+  }
+
+  getGadgetResponses(messageKey: string): GadgetResponse[] {
+    return this.ctx.storage.kv.get<GadgetResponse[]>(`gadget-responses:${messageKey}`) ?? [];
+  }
+
+  /**
+   * Submits from here rather than returning the target: relayed back through the fetch handler,
+   * the stub ctx.restore() mints arrives non-persistent, and the Workshop stores it.
+   */
+  async submitExternalMessage(input: Omit<SubmitExternalMessageInput, "chatGatewayRpcTarget">)
+      : Promise<SubmitExternalMessageResult> {
+    using chatGatewayRpcTarget =
+        await this.ctx.restore<RpcStub<ChatGatewayRpcTarget>>({ messageKey: input.messageKey });
+    return await this.env.WORKSHOP_EXTERNAL_MESSAGES.submitExternalMessage(
+        { ...input, chatGatewayRpcTarget });
+  }
+
+  [restore]({ messageKey }: { messageKey: string }): GadgetResponseRecorder {
+    return new GadgetResponseRecorder(this, messageKey);
+  }
+}
+
+/** Records each delivery rather than the latest, since delivery is at-least-once. */
+@validateRpc()
+class GadgetResponseRecorder extends RpcTarget implements ChatGatewayRpcTarget {
+  constructor(private readonly owner: TestControl, private readonly messageKey: string) {
+    super();
+  }
+
+  async onGadgetResponse(response: GadgetResponse): Promise<void> {
+    this.owner.recordGadgetResponse(this.messageKey, response);
   }
 }
 
@@ -309,8 +430,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
    */
   @skipRpcValidation()
   async createAccount(): Promise<Fetcher<GatekeeperUser>> {
-    const label = `test-${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}@${VENDOR_HOST}`;
-    return this.ctx.exports.TestAccount({ props: { label } });
+    return this.ctx.exports.TestAccount({ props: { label: newAccountLabel() } });
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
@@ -322,15 +442,13 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
   }
 
   /**
-   * Required by the interface but unreachable: autoProvisionsAccount means the Workshop mints
-   * accounts through createAccount() and never offers a connect flow.
+   * Reached via `AuthenticatedApi.connectAccount()`; the returned URL is served by this worker's
+   * `GET /connect/<label>`, named for the account the flow mints.
    */
-  async connectAccount(
-    _callback: Fetcher<GatekeeperConnectCallback>,
-  ): Promise<{ url: string }> {
-    throw new Error(
-      "The test gatekeeper auto-provisions accounts; it has no connect flow.",
-    );
+  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
+    const label = newAccountLabel();
+    await control(this.ctx.exports).openConnect(label, callback);
+    return { url: `https://${VENDOR_HOST}/connect/${label}` };
   }
 }
 
@@ -407,7 +525,9 @@ export class TestAccount
     return null;
   }
 
-  async revoke(): Promise<void> {}
+  async revoke(): Promise<void> {
+    await control(this.ctx.exports).recordRevocation(this.ctx.props.label);
+  }
 
   async startResourceConfigurator(
     _resourceUrlPattern: string,
@@ -458,15 +578,23 @@ export class TestVerifier
 export interface TestSession {
   /**
    * `restricted` marks the observation `containsRestrictedData`; `ownerInvitesOnly` marks it
-   * `ownerInvitesOnly`.
+   * `ownerInvitesOnly`. `excludeObservers` lists observer ids (from `/control/observer-events`)
+   * that must not see it.
    */
-  readValue(restricted?: boolean, ownerInvitesOnly?: boolean): Promise<number>;
+  readValue(restricted?: boolean, ownerInvitesOnly?: boolean, excludeObservers?: string[])
+      : Promise<number>;
   /** `incomplete` omits the `descriptionIsComplete` claim, as a summary-only gatekeeper would. */
   writeValue(value: number, opts?: { autoApprovable?: boolean; incomplete?: boolean }): Promise<number>;
   observe(): Promise<void>;
   act(): Promise<void>;
   bindHook(): Promise<void>;
   writeValues(values: number[]): Promise<number[]>;
+  watch(key: string, callback: RpcStub<ValueHook>): Promise<void>;
+}
+
+/** The hook a gadget binds through `TestSession.watch()`. */
+export interface ValueHook extends RpcTarget {
+  onValueRequested(value: number): Promise<void>;
 }
 
 @validateRpc()
@@ -479,17 +607,21 @@ class TestSessionTarget extends RpcTarget implements TestSession {
       private readonly label: string,
       private readonly controllerFactory: () => Fetcher<HookController<RpcTarget>>,
       private readonly callbackFactory: () => RpcStub<RpcTarget>,
-      private readonly onDispose: () => void) {
+      private readonly onDispose: () => void,
+      private readonly exports: Cloudflare.Exports) {
     super();
     this.approvalQueue = approvalQueue.dup();
   }
 
-  async readValue(restricted?: boolean, ownerInvitesOnly?: boolean): Promise<number> {
+  async readValue(
+      restricted?: boolean, ownerInvitesOnly?: boolean, excludeObservers?: string[])
+      : Promise<number> {
     await this.approvalQueue.authorizeObservation({
       title: "Read the test value",
       description: "Read the deterministic value exposed by the integration-test gatekeeper.",
       ...(restricted ? { containsRestrictedData: true } : {}),
       ...(ownerInvitesOnly ? { ownerInvitesOnly: true } : {}),
+      ...(excludeObservers ? { excludeObservers } : {}),
     });
     return 42;
   }
@@ -551,6 +683,14 @@ class TestSessionTarget extends RpcTarget implements TestSession {
     return Promise.all(values.map(value => this.writeValue(value)));
   }
 
+  async watch(key: string, callback: RpcStub<ValueHook>): Promise<void> {
+    await this.approvalQueue.bindHook(
+        // @ts-expect-error Workers currently widens the controller's hook type across bindHook RPC.
+        this.exports.TestHookController({ props: { key } }),
+        callback,
+        { title: `Test hook ${key}`, description: "Delivers values the integration test fires." });
+  }
+
   [Symbol.dispose](): void {
     this.approvalQueue[Symbol.dispose]();
     this.onDispose();
@@ -561,7 +701,7 @@ export class TestHookCallback extends WorkerEntrypoint<Cloudflare.Env> {
   async run(): Promise<void> {}
 }
 
-export class TestHookController extends WorkerEntrypoint<Cloudflare.Env, { key: string }>
+export class TestStartHookController extends WorkerEntrypoint<Cloudflare.Env, { key: string }>
     implements HookController<RpcTarget> {
   async enable(
       initiator: Fetcher<HookInitiator<RpcTarget>>, _target: HookTargetMetadata): Promise<void> {
@@ -626,11 +766,12 @@ export class TestGatekeeper
         approvalQueue,
         control(this.ctx.exports),
         this.ctx.props.label,
-        () => this.ctx.exports.TestHookController(
+        () => this.ctx.exports.TestStartHookController(
             { props: { key: this.ctx.props.resourceUrl } }),
         () => this.ctx.exports.TestHookCallback({ props: {} }) as unknown as RpcStub<RpcTarget>,
         () => this.ctx.waitUntil(
-            control(this.ctx.exports).recordSessionDisposed(this.ctx.props.resourceUrl)));
+            control(this.ctx.exports).recordSessionDisposed(this.ctx.props.resourceUrl)),
+        this.ctx.exports);
   }
 
   /** No discovery index: the ambient fixture is reached through its session alone. */
@@ -675,7 +816,10 @@ export class TestGatekeeper
   }
 
   async applyAction(action: number): Promise<void> {
-    await control(this.ctx.exports).applyAction(this.ctx.props.label, action);
+    const state = control(this.ctx.exports);
+    const failure = await state.takeApplyFailure(this.ctx.props.label);
+    if (failure !== null) throw new Error(failure);
+    await state.applyAction(this.ctx.props.label, action);
   }
 
   async rejectAction(action: number): Promise<void> {
@@ -684,6 +828,19 @@ export class TestGatekeeper
 
   async revertAction(_action: number): Promise<void> {
     throw new Error("Test actions do not support revert.");
+  }
+}
+
+@validateRpc()
+export class TestHookController
+    extends WorkerEntrypoint<Cloudflare.Env, { key: string }> implements HookController<ValueHook> {
+  async enable(initiator: Fetcher<HookInitiator<ValueHook>>, target: HookTargetMetadata)
+      : Promise<void> {
+    await control(this.ctx.exports).enableHook(this.ctx.props.key, initiator, target);
+  }
+
+  async disable(): Promise<void> {
+    await control(this.ctx.exports).recordHookDisable(this.ctx.props.key);
   }
 }
 
@@ -707,18 +864,17 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-/**
- * Discards Gadget responses. The control endpoint below only asserts on the submission result,
- * and the rejection paths under test return before any response is produced.
- */
-@validateRpc()
-class DevNullChatGateway extends RpcTarget implements ChatGatewayRpcTarget {
-  async onGadgetResponse(_response: GadgetResponse): Promise<void> {}
-}
-
 export default {
   async fetch(req: Request, env: Cloudflare.Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
+
+    // The page a finished connect flow ends on, carrying the handoff ticket to the Workshop.
+    if (req.method === "GET" && url.pathname.startsWith("/connect/")) {
+      const handoff = await control(ctx.exports).finishConnect(url.pathname.slice("/connect/".length));
+      return handoff
+        ? htmlResponse(connectHandoffPageHtml(handoff))
+        : new Response("Not Found", { status: 404 });
+    }
 
     let body: unknown;
     if (req.method === "POST") {
@@ -862,23 +1018,23 @@ export default {
       if (!isNonEmptyString(gadgetTitle)) {
         return badRequest("`gadgetTitle` must be a non-empty string");
       }
-      const responseTarget = new RpcStub(new DevNullChatGateway());
-      try {
-        const result = await env.WORKSHOP_EXTERNAL_MESSAGES.submitExternalMessage(
-          {
-            callerEmail,
-            gadgetKey,
-            chatKey: gadgetKey,
-            messageKey: crypto.randomUUID(),
-            gadgetTitle,
-            prompt: "test prompt",
-            chatGatewayRpcTarget: responseTarget,
-          },
-        );
-        return Response.json(result);
-      } finally {
-        responseTarget[Symbol.dispose]();
-      }
+      // Submits through TestControl so the gateway target is the restored recorder, not a
+      // throwaway stub: a stub minted here arrives non-persistent and the Workshop stores it.
+      const result = await control(ctx.exports).submitExternalMessage({
+        callerEmail,
+        gadgetKey,
+        chatKey: gadgetKey,
+        messageKey: crypto.randomUUID(),
+        gadgetTitle,
+        prompt: "test prompt",
+      });
+      return Response.json(result);
+    }
+
+    if (url.pathname === "/control/revocation-count" && req.method === "POST") {
+      const { label } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      return Response.json({ count: await control(ctx.exports).getRevocationCount(label) });
     }
 
     if (url.pathname === "/control/action-state" && req.method === "POST") {
@@ -890,6 +1046,19 @@ export default {
         value: state.value,
         applyCount: state.applyCount,
       });
+    }
+
+    // One-shot: the next applyAction() for `label` throws `reason` without applying.
+    // Body: {"label": "...", "reason": "..."}
+    if (url.pathname === "/control/fail-next-apply" && req.method === "POST") {
+      const { label, reason } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      if (reason !== undefined && typeof reason !== "string") {
+        return badRequest("`reason` must be a string when present");
+      }
+      await control(ctx.exports).failNextApply(
+          label, reason ?? "The test gatekeeper failed to apply this action.");
+      return new Response(null, { status: 204 });
     }
 
     // Submit an external chat message through the Workshop's ExternalMessageGateway entrypoint,
@@ -905,12 +1074,30 @@ export default {
         if (!isNonEmptyString(value)) return badRequest(`\`${field}\` must be a non-empty string`);
         input[field] = value;
       }
-      // The instance becomes a stub when it crosses the RPC boundary; the parameter type can only
-      // name the stub side of that.
-      const chatGatewayRpcTarget =
-          new DevNullChatGateway() as unknown as RpcStub<ChatGatewayRpcTarget>;
-      return Response.json(await env.WORKSHOP_EXTERNAL_MESSAGES.submitExternalMessage(
-          { ...input, chatGatewayRpcTarget }));
+      return Response.json(await control(ctx.exports).submitExternalMessage(input));
+    }
+
+    // Body: {"messageKey": "..."} -> {"responses": GadgetResponse[]}
+    if (url.pathname === "/control/gadget-responses" && req.method === "POST") {
+      const { messageKey } = body as Record<string, unknown>;
+      if (!isNonEmptyString(messageKey)) return badRequest("`messageKey` must be a non-empty string");
+      return Response.json({ responses: await control(ctx.exports).getGadgetResponses(messageKey) });
+    }
+
+    // Fire a hook through the initiator its controller's enable() stored.
+    // Body: {"key": "...", "value": number} -> {"fired": true} | {"error": string}
+    if (url.pathname === "/control/fire-hook" && req.method === "POST") {
+      const { key, value } = body as Record<string, unknown>;
+      if (!isNonEmptyString(key)) return badRequest("`key` must be a non-empty string");
+      if (typeof value !== "number") return badRequest("`value` must be a number");
+      return Response.json(await control(ctx.exports).fireHook(key, value));
+    }
+
+    // Body: {"key": "..."} -> {"enabled": boolean, "target"?: HookTargetMetadata, "disableCount"}
+    if (url.pathname === "/control/hook-state" && req.method === "POST") {
+      const { key } = body as Record<string, unknown>;
+      if (!isNonEmptyString(key)) return badRequest("`key` must be a non-empty string");
+      return Response.json(await control(ctx.exports).getHookState(key));
     }
 
     // Map an external gadgetKey to the Overseer id the gateway targets -- the DO named

@@ -21,7 +21,7 @@ import {
   type ConnectHandoff,
 } from '@gadgets/workshop-shared/gatekeeper';
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
-import { initiatorAllows, refuseForeignBrowser } from "@gadgets/backend-utils/fork/connect-initiator";
+import { initiatorAllows, refuseForeignBrowser } from "@gadgets/observability/fork/connect-initiator";
 import {
   EmailSession,
   EmailHook,

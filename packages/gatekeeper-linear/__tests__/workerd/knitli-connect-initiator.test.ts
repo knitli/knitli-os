@@ -4,7 +4,7 @@
 // is covered by `packages/mcp-shared/__tests__/fork/connect-initiator.test.ts`.
 import { createExecutionContext, env, runInDurableObject, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { WRONG_ACCOUNT_HTML } from "@gadgets/backend-utils/fork/connect-initiator";
+import { WRONG_ACCOUNT_HTML } from "@gadgets/observability/fork/connect-initiator";
 import type { UserAccount } from "../../src/linear.js";
 
 const BASE = "http://localhost:8787/gatekeeper/linear";

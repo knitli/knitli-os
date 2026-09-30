@@ -20,13 +20,14 @@ declare module "cloudflare:workers" {
 const USER = { type: "user", id: "alice", name: "Alice" } as const;
 const OWNER = "owner-profile";
 const OWNER_CALLER = { profileId: OWNER, isOwner: true };
-// Account-requiring connections, so "build" scope is all three: 1 is a Knitli Messaging connection
-// (the one vendor allowed to ask), 2 is some other vendor, 3 is ambient Messaging (the only kind
-// whose action kinds can be pre-approved). No gadget binds any of them, so "use" scope is empty.
+// Account-requiring connections: Messaging, another vendor, ambient Messaging, and Execution.
+// Only ambient connections can pre-approve action kinds. No gadget binds any of these, so
+// "use" scope is empty; "build" scope includes all four.
 const MESSAGING = 1;
 const OTHER = 2;
 const AMBIENT = 3;
-const ALL = { [MESSAGING]: 10, [OTHER]: 20, [AMBIENT]: 30 };
+const EXECUTION = 4;
+const ALL = { [MESSAGING]: 10, [OTHER]: 20, [AMBIENT]: 30, [EXECUTION]: 40 };
 const SEND = { tag: "messaging.send", label: "Send a message" };
 const SEND_ACTION = {
   title: "Send a message", description: "Sends one message.", descriptionIsComplete: true,
@@ -74,7 +75,7 @@ async function withWorkspace<T>(
       addObserver: async () => {},
       removeObserver: async () => {},
     });
-    for (let [id, vendorId] of [[MESSAGING, "messaging"], [OTHER, "testvendor"]] as const) {
+    for (let [id, vendorId] of [[MESSAGING, "messaging"], [OTHER, "testvendor"], [EXECUTION, "execution"]] as const) {
       impl.storage.gatekeepers.put({
         id, resourceTitle: `Connection ${id}`, class: {} as any,
         creationSpec: {
@@ -116,6 +117,24 @@ function attest(setup: (impl: any, sharing: any) => void | Promise<void>): Promi
 }
 
 describe("attestAudience", () => {
+  it("execution attests the current workspace and only admitted current build collaborators", async () => {
+    await withWorkspace(async (impl, overseer, facet, workspaceId) => {
+      let sharing = await impl.getSharingManager();
+      addCollaborator(impl, sharing, "bob", "build", ALL);
+      addCollaborator(impl, sharing, "removed", "build", ALL);
+      sharing.removeCollaborator(OWNER_CALLER, "removed", []);
+      addCollaborator(impl, sharing, "use-only", "use", ALL);
+      addCollaborator(impl, sharing, "incomplete", "build", { [EXECUTION]: 40 });
+      addCollaborator(impl, sharing, "unadmitted", "build", ALL);
+      impl.storage.observers.put({ profileId: "unadmitted", observerId: "obs-unadmitted", accountChoices: ALL });
+      let queue = await queueFor(overseer, facet, EXECUTION);
+      await expect(queue.attestAudience()).resolves.toEqual({
+        workspaceId, owner: OWNER, collaborators: ["bob"],
+        containsRestrictedData: false, ownerInvitesOnly: false, sharingProhibited: false,
+      });
+    });
+  });
+
   it("is the owner alone in an unshared workspace", async () => {
     let { audience, workspaceId } = await attest(() => {});
     expect(audience).toEqual({
@@ -148,7 +167,7 @@ describe("attestAudience", () => {
     // their record holds no verified choice for connection 2 until their next open.
     let { audience } = await attest((impl, sharing) => {
       addCollaborator(impl, sharing, "bob", "build", ALL);
-      addCollaborator(impl, sharing, "erin", "build", { [MESSAGING]: 10, [AMBIENT]: 30 });
+      addCollaborator(impl, sharing, "erin", "build", { [MESSAGING]: 10, [AMBIENT]: 30, [EXECUTION]: 40 });
     });
     expect(audience.collaborators).toEqual(["bob"]);
   });
@@ -335,9 +354,9 @@ describe("attestAudience", () => {
     });
   });
 
-  it("refuses while a revocation is in flight", async () => {
+  it.each([MESSAGING, EXECUTION])("refuses vendor connection %i while a revocation is in flight", async (id) => {
     await withWorkspace(async (impl, overseer, facet) => {
-      let queue = await queueFor(overseer, facet, MESSAGING);
+      let queue = await queueFor(overseer, facet, id);
       impl.beginRevocation();
       await expect(queue.attestAudience()).rejects.toThrow(/access is changing/);
       impl.finishRevocationWithoutEffect();
@@ -400,8 +419,8 @@ describe("applyAction's context", () => {
     });
   }
 
-  it("attests the apply-time audience on manual approval", async () => {
-    expect(await approveManually(MESSAGING))
+  it.each([MESSAGING, EXECUTION])("attests the apply-time audience on manual approval for connection %i", async (id) => {
+    expect(await approveManually(id))
         .toEqual([expect.objectContaining({ owner: OWNER, collaborators: ["bob"] })]);
   });
 

@@ -85,11 +85,11 @@
       "reason": "Fork regression tests for named $defs aliases and read-before-dispatch authorization."
     },
     {
-      "path": "packages/backend-utils/src/access.ts",
+      "path": "packages/observability/src/access.ts",
       "reason": "Cloudflare Access assertion verifier shared by the Workshop and gatekeepers; upstream has no Access integration."
     },
     {
-      "path": "packages/backend-utils/src/fork/",
+      "path": "packages/observability/src/fork/",
       "reason": "Shared connect-initiator guard used by every gatekeeper that owns its own account Durable Object."
     },
     {
@@ -286,5 +286,31 @@
     "scripts/contribution-policy.test.ts": "Tests the above, and reads the workflow file, so it cannot outlive either."
   },
   "formatExceptions": [],
-  "reviewedSurvivors": []
+  "reviewedSurvivors": [
+    {
+      "token": "_response",
+      "path": "packages/workshop-backend/__tests__/external-message-production-commit-guard.test.ts",
+      "reason": "Fork-local parameter and variable names; upstream #586 removed its own unrelated uses."
+    },
+    {
+      "token": "PASSWORD_HASH",
+      "path": "packages/workshop-backend/__integration__/ai-executor-admin-rpc.test.ts",
+      "reason": "Fork-local test constant, same shape as upstream's remaining uses; self-contained."
+    },
+    {
+      "token": "RESTRICTED_EXCLUDING_MALLORY",
+      "path": "packages/workshop-backend/__tests__/authorize-observation-flags.test.ts",
+      "reason": "Identical to upstream; #578 kept these lines."
+    },
+    {
+      "token": "estimatedCost",
+      "path": "packages/workshop-backend/src/overseer.ts",
+      "reason": "Identical to upstream; #588 kept #getCostFromAiGateway's fallback parameter."
+    },
+    {
+      "token": "lastStepTokens",
+      "path": "packages/integration-tests/src/agent-session.ts",
+      "reason": "Identical to upstream; #588 kept the agent-session usage tracking."
+    }
+  ]
 }

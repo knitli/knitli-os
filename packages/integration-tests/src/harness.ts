@@ -110,7 +110,8 @@ function workshopConfig(
   }));
 
   // No CF_ACCESS_AUD, so /api takes the unauthenticated path and password signup is available.
-  config.vars = { ...config.vars, ADMINS: [ADMIN_USERNAME] };
+  // PUBLIC_BASE_URL mirrors run-dev-server.ts; only connect handoffs read it, as their target origin.
+  config.vars = { ...config.vars, ADMINS: [ADMIN_USERNAME], PUBLIC_BASE_URL: "http://workshop.test" };
 
   // Most integration tests need no Gadget execution. Keep the loader only for tests that exercise
   // executeCode or a generated Gadget server.
@@ -184,13 +185,11 @@ export async function startHarness(opts: {
 export const RESTART_SETTLE_MS = 400;
 
 /**
- * Wait out a restart a test triggered but doesn't otherwise observe.
+ * Give a scheduled workspace restart time to land.
  *
  * Widening a collaborator's verification scope severs every session on the workspace by aborting
- * the DO ~100ms later, i.e. after the test body has returned. An abort that lands with no client
- * left on the workspace crashes the local workerd, and a suite's tests share one harness, so the
- * crash fails whichever siblings are mid-flight rather than the test that caused it. Call this
- * before the triggering test drops its connection.
+ * the DO ~100ms later. A test that asserts a change did not restart the workspace waits this long
+ * first, so a wrongful restart lands before its assertions rather than after the test.
  */
 export function settleRestart(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, RESTART_SETTLE_MS));

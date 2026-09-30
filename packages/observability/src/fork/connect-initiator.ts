@@ -7,9 +7,9 @@
  * it for the MCP family inside `handleMcpHttpRequest`; `gatekeeper-github`, `-linear`, `-email` and
  * `-cloudflare` each parse their own routes and own their own account class, so they need the same
  * two pieces -- read the browser's identity, compare it to what was stored -- without taking on
- * `McpAccountBase`. This module is those two pieces and nothing else. It lives in `backend-utils`
+ * `McpAccountBase`. This module is those two pieces and nothing else. It lives in `observability`
  * because that is the only package all six already depend on, and because the dependency runs
- * `mcp-shared -> backend-utils`, so importing `@gadgets/mcp-shared/html` here would be a cycle.
+ * `mcp-shared -> observability`, so importing `@gadgets/mcp-shared/html` here would be a cycle.
  */
 import type { ConnectInitiator } from "@gadgets/workshop-shared/gatekeeper";
 import { verifyCfAccessJwt, type AccessTokenVerifier, type CfAccessEnv } from "../access.js";

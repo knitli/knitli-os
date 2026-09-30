@@ -8,8 +8,8 @@
 // bound to it is owner-only. See `sharing-policy.ts` and the README.
 import { RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { validateRpc, skipRpcValidation } from "capnweb-validate";
-import { createLogger } from "@gadgets/backend-utils/logger";
-import { accessEmailReader } from "@gadgets/backend-utils/fork/connect-initiator";
+import { createLogger } from "@gadgets/observability/logger";
+import { accessEmailReader } from "@gadgets/observability/fork/connect-initiator";
 import {
   stripTrailingSlashes,
   type AvatarImage,

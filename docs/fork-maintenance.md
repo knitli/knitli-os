@@ -514,7 +514,7 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 
 ### Connect links are bound to the initiating Access identity in four of twelve hand-rolled gatekeepers
 
-- **Where:** `packages/backend-utils/src/fork/connect-initiator.ts` (fork-owned), called from the
+- **Where:** `packages/observability/src/fork/connect-initiator.ts` (fork-owned), called from the
   `fetch` handlers and `UserAccount` classes of `packages/gatekeeper-{github,linear,email,cloudflare}`,
   and from the `handleMcpHttpRequest` options in `packages/gatekeeper-{mcp,mcp-portal}`.
 - **What:** the Workshop attaches `{ initiator: { email } }` to every connect and reconnect
@@ -559,7 +559,7 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 - **Structural-only for email:** `packages/gatekeeper-email` has no test harness, so its guard is
   pinned by `scripts/fork/connect-initiator-enforced.test.ts` rather than a behavioural test.
   Standing a workerd project up for that package is the follow-up.
-- **`jwtVerify` algorithms are pinned** in `packages/backend-utils/src/access.ts`
+- **`jwtVerify` algorithms are pinned** in `packages/observability/src/access.ts`
   (`CF_ACCESS_JWT_ALGORITHMS`), read from the live certs endpoint on 2026-09-12.
 - **Coexists with upstream's token-bound handoff (adopted 2026-09-14):** upstream #464/#473 replaced
   the bearer completion URL with a ticket the popup redeems over the initiator's own session plus a
@@ -611,6 +611,11 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 - **2026-09-26 sync:** upstream #570 added `assertMayModifyWorkpiece` to `writeFile`/`editFile`;
   the prompt-file blindfold now runs right after it. Both refusals are independent of the
   filename, so the order discloses nothing about prompt files.
+- **2026-09-30 sync:** upstream #572 replaced the hand-added model API with the redacted
+  form (`addModel`/`getModelConfig`/`updateModel` over `RedactedAiModelConfig`), adopted
+  wholesale; the fork's `getModelReasoning` sits beside it unchanged. Upstream #595 wrapped
+  the turn body in `traceAgentTurn`; the effort/prompt-ref reads and `runAgent` options are
+  re-applied inside the traced callback.
 
 ### Gatekeeper resources are opt-in (`enabledResources`)
 
@@ -624,6 +629,27 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 - **2026-09-22 sync:** upstream #474 extracted `normalizeAdminConfig` around the opt-out field;
   the fork re-pointed it at `enabledResources` (plus `promptPresets`, which the shared normalize
   would otherwise drop for both the KV-mirror and AdminSettings read paths).
+- **2026-09-30 sync:** upstream #586's admin-policy test provisions its account ambiently
+  and expects resource refusal at minting; the fork keeps the ambient exemption (next entry) and
+  adapts the test to connect a regular account for the resource assertions instead.
+
+### Ambient-provisioned accounts bypass resource policy at minting
+
+- **Where:** `getGatekeeperClassFor()`'s policy call in `packages/workshop-backend/src/user.ts`
+  (passes `account.autoProvisioned`), the `ambient` branch of `isResourceDisabled()` in
+  `packages/workshop-backend/src/admin-config.ts`, and the matching bypass in
+  `filterEnabledResources()` for listings.
+- **What:** an account provisioned without an OAuth flow skips the resource-allowance check when
+  a capability is minted, and its resources list unfiltered. Vendor-level checks still apply: a
+  disabled gatekeeper, or an ambient vendor the admin set to "disabled", is refused the same way.
+- **Why:** auto-provisioning vendors have no resource toggles — the admin UI offers the
+  disabled/optional/enabled mode instead — so there is nothing to check an ambient account's
+  binding against. Refusing instead would make ambient minting un-enableable with no UI recourse.
+  The fixture's test vendor is auto-provisioning, so the suite mints through this exemption
+  everywhere it provisions ambiently.
+- **2026-09-30 sync:** upstream #586's admin-policy test provisions ambiently and expects resource
+  refusal at minting; the test now connects a regular account for the resource assertions (the
+  ambient mechanism there was harness convenience, not what the test pins).
 
 ### Worktree commits require full 40-hex SHAs (retired 2026-09-26)
 

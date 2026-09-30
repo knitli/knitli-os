@@ -7,7 +7,7 @@ import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createLegacyMcpHandler, WorkerTransport } from "agents/mcp";
 import type { RpcStub } from "capnweb";
 import type { JWTPayload } from "jose";
-import { createLogger } from "@gadgets/backend-utils/logger";
+import { createLogger } from "@gadgets/observability/logger";
 import { verifyCfAccessJwt } from "./access";
 
 const logger = createLogger({ component: "workshop.openapi-publisher" });

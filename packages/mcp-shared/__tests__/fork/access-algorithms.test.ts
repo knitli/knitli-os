@@ -1,11 +1,11 @@
 // The Access verifier must accept only the algorithms Cloudflare actually signs with (fork).
 // Without an explicit `algorithms`, `jwtVerify` accepts anything jose supports and the JWKS can
 // key -- so a JWKS that ever carries a second key type silently widens what a gatekeeper trusts.
-// This lives in mcp-shared rather than backend-utils because backend-utils' own suite runs under
+// This lives in mcp-shared rather than observability because observability' own suite runs under
 // workerd, where stubbing the global fetch that createRemoteJWKSet uses is not dependable.
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CF_ACCESS_JWT_ALGORITHMS, verifyCfAccessJwt } from "@gadgets/backend-utils/access";
+import { CF_ACCESS_JWT_ALGORITHMS, verifyCfAccessJwt } from "@gadgets/observability/access";
 
 const AUD = "test-audience";
 

@@ -1,5 +1,9 @@
+import type { RpcStub } from "capnweb";
 import { afterAll, beforeAll, expect, it } from "vitest";
-import { type Harness, startHarness } from "../src/harness.js";
+import {
+  getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, type AuthenticatedApi,
+} from "@gadgets/workshop-shared/api";
+import { settleRestart, type Harness, startHarness } from "../src/harness.js";
 import { mockChatCompletion } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, logIn, nextUsernames, signUp, waitFor } from "../src/rpc-client.js";
@@ -32,18 +36,32 @@ function username(): string {
   return value;
 }
 
+async function rejectedOpen(
+    authenticated: RpcStub<AuthenticatedApi>, workspaceId: string): Promise<unknown> {
+  try {
+    using _workspace = await authenticated.openGadget(workspaceId);
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected workspace open to fail");
+}
+
 function assertDeletionRestart(error: string): void {
   // deleteSelf uses the revocation restart. Its in-flight RPC abort can arrive before
-  // the containing WebSocket close; accept only those two observations of this boundary.
+  // the containing WebSocket close; accept only those observations of this boundary.
+  // The third is the same abort landing mid-call: workerd reports the dying execution
+  // context instead of the abort reason.
   expect([
     "Error: Gadget restarted to revoke access for a removed collaborator.",
     "Error: Peer closed WebSocket: 3000 RPC session was shut down by disposing the main stub",
+    "Error: The execution context which hosts this callback is no longer running.",
   ]).toContain(error);
 }
 
 it.each([
   ["Error: Gadget restarted to revoke access for a removed collaborator.", true],
   ["Error: Peer closed WebSocket: 3000 RPC session was shut down by disposing the main stub", true],
+  ["Error: The execution context which hosts this callback is no longer running.", true],
   ["Error: Peer closed WebSocket: 1006 connection lost", false],
   ["Error: BINDING_OWNER_REQUIRED", false],
   ["Error: Gadget restarted because a new connection was added.", false],
@@ -106,7 +124,33 @@ it.concurrent("persists an ordered human-only chat without starting an agent", a
 
   await workspace.deleteChat(chatId);
   expect(await workspace.listChats()).toEqual([]);
+  expect((await workspace.getChatHistory(chatId)).messages).toEqual([]);
   await workspace.deleteSelf();
+});
+
+it.concurrent("a chat attachment is readable only through its chat, and a discarded upload is gone",
+    async () => {
+  using publicApi = connect(requireHarness().url);
+  using authenticated = await signUp(publicApi, username());
+  using ws = await authenticated.newGadget();
+
+  const content = new TextEncoder().encode("only chat A");
+  const sent = await ws.uploadChatAttachment({ mimeType: "text/plain", content, name: "a.txt" }, null);
+  const chatA = await ws.newChat("With attachment", null, undefined, [sent]);
+  const chatB = await ws.newChat("Without attachment", null);
+
+  expect(new TextDecoder().decode(await ws.getChatAttachmentContent(chatA, sent.id))).toBe("only chat A");
+  await expect(ws.getChatAttachmentContent(chatB, sent.id)).rejects.toThrow("Chat attachment not found.");
+
+  const discarded = await ws.uploadChatAttachment(
+      { mimeType: "text/plain", content: new TextEncoder().encode("never sent"), name: "b.txt" }, null);
+  await ws.deleteChatAttachment(discarded.id);
+  await expect(ws.sendChatMessage(chatB, "Late attachment", null, undefined, [discarded]))
+    .rejects.toThrow("Chat attachment not found.");
+  const { messages } = await ws.getChatHistory(chatB);
+  expect(messages).not.toContainEqual(expect.objectContaining({ message: "Late attachment" }));
+
+  await ws.deleteSelf();
 });
 
 it.concurrent("creates, renames, reopens, and removes a Gadget capability", async () => {
@@ -127,4 +171,42 @@ it.concurrent("creates, renames, reopens, and removes a Gadget capability", asyn
   await gadget.remove();
   await expect(workspace.getGadget(gadgetId)).rejects.toThrow();
   await workspace.deleteSelf();
+});
+
+it.concurrent("only the owner deletes a workspace, and later opens say why", async () => {
+  const [owner, collaborator, stranger] = nextUsernames(
+      "deleteowner", "deletecollaborator", "deletestranger");
+  if (!owner || !collaborator || !stranger) throw new Error("Failed to allocate test usernames");
+
+  using ownerPublic = connect(requireHarness().url);
+  using collaboratorPublic = connect(requireHarness().url);
+  using strangerPublic = connect(requireHarness().url);
+  using ownerApi = await signUp(ownerPublic, owner);
+  using collaboratorApi = await signUp(collaboratorPublic, collaborator);
+  using strangerApi = await signUp(strangerPublic, stranger);
+  using ownerWorkspace = await ownerApi.newGadget();
+  const workspaceId = (await ownerWorkspace.getMetadata()).id;
+  if (!await ownerWorkspace.addCollaborator(collaborator, "build")) {
+    throw new Error(`Failed to share the workspace with ${collaborator}`);
+  }
+  using collaboratorWorkspace = await collaboratorApi.openGadget(workspaceId);
+
+  await expect(collaboratorWorkspace.deleteSelf())
+      .rejects.toThrow("Only the workspace owner can delete it.");
+  const denied = await rejectedOpen(strangerApi, workspaceId);
+  expect(getOpenGadgetErrorCode(denied)).toBe(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+  expect(Object.prototype.propertyIsEnumerable.call(denied, "code")).toBe(true);
+  expect(denied).toMatchObject({ message: "You don't have access to this workspace." });
+
+  collaboratorWorkspace[Symbol.dispose]();
+  await ownerWorkspace.deleteSelf();
+  ownerWorkspace[Symbol.dispose]();
+  await settleRestart();
+
+  using reconnected = connect(requireHarness().url);
+  using reopenedCollaborator = await logIn(reconnected, collaborator);
+  const missing = await rejectedOpen(reopenedCollaborator, workspaceId);
+  expect(getOpenGadgetErrorCode(missing)).toBe(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
+  expect(Object.prototype.propertyIsEnumerable.call(missing, "code")).toBe(true);
+  expect(missing).toMatchObject({ message: "Workspace not found." });
 });

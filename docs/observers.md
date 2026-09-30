@@ -493,11 +493,11 @@ scheduled, every trigger additionally marks the widened connection ids in the in
 `#gatekeepersPendingRestart` set: `addGatekeeper` marks the just-published id, and the three
 `use`-scope triggers mark each id their diff widened (marking gatekeeper ids suffices as
 quarantine because a binding loopback is not a session but a per-call route: its props name the
-target and every call re-resolves a session through `openSession`, where the mark is checked —
+target and every call re-resolves a session through `openGatekeeperSession`, where the mark is checked —
 so the quarantine holds even for a loopback retained across a facet abort or the reset itself,
 which is *not* merely "re-minted on facet reload"). Every route to a marked connection refuses with a retryable error until
 the reset destroys the mark along with the sessions: `getGatekeeperById` (the mint clients
-pipeline on), `GatekeeperClientImpl.openSession` (which binding loopbacks also pass through), the
+pipeline on), `openGatekeeperSession` (which client opens and binding loopbacks both pass through), the
 slash-command invoke in `#prepareChatMessage`, `GadgetClientImpl.bindWithSuggestedName`, and
 `startHook` — the inbound gatekeeper→gadget delivery route, whose arming enable may itself be the
 widening that scheduled the restart — while the enumerating routes (`listSlashCommands`, the
@@ -572,7 +572,7 @@ For each id in `description.excludeObservers`:
      `agentCallbackArgs` and re-injected later) keeps opening sessions until `removeGatekeeper`.
      Unreachability is currently assumed rather than enforced; the required fix is a per-call
      edge check (`#assertBindingEdgeLive`, matching on binding *target* for gadget callers) in
-     `startGatekeeperSession`'s gatekeeper branch, beside `openSession`'s quarantine check. Until
+     `startGatekeeperSession`'s gatekeeper branch, beside `openGatekeeperSession`'s quarantine check. Until
      it lands, this arm is fail-open twice over: the observation is admitted, and the
      de-registration stops the gatekeeper naming that observer in `excludeObservers` at all, so
      every later observation is admitted too — until a rebind plus a fresh open re-registers
@@ -831,6 +831,8 @@ its resource types.
 | **google** | Google Calendar (selected calendar) | **B** | Require `writer` or `owner` access to the bound calendar, since `reader` access hides private-event details. Future: let the binding owner exclude private events so readers can collaborate. |
 | **google** | Google Calendar (`allVisible` availability) | **C** | In addition to the selected-calendar check, track foreign calendars whose free/busy data was successfully read and verify each observer can independently query their availability. |
 | **google** | Gmail Mailbox | **A** | Always throw. (Future: allow observers who independently have access, e.g. mailing-list members — explicitly out of scope now.) |
+| **google** | Google Chat Conversation / Thread | **B** | Check the observer's own account can open the bound space (`spaces.get`); for a conversation binding, also that it can list the space's members (`members.list`), since a space can restrict its member list to managers and the binding lists members. Everything else the binding reads — including the other participant's name on a direct message — comes from Chat's own space-scoped responses. |
+| **google** | Google Chat Account | **A** | Always throw. The binding spans the owner's direct messages and every conversation they belong to, so there is no one a collaborator could be verified against. Bind a single conversation to share. |
 | **google** | BigQuery | **C** | Track accessed datasets; verify the observer's IAM access to each. Dataset granularity for now (tables/columns later). |
 | **linear** | Team / Issue | **B** | Check the observer's workspace/team membership, honoring team privacy. |
 | **linear** | Workspace | **C** | Track accessed teams; verify the observer against each (reusing the Team B check). |
@@ -869,6 +871,11 @@ This is why the broad bindings split the way they do:
 - **Decomposition deliberately deferred → A:** Gmail Mailbox — could in principle decompose into
   mailing lists the observer belongs to, but that is the out-of-scope "advanced" case, so it stays
   fully private for now.
+- **Satisfies both but still A:** Google Chat Account — spaces have distinct ACLs and `spaces.get`
+  is a serviceable oracle, so C is technically available. It stays A because the binding also
+  reaches the owner's direct messages, where "can this collaborator open it too" has no useful
+  answer, and one stray DM read under C would lock the workspace for everyone anyway. Sharing is
+  done by binding a single conversation, which is the B row above.
 
 ---
 

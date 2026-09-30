@@ -29,7 +29,7 @@ const HAND_ROLLED: Array<{ file: string; guarded: string[] }> = [
 for (const { file, guarded } of HAND_ROLLED) {
   test(`${file} stores and compares the connect initiator`, () => {
     const source = read(file);
-    assert.match(source, /from "@gadgets\/backend-utils\/fork\/connect-initiator"/,
+    assert.match(source, /from "@gadgets\/observability\/fork\/connect-initiator"/,
       `${file} does not import the shared connect-initiator guard`);
     assert.match(source, /async initiatorMatches\(accessEmail: string \| null\): Promise<boolean>/,
       `${file}'s account Durable Object does not expose initiatorMatches`);
@@ -135,7 +135,7 @@ for (const file of MCP_WORKERS) {
     const source = read(file);
     assert.match(source, /accessEmail: accessEmailReader\(env\)/,
       `${file} does not pass accessEmailReader(env) to handleMcpHttpRequest`);
-    assert.match(source, /from "@gadgets\/backend-utils\/fork\/connect-initiator"/,
+    assert.match(source, /from "@gadgets\/observability\/fork\/connect-initiator"/,
       `${file} does not import the shared reader`);
     assert.doesNotMatch(source, /verifyCfAccessJwt/,
       `${file} still re-implements the reader; use accessEmailReader so one place is tested`);

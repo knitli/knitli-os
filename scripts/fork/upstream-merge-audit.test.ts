@@ -411,8 +411,8 @@ test("surviving fork trees are explicitly fork owned", () => {
     "packages/integration-tests/__tests__/fork/observer-privacy.test.ts",
     "scripts/fork/openapi-host-retired.test.ts",
     "packages/workshop-frontend/src/features/admin/gatekeeper-apps/AdminGatekeeperAppsPanel.tsx",
-    "packages/backend-utils/src/access.ts",
-    "packages/backend-utils/src/fork/connect-initiator.ts",
+    "packages/observability/src/access.ts",
+    "packages/observability/src/fork/connect-initiator.ts",
     "packages/mcp-shared/__tests__/fork/connect-initiator.test.ts",
     "scripts/fork/connect-initiator-enforced.test.ts",
   ]) {
@@ -424,7 +424,7 @@ test("surviving fork trees are explicitly fork owned", () => {
   assert.equal(isForkOwned("packages/workshop-backend/src/user.ts"), false);
   assert.equal(isForkOwned("packages/workshop-shared/src/gatekeeper.ts"), false);
   assert.equal(isForkOwned("packages/workshop-shared/src/fork/openapi-host-binding.ts"), false);
-  assert.equal(isForkOwned("packages/backend-utils/src/logger.ts"), false);
+  assert.equal(isForkOwned("packages/observability/src/logger.ts"), false);
   assert.equal(isForkOwned("packages/gatekeeper-github/src/github.ts"), false);
 });
 

@@ -1,6 +1,6 @@
 // The shared connect-initiator guard, used by every gatekeeper that hand-rolls its own account
 // Durable Object (fork). Lives in mcp-shared's fork tree because that package runs the node pool
-// and already depends on backend-utils; backend-utils' own suite runs under workerd.
+// and already depends on observability; observability' own suite runs under workerd.
 import type { JWTPayload } from "jose";
 import { describe, expect, it } from "vitest";
 import {
@@ -8,7 +8,7 @@ import {
   initiatorAllows,
   refuseForeignBrowser,
   WRONG_ACCOUNT_HTML,
-} from "@gadgets/backend-utils/fork/connect-initiator";
+} from "@gadgets/observability/fork/connect-initiator";
 import { WRONG_ACCOUNT_HTML as MCP_WRONG_ACCOUNT_HTML } from "../../src/html.js";
 
 const ACCESS_ENV = { CF_ACCESS_ISS: "https://team.example.cloudflareaccess.com", CF_ACCESS_AUD: "aud" };

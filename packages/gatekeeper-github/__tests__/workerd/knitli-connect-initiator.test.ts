@@ -5,7 +5,7 @@
 // `packages/mcp-shared/__tests__/fork/connect-initiator.test.ts`.
 import { createExecutionContext, env, runInDurableObject, waitOnExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { WRONG_ACCOUNT_HTML } from "@gadgets/backend-utils/fork/connect-initiator";
+import { WRONG_ACCOUNT_HTML } from "@gadgets/observability/fork/connect-initiator";
 import type { UserAccount } from "../../src/github.js";
 
 // The connect-link route returns NOT_CONFIGURED_HTML before reaching the guard unless these are

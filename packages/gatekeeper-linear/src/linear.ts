@@ -23,7 +23,7 @@ import {
 } from "@gadgets/gatekeeper-kit/action-description";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
-import { initiatorAllows, refuseForeignBrowser } from "@gadgets/backend-utils/fork/connect-initiator";
+import { initiatorAllows, refuseForeignBrowser } from "@gadgets/observability/fork/connect-initiator";
 import type {
   Cursor,
   LinearWorkspace,

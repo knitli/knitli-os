@@ -75,7 +75,10 @@ export default defineConfig({
         // `allow_irrevocable_stub_storage` as in wrangler.jsonc: the user DO persists account stubs.
         compatibilityFlags: ['experimental', 'nodejs_compat', 'allow_irrevocable_stub_storage'],
         streamingTails: ['span-recorder'],
-        serviceBindings: { SPAN_RECORDER: { name: 'span-recorder', entrypoint: 'SpanRecorder' } },
+        serviceBindings: {
+          SPAN_RECORDER: { name: 'span-recorder', entrypoint: 'SpanRecorder' },
+          PUBLISHER_TEST_EGRESS: async () => new Response('EGRESS_ALLOWED'),
+        },
         workers: [{
           name: 'span-recorder',
           modules: true,
@@ -86,7 +89,6 @@ export default defineConfig({
         bindings: { PUBLIC_BASE_URL: 'https://workshop.example/' },
         // The overseer loads gadget code through this, so a test can run a real gadget facet.
         workerLoaders: { LOADER: {} },
-        serviceBindings: { PUBLISHER_TEST_EGRESS: async () => new Response('EGRESS_ALLOWED') },
         durableObjects: {
           TEST_VOICE: { className: 'VoiceSession', useSQLite: true },
           TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },

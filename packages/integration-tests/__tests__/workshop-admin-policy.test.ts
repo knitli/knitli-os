@@ -2,7 +2,8 @@ import type { RpcStub } from "capnweb";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { TestSession } from "../fixtures/gatekeeper-test/src/test-gatekeeper.js";
 import {
-  ADMIN_USERNAME, startTestGatekeeperHarness, TEST_VENDOR_ID, type Harness,
+  ADMIN_USERNAME, startTestGatekeeperHarness, TEST_GATEKEEPER_WORKER, TEST_VENDOR_ID,
+  type Harness,
 } from "../src/harness.js";
 import { scriptedModelRouter } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
@@ -80,10 +81,27 @@ it("enforces deployment gatekeeper policy through the admin API", async () => {
         "This account is provided automatically and can't be disconnected.");
 
     await admin.setGatekeeperMode(TEST_VENDOR_ID, "optional");
+    // Fork: bob's ambient account bypasses resource policy at minting (see the ambient exemption
+    // in docs/fork-maintenance.md), so the resource assertions connect a regular account instead.
+    // Upstream provisions ambiently throughout; the mechanism there is harness convenience, not
+    // what this test pins. (Flow borrowed from connect-handoff.test.ts.)
+    const { url: connectUrl, nonce } = await bob.connectAccount(TEST_VENDOR_ID);
+    const handoffPage = await harness.fetchWorker(TEST_GATEKEEPER_WORKER, connectUrl);
+    if (handoffPage.status !== 200) {
+      throw new Error(`The connect flow ended with ${handoffPage.status}`);
+    }
+    const ticketLiteral = /var ticket = (".*?");\n/.exec(await handoffPage.text());
+    if (ticketLiteral === null) throw new Error("The handoff page carried no ticket");
+    await bob.completeConnectHandoff(JSON.parse(ticketLiteral[1]!), nonce);
+    const connectedAccount = (await listConnectedAccounts(bob))
+        .find(candidate => candidate.id !== account.id);
+    if (connectedAccount === undefined) {
+      throw new Error("Bob's connected test account was not provisioned");
+    }
     await admin.setResourceEnabled(
         TEST_VENDOR_ID, "https://gadgets-test.example/things/*", false);
     await expect(workspace.newGatekeeper(
-        account.id, "https://gadgets-test.example/things/after")).rejects.toThrow(
+        connectedAccount.id, "https://gadgets-test.example/things/after")).rejects.toThrow(
         'The "Test Thing" resource is disabled on this deployment by an administrator.');
   } finally {
     try {

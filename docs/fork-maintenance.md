@@ -629,6 +629,27 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 - **2026-09-22 sync:** upstream #474 extracted `normalizeAdminConfig` around the opt-out field;
   the fork re-pointed it at `enabledResources` (plus `promptPresets`, which the shared normalize
   would otherwise drop for both the KV-mirror and AdminSettings read paths).
+- **2026-09-30 sync:** upstream #586's admin-policy test provisions its account ambiently
+  and expects resource refusal at minting; the fork keeps the ambient exemption (next entry) and
+  adapts the test to connect a regular account for the resource assertions instead.
+
+### Ambient-provisioned accounts bypass resource policy at minting
+
+- **Where:** `getGatekeeperClassFor()`'s policy call in `packages/workshop-backend/src/user.ts`
+  (passes `account.autoProvisioned`), the `ambient` branch of `isResourceDisabled()` in
+  `packages/workshop-backend/src/admin-config.ts`, and the matching bypass in
+  `filterEnabledResources()` for listings.
+- **What:** an account provisioned without an OAuth flow skips the resource-allowance check when
+  a capability is minted, and its resources list unfiltered. Vendor-level checks still apply: a
+  disabled gatekeeper, or an ambient vendor the admin set to "disabled", is refused the same way.
+- **Why:** auto-provisioning vendors have no resource toggles — the admin UI offers the
+  disabled/optional/enabled mode instead — so there is nothing to check an ambient account's
+  binding against. Refusing instead would make ambient minting un-enableable with no UI recourse.
+  The fixture's test vendor is auto-provisioning, so the suite mints through this exemption
+  everywhere it provisions ambiently.
+- **2026-09-30 sync:** upstream #586's admin-policy test provisions ambiently and expects resource
+  refusal at minting; the test now connects a regular account for the resource assertions (the
+  ambient mechanism there was harness convenience, not what the test pins).
 
 ### Worktree commits require full 40-hex SHAs (retired 2026-09-26)
 

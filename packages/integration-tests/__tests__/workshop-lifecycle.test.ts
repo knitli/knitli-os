@@ -48,16 +48,20 @@ async function rejectedOpen(
 
 function assertDeletionRestart(error: string): void {
   // deleteSelf uses the revocation restart. Its in-flight RPC abort can arrive before
-  // the containing WebSocket close; accept only those two observations of this boundary.
+  // the containing WebSocket close; accept only those observations of this boundary.
+  // The third is the same abort landing mid-call: workerd reports the dying execution
+  // context instead of the abort reason.
   expect([
     "Error: Gadget restarted to revoke access for a removed collaborator.",
     "Error: Peer closed WebSocket: 3000 RPC session was shut down by disposing the main stub",
+    "Error: The execution context which hosts this callback is no longer running.",
   ]).toContain(error);
 }
 
 it.each([
   ["Error: Gadget restarted to revoke access for a removed collaborator.", true],
   ["Error: Peer closed WebSocket: 3000 RPC session was shut down by disposing the main stub", true],
+  ["Error: The execution context which hosts this callback is no longer running.", true],
   ["Error: Peer closed WebSocket: 1006 connection lost", false],
   ["Error: BINDING_OWNER_REQUIRED", false],
   ["Error: Gadget restarted because a new connection was added.", false],

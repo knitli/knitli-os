@@ -1002,14 +1002,13 @@ export default {
       }
     }
 
-    if (
-      url.pathname === "/control/submit-external-message" &&
-      req.method === "POST"
-    ) {
-      const { callerEmail, gadgetKey, gadgetTitle } = body as Record<
-        string,
-        unknown
-      >;
+    // Submit an external chat message through the Workshop's ExternalMessageGateway entrypoint,
+    // the way a chat-integration worker would, so tests can drive receiveExternalMessage().
+    // Body: {"callerEmail", "gadgetKey", "gadgetTitle"} plus optional "chatKey", "messageKey",
+    // "prompt" -> SubmitExternalMessageResult
+    if (url.pathname === "/control/submit-external-message" && req.method === "POST") {
+      const { callerEmail, gadgetKey, gadgetTitle, chatKey, messageKey, prompt } =
+          body as Record<string, unknown>;
       if (!isNonEmptyString(callerEmail)) {
         return badRequest("`callerEmail` must be a non-empty string");
       }
@@ -1018,15 +1017,26 @@ export default {
       if (!isNonEmptyString(gadgetTitle)) {
         return badRequest("`gadgetTitle` must be a non-empty string");
       }
+      // The round-trip tests resubmit caller-chosen idempotency keys and assert on prompt text,
+      // so those ride through when present; fork callers post only the three fields above.
+      if (chatKey !== undefined && !isNonEmptyString(chatKey)) {
+        return badRequest("`chatKey` must be a non-empty string when present");
+      }
+      if (messageKey !== undefined && !isNonEmptyString(messageKey)) {
+        return badRequest("`messageKey` must be a non-empty string when present");
+      }
+      if (prompt !== undefined && !isNonEmptyString(prompt)) {
+        return badRequest("`prompt` must be a non-empty string when present");
+      }
       // Submits through TestControl so the gateway target is the restored recorder, not a
       // throwaway stub: a stub minted here arrives non-persistent and the Workshop stores it.
       const result = await control(ctx.exports).submitExternalMessage({
         callerEmail,
         gadgetKey,
-        chatKey: gadgetKey,
-        messageKey: crypto.randomUUID(),
+        chatKey: chatKey ?? gadgetKey,
+        messageKey: messageKey ?? crypto.randomUUID(),
         gadgetTitle,
-        prompt: "test prompt",
+        prompt: prompt ?? "test prompt",
       });
       return Response.json(result);
     }
@@ -1059,22 +1069,6 @@ export default {
       await control(ctx.exports).failNextApply(
           label, reason ?? "The test gatekeeper failed to apply this action.");
       return new Response(null, { status: 204 });
-    }
-
-    // Submit an external chat message through the Workshop's ExternalMessageGateway entrypoint,
-    // the way a chat-integration worker would, so tests can drive receiveExternalMessage().
-    // Body: {"callerEmail", "gadgetKey", "chatKey", "messageKey", "gadgetTitle", "prompt"}
-    // -> SubmitExternalMessageResult
-    if (url.pathname === "/control/submit-external-message" && req.method === "POST") {
-      const fields =
-          ["callerEmail", "gadgetKey", "chatKey", "messageKey", "gadgetTitle", "prompt"] as const;
-      const input = {} as Record<(typeof fields)[number], string>;
-      for (const field of fields) {
-        const value = (body as Record<string, unknown>)[field];
-        if (!isNonEmptyString(value)) return badRequest(`\`${field}\` must be a non-empty string`);
-        input[field] = value;
-      }
-      return Response.json(await control(ctx.exports).submitExternalMessage(input));
     }
 
     // Body: {"messageKey": "..."} -> {"responses": GadgetResponse[]}

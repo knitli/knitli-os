@@ -49,3 +49,4 @@ wrangler.dev.jsonc
 
 .headroom*
 *.local.*
+,pnpm-store/

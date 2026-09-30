@@ -1,10 +1,10 @@
 import { Agent, type Connection } from "agents";
 import { withVoice, type Transcriber, type VoiceTurnContext } from "agents/voice";
-import { WorkersAIFluxSTT, WorkersAITTS } from "agents/voice/workers-ai";
+import { WorkersAIFluxSTT, WorkersAINova3STT, WorkersAITTS } from "agents/voice/workers-ai";
 import { RpcTarget as NativeRpcTarget, type RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import type { VoiceMode, VoiceSessionLease } from "@gadgets/workshop-shared/api";
+import type { VoiceMode, VoiceSessionLease, VoiceSpec } from "@gadgets/workshop-shared/api";
 import { hashPresentedSecret } from "./connect-handoff";
 
 /** Authenticated invocation liveness, never an account or agent capability. */
@@ -75,6 +75,7 @@ export class VoiceResponseStream implements AsyncIterableIterator<string> {
 export class VoiceSession extends withVoice(Agent)<Cloudflare.Env> {
   private credential?: { hash: string; expiresAt: number };
   private mode?: VoiceMode;
+  private voiceSpec?: VoiceSpec;
   private sessionId = "";
   private liveness?: NativeRpcStub<VoiceLiveness>;
   private connectionId?: string;
@@ -132,9 +133,10 @@ export class VoiceSession extends withVoice(Agent)<Cloudflare.Env> {
   }
 
   async initialize(id: string, mode: VoiceMode, hash: string, expiresAt: number,
-      liveness: NativeRpcStub<VoiceLiveness>): Promise<void> {
+      liveness: NativeRpcStub<VoiceLiveness>, spec: VoiceSpec): Promise<void> {
     if (this.mode || this.closed) throw new Error("Voice session already initialized");
     this.sessionId = id; this.mode = mode; this.credential = { hash, expiresAt };
+    this.voiceSpec = spec;
     this.liveness = liveness.dup();
     this.expiry = setTimeout(() => { void this.revoke(); }, Math.max(0, expiresAt - Date.now()));
   }
@@ -175,7 +177,12 @@ export class VoiceSession extends withVoice(Agent)<Cloudflare.Env> {
     return !this.closed;
   }
   createTranscriber(): Transcriber | null {
-    return this.env.WORKERS_AI ? new WorkersAIFluxSTT(this.env.WORKERS_AI) : null;
+    if (!this.env.WORKERS_AI) return null;
+    // Each STT model has its own streaming protocol adapter; only these two ids can arrive
+    // here (see resolveVoiceSpec), so anything but Nova 3 is Flux.
+    return this.voiceSpec?.stt === "@cf/deepgram/nova-3"
+        ? new WorkersAINova3STT(this.env.WORKERS_AI)
+        : new WorkersAIFluxSTT(this.env.WORKERS_AI);
   }
   async afterTranscribe(text: string, connection: Connection): Promise<string | null> {
     if (this.closed || !this.inCall || text.length > 8192) return null;
@@ -191,7 +198,9 @@ export class VoiceSession extends withVoice(Agent)<Cloudflare.Env> {
     const id = crypto.randomUUID();
     const stream = new VoiceResponseStream(context.signal);
     this.turn = { id, stream };
-    this.tts ??= new WorkersAITTS(this.env.WORKERS_AI);
+    let tts = this.voiceSpec?.tts;
+    this.tts ??= new WorkersAITTS(this.env.WORKERS_AI,
+        tts ? { model: tts.model, speaker: tts.speaker } : undefined);
     this.emitTranscript(context.connection, id, text);
     return stream;
   }

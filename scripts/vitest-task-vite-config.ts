@@ -125,7 +125,10 @@ export type TestCommand = string | { command: string; idleSeconds: number }
  */
 const IDLE_TIMEOUT_SECONDS = 60
 
-/** Wall-clock backstop, for a command that stays chatty while looping forever. */
+/**
+ * Wall-clock backstop, for a command that stays chatty while looping forever. The default only: an
+ * environment replaces it with `TESTS_WITH_TIMEOUT_MAX_SECONDS` (see `withTestTimeout`).
+ */
 const TOTAL_TIMEOUT_SECONDS = 600
 
 /**
@@ -148,11 +151,15 @@ const TOTAL_TIMEOUT_SECONDS = 600
  * visible, fingerprinted change -- including a per-command `idleSeconds`, which lands in the command
  * string like any other.
  *
- * Only the idle threshold is overridable: `TOTAL_TIMEOUT_SECONDS` is the backstop against a real
- * hang, and a command able to opt out of it would be unbounded again.
+ * Only the idle threshold is overridable per command: `TOTAL_TIMEOUT_SECONDS` is the backstop
+ * against a real hang, and a command able to opt out of it would be unbounded again. An
+ * *environment* can rebudget it, though -- `TESTS_WITH_TIMEOUT_MAX_SECONDS`, read by `with-timeout.ts`
+ * itself rather than here, so the string below (and the tests pinning it) read the same everywhere.
+ * It replaces this number, is capped at a day, and does not touch the idle threshold, so a wedge is
+ * still caught by silence.
  *
- * The off switch, `TESTS_WITH_TIMEOUT_ENV`, is the one variable read, and it is declared in `env` so
- * that it is fingerprinted too.
+ * The off switch and that override, `TESTS_WITH_TIMEOUT_ENV`, are the only variables read, and both
+ * are declared in `env` so that they are fingerprinted too.
  */
 export const withTestTimeout = (command: TestCommand): string => {
   const { command: argv, idleSeconds } =
@@ -163,14 +170,20 @@ export const withTestTimeout = (command: TestCommand): string => {
 /**
  * The `env` every task wrapping `withTestTimeout` must declare, if it is cached.
  *
- * `TESTS_WITH_TIMEOUT_DISABLE`, set to anything non-empty, turns the watchdog off (see the header of
- * `with-timeout.ts`). A cached `vp` task sees none of the ambient environment unless the task
- * declares a variable; `env` both passes it through and fingerprints it, so a supervised run never
- * replays an unsupervised one. The builders below add it to every vitest `test` task; a
- * hand-declared task that wraps `withTestTimeout` spreads it itself, and `scripts/vitest-task.test.ts`
- * checks that each one either does so or is `cache: false`.
+ * `TESTS_WITH_TIMEOUT_DISABLE`, set to anything non-empty, turns the watchdog off, and
+ * `TESTS_WITH_TIMEOUT_MAX_SECONDS` replaces its wall-clock cap (see the header of `with-timeout.ts`).
+ * A cached `vp` task sees none of the ambient environment unless the task declares a variable; `env`
+ * both passes it through and fingerprints it, so a supervised run never replays an unsupervised one,
+ * nor a 600s run a 1200s one. The builders below add both to every vitest `test` task; a
+ * hand-declared task that wraps `withTestTimeout` spreads them itself, and
+ * `scripts/vitest-task.test.ts` checks that each one either does so or is `cache: false`.
+ *
+ * `DISABLE` stays first: that test destructures it by position.
  */
-export const TESTS_WITH_TIMEOUT_ENV: string[] = ['TESTS_WITH_TIMEOUT_DISABLE']
+export const TESTS_WITH_TIMEOUT_ENV: string[] = [
+  'TESTS_WITH_TIMEOUT_DISABLE',
+  'TESTS_WITH_TIMEOUT_MAX_SECONDS',
+]
 
 /**
  * The `test` task for a package, given the vitest invocation its `test` script used to hold.

@@ -25,6 +25,13 @@
 // unsupervised local run. A wedge is then killed anonymously by whatever is outside, with no
 // surviving-tree listing to name the culprit. Under vp the variable reaches a cached task only
 // through the task's `env` declaration (see vitest-task-vite-config.ts), which also fingerprints it.
+//
+// `TESTS_WITH_TIMEOUT_MAX_SECONDS=<secs>` replaces the `--max` given on the command line, for an
+// environment whose machines are slower than the number the repo baked in (a 2-vCPU CI runner runs a
+// workerd-heavy suite far past what a laptop does). The idle timer is untouched, so a wedge is still
+// caught by silence, and the value is capped at a day (MAX_OVERRIDE_CEILING_SECONDS) so the backstop
+// cannot be configured away. It reaches a cached task the same way the off switch does. An invalid
+// value exits 2 before the command starts, rather than being ignored.
 
 import { execFile, spawn } from "node:child_process";
 import { constants } from "node:os";
@@ -38,6 +45,13 @@ const TIMED_OUT_EXIT_CODE = 124;
 const KILL_GRACE_MS = 5_000;
 
 const USAGE = "usage: with-timeout.ts --idle <secs> --max <secs> -- <command> [args...]";
+
+/**
+ * The longest `TESTS_WITH_TIMEOUT_MAX_SECONDS` accepted. Keeps the wall-clock cap a cap, and stays
+ * inside `setTimeout`'s 2^31 ms range: past it the timer fires immediately, which would kill every
+ * run at once instead of never.
+ */
+const MAX_OVERRIDE_CEILING_SECONDS = 86_400;
 
 type Options = {
   idleMs: number;
@@ -66,7 +80,19 @@ function parseArgs(args: string[]): Options {
   const argv = args.slice(index);
   if (idleMs === undefined || maxMs === undefined) fail(`--idle and --max are both required\n${USAGE}`);
   if (argv.length === 0) fail(`no command given\n${USAGE}`);
+  // Unset and empty both mean "no override": CI expressions for an unset variable expand to "".
+  const maxOverride = process.env.TESTS_WITH_TIMEOUT_MAX_SECONDS;
+  if (maxOverride) maxMs = parseMaxOverride(maxOverride);
   return { idleMs, maxMs, argv };
+}
+
+function parseMaxOverride(value: string): number {
+  const name = "TESTS_WITH_TIMEOUT_MAX_SECONDS";
+  const ms = parseSeconds(name, value);
+  if (ms > MAX_OVERRIDE_CEILING_SECONDS * 1000) {
+    fail(`${name} is at most ${MAX_OVERRIDE_CEILING_SECONDS} seconds (got ${value})`);
+  }
+  return ms;
 }
 
 function parseSeconds(flag: string, value: string | undefined): number {

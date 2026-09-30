@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { RpcStub, RpcTarget, newMessagePortRpcSession, type RpcStub as RpcStubType } from 'capnweb'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AdminApi, AdminResourceVendor, AdminSettingsView, AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { DEFAULT_VOICE_CONFIG } from '@gadgets/workshop-shared/api'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import AdminPage from '../../../AdminPage'
 
@@ -40,7 +41,7 @@ function view(enabled: boolean, options: { vendorEnabled?: boolean; otherEnabled
   const resources = [{ urlPattern: PATTERN, title: 'Fixture resource', description: 'Fixture', enabled }]
   if (options.otherEnabled !== undefined) resources.push({ urlPattern: OTHER_PATTERN, title: 'Other resource', description: 'Other fixture', enabled: options.otherEnabled })
   const resourceVendors: AdminResourceVendor[] = [{ vendorId: 'openapi', autoProvisions: false, enabled: options.vendorEnabled ?? true, displayName: 'OpenAPI', resources }]
-  return { signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [], promptPresets: [] }
+  return { signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [], promptPresets: [], voice: DEFAULT_VOICE_CONFIG }
 }
 function missingVendorView(): AdminSettingsView {
   return { ...view(false), resourceVendors: [] }

@@ -7,6 +7,7 @@ import type { RpcStub } from 'capnweb'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   type AdminApi, type AdminSettingsView, type AuthenticatedApi, type PromptPreset,
+  DEFAULT_VOICE_CONFIG,
 } from '@gadgets/workshop-shared/api'
 import AdminPage from './AdminPage'
 
@@ -68,7 +69,7 @@ vi.mock('@cloudflare/kumo', async () => {
 const view = (promptPresets: PromptPreset[]): AdminSettingsView => ({
   signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '',
   banner: { text: '', color: 'info' }, accentColor: '', resourceVendors: [], formats: [],
-  promptPresets,
+  promptPresets, voice: DEFAULT_VOICE_CONFIG,
 })
 
 const state = vi.hoisted(() => {

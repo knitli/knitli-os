@@ -1,5 +1,5 @@
 import { useId } from "react";
-import { ChatCircleDots, Microphone, PhoneDisconnect, Stop, SpeakerHigh, SpeakerSlash } from "@phosphor-icons/react";
+import { ChatCircleDots, GearSix, Microphone, PhoneDisconnect, Stop, SpeakerHigh, SpeakerSlash } from "@phosphor-icons/react";
 import { WorkshopIconButton } from "../../../components/WorkshopControls";
 
 export type VoiceControlsState = {
@@ -19,6 +19,7 @@ export const VoiceControls = ({
   onMute,
   conversationAvailable = true,
   conversationBlockedReason,
+  onSettings,
 }: {
   state: VoiceControlsState;
   disabled: boolean;
@@ -27,6 +28,8 @@ export const VoiceControls = ({
   onMute: () => void;
   conversationAvailable?: boolean;
   conversationBlockedReason?: string;
+  /** Opens voice settings. Absent while the settings surface can't load (no API yet). */
+  onSettings?: () => void;
 }) => {
   const blockedReasonId = useId();
   const active = state.mode !== null;
@@ -60,6 +63,13 @@ export const VoiceControls = ({
           {conversationAvailable && conversationBlockedReason && <span id={blockedReasonId} className="text-sm text-kumo-subtle">
             {conversationBlockedReason}
           </span>}
+          {onSettings && <WorkshopIconButton
+            disabled={disabled}
+            onClick={onSettings}
+            aria-label="Voice settings"
+          >
+            <GearSix size={16} />
+          </WorkshopIconButton>}
         </>
       )}
       {!active && state.pendingText && <span className="sr-only">Send or clear the voice draft before starting again.</span>}

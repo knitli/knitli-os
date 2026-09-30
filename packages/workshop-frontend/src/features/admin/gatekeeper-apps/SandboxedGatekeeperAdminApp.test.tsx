@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { RpcStub, RpcTarget, newMessagePortRpcSession, type RpcStub as RpcStubType } from 'capnweb'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AdminApi, AdminResourceVendor, AdminSettingsView, AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { DEFAULT_VOICE_CONFIG } from '@gadgets/workshop-shared/api'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import SandboxedGatekeeperApp, { type AdminResourceControl } from '../../../SandboxedGatekeeperApp'
 
@@ -35,7 +36,7 @@ function settings(enabled: boolean | undefined): AdminSettingsView {
     // Keep the fixed vendor present when the exact pattern is absent, so a vendor-only check fails.
     resources: enabled === undefined ? [] : [{ urlPattern: PATTERN, title: 'Fixture', description: 'Fixture resource', enabled }],
   }]
-  return { signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [], promptPresets: [] }
+  return { signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [], promptPresets: [], voice: DEFAULT_VOICE_CONFIG }
 }
 
 function fakeAdmin(options: {

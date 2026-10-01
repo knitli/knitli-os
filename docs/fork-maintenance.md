@@ -791,3 +791,27 @@ ids are facet-local, not Activity ids.
   provisional workspace` (removing the `from === "user"` guard fails it).
 - **At sync:** Tier 2. If upstream reshapes `openSession()`, reapply the one guarded line after
   the final `assertGatekeeperUsable`.
+
+### The test watchdog's wall-clock cap can be rebudgeted by the environment
+
+- **Where:** `scripts/with-timeout.ts` (`parseArgs` and `parseMaxOverride`),
+  `TESTS_WITH_TIMEOUT_ENV` in `scripts/vitest-task-vite-config.ts`, the `forwarded` entry in
+  `scripts/env-passthrough.test.ts`, and the watchdog bullet in `AGENTS.md`
+- **What:** `TESTS_WITH_TIMEOUT_MAX_SECONDS=<secs>` replaces the `--max` every test command is
+  given (upstream bakes `--max 600` into the command string, for every command, with no way to
+  change it). Unset or empty means no override. The value must be a positive number of seconds and
+  at most 86400, and a bad one exits 2 before the command starts. It is declared in
+  `TESTS_WITH_TIMEOUT_ENV` beside `TESTS_WITH_TIMEOUT_DISABLE`, so a cached `vp` task receives it and
+  fingerprints it. `withTestTimeout` and `TOTAL_TIMEOUT_SECONDS` are unchanged, which is why
+  upstream's `vitest-task.test.ts` (it pins `--max 600` in the command string) stays green in an
+  environment that sets the variable. The idle threshold is untouched.
+- **Why:** on GitHub's 2-vCPU runners `packages/workshop-backend` (about 83 files, each booting
+  workerd) needs 300-600+ seconds, and was killed at 600s while still making progress. The limit is
+  a property of the machine, so the environment that needs more (knitli-site's nested OS test step)
+  sets it, and every other run keeps upstream's 600s. It lives in `with-timeout.ts`, not a
+  fork-owned module, because that file is the only place that can hold it: the module runs on import
+  and cannot be imported for a helper, and the override reuses its `parseSeconds` and `fail`.
+- **Test:** `scripts/fork/with-timeout-max-override.test.ts` (Tier 1) runs the real watchdog with
+  the variable set, unset, empty, at the ceiling and invalid, and pins the `env` declaration.
+- **At sync:** Tier 2. If upstream gives `with-timeout.ts` or `withTestTimeout` its own wall-clock
+  override, drop ours and keep theirs; otherwise reapply the two lines in `parseArgs`.

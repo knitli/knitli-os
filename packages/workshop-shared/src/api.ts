@@ -445,6 +445,185 @@ export interface VoiceSessionConnection {
   session: VoiceSessionLease;
 }
 
+/** How a voice model serves a call: transcribing speech or synthesizing it. */
+export type VoiceModelKind = "stt" | "tts";
+
+/** Whether a value names a voice model kind. */
+export function isVoiceModelKind(value: unknown): value is VoiceModelKind {
+  return value === "stt" || value === "tts";
+}
+
+/** One selectable TTS voice within a TTS model. */
+export type VoiceDefinition = {
+  /** Speaker id passed to the model, e.g. "luna". */
+  id: string;
+  /** Display name shown in pickers. */
+  name: string;
+  /** Optional admin-authored description, e.g. "warm, low-pitched". */
+  description?: string;
+};
+
+/** One speech model the deployment offers, as curated by the admin. */
+export type VoiceModelEntry = {
+  /** Workers AI model id, e.g. "@cf/deepgram/flux". */
+  modelId: string;
+  /** Whether the model transcribes or synthesizes. */
+  kind: VoiceModelKind;
+  /** Admin-chosen display name. */
+  name: string;
+  /** Optional admin-authored description. */
+  description?: string;
+  /** Offered to users. Disabling keeps the entry so re-enabling loses nothing. */
+  enabled: boolean;
+  /** Voices offered for a TTS model; absent for STT. */
+  voices?: VoiceDefinition[];
+  /** Default voice id when the user hasn't picked one (TTS only). */
+  defaultVoice?: string;
+};
+
+/** The three selectable voice roles: dictation transcription, conversation transcription, agent voice. */
+export const VOICE_ROLES = ["dictationStt", "conversationStt", "conversationTts"] as const;
+
+/** One of the three selectable voice roles (see VOICE_ROLES). */
+export type VoiceRole = typeof VOICE_ROLES[number];
+
+/** Whether a value names a voice role. */
+export function isVoiceRole(value: unknown): value is VoiceRole {
+  return (VOICE_ROLES as readonly unknown[]).includes(value);
+}
+
+/** Deployment voice curation: which speech models are offered and the default per role. */
+export type VoiceAdminConfig = {
+  /** Offered speech models (including disabled ones). */
+  models: VoiceModelEntry[];
+  /** Default model id per role. */
+  defaults: Record<VoiceRole, string>;
+};
+
+/** One user's voice selection. Absent or null fields fall back to the admin default. */
+export type VoicePreferences = {
+  /** STT model id for dictation. */
+  dictationStt?: string | null;
+  /** STT model id for conversation. */
+  conversationStt?: string | null;
+  /** TTS model id for the agent voice. */
+  conversationTts?: string | null;
+  /** Speaker id for the conversation TTS model. */
+  voice?: string | null;
+};
+
+/** What a user needs to render voice pickers: the offered catalog plus both resolution inputs. */
+export type VoiceOptions = {
+  /** Enabled speech models. */
+  models: VoiceModelEntry[];
+  /** Admin default model id per role. */
+  defaults: Record<VoiceRole, string>;
+  /** The user's current selection (null fields mean the admin default applies). */
+  preferences: VoicePreferences;
+};
+
+/** Fully-resolved speech models for one call: user prefs over admin defaults. */
+export type VoiceSpec = {
+  /** STT model id for the call's mode. */
+  stt: string;
+  /** TTS model + speaker (conversation only). */
+  tts?: { model: string; speaker: string };
+};
+
+/** One speech model the backend knows how to run. Adding a model id here needs a matching adapter in voice-session.ts. */
+export type SupportedVoiceModel = {
+  /** Workers AI model id. */
+  modelId: string;
+  /** Whether the model transcribes or synthesizes. */
+  kind: VoiceModelKind;
+  /** Display name used when an admin adds the model. */
+  name: string;
+  /** One-line description used when an admin adds the model. */
+  description: string;
+};
+
+/** Every speech model the backend can run. The admin catalog may only offer these. */
+export const SUPPORTED_VOICE_MODELS: SupportedVoiceModel[] = [
+  {
+    modelId: "@cf/deepgram/flux",
+    kind: "stt",
+    name: "Flux",
+    description: "Conversational transcription with native turn-taking.",
+  },
+  {
+    modelId: "@cf/deepgram/nova-3",
+    kind: "stt",
+    name: "Nova 3",
+    description: "High-accuracy transcription without turn detection.",
+  },
+  {
+    modelId: "@cf/deepgram/aura-2-en",
+    kind: "tts",
+    name: "Aura 2",
+    description: "Natural English voices with low latency.",
+  },
+  {
+    modelId: "@cf/deepgram/aura-1",
+    kind: "tts",
+    name: "Aura",
+    description: "Previous-generation English voices.",
+  },
+];
+
+/** Whether the backend can run `modelId` as `kind`. */
+export function isSupportedVoiceModel(modelId: unknown, kind: VoiceModelKind): boolean {
+  return SUPPORTED_VOICE_MODELS.some(entry => entry.modelId === modelId && entry.kind === kind);
+}
+
+/** Speaker ids offered by @cf/deepgram/aura-2-en (fixed by the provider). */
+export const AURA2_VOICES: string[] = [
+  "amalthea", "andromeda", "apollo", "arcas", "aries", "asteria", "athena", "atlas", "aurora",
+  "callista", "cora", "cordelia", "delia", "draco", "electra", "harmonia", "helena", "hera",
+  "hermes", "hyperion", "iris", "janus", "juno", "jupiter", "luna", "mars", "minerva", "neptune",
+  "odysseus", "ophelia", "orion", "orpheus", "pandora", "phoebe", "pluto", "saturn", "thalia",
+  "theia", "vesta", "zeus",
+];
+
+/** Speaker both Aura models accept, used when a TTS entry names no usable voice. */
+export const FALLBACK_VOICE_SPEAKER = "asteria";
+
+/** Fixed sample read aloud for every voice preview. Fixed so previews can't serve as a free TTS API. */
+export const VOICE_PREVIEW_TEXT = "Hello! This is how I'll sound when I read responses aloud.";
+
+/** Voice curation for a deployment whose admin hasn't touched it. */
+export const DEFAULT_VOICE_CONFIG: VoiceAdminConfig = {
+  models: [
+    {
+      modelId: "@cf/deepgram/flux",
+      kind: "stt",
+      name: "Flux",
+      description: "Conversational transcription with native turn-taking.",
+      enabled: true,
+    },
+    {
+      modelId: "@cf/deepgram/nova-3",
+      kind: "stt",
+      name: "Nova 3",
+      description: "High-accuracy transcription without turn detection.",
+      enabled: true,
+    },
+    {
+      modelId: "@cf/deepgram/aura-2-en",
+      kind: "tts",
+      name: "Aura 2",
+      description: "Natural English voices with low latency.",
+      enabled: true,
+      voices: AURA2_VOICES.map(id => ({ id, name: id.charAt(0).toUpperCase() + id.slice(1) })),
+      defaultVoice: "luna",
+    },
+  ],
+  defaults: {
+    dictationStt: "@cf/deepgram/nova-3",
+    conversationStt: "@cf/deepgram/flux",
+    conversationTts: "@cf/deepgram/aura-2-en",
+  },
+};
+
 /** Top-level API exposed to the user after they have authenticated. */
 export interface AuthenticatedApi extends RpcTarget {
   /** Create a single-use audio connection tied to this authenticated RPC session. */
@@ -565,6 +744,25 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /** Set the user's preferred model. Pass null to indicate "No agent". */
   setPreferredModel(id: string | null): Promise<void>;
+
+  /**
+   * Read the voice pickers' inputs in one call: the deployment's offered speech models, the admin
+   * defaults per role, and the user's current selection.
+   */
+  getVoiceOptions(): Promise<VoiceOptions>;
+
+  /**
+   * Set the user's voice selection. Null fields fall back to the admin default; unknown or
+   * disabled model ids, and voices the effective TTS model doesn't offer, are rejected.
+   */
+  setVoicePreferences(preferences: VoicePreferences): Promise<void>;
+
+  /**
+   * Synthesize the fixed preview sample (VOICE_PREVIEW_TEXT) with an offered TTS model + voice,
+   * for the pickers' preview buttons. Returns MP3 audio bytes. Rejects models and voices the
+   * deployment doesn't offer.
+   */
+  previewVoice(modelId: string, voiceId: string): Promise<Uint8Array>;
 
   /** Returns true if the user has completed the onboarding wizard. */
   isOnboardingCompleted(): Promise<boolean>;
@@ -1112,6 +1310,8 @@ export type AdminSettingsView = {
   resourceVendors: AdminResourceVendor[];
   /** The blueprints promoted as standard output formats, in menu order (including disabled ones). */
   formats: AdminFormat[];
+  /** The deployment's voice curation: offered speech models and the default per role. */
+  voice: VoiceAdminConfig;
 };
 
 /**
@@ -1442,6 +1642,13 @@ export interface AdminApi {
 
   /** Reorder the menu. `blueprintIds` must be a permutation of the currently promoted ids. */
   setFormatOrder(blueprintIds: string[]): Promise<void>;
+
+  /**
+   * Replace the deployment's voice curation wholesale: which speech models are offered (with
+   * their voices) and the default model per role. Rejects an unknown model id, a default naming
+   * a disabled model or one of the wrong kind, and a default voice the model doesn't offer.
+   */
+  setVoiceConfig(config: VoiceAdminConfig): Promise<void>;
 }
 
 /** A partial edit to one promoted format. Absent fields are left alone. */

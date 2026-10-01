@@ -1,5 +1,6 @@
 import { VoiceSession, VoiceLease, VoiceLiveness } from "./voice-session";
-import type { VoiceMode, VoiceSessionConnection } from "@gadgets/workshop-shared/api";
+import type { VoiceMode, VoiceOptions, VoicePreferences, VoiceSessionConnection } from "@gadgets/workshop-shared/api";
+import { VOICE_PREVIEW_TEXT } from "@gadgets/workshop-shared/api";
 export { VoiceSession };
 import { handleOpenApiPublisher } from "./openapi-publisher";
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
@@ -15,6 +16,7 @@ import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloud
 import { PendingLogin, LoginConnectCallbackImpl, EXPIRED_MESSAGE } from "./auth/login-flow.js";
 import { hashPresentedSecret, newSecretToken } from "./connect-handoff.js";
 import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from "./admin-config.js";
+import { offeredVoiceModels, resolveVoiceSpec } from "./voice-config.js";
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
@@ -105,7 +107,14 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     const { secret, hash } = await newSecretToken();
     const expiresAt = Date.now() + 60_000;
     const session = new VoiceLease(this.ctx, voice);
-    await voice.initialize(id, mode, hash, expiresAt, new VoiceLiveness(() => session.alive));
+    // The call's speech models resolve here, from the admin catalog and the user's prefs, so the
+    // audio DO stays dumb: it just runs the spec it was initialized with.
+    const [config, prefs] = await Promise.all([
+      readAdminConfig(this.env),
+      retryOnDoReset(() => this.#user.getVoicePreferences()),
+    ]);
+    await voice.initialize(id, mode, hash, expiresAt, new VoiceLiveness(() => session.alive),
+        resolveVoiceSpec(config.voice, prefs, mode));
     return { id, url: `/api/voice/${id}?token=${secret.toHex()}`, expiresAt, session };
   }
 
@@ -212,6 +221,28 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
   setPreferredModel(id: string | null): Promise<void> {
     return this.#user.setPreferredModel(id);
+  }
+  getVoiceOptions(): Promise<VoiceOptions> {
+    return retryOnDoReset(() => this.#user.getVoiceOptions());
+  }
+  setVoicePreferences(preferences: VoicePreferences): Promise<void> {
+    return this.#user.setVoicePreferences(preferences);
+  }
+  async previewVoice(modelId: string, voiceId: string): Promise<Uint8Array> {
+    if (!this.env.WORKERS_AI) throw new Error("Voice is not available on this deployment");
+    let config = await readAdminConfig(this.env);
+    let entry = offeredVoiceModels(config.voice)
+        .find(candidate => candidate.modelId === modelId && candidate.kind === "tts");
+    if (!entry || !entry.voices?.some(voice => voice.id === voiceId)) {
+      throw new Error(`Voice "${voiceId}" is not offered for "${modelId}".`);
+    }
+    // The sample text is fixed (VOICE_PREVIEW_TEXT), never caller-supplied, so previews can't be
+    // used as a free TTS API.
+    let response = await this.env.WORKERS_AI.run(modelId,
+        { text: VOICE_PREVIEW_TEXT, speaker: voiceId },
+        { returnRawResponse: true }) as unknown as Response;
+    if (!response.ok) throw new Error("Voice preview failed.");
+    return new Uint8Array(await response.arrayBuffer());
   }
   isOnboardingCompleted(): Promise<boolean> {
     return retryOnDoReset(() => this.#user.isOnboardingCompleted());

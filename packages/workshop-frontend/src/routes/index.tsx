@@ -24,6 +24,7 @@ import { homePromptFromSearch } from "../homePrompt";
 import { composerDraftStorageKey } from "../features/chat/composer/draft/composerDraft";
 
 import { VoiceControls } from "../features/chat/voice/VoiceControls";
+import { VoiceSettingsDialog } from "../features/chat/voice/VoiceSettingsDialog";
 import { useVoiceChat } from "../features/chat/voice/useVoiceChat";
 import { useDictationAppendQueue } from "../features/chat/composer/useDictationAppendQueue";
 
@@ -86,6 +87,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
 
   const voiceLaunchGeneration = useRef(0);
   const [startingConversation, setStartingConversation] = useState(false);
+  const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false);
   const handleModelChange = useCallback((value: string | null) => {
     voiceLaunchGeneration.current++;
     setStartingConversation(false);
@@ -250,15 +252,23 @@ export function HomePageContent({ prompt }: HomeSearch) {
           onSend={handleSend}
           appendText={dictationAppend.appendForChat(null)}
           onAppendTextApplied={dictationAppend.acknowledge}
-          voiceControls={({ canStartConversation }) => <VoiceControls
-            state={voice.state}
-            disabled={startingConversation}
-            onStart={(mode) => { void startVoice(mode, canStartConversation); }}
-            onEnd={voice.end}
-            onMute={voice.toggleMute}
-            conversationBlockedReason={canStartConversation() ? undefined : "Send or clear the draft before starting a conversation."}
-            conversationAvailable={selectedModel !== null}
-          />}
+          voiceControls={({ canStartConversation }) => <>
+            <VoiceControls
+              state={voice.state}
+              disabled={startingConversation}
+              onStart={(mode) => { void startVoice(mode, canStartConversation); }}
+              onEnd={voice.end}
+              onMute={voice.toggleMute}
+              conversationBlockedReason={canStartConversation() ? undefined : "Send or clear the draft before starting a conversation."}
+              conversationAvailable={selectedModel !== null}
+              onSettings={() => setVoiceSettingsOpen(true)}
+            />
+            <VoiceSettingsDialog
+              open={voiceSettingsOpen}
+              onOpenChange={setVoiceSettingsOpen}
+              api={authenticatedApi}
+            />
+          </>}
           isAgentActive={false}
           models={models}
           selectedModel={selectedModel}

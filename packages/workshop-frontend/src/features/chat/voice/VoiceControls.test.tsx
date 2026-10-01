@@ -157,6 +157,23 @@ it("explains a blocked conversation while keeping dictation available", async ()
 });
 
 
+it("opens voice settings from the idle controls", async () => {
+  const onSettings = vi.fn<() => void>();
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const render = (handler?: () => void) => <VoiceControls
+    state={{ mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "" }}
+    disabled={false} onStart={() => {}} onEnd={() => {}} onMute={() => {}} onSettings={handler}
+  />;
+  try {
+    await act(async () => root.render(render()));
+    expect(container.querySelector('[aria-label="Voice settings"]')).toBeNull();
+    await act(async () => root.render(render(onSettings)));
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Voice settings"]')!.click());
+    expect(onSettings).toHaveBeenCalledOnce();
+  } finally { await act(async () => root.unmount()); }
+});
+
 it("keeps pending speech visible for review before starting another voice mode", async () => {
   const container = document.createElement("div");
   const root = createRoot(container);

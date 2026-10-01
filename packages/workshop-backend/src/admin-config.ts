@@ -8,9 +8,10 @@
 // changed by a compromised admin session. Everything here is enabled by default; the admin UI opts
 // things *out*.
 
-import { AmbientGatekeeperMode, BannerConfig, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, OutputFormatOffer, PromptPreset, isAmbientGatekeeperMode, isBannerColor, isOutputIcon } from "@gadgets/workshop-shared/api";
+import { AmbientGatekeeperMode, BannerConfig, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, DEFAULT_VOICE_CONFIG, OutputFormatOffer, PromptPreset, VoiceAdminConfig, isAmbientGatekeeperMode, isBannerColor, isOutputIcon } from "@gadgets/workshop-shared/api";
 import { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { ADMIN_CONFIG_KEY, BlueprintKvEnv, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive.js";
+import { parseVoiceConfig } from "./voice-config.js";
 
 export type AdminConfig = {
   /**
@@ -65,6 +66,12 @@ export type AdminConfig = {
    * the deployment offers.
    */
   formats: FormatCuration[];
+
+  /**
+   * The speech models offered for dictation and conversation, and the default per role. Users
+   * pick within the offered set; absent or unusable curation falls back to DEFAULT_VOICE_CONFIG.
+   */
+  voice: VoiceAdminConfig;
 };
 
 /**
@@ -104,6 +111,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   disabledGatekeepers: [],
   ambientGatekeeperModes: {},
   formats: [],
+  voice: DEFAULT_VOICE_CONFIG,
 };
 
 /**
@@ -359,6 +367,7 @@ export function normalizeAdminConfig(p: Partial<AdminConfig>): AdminConfig {
     disabledGatekeepers: strings(p.disabledGatekeepers).map(v => v.toLowerCase()),
     ambientGatekeeperModes,
     formats: parseFormats(p.formats),
+    voice: parseVoiceConfig(p.voice),
   };
 }
 

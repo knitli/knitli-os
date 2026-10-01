@@ -118,6 +118,7 @@ import { ChatComposer } from "./features/chat/composer/ChatComposer";
 import type { PromptPresetOption } from "./features/chat/controls/ComposerPromptSelector";
 import { composerDraftStorageKey } from "./features/chat/composer/draft/composerDraft";
 import { VoiceControls } from "./features/chat/voice/VoiceControls";
+import { VoiceSettingsDialog } from "./features/chat/voice/VoiceSettingsDialog";
 import { useVoiceChat } from "./features/chat/voice/useVoiceChat";
 import { useDictationAppendQueue } from "./features/chat/composer/useDictationAppendQueue";
 
@@ -4127,6 +4128,7 @@ function ChatInterface({
     conversationAvailable: selectedChatId !== null && selectedModel !== null,
     submissionAvailable: !hasPendingConnectionRequest && !hasPendingAwaitedAction,
   });
+  const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false);
 
   const voiceStartRequest = initialVoice?.chatId;
   const startedVoiceRequestRef = useRef<number | undefined>(undefined);
@@ -6591,17 +6593,25 @@ function ChatInterface({
                     showThinkingTraces={showThinkingTraces}
                     onToggleThinkingTraces={toggleShowThinkingTraces}
                     voiceControls={({ canStartConversation }) => (
-                      <VoiceControls
-                        state={voice.state}
-                        disabled={hasPendingConnectionRequest || hasPendingAwaitedAction}
-                        onStart={(mode) => {
-                          if (mode === "dictate" || canStartConversation()) voice.start(mode);
-                        }}
-                        conversationBlockedReason={!canStartConversation() ? "Send or clear the draft before starting a conversation." : undefined}
-                        onEnd={voice.end}
-                        onMute={voice.toggleMute}
-                        conversationAvailable={selectedChatId !== null && selectedModel !== null}
-                      />
+                      <>
+                        <VoiceControls
+                          state={voice.state}
+                          disabled={hasPendingConnectionRequest || hasPendingAwaitedAction}
+                          onStart={(mode) => {
+                            if (mode === "dictate" || canStartConversation()) voice.start(mode);
+                          }}
+                          conversationBlockedReason={!canStartConversation() ? "Send or clear the draft before starting a conversation." : undefined}
+                          onEnd={voice.end}
+                          onMute={voice.toggleMute}
+                          conversationAvailable={selectedChatId !== null && selectedModel !== null}
+                          onSettings={() => setVoiceSettingsOpen(true)}
+                        />
+                        <VoiceSettingsDialog
+                          open={voiceSettingsOpen}
+                          onOpenChange={setVoiceSettingsOpen}
+                          api={authenticatedApi}
+                        />
+                      </>
                     )}
                     draftStorageKey={currentUser && workspaceId && selectedChatId !== null
                       ? composerDraftStorageKey(

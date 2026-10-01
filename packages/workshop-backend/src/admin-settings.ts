@@ -1,4 +1,4 @@
-import { AI_EXECUTOR_ADMIN_ERROR_CODES, AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AiExecutorProfile, AiExecutorProfileInput, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, PromptPreset, PromptPresetPatch, createAiExecutorAdminError, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
+import { AI_EXECUTOR_ADMIN_ERROR_CODES, AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AiExecutorProfile, AiExecutorProfileInput, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, PromptPreset, PromptPresetPatch, VoiceAdminConfig, createAiExecutorAdminError, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject, type WorkerEntrypoint } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
@@ -14,6 +14,7 @@ import { UserDurableObject } from './user.js';
 import { bundledBlueprintsManifestVersion, installBundledBlueprints } from './bundled-blueprints.js';
 import { BUNDLED_BLUEPRINTS } from './generated/bundled-blueprints.js';
 import { AdminGatekeeperApps } from './fork/admin-gatekeeper-apps.js';
+import { validateVoiceConfig } from './voice-config.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
 
@@ -356,6 +357,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       accentColor: config.accentColor,
       resourceVendors: await this.#listResourceConfig(config, adminUserId),
       formats: await this.#listFormatConfig(config),
+      voice: config.voice,
     };
   }
 
@@ -464,6 +466,15 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 
   async setFormatOrder(blueprintIds: string[]): Promise<void> {
     await this.#mutateFormats(formats => reorderFormats(formats, blueprintIds));
+  }
+
+  // --- Voice curation ---
+
+  async setVoiceConfig(config: VoiceAdminConfig): Promise<void> {
+    // Validated here, not just in the panel: this is an RPC an admin session can call directly.
+    // An unknown model id would break calls at runtime, so it is refused at curation time.
+    let clean = validateVoiceConfig(config);
+    await this.#mutateAdminConfig(current => ({...current, voice: clean}));
   }
 
   // --- Prompt presets ---
@@ -870,5 +881,9 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
 
   setFormatOrder(blueprintIds: string[]): Promise<void> {
     return this.admin.setFormatOrder(blueprintIds);
+  }
+
+  setVoiceConfig(config: VoiceAdminConfig): Promise<void> {
+    return this.admin.setVoiceConfig(config);
   }
 }

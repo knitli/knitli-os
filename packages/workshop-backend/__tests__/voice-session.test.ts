@@ -10,7 +10,11 @@ async function session(mode: "dictate" | "conversation" = "dictate") {
   const stub = voices.getByName(id);
   const { secret, hash } = await newSecretToken();
   const live = new RpcStub(new VoiceLiveness(() => true));
-  await stub.initialize(id.toString(), mode, hash, Date.now() + 60_000, live);
+  await stub.initialize(id.toString(), mode, hash, Date.now() + 60_000, live, {
+    stt: "@cf/deepgram/flux",
+    ...(mode === "conversation"
+        ? { tts: { model: "@cf/deepgram/aura-2-en", speaker: "luna" } } : {}),
+  });
   return { stub, token: secret.toHex(), live };
 }
 function upgrade(token: string) {
@@ -28,7 +32,8 @@ describe("voice audio capability", () => {
       try {
         expect(Date.now()).toBe(1_000_000);
         now.mockClear();
-        await instance.initialize("unused", "dictate", hash, 1_045_000, live);
+        await instance.initialize("unused", "dictate", hash, 1_045_000, live,
+            { stt: "@cf/deepgram/flux" });
         expect(now).toHaveBeenCalled();
         expect(interval).not.toHaveBeenCalled();
         expect(timeout).toHaveBeenCalledWith(expect.any(Function), 45_000);
@@ -107,7 +112,8 @@ describe("voice audio capability", () => {
     const stub = voices.getByName(id);
     const { secret, hash } = await newSecretToken();
     using live = new RpcStub(new VoiceLiveness(() => true));
-    await stub.initialize(id.toString(), "conversation", hash, Date.now() - 1, live);
+    await stub.initialize(id.toString(), "conversation", hash, Date.now() - 1, live,
+        { stt: "@cf/deepgram/flux", tts: { model: "@cf/deepgram/aura-1", speaker: "asteria" } });
     expect((await stub.fetch(upgrade(secret.toHex()))).status).toBe(403);
     await stub.revoke();
     const fresh = await session();
@@ -125,6 +131,47 @@ describe("voice audio capability", () => {
       socket.send(JSON.stringify({ type: "text_message", text: "unauthorized inference" }));
       expect((await closed).code).toBe(1000);
     } finally { await current.stub.revoke(); current.live[Symbol.dispose](); }
+  });
+});
+describe("voice model selection", () => {
+  it("runs the resolved STT adapter and TTS model/speaker", async () => {
+    const id = crypto.randomUUID();
+    const stub = voices.getByName(id);
+    const { hash } = await newSecretToken();
+    using live = new RpcStub(new VoiceLiveness(() => true));
+    await stub.initialize(id.toString(), "conversation", hash, Date.now() + 60_000, live,
+        { stt: "@cf/deepgram/nova-3", tts: { model: "@cf/deepgram/aura-2-en", speaker: "luna" } });
+    try {
+      await runInDurableObject(stub, async (instance: VoiceSession) => {
+        const bindings = Reflect.get(instance, "env") as Cloudflare.Env;
+        const originalAi = bindings.WORKERS_AI;
+        const pair = new WebSocketPair();
+        pair[0].accept();
+        const run = vi.fn(async (model: string) => model === "@cf/deepgram/nova-3"
+            ? new Response(null, { status: 101, webSocket: pair[1] })
+            : new Response(new ArrayBuffer(8), { status: 200 }));
+        Object.assign(bindings, { WORKERS_AI: { run } });
+        try {
+          const stt = instance.createTranscriber()!.createSession({});
+          await stt.waitUntilReady?.();
+          expect(run).toHaveBeenCalledWith("@cf/deepgram/nova-3", expect.anything(),
+              { websocket: true });
+          stt.close();
+          Reflect.set(instance, "inCall", true);
+          await instance.onTurn("Hello.", {
+            signal: new AbortController().signal,
+            connection: { send() {} },
+          } as never);
+          await instance.tts!.synthesize("Hello.");
+          expect(run).toHaveBeenCalledWith("@cf/deepgram/aura-2-en",
+              { text: "Hello.", speaker: "luna" },
+              expect.objectContaining({ returnRawResponse: true }));
+        } finally {
+          await instance.revoke();
+          Object.assign(bindings, { WORKERS_AI: originalAi });
+        }
+      });
+    } finally { await stub.revoke(); }
   });
 });
 describe("voice response stream", () => {

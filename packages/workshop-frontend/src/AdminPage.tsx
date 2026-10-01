@@ -3,7 +3,7 @@ import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { Hexagon, MagnifyingGlass, ShieldWarning, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
-import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, AuthenticatedApi, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR, PromptPreset } from '@gadgets/workshop-shared/api'
+import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, AuthenticatedApi, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR, PromptPreset, VoiceAdminConfig } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
 import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
@@ -11,6 +11,7 @@ import { useDocumentTitle } from './useDocumentTitle'
 import AdminFormatsPanel from './components/format/AdminFormatsPanel'
 import AdminAiExecutorsPanel from './components/AdminAiExecutorsPanel'
 import { AdminGatekeeperAppsPanel } from './features/admin/gatekeeper-apps/AdminGatekeeperAppsPanel'
+import { AdminVoicePanel } from './features/admin/voice/AdminVoicePanel'
 import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
@@ -135,6 +136,9 @@ export default function AdminPage() {
   // Promoted output formats, in menu order (see AdminFormatsPanel).
   const [formats, setFormats] = useState<AdminFormat[]>([])
 
+  // Voice curation: offered speech models and the default per role (see AdminVoicePanel).
+  const [voice, setVoice] = useState<VoiceAdminConfig | null>(null)
+
   const setResourceOperationBusy = (key: string, busy: boolean) => {
     const next = new Set(resourceBusyRef.current)
     if (busy) next.add(key)
@@ -163,6 +167,7 @@ export default function AdminPage() {
     setSavedAccent(view.accentColor)
     setAccentDraft(view.accentColor)
     setFormats(view.formats)
+    setVoice(view.voice)
   }
 
   // Mint the admin capability once (the access check happens server-side) and load settings.
@@ -557,6 +562,7 @@ export default function AdminPage() {
         { value: 'openapi', label: 'OpenAPI' },
         { value: 'executors', label: 'Executors' },
         { value: 'formats', label: 'Formats' },
+        { value: 'voice', label: 'Voice' },
           { value: 'access', label: 'Access' },
         ]}
       />
@@ -571,6 +577,15 @@ export default function AdminPage() {
           admin={admin.api}
           formats={formats}
           onChanged={async () => { setFormats((await admin.api.getSettings()).formats) }}
+        />
+      )}
+
+      {/* Voice curation */}
+      {activeTab === 'voice' && admin && voice && (
+        <AdminVoicePanel
+          admin={admin.api}
+          voice={voice}
+          onChanged={async () => { setVoice((await admin.api.getSettings()).voice) }}
         />
       )}
 

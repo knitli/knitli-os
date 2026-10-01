@@ -4,6 +4,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { RpcStub, RpcTarget, newMessagePortRpcSession, type RpcStub as RpcStubType } from 'capnweb'
 import type { AdminApi, AdminSettingsView, AiChatAuthorInfo, AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { DEFAULT_VOICE_CONFIG } from '@gadgets/workshop-shared/api'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthProvider, useAuthenticatedApi } from '../../../AuthContext'
@@ -39,6 +40,7 @@ const view = (siteName: string): AdminSettingsView => ({
   signupsEnabled: true, userSearchEnabled: false, siteName, instanceInstructions: '', announcement: '',
   banner: { text: '', color: 'info' }, accentColor: '', formats: [], promptPresets: [],
   resourceVendors: [{ vendorId: 'openapi', autoProvisions: false, enabled: true, displayName: 'OpenAPI', resources: [{ urlPattern: PATTERN, title: 'Fixture resource', description: 'Fixture', enabled: true }] }],
+  voice: DEFAULT_VOICE_CONFIG,
 })
 class FrameUi extends RpcTarget {
   disposed = vi.fn<() => void>();

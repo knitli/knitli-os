@@ -65,15 +65,15 @@ vi.mock('@cloudflare/kumo', async () => {
     Loader: () => React.createElement('span', null, 'Loading'),
     Radio,
     Select,
-    useKumoToastManager: () => toastState.manager,
+    // Fresh object per call, like the real manager: the dialog must not depend on it or
+    // its load effect loops and the spinner never resolves (production bug, caught here).
+    useKumoToastManager: () => ({ add: toastState.add }),
   }
 })
 
 const toastState = vi.hoisted(() => {
   const titles: string[] = []
-  const manager = { add: ({ title }: { title: string }) => { titles.push(title) } }
-  // Stable across renders, like the real manager: effects depend on it.
-  return { titles, manager }
+  return { titles, add: ({ title }: { title: string }) => { titles.push(title) } }
 })
 
 const FLUX = '@cf/deepgram/flux'

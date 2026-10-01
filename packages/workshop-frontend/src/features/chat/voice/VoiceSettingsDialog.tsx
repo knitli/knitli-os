@@ -47,6 +47,11 @@ export const VoiceSettingsDialog = ({
   api: RpcStub<AuthenticatedApi> | null
 }) => {
   const toasts = useKumoToastManager()
+  // The manager is a fresh object every render (see Kumo's useKumoToastManager), so effects and
+  // callbacks go through a ref — depending on it directly re-runs the load on every render and
+  // the dialog never leaves its spinner. Same pattern as AdminPage's toastsRef.
+  const toastsRef = useRef(toasts)
+  toastsRef.current = toasts
   const { isPlaying, play } = useVoicePreview(api)
   const [options, setOptions] = useState<VoiceOptions | null>(null)
   const [saving, setSaving] = useState(false)
@@ -63,7 +68,7 @@ export const VoiceSettingsDialog = ({
       (err) => {
         console.error('Failed to load voice options:', err)
         if (!cancelled) {
-          toasts.add({ title: "Couldn't load voice settings", variant: 'error' })
+          toastsRef.current.add({ title: "Couldn't load voice settings", variant: 'error' })
           onOpenChange(false)
         }
       },
@@ -71,7 +76,7 @@ export const VoiceSettingsDialog = ({
     return () => {
       cancelled = true
     }
-  }, [open, api, onOpenChange, toasts])
+  }, [open, api, onOpenChange])
 
   const save = useCallback(
     async (next: VoicePreferences) => {
@@ -81,7 +86,7 @@ export const VoiceSettingsDialog = ({
         await api.setVoicePreferences(next)
         setOptions({ ...options, preferences: next })
       } catch (err) {
-        toasts.add({
+        toastsRef.current.add({
           title: err instanceof Error ? err.message : "Couldn't save voice settings",
           variant: 'error',
         })
@@ -91,7 +96,7 @@ export const VoiceSettingsDialog = ({
         setSaving(false)
       }
     },
-    [api, options, saving, toasts],
+    [api, options, saving],
   )
 
   const preview = async (modelId: string, voiceId: string) => {

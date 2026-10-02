@@ -95,6 +95,7 @@ describe("Knitli Memory under the restricted-data latch", () => {
   it("the apply context reports a latch set between submit and apply", async () => {
     let applied = await withWorkspace(async (impl, overseer, facet) => {
       await impl.submitAction(MEMORY, 0, REMEMBER_ACTION, CALLER);
+      expect(impl.storage.containsRestrictedData.get()).toBe(false);
       await impl.authorizeObservation(MEMORY, RESTRICTED, CALLER);
       let [pending] = [...impl.storage.actions.list()].filter((rec: any) => rec.type === "action");
       await overseer.approveAction(pending.id);

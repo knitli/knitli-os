@@ -294,9 +294,13 @@ Intentional, reviewed differences from upstream. Keep this current.
   action is applied, through `applyAction()`'s `context`, since no queue exists then. Attestation
   is refused while a revocation is in flight, and names nobody but the owner while
   `sharingProhibited`.
-- **Vendor allowlist:** only vendors in `AUDIENCE_VENDORS` (today `messaging`) may ask; any other
-  connection's queue or apply context is refused. The answer names collaborators by profile id,
-  which undoes the opaque `observerId` design for every other gatekeeper
+- **Vendor allowlist:** only vendors in `AUDIENCE_VENDORS` (today `messaging`, `execution` and
+  `memory`) may ask; any other connection's queue or apply context is refused. `memory` is listed
+  so the memory gatekeeper can read the `containsRestrictedData` latch at submit and again at
+  apply (knitli-site's memory-collections plan, Phase 3);
+  `__tests__/knitli-memory-restricted.test.ts` pins that the latch reaches it fresh and that
+  auto-approval stays suspended on a resource memory connection. The answer names collaborators by
+  profile id, which undoes the opaque `observerId` design for every other gatekeeper
   (`ObserverRecord.observerId`, `__tests__/fork/observer-privacy.test.ts`). Every gatekeeper still
   receives an apply context -- refusing inside it keeps the upstream call site a single argument
   rather than a conditional.

@@ -13,7 +13,7 @@ import type { ActionApplyContext, WorkspaceAudience } from "@gadgets/workshop-sh
  * Access deployments), which ordinary gatekeepers deliberately never learn: they see only opaque
  * observer ids (see ObserverRecord.observerId).
  */
-export const AUDIENCE_VENDORS: ReadonlySet<string> = new Set(["messaging", "execution"]);
+export const AUDIENCE_VENDORS: ReadonlySet<string> = new Set(["messaging", "execution", "memory"]);
 
 type AccountChoices = { [gatekeeperId: number]: number };
 type ObserverRecordLike = {

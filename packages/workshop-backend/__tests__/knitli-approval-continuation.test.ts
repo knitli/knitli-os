@@ -18,7 +18,7 @@ it("allows current references to owner-origin approvals without rewriting the or
   const original = structuredClone(record);
   const waiters = currentApprovalWaiters([message(3, {type: "action", actionId: 1}), message(2, {type: "action", actionId: 1}), prompt], () => record);
   expect(waiters?.actions.map(entry => entry.id)).toEqual([1]);
-  expect(approvedActionSummary(waiters?.actions)).toBe('The user approved your action(s): "Action 1". They have now run. You don\'t need to resubmit them; continue from where you left off.');
+  expect(approvedActionSummary(waiters?.actions)).toBe('The user approved your action(s): "Action 1". They have now run. You don\'t need to resubmit them; continue from where you left off. Later reads will show the result.');
   expect(record).toEqual(original);
 });
 

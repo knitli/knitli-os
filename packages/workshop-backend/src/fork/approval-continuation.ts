@@ -31,7 +31,7 @@ export function currentApprovalWaiters(
 /** Approval summaries delimit the resumed turn, so the same references cannot resume twice. */
 export function approvedActionSummary(actions: readonly AwaitedAction[] | undefined): string | undefined {
   if (!actions?.length || actions.some(action => action.state !== "approved")) return undefined;
-  return `The changes you submitted have been approved and applied: ${actions.map(action => `"${action.description.title}"`).join(", ")}. Reads will now reflect them.`;
+  return `The user approved your action(s): ${actions.map(action => `"${action.description.title}"`).join(", ")}. They have now run. You don't need to resubmit them; continue from where you left off. Later reads will show the result.`;
 }
 
 /** Close approval-before-persistence without crossing into a subsequent user turn. */

@@ -1043,6 +1043,7 @@ class OverseerImpl implements AgentHooks {
         event: "agent.resume.model.resolve.failed",
         chatId: record.chatId, modelId: record.modelId, error: err,
       });
+      this.restartIfLoopLimited(err);
     }
 
     if (!aiModel) {
@@ -4663,6 +4664,7 @@ class OverseerImpl implements AgentHooks {
       this.logger.warn("failed to post action chat message", {
         event: "action.chat.message.post.failed", actionId, error: err,
       });
+      this.restartIfLoopLimited(err);
     }
   }
 
@@ -5388,13 +5390,15 @@ class OverseerImpl implements AgentHooks {
 
   // Restart if `err` is the runtime's loop-limit rejection (see isLoopLimitError) of one of this
   // object's own calls to a user object: once its outgoing channels hold an exhausted counter
-  // every such call is refused until this instance is replaced. Only rejections of those calls are
-  // passed in (wrapUserDo's stubs, the last-active bump and the outputs sync) -- code the workspace
-  // runs or calls (gadgets, agents, gatekeeper facets) can throw the same message at will, and
-  // must not be able to restart a shared workspace. A rejection the user object relays whole from
-  // something it called, such as a connected gatekeeper account, cannot be told apart and counts.
-  // At most one restart per instance, and none while the instance is young: that bounds how often
-  // a restart that did not clear the condition repeats.
+  // every such call is refused until this instance is replaced. Every user-object call routes its
+  // rejections here -- through wrapUserDo's stubs, or an explicit call in a catch that covers only
+  // user-object calls (resumes, association, listing refreshes, the last-active bump, the outputs
+  // sync). Code the workspace runs or calls (gadgets, agents, gatekeeper facets) can throw the
+  // same message at will, and must not be able to restart a shared workspace, so a catch shared
+  // with such code never calls this; those paths wrap the stub instead. A rejection the user
+  // object relays whole from something it called, such as a connected gatekeeper account, cannot
+  // be told apart and counts. At most one restart per instance, and none while the instance is
+  // young: that bounds how often a restart that did not clear the condition repeats.
   restartIfLoopLimited(err: unknown): void {
     if (!isLoopLimitError(err) || this.#loopLimitRestartScheduled) return;
     if (Date.now() - this.streamGeneration < LOOP_LIMIT_RESTART_MIN_AGE_MS) return;
@@ -6358,7 +6362,7 @@ class OverseerImpl implements AgentHooks {
         // emits a stream "clear" — otherwise the UI would spin forever on a block.)
         let byokRouting: UserGatewayRouting | undefined;
         if (this.ownerId) {
-          let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
+          let ownerStub = this.wrapUserDo(this.users.get(this.users.idFromString(this.ownerId)));
           let usage = await checkUsageAndBalance(this.env, ownerStub);
           if (!usage.allowed) {
             turn.setErrorType("usage_limit");
@@ -7553,7 +7557,7 @@ class OverseerImpl implements AgentHooks {
     }
 
     // Propagate to User DO.
-    let owner = this.users.get(this.users.idFromString(this.ownerId));
+    let owner = this.wrapUserDo(this.users.get(this.users.idFromString(this.ownerId)));
     let isFeatured = await owner.updateBlueprint(
       record.id, record.metadata, this.ctx.id.toString()
     );
@@ -7592,7 +7596,7 @@ class OverseerImpl implements AgentHooks {
     await this.env.BLUEPRINT_CONTENT.delete(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${record.id}`);
 
     // Delete from User DO.
-    let owner = this.users.get(this.users.idFromString(this.ownerId));
+    let owner = this.wrapUserDo(this.users.get(this.users.idFromString(this.ownerId)));
     await this.ctx.exports.AdminSettings.getByName("").deleteFeaturedBlueprint(record.id);
     await owner.deleteBlueprint(record.id);
 
@@ -7681,7 +7685,7 @@ class OverseerImpl implements AgentHooks {
       // apply the same title as the chat itself.
       if (chatId === 0 && ["Untitled Gadget", "Untitled Workspace"].includes(this.storage.title.get()) && this.ownerId) {
         this.storage.title.put(result);
-        let owner = this.users.get(this.users.idFromString(this.ownerId));
+        let owner = this.wrapUserDo(this.users.get(this.users.idFromString(this.ownerId)));
         await owner.updateTitle(this.ctx.id.toString(), result);
       }
 
@@ -7723,7 +7727,7 @@ class OverseerImpl implements AgentHooks {
       let title = gadgetTitle.trim();
       if (title && this.ownerId) {
         this.storage.title.put(title);
-        let owner = this.users.get(this.users.idFromString(this.ownerId));
+        let owner = this.wrapUserDo(this.users.get(this.users.idFromString(this.ownerId)));
         await owner.updateTitle(this.ctx.id.toString(), title);
       }
     } catch (err) {
@@ -8266,7 +8270,7 @@ class OverseerImpl implements AgentHooks {
     // User DOs are named by user identifier, and `initiator.id` is one: the initiating user for
     // "user" turns, the spawning gadget's owner for "gadget" turns (see AiChatAuthorInfo) -- the
     // same resolution executeCodeMode uses for its self-loopback props.
-    let userStub = this.users.get(this.users.idFromName(initiator.id));
+    let userStub = this.wrapUserDo(this.users.get(this.users.idFromName(initiator.id)));
     let [own, library, featured, formats] = await Promise.all([
       userStub.listBlueprints(),
       userStub.listLibraryBlueprints(),
@@ -8767,6 +8771,7 @@ class OverseerImpl implements AgentHooks {
         this.logger.warn("failed to refresh affected collaborator's workspace listing", {
           event: "shared.gadget.access.refresh.failed", gadgetId, error: result.reason,
         });
+        this.restartIfLoopLimited(result.reason);
       }
     }
   }
@@ -9081,7 +9086,7 @@ class OverseerImpl implements AgentHooks {
     }
 
     if (!this.ownerId) throw new Error("Workspace is not initialized.");
-    const ownerDo = this.users.get(this.users.idFromString(this.ownerId));
+    const ownerDo = this.wrapUserDo(this.users.get(this.users.idFromString(this.ownerId)));
     const ownerProfile = await ownerDo.whoami();
     this.ownerProfileId = ownerProfile.id;
     return ownerProfile.id;
@@ -9277,7 +9282,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       await this.ctx.blockConcurrencyWhile(async () => {
         // Verify that the owner believes it exists. The owner account must be initialized with
         // any new gadgets first before the gadget is actually opened.
-        let owner = this.impl.users.get(this.impl.users.idFromString(userId));
+        let owner = this.impl.wrapUserDo(this.impl.users.get(this.impl.users.idFromString(userId)));
         let meta = await owner.getGadget(this.ctx.id.toString());
         if (!meta) {
           throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
@@ -9320,10 +9325,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       await ensureCapsules;
     }
 
-    let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId!));
+    let owner = this.impl.wrapUserDo(
+        this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId!)));
     let clientUser = isOwner
         ? owner
-        : this.impl.users.get(this.impl.users.idFromString(userId));
+        : this.impl.wrapUserDo(this.impl.users.get(this.impl.users.idFromString(userId)));
 
     // Refresh the owner's outputs index. Pushes are best-effort, and workspaces predating the
     // index have never pushed at all, so re-syncing on open is what corrects both.
@@ -9452,7 +9458,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     // Resolve the caller.
-    let caller = this.impl.users.getByName(input.callerEmail);
+    let caller = this.impl.wrapUserDo(this.impl.users.getByName(input.callerEmail));
     let callerId = caller.id.toString();
     let callerProfile = await caller.whoamiIfExists();
     if (!callerProfile) {
@@ -9546,7 +9552,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     // Complete pending registration in the owner's UserDO.
     if (this.impl.storage.ownerRegistrationPending.get()) {
-      let owner = this.impl.users.get(this.impl.users.idFromString(ownerId));
+      let owner = this.impl.wrapUserDo(
+          this.impl.users.get(this.impl.users.idFromString(ownerId)));
       await owner.ensureGadgetRegistered(this.ctx.id.toString(), this.impl.storage.title.get());
       this.impl.storage.ownerRegistrationPending.put(false);
     }
@@ -9835,7 +9842,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // bindings created before collaborator support).
     let resolveUserId = creatorUserId ?? this.impl.ownerId;
     let initiatorUserId = this.impl.users.idFromString(resolveUserId).toString();
-    let user = this.impl.users.get(this.impl.users.idFromString(resolveUserId));
+    let user = this.impl.wrapUserDo(
+        this.impl.users.get(this.impl.users.idFromString(resolveUserId)));
     let userMeta = await user.getChatContext(config.modelId);
 
     let chatId = this.impl.nextChatId();
@@ -10733,23 +10741,38 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Snapshot every awaited action, even auto-eligible ones that didn't suspend their turn: a turn
     // suspended on a manual action can also be waiting on them. Accepted cost: one applied here
     // (e.g. a retried auto-apply failure) can resume a turn that never suspended.
-    let awaited = new Map<number, number>();  // action id -> chat id
+    // action id -> agent chat id, if the caller was an agent turn
+    let awaited = new Map<number, number | undefined>();
     for (let record of this.impl.storage.actions.pendingByGatekeeper.get(gatekeeperId)) {
-      if (record.type === "action" && record.caller.from === "agent" &&
-          record.description.awaitDecision) {
-        awaited.set(record.id, record.caller.chatId);
+      if (record.type === "action" && record.description.awaitDecision) {
+        awaited.set(record.id, record.caller.from === "agent" ? record.caller.chatId : undefined);
       }
     }
     await this.impl.drainAutoApprovals(gatekeeperId);
     // No caller awaits a drain, so log each failed resume rather than letting it end the loop.
     for (let [id, chatId] of awaited) {
       if (this.impl.storage.actions.get(id)?.state !== "approved") continue;
-      await this.#maybeResumeAfterActionDecision(chatId, id).catch(error => {
-        this.impl.logger.error("failed to resume agent after auto-approval", {
-          event: "agent.resume.failed", chatId, error,
-        });
-      });
+      if (chatId !== undefined) {
+        await this.#resumeAfterDrain(chatId, id);
+      } else {
+        // A non-agent caller has no chat of its own; fan out to the chats whose current turn
+        // waits on this action, as approveAction does.
+        for (let chat of Array.from(this.impl.storage.chatMeta.list())) {
+          if (this.impl.approvalWaiters(chat.id)?.actions.some(waiter => waiter.id === id)) {
+            await this.#resumeAfterDrain(chat.id, id);
+          }
+        }
+      }
     }
+  }
+
+  // Best-effort turn resume after a drain-approved action. Failures are logged, never thrown.
+  async #resumeAfterDrain(chatId: number, approvedId: number): Promise<void> {
+    await this.#maybeResumeAfterActionDecision(chatId, approvedId).catch(error => {
+      this.impl.logger.error("failed to resume agent after auto-approval", {
+        event: "agent.resume.failed", chatId, error,
+      });
+    });
   }
 
   async listHooks(): Promise<BoundHookInfo[]> {
@@ -11732,7 +11755,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       : Promise<CollaboratorInfo | null> {
     // Look up the user DO to check if the account exists.
     let userDoId = this.impl.users.idFromName(username);
-    let userDo = this.impl.users.get(userDoId);
+    let userDo = this.impl.wrapUserDo(this.impl.users.get(userDoId));
     let profile = await userDo.whoamiIfExists();
     if (!profile) {
       return null;
@@ -12402,7 +12425,8 @@ export class GadgetClientImpl extends RpcTarget implements GadgetClient {
     let bindings = this.impl.collectBindingMetadata(this.id);
 
     // Get gadget owner's profile for the author field.
-    let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId));
+    let owner = this.impl.wrapUserDo(
+        this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId)));
     let ownerProfile = await owner.whoami();
 
     // The blueprint exports the gadget's committed code, keyed by its head commit. (Re-read the

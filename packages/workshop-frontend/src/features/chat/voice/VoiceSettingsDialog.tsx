@@ -153,9 +153,14 @@ export const VoiceSettingsDialog = ({
                     </div>
                     <Radio.Group
                       value={options.preferences[section.role] ?? options.defaults[section.role]}
-                      onValueChange={(modelId) =>
-                        save({ ...options.preferences, [section.role]: modelId })
-                      }
+                      onValueChange={(modelId) => {
+                        const next = { ...options.preferences, [section.role]: modelId }
+                        // A speaker belongs to its TTS model: the backend validates the saved
+                        // voice against the new model and rejects the whole update when it
+                        // isn't offered there, so fall back to the new default voice.
+                        if (section.role === 'conversationTts') next.voice = null
+                        save(next)
+                      }}
                       disabled={saving}
                     >
                       <Radio.Legend className="sr-only">{section.title}</Radio.Legend>

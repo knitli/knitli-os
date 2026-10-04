@@ -548,7 +548,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     // Pure read returning level names only -- no credentials -- so it is safe to expose over RPC.
     let record = this.#resolveModel(modelId, await getGatewayModels(this.env));
     if (!record) return null;
-    return modelReasoningForConfig(record.config.provider, record.config.model);
+    let own = modelReasoningForConfig(record.config.provider, record.config.model);
+    // An added model the runtime doesn't know borrows its levels from behavesLike, as chats do
+    // (gatewayCatalogModel): without this the composer hides its effort selector.
+    if (own || record.config.behavesLike === undefined) return own;
+    return modelReasoningForConfig(record.config.provider, record.config.behavesLike);
   }
 
   async setQuickModel(id: string | null): Promise<void> {

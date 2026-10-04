@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
 import type { UserDurableObject } from "../src/user.js";
 import { AiGatewayConfig, GatewayModels } from "../src/ai-gateway.js";
+import { serializeAdminConfig } from "../src/admin-config.js";
 import { DEFAULT_ADMIN_CONFIG } from "../src/storage-schema/admin-settings-storage.js";
+import { ADMIN_CONFIG_KEY } from "../src/storage-schema/blueprints-kv.js";
 import { getModel, type ModelHandle } from "../src/ai-models.js";
 import {
   defaultReasoningEffort, isReasoningLevel, modelReasoningForConfig,
@@ -210,6 +213,36 @@ describe("getModelReasoning resolution", () => {
         { type: "agent", id: "custom-claude", name: "Custom Claude" },
         { provider: "anthropic", model: "claude-opus-5", apiToken: "secret" });
     expect(await stub.getModelReasoning("custom-claude")).toBeNull();
+  }, 30000);
+
+  it("borrows behavesLike levels for an added model the runtime doesn't know", async () => {
+    let stub = env.TEST_USER.getByName(`reasoning-behaves-like-${crypto.randomUUID()}`);
+    await runInDurableObject(stub, async (instance: UserDurableObject) => {
+      let admin = {
+        ...DEFAULT_ADMIN_CONFIG,
+        addedModels: [{
+          provider: "openai", id: "my-terra", name: "My Terra",
+          contextWindow: 128000, behavesLike: "gpt-5.6-terra",
+        }, {
+          provider: "openai", id: "my-mystery", name: "My Mystery", contextWindow: 128000,
+        }],
+      };
+      (instance as any).env = {
+        ...(instance as any).env,
+        ...gatewayEnv(),
+        BLUEPRINTS: { get: async (key: string) =>
+          key === ADMIN_CONFIG_KEY ? serializeAdminConfig(admin as never) : null },
+      };
+      // The unknown id borrows its levels; without behavesLike there is nothing to borrow.
+      expect(await instance.getModelReasoning("my-terra")).toEqual({
+        levels: ["low", "medium", "high", "xhigh", "max"], default: "medium",
+      });
+      expect(await instance.getModelReasoning("my-mystery")).toBeNull();
+      // A runtime-known model uses its own entry.
+      expect(await instance.getModelReasoning("gpt-5.6-terra")).toEqual({
+        levels: ["low", "medium", "high", "xhigh", "max"], default: "medium",
+      });
+    });
   }, 30000);
 });
 

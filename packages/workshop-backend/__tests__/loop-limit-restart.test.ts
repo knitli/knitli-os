@@ -72,8 +72,17 @@ function rejectUserCalls(impl: any, error: unknown): string[] {
     listProvidedAccounts: reject("listProvidedAccounts"),
     updatePinned: reject("updatePinned"),
     getChatContext: reject("getChatContext"),
+    whoami: reject("whoami"),
+    whoamiIfExists: reject("whoamiIfExists"),
+    getGadget: reject("getGadget"),
+    listBlueprints: reject("listBlueprints"),
+    listLibraryBlueprints: reject("listLibraryBlueprints"),
+    updateBlueprint: reject("updateBlueprint"),
+    deleteBlueprint: reject("deleteBlueprint"),
+    forgetSharedGadget: reject("forgetSharedGadget"),
+    updateSharedGadgetRole: reject("updateSharedGadgetRole"),
   };
-  impl.users = { idFromString: (id: string) => id, get: () => user };
+  impl.users = { idFromString: (id: string) => id, idFromName: (id: string) => id, get: () => user };
   return calls;
 }
 
@@ -154,7 +163,8 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
 
     await expect(client.setPinned(true)).rejects.toBe(error);
 
-    expect(calls).toEqual(["updatePinned"]);
+    // Opening the client probes the profile for presence first (also a wrapped stub).
+    expect(calls).toEqual(["whoami", "updatePinned"]);
     expect(restarts).toEqual([RESTART_REASON]);
   }));
 
@@ -179,6 +189,121 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
     expect(logged(errors, "agent.callback.start.failed")).toHaveLength(1);
     expect([...impl.storage.pendingAgentCalls.list()].map(call => call.methodName))
         .toEqual(["refused"]);
+  }));
+
+  it("a refused owner profile lookup restarts the workspace",
+      () => withImpl(async (impl, restarts) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let error = new Error(LOOP_LIMIT_MESSAGE);
+    let calls = rejectUserCalls(impl, error);
+
+    await expect(impl.getOwnerProfileId()).rejects.toBe(error);
+
+    expect(calls).toEqual(["whoami"]);
+    expect(restarts).toEqual([RESTART_REASON]);
+  }));
+
+  it("a refused blueprint library listing restarts the workspace",
+      () => withImpl(async (impl, restarts) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let error = new Error(LOOP_LIMIT_MESSAGE);
+    let calls = rejectUserCalls(impl, error);
+    // The featured/formats legs read KV, not the user object; an empty mirror keeps this about
+    // the user calls.
+    impl.env = {
+      ...impl.env,
+      BLUEPRINTS: { get: async () => null },
+    };
+
+    await expect(impl.listAvailableBlueprints({ type: "user", id: OWNER_ID, name: "Owner" }))
+        .rejects.toBe(error);
+
+    expect(calls).toEqual(["listBlueprints", "listLibraryBlueprints"]);
+    expect(restarts).toEqual([RESTART_REASON]);
+  }));
+
+  it("a refused action association restarts the workspace",
+      () => withImpl(async (impl, restarts) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let calls = rejectUserCalls(impl, new Error(LOOP_LIMIT_MESSAGE));
+    impl.storage.gatekeepers.put({
+      id: 1, resourceTitle: "Connection 1", class: {} as any,
+      creationSpec: {
+        type: "gatekeeper", vendorId: "messaging",
+        resourceUrl: "https://example.com/1", typeUrlPattern: "https://*",
+      },
+    });
+
+    // A user-caller action naming a chat posts its card through the owner's chat context.
+    // Association is fire-and-forget, so settle before asserting.
+    await impl.submitAction(1, 0, {
+      title: "Do it", description: "Does it.", descriptionIsComplete: true,
+      implementsRevert: false,
+    }, { from: "user", chatId: 7 });
+    await settle();
+
+    expect(calls).toEqual(["getChatContext"]);
+    expect(restarts).toEqual([RESTART_REASON]);
+    expect(logged(warnings, "action.chat.message.post.failed")).toHaveLength(1);
+  }));
+
+  it("a refused collaborator listing refresh restarts the workspace",
+      () => withImpl(async (impl, restarts) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let calls = rejectUserCalls(impl, new Error(LOOP_LIMIT_MESSAGE));
+
+    await impl.refreshAffectedCollaboratorListings([
+      {
+        profile: { type: "user", id: "gone", name: "Gone" }, addedBy: [],
+        oldRole: "build", newRole: null,
+      },
+      {
+        profile: { type: "user", id: "demoted", name: "Demoted" }, addedBy: [],
+        oldRole: "build", newRole: "use",
+      },
+    ]);
+
+    expect(calls).toEqual(["forgetSharedGadget", "updateSharedGadgetRole"]);
+    expect(restarts).toEqual([RESTART_REASON]);
+    expect(logged(warnings, "shared.gadget.access.refresh.failed")).toHaveLength(2);
+  }));
+
+  it("a refused blueprint propagation restarts the workspace",
+      () => withImpl(async (impl, restarts) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let error = new Error(LOOP_LIMIT_MESSAGE);
+    let calls = rejectUserCalls(impl, error);
+
+    // No code snapshot or screenshot: no R2, straight to the owner propagation.
+    await expect(impl.propagateBlueprint({ id: "bp1", metadata: { version: 1 } }))
+        .rejects.toBe(error);
+
+    expect(calls).toEqual(["updateBlueprint"]);
+    expect(restarts).toEqual([RESTART_REASON]);
+  }));
+
+  it("a refused blueprint deletion restarts the workspace",
+      () => withImpl(async (impl, restarts) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let error = new Error(LOOP_LIMIT_MESSAGE);
+    let calls = rejectUserCalls(impl, error);
+    impl.env = {
+      ...impl.env,
+      BLUEPRINTS: { delete: async () => {} },
+      BLUEPRINT_CONTENT: { delete: async () => {} },
+    };
+    Object.defineProperty(impl.ctx, "exports", {
+      value: { AdminSettings: { getByName: () => ({ deleteFeaturedBlueprint: async () => {} }) } },
+      configurable: true,
+    });
+
+    await expect(impl.deleteBlueprintPropagation({ id: "bp1", metadata: { version: 1 } }))
+        .rejects.toBe(error);
+
+    expect(calls).toEqual(["deleteBlueprint"]);
+    expect(restarts).toEqual([RESTART_REASON]);
   }));
 
   it("no other rejection restarts the workspace", () => withImpl(async (impl, restarts) => {
@@ -233,6 +358,45 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
     expect(await impl.syncOutputsTo(impl.users.get(OWNER_ID))).toBe(false);
     expect(restarts).toEqual([RESTART_REASON]);
   }, MIN_AGE_MS - 1));
+
+  it("a refused collaborator lookup restarts the workspace",
+      () => withImpl(async (impl, restarts) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let error = new Error(LOOP_LIMIT_MESSAGE);
+    let calls = rejectUserCalls(impl, error);
+    // A real build client interface over the real impl's users: addCollaborator checks the
+    // account through a wrapped stub.
+    let client = await openFakeOverseer({}, { impl: {
+      users: impl.users,
+      wrapUserDo: (stub: unknown) => impl.wrapUserDo(stub),
+    } });
+
+    await expect(client.addCollaborator("ghost", "build")).rejects.toBe(error);
+
+    // Opening the client probes the profile for presence first (also a wrapped stub).
+    expect(calls).toEqual(["whoami", "whoamiIfExists"]);
+    expect(restarts).toEqual([RESTART_REASON]);
+  }));
+
+  it("a refused first-open ownership check restarts the workspace",
+      () => withImpl(async (impl, restarts) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let error = new Error(LOOP_LIMIT_MESSAGE);
+    let calls = rejectUserCalls(impl, error);
+
+    // Owner unset: open takes the first-open path, whose ownership check is the first user
+    // call. It rejects before any client exists, so no presence probe precedes it.
+    await expect(openFakeOverseer({}, {
+      impl: {
+        ownerId: undefined,
+        users: impl.users,
+        wrapUserDo: (stub: unknown) => impl.wrapUserDo(stub),
+      },
+    })).rejects.toBe(error);
+
+    expect(calls).toEqual(["getGadget"]);
+    expect(restarts).toEqual([RESTART_REASON]);
+  }));
 
   it("an instance restarts at most once, however many calls are refused",
       () => withImpl(async (impl, restarts) => {

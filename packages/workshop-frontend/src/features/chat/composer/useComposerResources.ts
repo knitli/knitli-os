@@ -4,7 +4,7 @@ import type { GatekeeperClient, Overseer } from "@gadgets/workshop-shared/api";
 import type { ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import {
   ConnectionRestartError,
-  readCreatedConnection,
+  consumeCreatedConnection,
 } from "../../../connectionRestartRecovery";
 import { normalizeResourceUrl } from "../../../resourceMatching";
 import {
@@ -34,9 +34,10 @@ type UseComposerResourcesOptions = {
     accountId: number,
     url: string,
   ) => Promise<RpcStub<GatekeeperClient<any>> | null>;
-  // Read on every recovery attempt: a connection's creation can restart the workspace, and only
-  // the reopened overseer can reach it then (see readCreatedConnection).
-  getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>;
+  // Fork: read on every recovery attempt, since a connection's creation can restart the
+  // workspace and only the reopened overseer reaches it then (see consumeCreatedConnection).
+  // Without it, a restart-class failure is not recovered.
+  getOverseer?: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>;
   getDocumentSnapshot: () => ComposerDocumentSnapshot;
   commitDocumentEdit: <T extends { document: ComposerDocument }>(
     snapshot: ComposerDocumentSnapshot,
@@ -87,14 +88,6 @@ const currentPresentationPosition = (
   return position + shift;
 };
 
-const removeUnusedGatekeeper = async (gatekeeper: RpcStub<GatekeeperClient<any>>) => {
-  try {
-    await gatekeeper.remove();
-  } catch (error) {
-    console.error("Failed to remove unused resource connection:", error);
-  }
-};
-
 export const useComposerResources = ({
   createCapsuleGatekeeper,
   getOverseer,
@@ -118,6 +111,8 @@ export const useComposerResources = ({
   const getOverseerRef = useRef(getOverseer);
   activeUrlRef.current = activeUrl;
   getOverseerRef.current = getOverseer;
+  const getCurrentOverseer = () =>
+    getOverseerRef.current?.() ?? Promise.reject(new Error("No overseer to recover through"));
 
   useEffect(() => () => {
     operationRef.current++;
@@ -183,18 +178,9 @@ export const useComposerResources = ({
         onError("Failed to create resource connection");
         return;
       }
-      let inserted = false;
-      let restarted = false;
-      let reopened: RpcStub<GatekeeperClient<any>> | undefined;
-      try {
-        const created = await readCreatedConnection(
-          gatekeeper,
-          (connection) => connection.describe(),
-          () => getOverseerRef.current(),
-        );
-        reopened = created.reopened;
-        const { id: gatekeeperId, value: description } = created;
-        if (operationRef.current !== operation) return;
+      await consumeCreatedConnection(gatekeeper, (connection) => connection.describe(),
+          getCurrentOverseer, (gatekeeperId, description) => {
+        if (operationRef.current !== operation) return false;
         const result = commitDocumentEdit(source.snapshot, (document) => {
           const url = currentResourceUrl(source, document);
           return url && replaceComposerUrlWithCapsule(
@@ -207,21 +193,13 @@ export const useComposerResources = ({
         if (!result) {
           onError("The prompt changed before the resource could be added");
           dismissUrl();
-          return;
+          return false;
         }
-        inserted = true;
         dismissUrl();
         onSelectionRequest({ start: result.caret, end: result.caret }, result.documentRevision);
         onConnectionCreated();
-      } catch (error) {
-        restarted = error instanceof ConnectionRestartError;
-        throw error;
-      } finally {
-        // A connection lost to a restart is left in place: it may be the one recovery reaches.
-        if (!inserted && !restarted) await removeUnusedGatekeeper(reopened ?? gatekeeper);
-        reopened?.[Symbol.dispose]();
-        gatekeeper[Symbol.dispose]();
-      }
+        return true;
+      }, () => operationRef.current === operation);
     } catch (error) {
       if (operationRef.current !== operation) return;
       console.error("Failed to create capsule:", error);
@@ -270,19 +248,11 @@ export const useComposerResources = ({
 
   const attachCreated = async (gatekeeper: RpcStub<GatekeeperClient<any>>) => {
     const source = attachSnapshotRef.current;
-    let inserted = false;
-    let restarted = false;
-    let reopened: RpcStub<GatekeeperClient<any>> | undefined;
     try {
-      if (!source || attachSnapshotRef.current !== source) return;
-      const created = await readCreatedConnection(
-        gatekeeper,
-        (connection) => Promise.all([connection.describe(), connection.getCreationSpec()]),
-        () => getOverseerRef.current(),
-      );
-      reopened = created.reopened;
-      const { id: gatekeeperId, value: [description, creationSpec] } = created;
-      if (!source || attachSnapshotRef.current !== source) return;
+      await consumeCreatedConnection(gatekeeper,
+          (connection) => Promise.all([connection.describe(), connection.getCreationSpec()]),
+          getCurrentOverseer, (gatekeeperId, [description, creationSpec]) => {
+      if (!source || attachSnapshotRef.current !== source) return false;
       const vendorId = creationSpec.type === "gatekeeper" ? creationSpec.vendorId : undefined;
       const result = commitDocumentEdit(source.snapshot, (document) => {
         const position = currentPresentationPosition(source.snapshot, document, source.position);
@@ -296,19 +266,15 @@ export const useComposerResources = ({
       closeAttachModal();
       if (!result) {
         onError("The prompt changed before the resource could be added");
-        return;
+        return false;
       }
-      inserted = true;
       onSelectionRequest({ start: result.caret, end: result.caret }, result.documentRevision);
       onConnectionCreated();
+      return true;
+      }, () => attachSnapshotRef.current === source);
     } catch (error) {
-      restarted = error instanceof ConnectionRestartError;
       if (attachSnapshotRef.current !== source) return;
       throw error;
-    } finally {
-      if (!inserted && !restarted) await removeUnusedGatekeeper(reopened ?? gatekeeper);
-      reopened?.[Symbol.dispose]();
-      gatekeeper[Symbol.dispose]();
     }
   };
 

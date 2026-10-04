@@ -840,7 +840,7 @@ describe('GatekeeperModal ambient resource connections', () => {
       vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({ newGatekeeper } as unknown as RpcStub<Overseer>),
       {
         initialVendorId: 'openapi', initialResourceUrlPattern: BARE_MAIL, onClose,
-        onCreated: gk => bindCreatedConnection(gk, () => gadget, 3),
+        onCreated: async gk => { await bindCreatedConnection(gk, () => gadget, 3) },
       })
     const add = buttonNamed(rendered.container, 'Add connection')
     await act(async () => add!.click())

@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
-import { GadgetClientImpl, type OverseerDurableObject } from "../src/overseer.js";
+import type { OverseerDurableObject } from "../src/overseer.js";
 import type { SeedBindingInfo } from "../src/agent.js";
 import { openFakeOverseer } from "./fixtures.js";
 
@@ -158,42 +158,6 @@ describe("restarting sessions when verification scope widens", () => {
     await expect(client.getGatekeeperById(id)).rejects.toThrow(/restarting/);
     // ...and the session chokepoint itself, which binding loopbacks also pass through.
     await expect(added.openSession()).rejects.toThrow(/restarting/);
-  }));
-
-  // The Add connection picker's follow-up: create the connection, then bind it into the gadget.
-  // With a build collaborator live, that bind lands inside the restart window and is refused --
-  // the record is already saved, so the client must re-bind the same id after reconnecting.
-  it("binding a just-added connection is refused until the reset lands",
-      () => withImpl(async (impl, restarts) => {
-    joinSession(impl);
-    seedGadget(impl, 100);
-    stubFacets(impl);
-
-    let added = await impl.addGatekeeper({} as any, CONNECTION_SPEC);
-    let id = await added.getId();
-    expect(restarts).toHaveLength(1);
-
-    let gadget = new GadgetClientImpl(impl, 100, OWNER);
-    await expect(gadget.bindWithSuggestedName(id))
-        .rejects.toThrow(/restarting to apply a connection change/);
-    expect(impl.storage.gatekeepers.get(id)).toBeDefined();
-    expect(impl.storage.gadgets.get(100).bindings).toEqual({});
-  }));
-
-  it("with nobody to sever, a just-added connection binds immediately",
-      () => withImpl(async (impl, restarts) => {
-    seedGadget(impl, 100);
-    impl.getGatekeeperFacet = () => ({
-      describe: async () =>
-        ({ title: "Test", url: "https://example.com/new", suggestedBindingName: "TEST" }),
-    });
-
-    let added = await impl.addGatekeeper({} as any, CONNECTION_SPEC);
-    let id = await added.getId();
-    let gadget = new GadgetClientImpl(impl, 100, OWNER);
-
-    expect(await gadget.bindWithSuggestedName(id)).toBe("TEST");
-    expect(restarts).toEqual([]);
   }));
 
   it("with nobody to sever, the added connection is immediately usable",

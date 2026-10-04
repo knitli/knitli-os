@@ -316,6 +316,7 @@ export const ChatComposer = ({
     scanAt: scanForResourceUrl,
   } = useComposerResources({
     createCapsuleGatekeeper,
+    getOverseer,
     getDocumentSnapshot,
     commitDocumentEdit,
     capsuleTokenText: (description, vendorId) =>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { Dialog, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import {
   Pencil,
@@ -21,6 +21,7 @@ import {
   loadBindingCardData,
 } from './components/BlueprintBindingCard'
 import { reportIssue } from './errorReporting'
+import { bindCreatedConnection } from './connectionRestartRecovery'
 import { isImeComposing } from './keyboardEvent'
 
 interface ConnectionsProps {
@@ -120,6 +121,17 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
       setDeleteHookTarget(null)
     }
   }
+
+  // Fork: adding a connection can restart the workspace (see bindCreatedConnection), so its
+  // follow-up must reach the stubs and loader of whichever render is current, not the click's,
+  // and must go quiet if this panel unmounts while it waits for the reopen.
+  const latestRef = useRef({ gadget, loadGatekeepers })
+  latestRef.current = { gadget, loadGatekeepers }
+  const mountedRef = useRef(false)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   // Keyed on the `gadget` stub rather than `overseer`, even though the load uses both. The gadget
   // stub is derived from the overseer by an effect in the parent, so on reconnect it arrives one
@@ -461,15 +473,15 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
         spawnerEnvCandidates={spawnerEnvCandidates}
         onCreated={async (gk) => {
           try {
-            const gatekeeperId = await gk.getId()
-            await gadget.bindWithSuggestedName(gatekeeperId, chatId)
+            if (!await bindCreatedConnection(
+                gk, () => latestRef.current.gadget, chatId, () => mountedRef.current)) return
             toasts.add({
               title: chatId === undefined
                 ? 'Connection created successfully'
                 : "Connection created — accept the chat's changes to keep it",
               variant: 'success',
             })
-            await loadGatekeepers()
+            await latestRef.current.loadGatekeepers()
             onConnectionsChange?.()
           } finally {
             gk[Symbol.dispose]()

@@ -5,7 +5,7 @@ import { act, type ComponentProps, type ReactNode, useEffect, useState } from 'r
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { AmbientVendorStatus, AuthenticatedApi, ConnectedAccountsSubscriber, ConnectFlowStart, Overseer } from '@gadgets/workshop-shared/api'
+import type { AmbientVendorStatus, AuthenticatedApi, ConnectedAccountsSubscriber, ConnectFlowStart, GadgetClient, Overseer } from '@gadgets/workshop-shared/api'
 import type { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -93,6 +93,7 @@ vi.mock('./ResourceConfiguratorHost', () => ({
 }))
 
 import GatekeeperModal from './GatekeeperModal'
+import { bindCreatedConnection } from './connectionRestartRecovery'
 
 let currentApi: RpcStub<AuthenticatedApi>
 
@@ -818,5 +819,35 @@ describe('GatekeeperModal ambient resource connections', () => {
     await act(async () => add!.click())
     expect(newGatekeeper).toHaveBeenCalledWith(42, NARROWED_MAIL)
     expect(onCreated).toHaveBeenCalledWith(capability)
+  })
+
+  // Connections' onCreated: adding a connection while a build collaborator is connected restarts
+  // the workspace, so the follow-up bind is refused once. It must re-bind the same id rather than
+  // create the connection again (each creation restarts the workspace anew).
+  it('re-binds the same connection when its creation restarted the workspace', async () => {
+    const testApi = buildApi({ autoProvisionsAccount: false, initialAccount: true, vendorId: 'openapi', resources: [
+      { urlPattern: BARE_MAIL, title: 'Mail', description: 'Mail.' },
+    ] })
+    const capability = { getId: async () => 9, [Symbol.dispose]() {} }
+    const newGatekeeper = vi.fn<(accountId: number, resourceUrl: string) => Promise<typeof capability>>()
+      .mockResolvedValue(capability)
+    const bindWithSuggestedName = vi.fn<(target: number, chatId?: number) => Promise<string>>()
+      .mockRejectedValueOnce(new Error('The workspace is restarting to apply a connection change. Please retry.'))
+      .mockResolvedValue('MAIL')
+    const gadget = { bindWithSuggestedName } as unknown as RpcStub<GadgetClient>
+    const onClose = vi.fn<() => void>()
+    const rendered = await render(testApi.api,
+      vi.fn<() => Promise<RpcStub<Overseer>>>().mockResolvedValue({ newGatekeeper } as unknown as RpcStub<Overseer>),
+      {
+        initialVendorId: 'openapi', initialResourceUrlPattern: BARE_MAIL, onClose,
+        onCreated: async gk => { await bindCreatedConnection(gk, () => gadget, 3) },
+      })
+    const add = buttonNamed(rendered.container, 'Add connection')
+    await act(async () => add!.click())
+
+    await vi.waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+    expect(newGatekeeper).toHaveBeenCalledOnce()
+    expect(bindWithSuggestedName.mock.calls).toEqual([[9, 3], [9, 3]])
+    expect(toastAdd).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'error' }))
   })
 })

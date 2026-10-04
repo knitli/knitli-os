@@ -811,7 +811,8 @@ ids are facet-local, not Activity ids.
   once the id is known, the fork retries against the same id through the current stubs (the
   reopened gadget, or `getGatekeeperById` on the reopened overseer), polling every 250 ms for up
   to 30 s, and never calls `newGatekeeper` again: each creation restarts the workspace anew. A
-  connection lost to the restart is not removed as unused. Upstream leaves an unattached
+  connection lost to the restart is not removed as unused; one whose picker was cancelled
+  mid-recovery is still reached through the reopened overseer and removed, as upstream would. Upstream leaves an unattached
   connection behind and shows a generic failure.
 - **Why upstream behaves this way:** the refusal is upstream code, not ours.
   `OverseerImpl.#gatekeepersPendingRestart` and `assertGatekeeperUsable` (called from

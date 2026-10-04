@@ -84,6 +84,30 @@ describe('consumeCreatedConnection', () => {
     expect(created.dispose).toHaveBeenCalledOnce()
   })
 
+  it('still reaches and removes the connection when the caller gives up mid-recovery', async () => {
+    const created = connection(async () => { throw new Error(RESTARTING) })
+    const reopened = connection(async () => 'reopened')
+    let active = true
+    const { getOverseer, calls: [, live] } = overseers(
+      async () => {
+        // The caller is cancelled (prompt edited, modal closed) while the workspace reopens.
+        active = false
+        throw new Error(SEVERED)
+      },
+      async () => reopened.stub,
+    )
+
+    await expect(consumeCreatedConnection(created.stub, read, getOverseer, () => active))
+      .resolves.toBeUndefined()
+
+    expect(live).toHaveBeenCalledExactlyOnceWith(7)
+    expect(reopened.remove).toHaveBeenCalledOnce()
+    expect(created.remove).not.toHaveBeenCalled()
+    expect(reopened.dispose).toHaveBeenCalledOnce()
+    expect(created.dispose).toHaveBeenCalledOnce()
+    expect(reportIssue).not.toHaveBeenCalled()
+  })
+
   it('gives up at the deadline, keeps the connection and reports it', async () => {
     vi.useFakeTimers()
     const created = connection(async () => { throw new Error(RESTARTING) })

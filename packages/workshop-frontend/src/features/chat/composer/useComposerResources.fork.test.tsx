@@ -213,4 +213,17 @@ describe("useComposerResources after a connection restarts the workspace", () =>
     expect(gatekeeper.dispose).toHaveBeenCalledOnce();
     expect(harness.controls.draft.document.capsules).toEqual([]);
   });
+
+  it("discards a modal resource without reading it when no attach is pending", async () => {
+    const getId = vi.fn<() => Promise<number>>(async () => 7);
+    const gatekeeper = fakeGatekeeper(undefined, getId);
+    const harness = await renderHarness(async () => null);
+
+    await act(async () => harness.controls.resources.attachCreated(gatekeeper.stub));
+
+    expect(getId).not.toHaveBeenCalled();
+    expect(gatekeeper.remove).toHaveBeenCalledOnce();
+    expect(gatekeeper.dispose).toHaveBeenCalledOnce();
+    expect(harness.onConnectionCreated).not.toHaveBeenCalled();
+  });
 });

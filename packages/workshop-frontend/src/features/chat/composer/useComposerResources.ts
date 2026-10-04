@@ -5,6 +5,7 @@ import type { ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
 import {
   ConnectionRestartError,
   consumeCreatedConnection,
+  discardCreatedConnection,
 } from "../../../connectionRestartRecovery";
 import { normalizeResourceUrl } from "../../../resourceMatching";
 import {
@@ -199,7 +200,7 @@ export const useComposerResources = ({
         onSelectionRequest({ start: result.caret, end: result.caret }, result.documentRevision);
         onConnectionCreated();
         return true;
-      }, () => operationRef.current === operation);
+      });
     } catch (error) {
       if (operationRef.current !== operation) return;
       console.error("Failed to create capsule:", error);
@@ -248,7 +249,10 @@ export const useComposerResources = ({
 
   const attachCreated = async (gatekeeper: RpcStub<GatekeeperClient<any>>) => {
     const source = attachSnapshotRef.current;
+    if (!source) return discardCreatedConnection(gatekeeper);
     try {
+      // Fork: the `use` body below is deliberately left at upstream's indentation to keep the
+      // upstream diff small.
       await consumeCreatedConnection(gatekeeper,
           (connection) => Promise.all([connection.describe(), connection.getCreationSpec()]),
           getCurrentOverseer, (gatekeeperId, [description, creationSpec]) => {
@@ -271,7 +275,7 @@ export const useComposerResources = ({
       onSelectionRequest({ start: result.caret, end: result.caret }, result.documentRevision);
       onConnectionCreated();
       return true;
-      }, () => attachSnapshotRef.current === source);
+      });
     } catch (error) {
       if (attachSnapshotRef.current !== source) return;
       throw error;

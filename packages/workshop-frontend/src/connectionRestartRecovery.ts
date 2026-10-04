@@ -70,18 +70,25 @@ const removeUnused = async (gatekeeper: RpcStub<GatekeeperClient<any>>) => {
   }
 }
 
+/** Removes and disposes a just-created connection its caller no longer wants. */
+export async function discardCreatedConnection(created: RpcStub<GatekeeperClient<any>>) {
+  await removeUnused(created)
+  created[Symbol.dispose]()
+}
+
 /**
  * Takes ownership of a just-created connection: reads `read` from it, hands the result to `use`,
  * then disposes every stub. If the creation restarted the workspace, `read` is retried against the
- * same id through the reopened overseer. The connection is removed unless `use` returns true or
- * it was lost to the restart (ConnectionRestartError); any other failure propagates unchanged.
+ * same id through the reopened overseer -- even when the caller has meanwhile given up, since the
+ * reopened stub is the only one that can still remove it. The connection is removed unless `use`
+ * returns true (so `use` returns false for a caller that is no longer interested) or it was lost
+ * to the restart (ConnectionRestartError); any other failure propagates unchanged.
  */
 export async function consumeCreatedConnection<T>(
   created: RpcStub<GatekeeperClient<any>>,
   read: (gatekeeper: RpcStub<GatekeeperClient<any>>) => Promise<T>,
   getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>,
   use: (id: number, value: T) => boolean,
-  isActive: () => boolean = () => true,
 ): Promise<void> {
   let reopened: RpcStub<GatekeeperClient<any>> | undefined
   let used = false
@@ -103,7 +110,7 @@ export async function consumeCreatedConnection<T>(
         reopened = undefined
         reopened = await (await getOverseer()).getGatekeeperById(id)
         return read(reopened)
-      }, isActive)
+      }, () => true)
     }
     used = use(id, value)
   } catch (err) {

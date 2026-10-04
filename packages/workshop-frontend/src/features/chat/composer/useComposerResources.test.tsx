@@ -4,7 +4,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { RpcStub } from "capnweb";
-import type { GatekeeperClient } from "@gadgets/workshop-shared/api";
+import type { GatekeeperClient, Overseer } from "@gadgets/workshop-shared/api";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ComposerDocument, ComposerSelection } from "./composerDocument";
 import type { StoredComposerDraft } from "./draft/composerDraft";
@@ -70,6 +70,7 @@ describe("useComposerResources", () => {
   const renderHarness = async (
     createCapsuleGatekeeper: () => Promise<RpcStub<GatekeeperClient<any>> | null>,
     draftOptions: { storageKey?: string; logoSlot?: string } = {},
+    getOverseer: () => RpcStub<Overseer> = () => ({}) as RpcStub<Overseer>,
   ) => {
     const onSelectionRequest = vi.fn<(
       selection: ComposerSelection,
@@ -88,6 +89,7 @@ describe("useComposerResources", () => {
       });
       const resources = useComposerResources({
         createCapsuleGatekeeper,
+        getOverseer,
         getDocumentSnapshot: draft.getDocumentSnapshot,
         commitDocumentEdit: draft.commitDocumentEdit,
         capsuleTokenText: (resource) => resource.title,
@@ -340,5 +342,122 @@ describe("useComposerResources", () => {
     expect(remove).toHaveBeenCalledOnce();
     expect(harness.onConnectionCreated).not.toHaveBeenCalled();
     expect(harness.onError).not.toHaveBeenCalled();
+  });
+
+  // Adding a connection while a build collaborator is connected restarts the workspace; the
+  // record survives, so the follow-up is retried against the same id on the reopened session.
+  const RESTARTING = "The workspace is restarting to apply a connection change. Please retry.";
+
+  const restartingOverseer = (reopened: RpcStub<GatekeeperClient<any>>) => {
+    const getGatekeeperById = vi.fn<(id: number) => Promise<RpcStub<GatekeeperClient<any>>>>()
+      .mockRejectedValueOnce(new Error(RESTARTING))
+      .mockResolvedValue(reopened);
+    return {
+      getGatekeeperById,
+      overseer: { getGatekeeperById } as unknown as RpcStub<Overseer>,
+    };
+  };
+
+  it("recovers a resource whose creation restarted the workspace", async () => {
+    const gatekeeper = fakeGatekeeper(async () => { throw new Error(RESTARTING); });
+    const reopened = fakeGatekeeper();
+    const { getGatekeeperById, overseer } = restartingOverseer(reopened.stub);
+    const createCapsuleGatekeeper = vi.fn<() => Promise<RpcStub<GatekeeperClient<any>>>>(
+      async () => gatekeeper.stub);
+    const harness = await renderHarness(createCapsuleGatekeeper, {}, () => overseer);
+    act(() => {
+      harness.controls.draft.recordEdit();
+      harness.controls.draft.replaceDocument(emptyDocument(description.url));
+    });
+    act(() => harness.controls.resources.scanAt(10));
+
+    await act(async () => harness.controls.resources.createCapsule(3, "vendor"));
+
+    expect(harness.controls.draft.document.capsules).toEqual([{
+      start: 0, length: 4, gatekeeperId: 7, description, vendorId: "vendor",
+    }]);
+    expect(createCapsuleGatekeeper).toHaveBeenCalledOnce();
+    expect(getGatekeeperById).toHaveBeenCalledTimes(2);
+    expect(getGatekeeperById).toHaveBeenCalledWith(7);
+    expect(gatekeeper.remove).not.toHaveBeenCalled();
+    expect(reopened.remove).not.toHaveBeenCalled();
+    expect(gatekeeper.dispose).toHaveBeenCalledOnce();
+    expect(reopened.dispose).toHaveBeenCalledOnce();
+    expect(harness.onConnectionCreated).toHaveBeenCalledOnce();
+    expect(harness.onError).not.toHaveBeenCalled();
+  });
+
+  it("removes a resource whose metadata fails for any other reason", async () => {
+    const gatekeeper = fakeGatekeeper(async () => { throw new Error("describe failed"); });
+    const getGatekeeperById = vi.fn<(id: number) => Promise<never>>();
+    const harness = await renderHarness(
+      async () => gatekeeper.stub,
+      {},
+      () => ({ getGatekeeperById }) as unknown as RpcStub<Overseer>,
+    );
+    act(() => {
+      harness.controls.draft.recordEdit();
+      harness.controls.draft.replaceDocument(emptyDocument(description.url));
+    });
+    act(() => harness.controls.resources.scanAt(10));
+
+    await act(async () => harness.controls.resources.createCapsule(3, "vendor"));
+
+    expect(harness.controls.draft.document).toEqual(emptyDocument(description.url));
+    expect(getGatekeeperById).not.toHaveBeenCalled();
+    expect(gatekeeper.remove).toHaveBeenCalledOnce();
+    expect(gatekeeper.dispose).toHaveBeenCalledOnce();
+    expect(harness.onError).toHaveBeenCalledWith("Failed to add resource");
+  });
+
+  it("says a connection may exist when a restart loses its id", async () => {
+    const gatekeeper = fakeGatekeeper();
+    const stub = gatekeeper.stub as unknown as { getId: () => Promise<number> };
+    stub.getId = async () => { throw new Error("Peer closed WebSocket"); };
+    const harness = await renderHarness(async () => gatekeeper.stub);
+    act(() => {
+      harness.controls.draft.recordEdit();
+      harness.controls.draft.replaceDocument(emptyDocument(description.url));
+    });
+    act(() => harness.controls.resources.scanAt(10));
+
+    await act(async () => harness.controls.resources.createCapsule(3, "vendor"));
+
+    expect(harness.controls.draft.document).toEqual(emptyDocument(description.url));
+    expect(gatekeeper.remove).not.toHaveBeenCalled();
+    expect(harness.onError).toHaveBeenCalledWith(expect.stringMatching(/may have been created/));
+  });
+
+  it("recovers a modal resource whose creation restarted the workspace", async () => {
+    const dispose = vi.fn<() => void>();
+    const remove = vi.fn<() => Promise<void>>(async () => {});
+    const gatekeeper = {
+      getId: async () => 7,
+      describe: async () => { throw new Error("Peer closed WebSocket"); },
+      getCreationSpec: async () => ({ type: "gatekeeper" as const, vendorId: "vendor" }),
+      remove,
+      [Symbol.dispose]: dispose,
+    } as unknown as RpcStub<GatekeeperClient<any>>;
+    const reopenedDispose = vi.fn<() => void>();
+    const reopened = {
+      describe: async () => description,
+      getCreationSpec: async () => ({ type: "gatekeeper" as const, vendorId: "vendor" }),
+      remove,
+      [Symbol.dispose]: reopenedDispose,
+    } as unknown as RpcStub<GatekeeperClient<any>>;
+    const { getGatekeeperById, overseer } = restartingOverseer(reopened);
+    const harness = await renderHarness(async () => null, {}, () => overseer);
+    act(() => harness.controls.resources.openAttachModal(0));
+
+    await act(async () => harness.controls.resources.attachCreated(gatekeeper));
+
+    expect(harness.controls.draft.document.capsules).toEqual([{
+      start: 0, length: 4, gatekeeperId: 7, description, vendorId: "vendor",
+    }]);
+    expect(getGatekeeperById).toHaveBeenLastCalledWith(7);
+    expect(remove).not.toHaveBeenCalled();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(reopenedDispose).toHaveBeenCalledOnce();
+    expect(harness.onConnectionCreated).toHaveBeenCalledOnce();
   });
 });

@@ -41,6 +41,10 @@
       "reason": "Regression test for the fork's ambient-gatekeeper entries in listPreApprovableActions (knitli-os #37); exact path because this package's vitest include is non-recursive, so a __tests__/fork/ tree would need an upstream config edit."
     },
     {
+      "path": "packages/workshop-backend/__tests__/knitli-connection-restart-bind.test.ts",
+      "reason": "Pins upstream's bind refusal for a connection added under a live build session, and its success after the reset, which the fork's connectionRestartRecovery.ts depends on (knitli/knitli-site#640)."
+    },
+    {
       "path": "packages/workshop-backend/__tests__/knitli-ambient-connection-request.test.ts",
       "reason": "Regression test for the fork's Overseer.getAmbientGatekeeper(), which lets a chat frozen before the owner gained a singleton accept an agent's connection request for it."
     },
@@ -235,6 +239,22 @@
     {
       "path": "packages/workshop-frontend/src/GatekeeperModal.fork.test.tsx",
       "reason": "Fork ambient-resource and prefill tests, split out when upstream #505 added its own GatekeeperModal.test.tsx so that file stays byte-identical."
+    },
+    {
+      "path": "packages/workshop-frontend/src/connectionRestartRecovery.ts",
+      "reason": "Fork-owned recovery for a picker's follow-up on a connection whose creation restarted the workspace (knitli/knitli-site#640); Connections.tsx and useComposerResources.ts call it."
+    },
+    {
+      "path": "packages/workshop-frontend/src/connectionRestartRecovery.test.ts",
+      "reason": "Regression test for the fork-owned connectionRestartRecovery.ts."
+    },
+    {
+      "path": "packages/workshop-frontend/src/Connections.fork.test.tsx",
+      "reason": "Regression test for Connections' fork wiring of connectionRestartRecovery.ts, kept out of upstream test files."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/chat/composer/useComposerResources.fork.test.tsx",
+      "reason": "Regression test for the composer's fork wiring of connectionRestartRecovery.ts, so upstream's useComposerResources.test.tsx stays byte-identical."
     },
     {
       "path": "packages/gatekeeper-linear/__tests__/workerd/oauth-link.test.ts",

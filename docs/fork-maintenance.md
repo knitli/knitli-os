@@ -796,6 +796,43 @@ ids are facet-local, not Activity ids.
 - **At sync:** Tier 2. If upstream reshapes `openSession()`, reapply the one guarded line after
   the final `assertGatekeeperUsable`.
 
+### A new connection survives the restart its creation triggers
+
+- **Where:** fork-owned `packages/workshop-frontend/src/connectionRestartRecovery.ts`, called from
+  three upstream files: `Connections.tsx` (the Add connection `onCreated`, plus a latest-render
+  ref and an unmount guard), `features/chat/composer/useComposerResources.ts` (`createCapsule`
+  and `attachCreated` go through `consumeCreatedConnection`; a new optional `getOverseer`
+  option, whose absence keeps upstream's behaviour) and `features/chat/composer/ChatComposer.tsx`
+  (passes `getOverseer` through).
+- **Introduced:** knitli/knitli-site#640
+- **What:** adding a connection while a "build" collaborator is connected restarts the workspace.
+  The record is saved first, then the picker's follow-up (Connections' `bindWithSuggestedName`,
+  the composer's `describe`/`getCreationSpec`) is refused or severed. On a restart-class failure
+  once the id is known, the fork retries against the same id through the current stubs (the
+  reopened gadget, or `getGatekeeperById` on the reopened overseer), polling every 250 ms for up
+  to 30 s, and never calls `newGatekeeper` again: each creation restarts the workspace anew. A
+  connection lost to the restart is not removed as unused. Upstream leaves an unattached
+  connection behind and shows a generic failure.
+- **Why upstream behaves this way:** the refusal is upstream code, not ours.
+  `OverseerImpl.#gatekeepersPendingRestart` and `assertGatekeeperUsable` (called from
+  `GadgetClientImpl.bindWithSuggestedName` and `getGatekeeperById`) block a connection added
+  under a live build session until `scheduleAccessRestart`'s reset lands, and upstream's own
+  picker does not retry. This is an upstream bug; the fix belongs upstream, and a sync that
+  reshapes those files could silently drop this patch.
+- **Known cost:** if the session drops before `getId()` returns, the id is lost and the user is
+  told to try again, which creates a second connection; nothing lists unbound connections and
+  `newGatekeeper` does not dedupe, so the first is orphaned. The same orphan is left when
+  recovery passes its 30 s deadline (reported as `do-reset.connection.restart-recovery`). Closing
+  it needs a host RPC to list connections, or an idempotent `newGatekeeper`. No attempt has its
+  own timeout, so a reconnect that never resolves stalls the retry as it stalls everything else.
+- **Test:** `packages/workshop-backend/__tests__/knitli-connection-restart-bind.test.ts` pins the
+  host contract (refused before the reset, bound after it); `connectionRestartRecovery.test.ts`,
+  `Connections.fork.test.tsx`, `features/chat/composer/useComposerResources.fork.test.tsx` and
+  the re-bind case in `GatekeeperModal.fork.test.tsx` pin the client.
+- **At sync:** Tier 2 for the three upstream call sites. If upstream starts retrying the
+  follow-up itself, or stops refusing the bind, drop the fork module and its call sites; if it
+  reshapes `onCreated`, `createCapsule` or `attachCreated`, reapply the single call each.
+
 ### The test watchdog's wall-clock cap can be rebudgeted by the environment
 
 - **Where:** `scripts/with-timeout.ts` (`parseArgs` and `parseMaxOverride`),

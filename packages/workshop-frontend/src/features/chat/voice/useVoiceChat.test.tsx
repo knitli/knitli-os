@@ -77,7 +77,7 @@ describe("useVoiceChat", () => {
     useLayoutEffect(() => { onLayout?.(); });
     return showVoiceControls ? <ChatComposer
       createCapsuleGatekeeper={async () => null} getOverseer={() => ({} as RpcStub<Overseer>)}
-      onSend={() => {}} isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+      onSend={() => {}} isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
       conversationDraft={{ text: result.state.pendingText, readOnly: false, canSend: true,
         onChange: result.setPendingText, onSend: result.sendPending }}
     /> : null;

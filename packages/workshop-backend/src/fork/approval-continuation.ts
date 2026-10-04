@@ -1,5 +1,5 @@
 import type { AiChatMessage, AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
-import type { ActionRecord } from "../overseer";
+import type { ActionRecord } from "../storage-schema/overseer-storage.js";
 
 type AwaitedAction = Extract<ActionRecord, { type: "action" }>;
 /** Existing chat boundary and referenced action records for one current turn. */

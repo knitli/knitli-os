@@ -155,6 +155,28 @@ describe('VoiceSettingsDialog', () => {
         expect.objectContaining({ dictationStt: FLUX }))
   })
 
+  it('switching the conversation voice model clears the speaker', async () => {
+    const api = apiStub({ conversationTts: '@cf/deepgram/aura-2-en', voice: 'zeus' })
+    api.options.models.push({
+      modelId: '@cf/acme/vox', kind: 'tts', name: 'Vox', description: 'Another voice.',
+      enabled: true, voices: [{ id: 'ori', name: 'Ori' }], defaultVoice: 'ori',
+    })
+    await render(api)
+    await act(async () => radio(host, 'Vox').click())
+    // The old speaker isn't offered by the new model; saving it along would make the
+    // backend reject the whole update, so the pick falls back to the default voice.
+    expect(api.setVoicePreferences).toHaveBeenCalledWith(
+        expect.objectContaining({ conversationTts: '@cf/acme/vox', voice: null }))
+  })
+
+  it('switching a transcription model keeps the speaker', async () => {
+    const api = apiStub({ voice: 'zeus' })
+    await render(api)
+    await act(async () => radio(host, 'Flux').click())
+    expect(api.setVoicePreferences).toHaveBeenCalledWith(
+        expect.objectContaining({ dictationStt: FLUX, voice: 'zeus' }))
+  })
+
   it('resetting clears every pick back to the defaults', async () => {
     const api = apiStub({ dictationStt: FLUX, voice: 'zeus' })
     await render(api)

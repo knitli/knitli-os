@@ -335,6 +335,11 @@ Intentional, reviewed differences from upstream. Keep this current.
   implementations and fakes still typecheck and gatekeepers that ignore `context` are unaffected;
   a gatekeeper must treat an absent method or context as "no attestation", never as an empty
   audience. Pinned by `packages/workshop-backend/__tests__/knitli-workspace-audience.test.ts`.
+- **2026-10-04 sync:** upstream #639 moved `ObserverRecord` into
+  `storage-schema/overseer-storage.ts`; `admittedAs` moved with it (same field, new file). The
+  `GatekeeperRecord` fork fields (`initializing`, `ownerOnly`) and the
+  `prohibitWorkspaceSharing` singleton moved likewise; key helpers (`chatKey`,
+  `chatChangeClientKey`) are byte-identical to the inlines they replaced.
 - **Known residuals:**
   - *Removed connections.* Build scope is computed from current connections, so data observed
     through a connection that has since been removed is no longer checked by anyone admitted
@@ -344,6 +349,28 @@ Intentional, reviewed differences from upstream. Keep this current.
     window is admitted. The attestation can then include a collaborator whom that observation
     should have excluded. The fix upstream proposes there (an in-memory map of pending ids) would
     close both.
+
+### Approval-turn continuation is merged with upstream #599 (2026-10-04)
+
+- **Where:** `#maybeResumeAfterActionDecision` and its `approveAction` call site in
+  `packages/workshop-backend/src/overseer.ts`; pure helpers in
+  `packages/workshop-backend/src/fork/approval-continuation.ts` (Tier 1).
+- **What:** upstream #599 adopted the same behavior the fork built (resume a turn suspended on
+  `awaitDecision` once its awaited actions are approved), so the method is now upstream's
+  structure — chat-log scan, `approvedId` scoping, all-decided/all-approved gates, auto-approval
+  drain — with four fork deltas: the resume summary keeps the fork text (#53: models mishandle
+  the "changes approved and applied" framing); the scan takes agent-authored cards with no
+  caller filter, so a turn awaiting a user/OpenAPI-caller action resumes when it is approved;
+  non-agent approvals fan out across chats (agent callers resume directly); and a waiter
+  stability recheck around the profile fetch aborts if the turn moved on. The consumed-waiter
+  snapshot in `consumeCapturedActions` is recorded before upstream's awaited re-check, which
+  the turn-end recheck depends on.
+- **Why:** neither side subsumes the other — upstream fixed the stale-turn scoping the fork
+  lacked, and the fork covers cross-caller approvals, the summary wording, and the
+  submit-during-fetch race that upstream leaves open.
+- **At sync:** Tier 2. If upstream reshapes the resume path again, keep the four deltas and
+  the record-before-recheck ordering; `#53` and `knitli-approval-continuation.test.ts` (which
+  pins the pure helpers) say what "still working" means.
 
 ### `open()` routes sharing and revocation guards through the impl
 
@@ -401,6 +428,10 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **What:** `gatekeeper-ai-executor` is a gatekeeper by name and ships in the release bundle, but gets
   no preview worker, no router mount and no backend service binding.
 - **Why:** The outer deployment binds it directly; there is nothing for the router to route to.
+- **2026-10-04 sync:** it still keeps a `wrangler.jsonc` (generated from its fork-owned
+  `cloudflare.config.ts`, which the config generator requires beside every worker) for local dev,
+  types, and tests; the discovery filter excludes it by name, so the generated file changes
+  nothing about preview/dev routing.
 
 ### AI Executor release-manifest classification
 
@@ -410,18 +441,28 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **Why:** Both are data-only additions to existing upstream sets — the cheapest possible shape for
   an upstream edit, and the shape to aim for elsewhere.
 
-### Deployment wrangler files are fork-managed upstream files (Tier 2)
+### Deployment worker configs are fork-managed upstream files (Tier 2)
 
-- **Where:** `wrangler.jsonc`, `packages/workshop-backend/wrangler.jsonc`,
-  `packages/gatekeeper-context/wrangler.jsonc`, `packages/router/wrangler.jsonc`
-- **What:** deployment bindings, vars, and limits differ from upstream's (assets and AI bindings,
-  time limits, context artifacts).
-- **Why:** this deployment binds workers differently than upstream's; the files cannot be
-  byte-identical.
+- **Where:** `cloudflare.config.ts`, `packages/workshop-backend/cloudflare.config.ts`,
+  `packages/gatekeeper-context/cloudflare.config.ts`, `packages/router/cloudflare.config.ts`
+  (plus the fork-owned `packages/gatekeeper-ai-executor/cloudflare.config.ts`, Tier 1 by
+  directory). The `wrangler.jsonc` beside each is generated — never edited by hand.
+- **What:** deployment bindings, vars, and limits differ from upstream's: backend assets
+  (`ASSETS` binding + `assets` + `assetsDirectory`) with `limits.cpuMs: 300000` and smart
+  placement, the backend `v4` `VoiceSession` migration, context's remote `ARTIFACTS` binding,
+  and router smart placement. Each delta carries a `// Fork:` comment in the config.
+- **Why:** this deployment binds workers differently than upstream's; the generated files cannot
+  be byte-identical.
 - **How it is kept:** Tier 2, resolved by hand at each sync — usually take ours, but an upstream
   feature (a new binding, a raised limit) is reconciled in, not dropped. These were briefly listed
   as Tier 1 in `ae28b29b`, which only exempted take-ours resolutions from the dropped-hunk check
   without avoiding any conflict; the collision check now fails that shape.
+- **2026-10-04 sync:** upstream #597 made `cloudflare.config.ts` the source of truth with
+  `wrangler.jsonc` generated (`pnpm configs:check` fails a hand edit), so the fork deltas moved
+  from the four `wrangler.jsonc` files into the configs (`limits`/`placement`/`artifacts` are all
+  expressible in `@cloudflare/config`, no generator extension needed). The executor needed a new
+  config or the generator throws; it keeps its `2026-02-02` compatibility date via a direct
+  `defineConfig` (bumping it would change runtime semantics unreviewed).
 
 ### Named `$defs` aliases in `generateSessionTypes`
 
@@ -620,10 +661,19 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   wholesale; the fork's `getModelReasoning` sits beside it unchanged. Upstream #595 wrapped
   the turn body in `traceAgentTurn`; the effort/prompt-ref reads and `runAgent` options are
   re-applied inside the traced callback.
+- **2026-10-04 sync:** upstream #609 sends the system prompt as static + dynamic blocks
+  (`SystemMessage` with `content`/`sections`); the preset swap now feeds slot 0 of that form,
+  so each preset is its own cache prefix and the `knitli-chat-prompt` prefix assertions hold
+  unchanged. Upstream's pi 0.99 compat work added its own `supportsReasoningEffort` after the
+  catalog spread; the fork's pre-spread twin was deleted (catalog-wins became force-true —
+  a preset effort can no longer be silently vetoed by catalog data). Upstream #611's
+  `SelectedModel` object form is adopted in the composer tests; #616's gateway-model
+  management is disjoint (chat LLMs vs speech models), and `getModelReasoning` was ported
+  onto the new `#resolveModel` helper.
 
 ### Gatekeeper resources are opt-in (`enabledResources`)
 
-- **Where:** `AdminConfig` in `packages/workshop-backend/src/admin-config.ts`,
+- **Where:** `AdminConfig` in `packages/workshop-backend/src/storage-schema/admin-settings-storage.ts`,
   `normalizeAdminConfig`/`parseAdminConfig`, the `AdminSettings` resource toggles, and the
   `isResourceDisabled`/`filterEnabledResources` readers
 - **Introduced:** #24
@@ -636,6 +686,16 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 - **2026-09-30 sync:** upstream #586's admin-policy test provisions its account ambiently
   and expects resource refusal at minting; the fork keeps the ambient exemption (next entry) and
   adapts the test to connect a regular account for the resource assertions instead.
+- **2026-10-04 sync:** upstream #639 moved `AdminConfig`/`DEFAULT_ADMIN_CONFIG` into
+  `storage-schema/`; the fork fields (`enabledResources`, `promptPresets`, `voice`) moved with
+  it, and the normalize function is the union of the fork parsers with #616's gateway-model
+  sanitizers. `disabledResources` now appears nowhere outside comments.
+- **2026-10-04 sync, test-import trap:** #639 also moved `ADMIN_CONFIG_KEY`,
+  `FEATURED_BLUEPRINTS_KEY`, and `serializeFeaturedBlueprints` out of `blueprint-archive.ts`
+  without a re-export. Backend `tsconfig`s only include `src`, so the stale imports in eight
+  fork test files passed `tsc` and became silent `undefined`s at runtime (the bundler does no
+  link-check). After any upstream move, grep the fork's test files for imports from the old
+  module — a green typecheck does not cover them.
 
 ### Ambient-provisioned accounts bypass resource policy at minting
 
@@ -854,6 +914,8 @@ ids are facet-local, not Activity ids.
   fork-owned module, because that file is the only place that can hold it: the module runs on import
   and cannot be imported for a helper, and the override reuses its `parseSeconds` and `fail`.
 - **Test:** `scripts/fork/with-timeout-max-override.test.ts` (Tier 1) runs the real watchdog with
-  the variable set, unset, empty, at the ceiling and invalid, and pins the `env` declaration.
+  the variable set, unset, empty, at the ceiling and invalid, and pins the `cache.env` declaration.
 - **At sync:** Tier 2. If upstream gives `with-timeout.ts` or `withTestTimeout` its own wall-clock
   override, drop ours and keep theirs; otherwise reapply the two lines in `parseArgs`.
+- **2026-10-04 sync:** upstream moved the task env declaration under `cache.env` (vp 1.0.0
+  schema); the override list and test pin the nested form now. Nothing else changed.

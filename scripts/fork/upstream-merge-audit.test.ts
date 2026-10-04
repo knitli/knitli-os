@@ -56,6 +56,13 @@ test("fork-owned trees are exempt, upstream-owned files are not", () => {
   assert.equal(isForkOwned("packages/workshop-backend/src/overseer.ts"), false);
 });
 
+test("root-file entries match exactly, not as prefixes", () => {
+  assert.equal(isForkOwned("CLAUDE.md"), true);
+  assert.equal(isForkOwned(".claude"), true);
+  assert.equal(isForkOwned("CLAUDE.mdx"), false);
+  assert.equal(isForkOwned(".claude/settings.json"), false);
+});
+
 test("only files the normaliser can read are format-checked", () => {
   for (const path of ["src/a.ts", "src/a.tsx", "b.mjs", "c.js"]) {
     assert.equal(isSourceFile(path), true, path);
@@ -139,6 +146,9 @@ function scratchRepo(): string {
   run("init", "-q", "-b", "main");
   run("config", "user.email", "test@example.invalid");
   run("config", "user.name", "Test");
+  // The ambient gitconfig may sign commits; the scratch repo has no agent (and vp strips the
+  // env that would reach one), so opt out explicitly.
+  run("config", "commit.gpgsign", "false");
   run("commit", "-q", "--allow-empty", "-m", "base");
   run("branch", "upstream");
   run("branch", "feature");
@@ -326,6 +336,7 @@ test("a shallow boundary reports a false 'no', which must not be trusted", () =>
     run(origin, "init", "-q", "-b", "main");
     run(origin, "config", "user.email", "test@example.invalid");
     run(origin, "config", "user.name", "Test");
+    run(origin, "config", "commit.gpgsign", "false");
     run(origin, "commit", "-q", "--allow-empty", "-m", "A");
     const ancestorCommit = run(origin, "rev-parse", "HEAD");
     run(origin, "branch", "side");

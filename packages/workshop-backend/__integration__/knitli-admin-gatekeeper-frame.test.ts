@@ -5,7 +5,7 @@ import type { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { vi } from 'vitest';
 import { AdminGatekeeperApps } from '../src/fork/admin-gatekeeper-apps.js';
-import { ADMIN_CONFIG_KEY } from '../src/blueprint-archive.js';
+import { ADMIN_CONFIG_KEY } from '../src/storage-schema/blueprints-kv.js';
 import { MAX_ADMIN_CONFIG_BYTES, MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES, MAX_ENABLED_RESOURCES_PER_VENDOR } from '../src/admin-settings.js';
 
 type Call = { vendorId: string; method: string; args: unknown[] };

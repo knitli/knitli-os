@@ -5,9 +5,8 @@ import type {
   AiChatAuthorInfo, AiChatMessage, AiModelConfig,
 } from "@gadgets/workshop-shared/api";
 import * as Y from "yjs";
-import {
-  DEFAULT_ADMIN_CONFIG, serializeAdminConfig,
-} from "../src/admin-config.js";
+import { serializeAdminConfig } from "../src/admin-config.js";
+import { DEFAULT_ADMIN_CONFIG } from "../src/storage-schema/admin-settings-storage.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import {
   runAgent, type AgentHooks, type ModelStreamOptions, type WorktreeTurnAccess,

@@ -4,11 +4,11 @@ import { runInDurableObject } from "cloudflare:test";
 import type {
   AiChatAuthorInfo, AiChatMessage, PromptRef,
 } from "@gadgets/workshop-shared/api";
-import { ADMIN_CONFIG_KEY } from "../src/blueprint-archive.js";
+import { ADMIN_CONFIG_KEY } from "../src/storage-schema/blueprints-kv.js";
 import {
-  DEFAULT_ADMIN_CONFIG, formatInstanceInstructions, parseAdminConfig,
-  serializeAdminConfig,
+  formatInstanceInstructions, parseAdminConfig, serializeAdminConfig,
 } from "../src/admin-config.js";
+import { DEFAULT_ADMIN_CONFIG } from "../src/storage-schema/admin-settings-storage.js";
 import type { AdminSettings } from "../src/admin-settings.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import {

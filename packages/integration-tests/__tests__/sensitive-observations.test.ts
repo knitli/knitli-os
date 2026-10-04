@@ -23,7 +23,7 @@ import {
   type PublicApi,
 } from "@gadgets/workshop-shared/api";
 import {
-  startTestGatekeeperHarness, TEST_GATEKEEPER_WORKER, TEST_VENDOR_ID, type Harness,
+  startTestGatekeeperHarness, TEST_VENDOR_ID, testControl, type Harness,
 } from "../src/harness.js";
 import type { TestSession } from "../fixtures/gatekeeper-test/src/test-gatekeeper.js";
 import {
@@ -74,15 +74,10 @@ async function provisionAccount(api: RpcStub<AuthenticatedApi>): Promise<Connect
  * Tell the fixture gatekeeper whether to admit `label` as an observer -- everywhere, or (with
  * `resourceUrl`) at one bound resource only, which wins over the account-wide outcome.
  */
-async function setVerifyOutcome(
+function setVerifyOutcome(
     label: string, outcome: { allow: true } | { allow: false; reason: string },
     resourceUrl?: string): Promise<void> {
-  const res = await harness.fetchWorker(
-    TEST_GATEKEEPER_WORKER, "http://gatekeeper-test.test/control/verify-outcome",
-    { method: "POST", body: JSON.stringify({ label, resourceUrl, ...outcome }) });
-  if (res.status !== 204) {
-    throw new Error(`Setting the verify outcome failed with ${res.status}: ${await res.text()}`);
-  }
+  return testControl(harness, "verify-outcome", { label, resourceUrl, ...outcome });
 }
 
 type Workspace = {
@@ -251,7 +246,7 @@ describe("sensitive observations", () => {
       expect(incomplete.type === "action" && incomplete.description.descriptionIsComplete)
           .toBeFalsy();
       await ws.overseer.rejectAction(incomplete.id);
-      await expect(incompleteWrite).rejects.toThrow();
+      await expect(incompleteWrite).resolves.toEqual(expect.any(Number));
 
       // A write back to the producing connection is held for approval and goes through once
       // approved...
@@ -277,7 +272,7 @@ describe("sensitive observations", () => {
         return entries.length > 0 ? entries : null;
       });
       await ws.overseer.rejectAction(otherPending.id);
-      await expect(otherWrite).rejects.toThrow();
+      await expect(otherWrite).resolves.toEqual(expect.any(Number));
 
       // Reads -- sensitive or not -- keep working.
       await expect(ws.session.readValue()).resolves.toBe(42);

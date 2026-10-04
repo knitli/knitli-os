@@ -6,8 +6,8 @@ import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import type { Collection, Singleton } from "@gadgets/typed-storage";
 import type { Overseer } from "@gadgets/workshop-shared/api";
-import { OverseerDurableObject, makeOverseerStorage } from "../src/overseer.js";
-import type { ActionRecord } from "../src/overseer.js";
+import { OverseerDurableObject } from "../src/overseer.js";
+import { makeOverseerStorage, type ActionRecord } from "../src/storage-schema/overseer-storage.js";
 import { makeMockStorage } from "./mock-storage.js";
 
 /**
@@ -73,12 +73,19 @@ export function putAction(
  */
 export async function openFakeOverseer(
     storage: object,
-    opts: { role?: "build" | "use", exports?: object, impl?: object, implOverrides?: object } = {}): Promise<Overseer> {
+    opts: { role?: "build" | "use", exports?: object, impl?: object, implOverrides?: object,
+            ctx?: object } = {}): Promise<Overseer> {
   let role = opts.role ?? "build";
   let ownerId = "owner-id";
   let userId = role === "build" ? ownerId : "viewer-id";
   let overseer = {
     open: OverseerDurableObject.prototype.open,
+    // First-open ownership checks run inside blockConcurrencyWhile; run it inline.
+    ctx: {
+      id: { toString: () => "workspace-id" },
+      blockConcurrencyWhile: (fn: () => Promise<void>) => fn(),
+      ...opts.ctx,
+    },
     impl: {
       ownerId,
       assertGatekeeperUsable: () => {},
@@ -90,6 +97,7 @@ export async function openFakeOverseer(
       ensureObserver: async () => {},
       syncOutputsTo: async () => {},
       recordGadgetAnalytics: () => {},
+      wrapUserDo: (stub: unknown) => stub,
       // What open() consults for a non-owner's role: the permission-graph lookup and observer
       // verification in one. The sharing manager is still reached, but only to redeem a share key,
       // which these tests never pass.
@@ -121,7 +129,7 @@ export async function openFakeOverseer(
       }),
       ...opts.impl,
     },
-  } satisfies Pick<OverseerDurableObject, "open"> & { impl: object };
+  } satisfies Pick<OverseerDurableObject, "open"> & { impl: object, ctx: object };
   Object.assign(overseer.impl, opts.implOverrides);
   // Partial sharing fakes still pass through the fork's synchronous permission preflights.
   const getSharingManager = overseer.impl.getSharingManager;

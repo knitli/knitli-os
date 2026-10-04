@@ -22,7 +22,8 @@ function commit(files: Record<string, string>): string {
     writeFileSync(join(repo, path), content);
   }
   git("add", "-A");
-  git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c");
+  git("-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+    "commit", "-q", "--allow-empty", "-m", "c");
   return git("rev-parse", "HEAD");
 }
 

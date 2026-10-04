@@ -1,8 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
 import type { UserDurableObject } from "../src/user.js";
-import { AiGatewayConfig } from "../src/ai-gateway.js";
+import { AiGatewayConfig, GatewayModels } from "../src/ai-gateway.js";
+import { serializeAdminConfig } from "../src/admin-config.js";
+import { DEFAULT_ADMIN_CONFIG } from "../src/storage-schema/admin-settings-storage.js";
+import { ADMIN_CONFIG_KEY } from "../src/storage-schema/blueprints-kv.js";
 import { getModel, type ModelHandle } from "../src/ai-models.js";
 import {
   defaultReasoningEffort, isReasoningLevel, modelReasoningForConfig,
@@ -74,6 +78,20 @@ describe("resolveThinkingLevelMap", () => {
     expect(resolveThinkingLevelMap(
         "cloudflare-workers-ai", "@cf/unknown/model", undefined)).toBeUndefined();
     expect(resolveThinkingLevelMap("ollama", "muse-glimmer", undefined)).toBeUndefined();
+  });
+
+  it("strips a string `off` only from repaired maps, without mutating input", () => {
+    // pi sends a string map.off as the request's effort when no effort is requested, so a
+    // repaired map (pi's own lookup, which the descriptor didn't carry) must not name an
+    // effort on turns that asked for none -- while a caller-provided map passes through
+    // byte-identical, off included.
+    let repaired = resolveThinkingLevelMap("openai", "gpt-6-sol", undefined);
+    expect(repaired).toBeDefined();
+    expect(repaired).not.toHaveProperty("off");
+    let catalog = { off: "none", low: "low", high: "high" };
+    expect(resolveThinkingLevelMap(
+        "cloudflare-workers-ai", DEEPSEEK_PRO, catalog)).toBe(catalog);
+    expect(catalog).toEqual({ off: "none", low: "low", high: "high" });
   });
 });
 
@@ -157,7 +175,8 @@ describe("modelReasoningForConfig", () => {
 
 describe("getModelReasoning resolution", () => {
   it("resolves gateway built-in ids through the fork table", () => {
-    let gwConfig = new AiGatewayConfig(gatewayEnv());
+    let models =
+        new GatewayModels(new AiGatewayConfig(gatewayEnv()), DEFAULT_ADMIN_CONFIG);
     for (let [id, expected] of [
       [GLM_FLASH, { levels: ["low", "high", "max"], default: "high" }],
       [DEEPSEEK_PRO, { levels: ["high", "max"], default: "high" }],
@@ -165,13 +184,13 @@ describe("getModelReasoning resolution", () => {
         levels: ["low", "medium", "high", "xhigh", "max"], default: "medium",
       }],
     ] as const) {
-      let record = gwConfig.resolveModel(id);
+      let record = models.resolve(id);
       expect(record).toBeDefined();
       expect(modelReasoningForConfig(record!.config.provider, record!.config.model))
           .toEqual(expected);
     }
-    expect(gwConfig.resolveModel("claude-opus-5")).toBeDefined();
-    let claude = gwConfig.resolveModel("claude-opus-5")!;
+    expect(models.resolve("claude-opus-5")).toBeDefined();
+    let claude = models.resolve("claude-opus-5")!;
     expect(modelReasoningForConfig(claude.config.provider, claude.config.model)).toBeNull();
   });
 
@@ -194,6 +213,36 @@ describe("getModelReasoning resolution", () => {
         { type: "agent", id: "custom-claude", name: "Custom Claude" },
         { provider: "anthropic", model: "claude-opus-5", apiToken: "secret" });
     expect(await stub.getModelReasoning("custom-claude")).toBeNull();
+  }, 30000);
+
+  it("borrows behavesLike levels for an added model the runtime doesn't know", async () => {
+    let stub = env.TEST_USER.getByName(`reasoning-behaves-like-${crypto.randomUUID()}`);
+    await runInDurableObject(stub, async (instance: UserDurableObject) => {
+      let admin = {
+        ...DEFAULT_ADMIN_CONFIG,
+        addedModels: [{
+          provider: "openai", id: "my-terra", name: "My Terra",
+          contextWindow: 128000, behavesLike: "gpt-5.6-terra",
+        }, {
+          provider: "openai", id: "my-mystery", name: "My Mystery", contextWindow: 128000,
+        }],
+      };
+      (instance as any).env = {
+        ...(instance as any).env,
+        ...gatewayEnv(),
+        BLUEPRINTS: { get: async (key: string) =>
+          key === ADMIN_CONFIG_KEY ? serializeAdminConfig(admin as never) : null },
+      };
+      // The unknown id borrows its levels; without behavesLike there is nothing to borrow.
+      expect(await instance.getModelReasoning("my-terra")).toEqual({
+        levels: ["low", "medium", "high", "xhigh", "max"], default: "medium",
+      });
+      expect(await instance.getModelReasoning("my-mystery")).toBeNull();
+      // A runtime-known model uses its own entry.
+      expect(await instance.getModelReasoning("gpt-5.6-terra")).toEqual({
+        levels: ["low", "medium", "high", "xhigh", "max"], default: "medium",
+      });
+    });
   }, 30000);
 });
 

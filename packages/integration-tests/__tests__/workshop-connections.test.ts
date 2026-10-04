@@ -1,18 +1,19 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { RpcStub } from "capnweb";
-import { z } from "zod";
-import type { AiChatMessage } from "@gadgets/workshop-shared/api";
+import type { AiChatMessage, ConnectedAccountsSubscriber } from "@gadgets/workshop-shared/api";
+import type { AccountDescription } from "@gadgets/workshop-shared/gatekeeper";
 import type { TestSession } from "../fixtures/gatekeeper-test/src/test-gatekeeper.js";
 import { loadAllChatHistory, openAgentSession } from "../src/agent-session.js";
 import {
-  startTestGatekeeperHarness, TEST_GATEKEEPER_WORKER, TEST_VENDOR_ID, type Harness,
+  startTestGatekeeperHarness, TEST_VENDOR_ID, testActionState, testControl, type Harness,
 } from "../src/harness.js";
 import {
   SCRIPTED_MODEL_ID, scriptedModelRouter, type ChatCompletionStep, type RoutedScriptedModel,
 } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import {
-  accountLabel, restartWorkspace, waitFor, waitForIdleChat, withOwnerWorkspace,
+  accountLabel, connect, listConnectedAccounts, nextUsernames, restartWorkspace, RpcTarget,
+  signUp, stubFor, waitFor, waitForIdleChat, withOwnerWorkspace, type ConnectedAccount,
 } from "../src/rpc-client.js";
 
 let harness: Harness;
@@ -59,21 +60,7 @@ const bindRequestedThing: ChatCompletionStep = {
   },
 };
 
-const TEST_ACTION_STATE = z.object({
-  pending: z.array(z.object({ id: z.number(), value: z.number() })),
-  value: z.number().optional(),
-  applyCount: z.number(),
-});
-
-async function actionState(label: string) {
-  const response = await harness.fetchWorker(
-      TEST_GATEKEEPER_WORKER, "http://gatekeeper-test.test/control/action-state",
-      { method: "POST", body: JSON.stringify({ label }) });
-  if (response.status !== 200) {
-    throw new Error(`Reading test action state failed with ${response.status}: ${await response.text()}`);
-  }
-  return TEST_ACTION_STATE.parse(await response.json());
-}
+const actionState = (label: string) => testActionState(harness, label);
 
 const openSession = (model: RoutedScriptedModel, usernamePrefix: string) =>
   openAgentSession(harness.url, {
@@ -358,4 +345,37 @@ it.concurrent("a connection request left pending across a workspace restart is d
   expect(model.requests).toHaveLength(2);
   expect(JSON.stringify(model.requests[1])).toContain("env.REQUESTED_THING");
   expect(model.remainingSteps()).toBe(0);
+});
+
+/** What the Connectors page hears while it stays open. */
+class ConnectorsPage extends RpcTarget implements ConnectedAccountsSubscriber {
+  readonly added: ConnectedAccount[] = [];
+  readonly removed: number[] = [];
+  add(id: number, description: AccountDescription, _vendor: unknown, _resources: unknown,
+      credentialsValid: boolean, vendorId: string) {
+    this.added.push({ id, description, credentialsValid, vendorId });
+  }
+  remove(id: number) { this.removed.push(id); }
+  ready() {}
+}
+
+it.concurrent("disconnecting an account from the Connectors page removes it and revokes it",
+    async () => {
+  const [username] = nextUsernames("disconnect");
+  using publicApi = connect(harness.url);
+  using api = await signUp(publicApi, username!);
+  const page = new ConnectorsPage();
+  using pageStub = stubFor(page);
+  using _subscription = await api.subscribeConnectedAccounts(pageStub);
+
+  await api.provisionAmbientAccount(TEST_VENDOR_ID);
+  const account = await waitFor("the new account to appear on the page", async () =>
+    page.added.find(added => added.vendorId === TEST_VENDOR_ID) ?? null);
+  await api.disconnectAccount(account.id);
+
+  await waitFor("the account to leave the page", async () =>
+    page.removed.includes(account.id) || null);
+  expect((await listConnectedAccounts(api)).map(listed => listed.id)).not.toContain(account.id);
+  expect(await testControl(harness, "revocation-count", { label: accountLabel(account) }))
+      .toEqual({ count: 1 });
 });

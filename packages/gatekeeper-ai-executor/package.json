@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@gadgets/scripts": "workspace:*",
+    "@cloudflare/config": "0.20.0",
     "@cloudflare/vitest-pool-workers": "catalog:",
     "@cloudflare/workers-types": "^5.20260808.1",
     "miniflare": "catalog:",

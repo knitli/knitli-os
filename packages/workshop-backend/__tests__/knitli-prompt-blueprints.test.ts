@@ -4,12 +4,11 @@ import { runInDurableObject } from "cloudflare:test";
 import type {
   AiChatAuthorInfo, BlueprintLibrarySummary, BlueprintMetadata, BlueprintUserSummary,
 } from "@gadgets/workshop-shared/api";
-import {
-  DEFAULT_ADMIN_CONFIG, serializeAdminConfig,
-} from "../src/admin-config.js";
+import { serializeAdminConfig } from "../src/admin-config.js";
+import { DEFAULT_ADMIN_CONFIG } from "../src/storage-schema/admin-settings-storage.js";
 import {
   FEATURED_BLUEPRINTS_KEY, serializeFeaturedBlueprints,
-} from "../src/blueprint-archive.js";
+} from "../src/storage-schema/blueprints-kv.js";
 import {
   GadgetClientImpl, type OverseerDurableObject,
 } from "../src/overseer.js";

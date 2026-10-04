@@ -8,7 +8,8 @@ import { describe, expect, it } from "vitest";
 import { env, RpcStub as NativeRpcStub, RpcTarget } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { WorkspaceAudience } from "@gadgets/workshop-shared/gatekeeper";
-import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
+import { serializeAdminConfig } from "../src/admin-config.js";
+import { DEFAULT_ADMIN_CONFIG } from "../src/storage-schema/admin-settings-storage.js";
 import { OverseerDurableObject } from "../src/overseer.js";
 
 declare module "cloudflare:workers" {

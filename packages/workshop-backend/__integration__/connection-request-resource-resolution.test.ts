@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
 import { vi } from "vitest";
 import { parseAdminConfig } from "../src/admin-config.js";
-import { ADMIN_CONFIG_KEY } from "../src/blueprint-archive.js";
+import { ADMIN_CONFIG_KEY } from "../src/storage-schema/blueprints-kv.js";
 
 const HASH = new Uint8Array([1, 2, 3]);
 const ORIGIN = "https://graph.microsoft.com";

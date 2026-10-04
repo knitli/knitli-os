@@ -31,9 +31,11 @@ export type GlobWithBase = {
 /** The subset of a Vite+ task this factory produces. */
 export type VitestTask = {
   command: string | string[]
-  input: (GlobWithBase | { auto: boolean })[]
-  output: (GlobWithBase | { auto: boolean })[]
-  env: string[]
+  cache: {
+    input: (GlobWithBase | { auto: boolean })[]
+    output: (GlobWithBase | { auto: boolean })[]
+    env: string[]
+  }
 }
 
 /** A Vite+ config carrying a `run.tasks` map. */
@@ -168,14 +170,14 @@ export const withTestTimeout = (command: TestCommand): string => {
 }
 
 /**
- * The `env` every task wrapping `withTestTimeout` must declare, if it is cached.
+ * The `cache.env` every task wrapping `withTestTimeout` must declare, if it is cached.
  *
  * `TESTS_WITH_TIMEOUT_DISABLE`, set to anything non-empty, turns the watchdog off, and
  * `TESTS_WITH_TIMEOUT_MAX_SECONDS` replaces its wall-clock cap (see the header of `with-timeout.ts`).
- * A cached `vp` task sees none of the ambient environment unless the task declares a variable; `env`
- * both passes it through and fingerprints it, so a supervised run never replays an unsupervised one,
- * nor a 600s run a 1200s one. The builders below add both to every vitest `test` task; a
- * hand-declared task that wraps `withTestTimeout` spreads them itself, and
+ * A cached `vp` task sees none of the ambient environment unless the task declares a variable;
+ * `cache.env` both passes it through and fingerprints it, so a supervised run never replays an
+ * unsupervised one, nor a 600s run a 1200s one. The builders below add both to every vitest `test`
+ * task; a hand-declared task that wraps `withTestTimeout` spreads them itself, and
  * `scripts/vitest-task.test.ts` checks that each one either does so or is `cache: false`.
  *
  * `DISABLE` stays first: that test destructures it by position.
@@ -218,9 +220,11 @@ export function vitestTaskWithExclusions(
 ): VitestTask {
   return {
     command: Array.isArray(command) ? command.map(withTestTimeout) : withTestTimeout(command),
-    input: [{ auto: true }, ...exclusions],
-    output: [{ auto: true }, ...exclusions],
-    env: TESTS_WITH_TIMEOUT_ENV,
+    cache: {
+      input: [{ auto: true }, ...exclusions],
+      output: [{ auto: true }, ...exclusions],
+      env: TESTS_WITH_TIMEOUT_ENV,
+    },
   }
 }
 

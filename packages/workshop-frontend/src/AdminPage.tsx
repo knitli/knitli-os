@@ -3,7 +3,7 @@ import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { Hexagon, MagnifyingGlass, ShieldWarning, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
-import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, AuthenticatedApi, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR, PromptPreset, VoiceAdminConfig } from '@gadgets/workshop-shared/api'
+import { AdminApi, AdminFormat, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, AuthenticatedApi, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR, PromptPreset, VoiceAdminConfig } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
 import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
@@ -13,6 +13,7 @@ import AdminAiExecutorsPanel from './components/AdminAiExecutorsPanel'
 import { AdminGatekeeperAppsPanel } from './features/admin/gatekeeper-apps/AdminGatekeeperAppsPanel'
 import { AdminVoicePanel } from './features/admin/voice/AdminVoicePanel'
 import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
+import { AdminModelsPanel } from './features/ai-models/AdminModelsPanel'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [
@@ -139,6 +140,15 @@ export default function AdminPage() {
   // Voice curation: offered speech models and the default per role (see AdminVoicePanel).
   const [voice, setVoice] = useState<VoiceAdminConfig | null>(null)
 
+  // The models the deployment provides through AI Gateway; absent outside AI Gateway mode (see
+  // AdminModelsPanel).
+  const [gatewayModels, setGatewayModels] = useState<AdminSettingsView['gatewayModels']>(undefined)
+  // Re-reads can overlap, since leaving the Models tab drops the panel's in-flight state, and an
+  // earlier one answering last must not replace what a later one showed.
+  const gatewayModelsRead = useRef(0)
+
+  // resourceKey lives at module scope (moved there with gatekeeperKey for the shared merge
+  // helper); no component-local copy.
   const setResourceOperationBusy = (key: string, busy: boolean) => {
     const next = new Set(resourceBusyRef.current)
     if (busy) next.add(key)
@@ -168,6 +178,7 @@ export default function AdminPage() {
     setAccentDraft(view.accentColor)
     setFormats(view.formats)
     setVoice(view.voice)
+    setGatewayModels(view.gatewayModels)
   }
 
   // Mint the admin capability once (the access check happens server-side) and load settings.
@@ -558,11 +569,12 @@ export default function AdminPage() {
         }}
         tabs={[
           { value: 'general', label: 'General' },
-        { value: 'gatekeepers', label: 'Gatekeepers' },
-        { value: 'openapi', label: 'OpenAPI' },
-        { value: 'executors', label: 'Executors' },
-        { value: 'formats', label: 'Formats' },
-        { value: 'voice', label: 'Voice' },
+          { value: 'gatekeepers', label: 'Gatekeepers' },
+          { value: 'openapi', label: 'OpenAPI' },
+          { value: 'executors', label: 'Executors' },
+          { value: 'formats', label: 'Formats' },
+          { value: 'models', label: 'Models' },
+          { value: 'voice', label: 'Voice' },
           { value: 'access', label: 'Access' },
         ]}
       />
@@ -577,6 +589,19 @@ export default function AdminPage() {
           admin={admin.api}
           formats={formats}
           onChanged={async () => { setFormats((await admin.api.getSettings()).formats) }}
+        />
+      )}
+
+      {/* AI Gateway models */}
+      {activeTab === 'models' && (
+        <AdminModelsPanel
+          admin={admin.api}
+          gatewayModels={gatewayModels}
+          onChanged={async () => {
+            const read = ++gatewayModelsRead.current
+            const view = await admin.api.getSettings()
+            if (read === gatewayModelsRead.current) setGatewayModels(view.gatewayModels)
+          }}
         />
       )}
 

@@ -68,7 +68,7 @@ describe("ChatComposer", () => {
     await act(async () => root!.render(<ChatComposer
       createCapsuleGatekeeper={async () => null}
       getOverseer={() => ({} as RpcStub<Overseer>)} onSend={() => {}}
-      isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+      isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
       voiceControls={(draft) => { canStartConversation ??= draft.canStartConversation; return null; }}
     />));
     expect(canStartConversation!()).toBe(true);
@@ -101,7 +101,7 @@ describe("ChatComposer", () => {
       await act(async () => root!.render(<ChatComposer
         createCapsuleGatekeeper={async () => null}
         getOverseer={() => ({ uploadChatAttachment: upload, deleteChatAttachment: remove }) as unknown as RpcStub<Overseer>}
-        onSend={() => {}} isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+        onSend={() => {}} isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
         voiceControls={(draft) => { canStartConversation ??= draft.canStartConversation; return null; }}
       />));
       expect(canStartConversation!()).toBe(true);
@@ -141,7 +141,7 @@ describe("ChatComposer", () => {
         onSend={onSend}
         appendText={dictation.appendForChat(7)}
         onAppendTextApplied={dictation.acknowledge}
-        isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+        isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
       />;
     };
     container = document.createElement("div");
@@ -201,7 +201,7 @@ describe("ChatComposer", () => {
       const [text, setText] = useState("First request\nSecond request");
       return <ChatComposer
         createCapsuleGatekeeper={async () => null} getOverseer={() => ({} as RpcStub<Overseer>)}
-        onSend={normalSend} isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+        onSend={normalSend} isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
         conversationDraft={{ text, readOnly: live, canSend: !live,
           onChange: (value, selection) => { onChange(value, selection); setText(value); },
           onSend: () => onSend(text),
@@ -245,7 +245,7 @@ describe("ChatComposer", () => {
         chatKey={7} isDictating={recording}
         createCapsuleGatekeeper={async () => null}
         getOverseer={() => ({ uploadChatAttachment: upload }) as unknown as RpcStub<Overseer>}
-        onSend={onSend} isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+        onSend={onSend} isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
         appendText={dictation.appendForChat(7)} onAppendTextApplied={dictation.acknowledge}
       />;
     };
@@ -295,7 +295,7 @@ describe("ChatComposer", () => {
         onAppendTextApplied={dictation.acknowledge}
         isAgentActive={false}
         models={[]}
-        selectedModel="model-a"
+        selectedModel={{ id: "model-a" }}
         onModelChange={() => {}}
       />;
     };
@@ -327,7 +327,7 @@ describe("ChatComposer", () => {
         onAppendTextApplied={dictation.acknowledge}
         isAgentActive={false}
         models={[]}
-        selectedModel="model-a"
+        selectedModel={{ id: "model-a" }}
         onModelChange={() => {}}
       />;
     };
@@ -367,7 +367,7 @@ describe("ChatComposer", () => {
         appendText={{ token: 1, text: "Dictated draft.", chatKey: 7 }}
         isAgentActive={false}
         models={[]}
-        selectedModel="model-a"
+        selectedModel={{ id: "model-a" }}
         onModelChange={() => {}}
       />,
     ));
@@ -406,7 +406,7 @@ describe("ChatComposer", () => {
         appendText={{ token: 1, text: "Dictated draft.", chatKey: 7 }}
         isAgentActive={false}
         models={[]}
-        selectedModel="model-a"
+        selectedModel={{ id: "model-a" }}
         onModelChange={() => {}}
       />,
     ));
@@ -446,7 +446,7 @@ describe("ChatComposer", () => {
         onSend={onSend}
         isAgentActive={false}
         models={[]}
-        selectedModel="model-a"
+        selectedModel={{ id: "model-a" }}
         onModelChange={() => {}}
       />,
     ));
@@ -505,7 +505,7 @@ describe("ChatComposer", () => {
         onSend={onSend}
         isAgentActive={false}
         models={[]}
-        selectedModel="model-a"
+        selectedModel={{ id: "model-a" }}
         onModelChange={() => {}}
         chatKey={7}
       />,
@@ -548,7 +548,7 @@ describe("ChatComposer", () => {
         onSend={() => {}}
         isAgentActive={false}
         models={[]}
-        selectedModel="model-a"
+        selectedModel={{ id: "model-a" }}
         onModelChange={() => {}}
         attachLabel="Legacy resource"
       />,
@@ -615,7 +615,7 @@ describe("ChatComposer", () => {
         onSend={onSend}
         isAgentActive={false}
         models={[]}
-        selectedModel="model-a"
+        selectedModel={{ id: "model-a" }}
         onModelChange={() => {}}
       />,
     ));
@@ -707,7 +707,7 @@ describe("ChatComposer", () => {
         onSend={() => {}}
         isAgentActive={false}
         models={[]}
-        selectedModel="model-a"
+        selectedModel={{ id: "model-a" }}
         onModelChange={() => {}}
       />,
     ));

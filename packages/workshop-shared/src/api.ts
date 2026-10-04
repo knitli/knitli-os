@@ -686,6 +686,9 @@ export interface AuthenticatedApi extends RpcTarget {
    * holding the secrets. The rules of `updateModel()` for keeping a secret apply to copying one.
    * Without it, `config` must contain no `null` secrets. With it, `profile.id` must also not name
    * a model provided by the deployment's AI Gateway configuration.
+   *
+   * Throws on a deployment whose users may not add their own models (see
+   * `AiGatewayInfo.userModelsEnabled`), as `updateModel()` does.
    */
   addModel(profile: AiChatAuthorInfo, config: RedactedAiModelConfig,
            copySecretsFrom?: string): Promise<void>;
@@ -738,11 +741,16 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /**
    * Get the user's preferred model, chosen during onboarding. Returns null if the user has not
-   * set a preference (or explicitly chose "No agent").
+   * set a preference (or explicitly chose "No agent"). The preference may name a model that is
+   * no longer offered (see setPreferredModel).
    */
   getPreferredModel(): Promise<string | null>;
 
-  /** Set the user's preferred model. Pass null to indicate "No agent". */
+  /**
+   * Set the user's preferred model. Pass null to indicate "No agent". Any model that resolves is
+   * accepted, including one hidden from pickers, but a new external conversation uses the
+   * preference only while it is offered, and otherwise the first offered model.
+   */
   setPreferredModel(id: string | null): Promise<void>;
 
   /**
@@ -1312,6 +1320,27 @@ export type AdminSettingsView = {
   formats: AdminFormat[];
   /** The deployment's voice curation: offered speech models and the default per role. */
   voice: VoiceAdminConfig;
+  /** The models the deployment provides through AI Gateway. Absent outside AI Gateway mode. */
+  gatewayModels?: {
+    /** The providers a model may be added under: the ones the gateway both enables and serves. */
+    providers: AiModelProvider[];
+    /** Every provider the gateway serves, on or off, in the order the models are listed in. */
+    providerSettings: AdminGatewayProvider[];
+    /** Every gateway model, in any mode, in listing order. */
+    models: AdminModelView[];
+    /**
+     * The reasoning level of each gateway model that has none of its own (see
+     * AdminApi.setDefaultReasoning), or null while the deployment sets none.
+     */
+    defaultReasoning: ReasoningLevel | null;
+    /** Whether users may add models of their own (see AdminApi.setUserModelsEnabled). */
+    userModelsEnabled: boolean;
+    /**
+     * Whether the admin UI may suggest models from models.dev while an admin adds one (see
+     * AdminApi.setModelsDevSuggestions).
+     */
+    modelsDevSuggestions: boolean;
+  };
 };
 
 /**
@@ -1495,8 +1524,9 @@ export const getAiExecutorAdminErrorCode = aiExecutorAdminErrors.getCode;
  * Capability for managing deployment-wide admin settings, obtained via
  * AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
  * capability is minted, so these methods don't re-check. Covers branding, agent instructions,
- * vendor administration frames, and which gatekeeper connectors/resources are offered — NOT
- * authentication config (that's env-var driven). Each setter throws on invalid input.
+ * vendor administration frames, which gatekeeper connectors/resources are offered, and the
+ * models an AI Gateway deployment provides — NOT authentication config (that's env-var driven).
+ * Each setter throws on invalid input.
  */
 export interface AdminApi {
   /** List vendor-owned administration frames available to this deployment administrator. */
@@ -1649,6 +1679,127 @@ export interface AdminApi {
    * a disabled model or one of the wrong kind, and a default voice the model doesn't offer.
    */
   setVoiceConfig(config: VoiceAdminConfig): Promise<void>;
+  // --- AI Gateway models ---
+  //
+  // The models the deployment provides through AI Gateway (AdminSettingsView.gatewayModels). Each
+  // of these throws outside AI Gateway mode.
+
+  /**
+   * Set how the deployment offers one of its gateway models (see GatewayModelMode). Setting the
+   * model's default mode forgets the override, so the model follows its default from then on.
+   * Throws if `modelId` is not one of the deployment's gateway models.
+   *
+   * 'disabled' revokes nothing that is stored: the chats, spawners, preferences and gadget model
+   * bindings that name the model keep naming it, and stop resolving for as long as it is disabled.
+   */
+  setGatewayModelMode(modelId: string, mode: GatewayModelMode): Promise<void>;
+
+  /**
+   * Add a model to the ones the deployment provides, listed after its provider's suggested models
+   * and 'enabled' by default. Throws if the model is malformed (an empty or over-long ID or name,
+   * an over-long `behavesLike`, a token limit that isn't a positive integer), if the gateway does
+   * not serve and enable its provider (see AdminSettingsView.gatewayModels), if a suggested or
+   * added model already has its ID, if the model runtime does not know its `behavesLike` under
+   * its provider, or if what its context window reserves for the response (its output limit, or
+   * WORKERS_AI_OUTPUT_LIMIT for a Cloudflare model that gives none) leaves a prompt no room.
+   */
+  addGatewayModel(model: GatewayModel): Promise<void>;
+
+  /**
+   * Remove a model added with addGatewayModel(), along with its mode and settings. Throws if no
+   * added model has this ID; a suggested model can't be removed, only disabled.
+   *
+   * Removing frees the ID rather than reserving it. The chats, spawners and preferences that name
+   * the model resolve again if a model is later added under the same ID. A gadget model binding
+   * minted for it carries its own provider and model, so while users may add their own models
+   * (see setUserModelsEnabled) it runs once the model is removed, even if the model was disabled.
+   * To shut a model off, disable it instead.
+   */
+  removeGatewayModel(modelId: string): Promise<void>;
+
+  /**
+   * Set whether users may add models of their own, which run through the deployment's gateway
+   * like the models it provides. On by default.
+   *
+   * Off makes the deployment's models the only ones: a user can't add or edit a model, and the
+   * models users added are neither listed nor resolved. A gadget model binding stops at its next
+   * call unless a gateway model has its provider and model. Nothing stored is deleted, so the
+   * models users added work again once this is back on.
+   */
+  setUserModelsEnabled(enabled: boolean): Promise<void>;
+
+  /**
+   * Set whether the admin UI may suggest models from models.dev while an admin adds one. Off by
+   * default.
+   *
+   * The admin's browser reads the setting and, with it on, downloads models.dev's public model
+   * list while an admin adds a model, to fill in the add-model form. It changes nothing the server
+   * does: the server never contacts models.dev, and addGatewayModel() validates a suggested model
+   * like any other.
+   */
+  setModelsDevSuggestions(enabled: boolean): Promise<void>;
+
+  /**
+   * Replace what the deployment sets for one of its gateway models (see GatewayModelSettings):
+   * a field left out of `settings` is unset, and an empty `settings` unsets everything. Throws
+   * if `modelId` is not one of the deployment's gateway models, or if the compaction budget is
+   * not a positive whole number within the model's maximum (see
+   * AdminModelView.maxCompactionInputBudget).
+   *
+   * The reasoning level may be one the model lacks, since it is fitted to the model when a
+   * request is made (see ReasoningLevel).
+   */
+  setGatewayModelSettings(modelId: string, settings: GatewayModelSettings): Promise<void>;
+
+  /**
+   * Set the reasoning level of every gateway model that has none of its own, or null for each
+   * model's built-in behaviour. It never applies to a model a user added.
+   */
+  setDefaultReasoning(level: ReasoningLevel | null): Promise<void>;
+
+  /**
+   * Turn a provider on or off beside the ones CF_AI_GATEWAY_PROVIDERS lists. On is the same as
+   * listing it there: its suggested models appear in their default modes, models can be added
+   * under it, and so can users' own while those are allowed. Throws for a provider the gateway
+   * does not serve, and when turning off one that the variable lists: it is a floor, which an
+   * admin adds to.
+   *
+   * Off takes the provider's models out of the deployment's and deletes nothing: their modes and
+   * settings, and the models added under the provider, are kept for when it is back on. It stops
+   * neither a model a user already added under the provider nor a gadget model binding already
+   * minted for one of its models, which setUserModelsEnabled(false) does.
+   */
+  setGatewayProviderEnabled(provider: AiModelProvider, enabled: boolean): Promise<void>;
+
+  /**
+   * Send one small request to the first of a provider's SUGGESTED_MODELS through the gateway, as
+   * the admin, and report what happened within 15 seconds: the Workshop can't see which provider
+   * keys the gateway holds. It works on a provider that is off, and changes nothing. Throws for
+   * a provider the gateway does not serve; a request that fails is a result (see
+   * GatewayModelTest).
+   *
+   * A pass says that one model answered once. A 401 or 403 does not tell a provider key the
+   * gateway lacks from a CF_AI_GATEWAY_API_TOKEN that may not run models. The request is a
+   * quick one that takes none of a model's settings: testGatewayModel() sends a model the
+   * request its chats would.
+   */
+  testGatewayProvider(provider: AiModelProvider): Promise<GatewayModelTest>;
+
+  /**
+   * Send one request to a gateway model the way a chat turn would, through the gateway, as the
+   * admin, and report what happened within 30 seconds. The request asks for the reasoning level
+   * in effect for the model (its own, else the deployment's default, else what BuiltInReasoning
+   * describes), with the flags of the model it behaves like, under a response cap of at most
+   * 2,048 tokens. A level that a model takes as a token budget comes out of that cap, so it is
+   * cut to the room the cap leaves and is smaller than a chat's. It works on a model in any
+   * mode, hidden and disabled included, and changes nothing. Throws outside AI Gateway mode and
+   * for an ID that names no gateway model; a request that fails is a result (see
+   * GatewayModelTest).
+   *
+   * A pass says that the model answered that one request. It costs more than
+   * testGatewayProvider(), whose quick request is capped at a few tokens.
+   */
+  testGatewayModel(modelId: string): Promise<GatewayModelTest>;
 }
 
 /** A partial edit to one promoted format. Absent fields are left alone. */
@@ -1778,10 +1929,209 @@ export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" |
 /** Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`. */
 export type AiGatewayInfo = {
   enabled: true;
+  /**
+   * The providers the deployment enables: the ones CF_AI_GATEWAY_PROVIDERS lists and the ones its
+   * admin turned on (see AdminApi.setGatewayProviderEnabled). A user can add a model of their own
+   * under these only.
+   */
   enabledProviders: AiModelProvider[];
+  /**
+   * The ID of every model the deployment provides through AI Gateway, in any mode (see
+   * GatewayModelMode). A user can't edit or delete these, nor add a model under one of these IDs.
+   */
+  builtInModelIds: string[];
+  /**
+   * Whether users may add models of their own (see AdminApi.setUserModelsEnabled). When false,
+   * addModel() and updateModel() refuse, and the models the user added are neither listed nor
+   * resolved.
+   */
+  userModelsEnabled: boolean;
 } | {
   enabled: false;
 };
+
+/**
+ * How a deployment offers one of the models it provides through AI Gateway:
+ *   - 'enabled':  offered in model pickers.
+ *   - 'hidden':   left out of pickers but still resolves, so the chats, spawners, preferences and
+ *                 gadget model bindings that already name it keep working.
+ *   - 'disabled': left out of pickers and does not resolve: a chat or spawner that names it is
+ *                 refused, and a gadget model binding minted for it fails at its next call. Its ID
+ *                 stays reserved, so a user can't add a model of their own under it.
+ */
+export const GATEWAY_MODEL_MODES = ['enabled', 'hidden', 'disabled'] as const;
+
+/** One of GATEWAY_MODEL_MODES. */
+export type GatewayModelMode = typeof GATEWAY_MODEL_MODES[number];
+
+/** Whether `value` is a GatewayModelMode. */
+export function isGatewayModelMode(value: unknown): value is GatewayModelMode {
+  return GATEWAY_MODEL_MODES.includes(value as GatewayModelMode);
+}
+
+/**
+ * How much reasoning a model is asked for on an agent's turns, least to most. The values are the
+ * model runtime's own (pi's ModelThinkingLevel). Each model takes some of them. One it lacks is
+ * fitted to the next higher one it has, or else the next lower, so 'off' on a model that cannot
+ * stop reasoning asks for its lowest level. A model that does no reasoning is sent none.
+ */
+export const REASONING_LEVELS =
+    ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/** One of REASONING_LEVELS. */
+export type ReasoningLevel = typeof REASONING_LEVELS[number];
+
+/** Whether `value` is a ReasoningLevel. */
+export function isReasoningLevel(value: unknown): value is ReasoningLevel {
+  return REASONING_LEVELS.includes(value as ReasoningLevel);
+}
+
+/**
+ * What a model is asked for while no reasoning level is set for it: 'adaptive' when the model
+ * itself decides whether and how much to reason, a level when the Workshop asks for that effort,
+ * and null when no level is sent.
+ */
+export type BuiltInReasoning = ReasoningLevel | 'adaptive' | null;
+
+/**
+ * The share of its compaction budget a chat's prompt may reach before the chat compacts, leaving
+ * room for the response.
+ */
+export const COMPACTION_TRIGGER_RATIO = 0.85;
+
+/**
+ * What a deployment's admin sets for one of its AI Gateway models. A field left out is unset: the
+ * model then has its built-in behaviour, or for `reasoning` the deployment's default level where
+ * one is set.
+ */
+export type GatewayModelSettings = {
+  /**
+   * The reasoning level of the agent's turns on the model, ahead of the deployment's default
+   * (see AdminApi.setDefaultReasoning). One-shot calls, such as titles, compaction summaries
+   * and gadget model bindings, ask for none either way.
+   */
+  reasoning?: ReasoningLevel;
+
+  /**
+   * The prompt budget, in tokens, that a chat on the model compacts against (see
+   * COMPACTION_TRIGGER_RATIO), in place of the model's built-in one. A positive whole number, at
+   * most the model's AdminModelView.maxCompactionInputBudget.
+   */
+  compactionInputBudget?: number;
+};
+
+/**
+ * The description of a model a deployment provides through AI Gateway. Its admin supplies one to
+ * add a model beside the SUGGESTED_MODELS of the providers the gateway enables.
+ */
+export type GatewayModel = {
+  /** Which AI provider hosts the model. */
+  provider: AiModelProvider;
+
+  /**
+   * Name of the model as specified to the provider's API, which is also the ID chats and
+   * preferences refer to it by.
+   */
+  id: string;
+
+  /** Display name. */
+  name: string;
+
+  /** The maximum tokens one request may total. */
+  contextWindow: number;
+
+  /** When present, both the requested response cap and the space reserved for it. */
+  outputLimit?: number;
+
+  /**
+   * The ID of a model of the same provider that the model runtime knows. While the runtime has
+   * no entry for this model's own ID, the model borrows that one's runtime flags: its request
+   * formats, its reasoning levels and the kinds of input it takes. Its name, limits and cost stay
+   * its own.
+   */
+  behavesLike?: string;
+};
+
+/** A model a deployment provides through AI Gateway, as its admin sees it. */
+export type AdminModel = GatewayModel & {
+  /** How the deployment offers the model. */
+  mode: GatewayModelMode;
+
+  /**
+   * The mode the model has while the admin leaves it alone: SUGGESTED_MODELS decides it for a
+   * suggested model, and an added model's is 'enabled'.
+   */
+  defaultMode: GatewayModelMode;
+
+  /** Whether the admin added the model, rather than SUGGESTED_MODELS listing it. */
+  added: boolean;
+
+  /** What the admin set for the model. Absent while nothing is set. */
+  settings?: GatewayModelSettings;
+};
+
+/** An AdminModel with what the admin UI needs in order to offer its settings. */
+export type AdminModelView = AdminModel & {
+  /** The reasoning levels the model can be sent, least to most. Empty when it takes none. */
+  reasoningLevels: ReasoningLevel[];
+
+  /**
+   * What the model is asked for while neither its settings nor the deployment's default give it
+   * a reasoning level.
+   */
+  builtInReasoning: BuiltInReasoning;
+
+  /** The compaction budget the model has while GatewayModelSettings sets none. */
+  builtInCompactionInputBudget: number;
+
+  /**
+   * The largest compaction budget the model may be given: the room its context window leaves for
+   * a prompt.
+   */
+  maxCompactionInputBudget: number;
+
+  /**
+   * Whether the model runtime has an entry for the model's own ID. When it has, the runtime's
+   * entry is used and `behavesLike` is not.
+   */
+  runtimeKnown: boolean;
+
+  /**
+   * For a model with a `behavesLike`, whether the model runtime knows the model it names. When
+   * it does not, there is nothing to borrow, and the model runs as one the runtime does not know
+   * for as long as it has no entry for the model's own ID either.
+   */
+  behavesLikeKnown?: boolean;
+};
+
+/** One of the providers AI Gateway serves, as a deployment's admin sees it. */
+export type AdminGatewayProvider = {
+  /** The provider. */
+  provider: AiModelProvider;
+
+  /**
+   * Who enabled the provider: the CF_AI_GATEWAY_PROVIDERS environment variable, or an admin (see
+   * AdminApi.setGatewayProviderEnabled). Absent while the provider is off.
+   */
+  enabledBy?: 'environment' | 'admin';
+
+  /**
+   * Whether the provider's requests need CF_AI_GATEWAY_API_TOKEN on a deployment that has none,
+   * so that they fail until it is set. It says nothing of the provider keys the gateway holds,
+   * which the Workshop can't see (see AdminApi.testGatewayProvider).
+   */
+  needsApiToken: boolean;
+};
+
+/**
+ * What AdminApi.testGatewayProvider() and AdminApi.testGatewayModel() found: the model asked, and
+ * whether it answered. A failure carries a message on one line, cut short: what the provider or
+ * the gateway answered, or why no answer came. It carries the HTTP status of the response only
+ * when the model runtime reports one, which it does not for every provider (a failed Google
+ * request has none): the message then says what there is.
+ */
+export type GatewayModelTest = { model: string } &
+    ({ ok: true } | { ok: false; status?: number; message: string });
 
 /** Configuration specifying how to connect to an AI model provider. */
 export type AiModelConfig = {
@@ -1831,6 +2181,24 @@ export type AiModelConfig = {
    * table, it is both the requested response cap and the space reserved for it in the window.
    */
   outputLimit?: number;
+
+  /**
+   * The reasoning level of an agent's turns on the model. Absent gives the model's built-in
+   * behaviour. Set only on a deployment's AI Gateway models (see GatewayModelSettings).
+   */
+  reasoning?: ReasoningLevel;
+
+  /**
+   * Overrides the model's built-in compaction budget, up to the room its window leaves for a
+   * prompt. Set only on a deployment's AI Gateway models (see GatewayModelSettings).
+   */
+  compactionInputBudget?: number;
+
+  /**
+   * The model whose runtime flags this one borrows (see GatewayModel.behavesLike). Set only on
+   * the models a deployment's admin added to its AI Gateway.
+   */
+  behavesLike?: string;
 };
 
 /**
@@ -1838,9 +2206,10 @@ export type AiModelConfig = {
  * and edited without the client ever receiving its secrets. As returned by
  * `AuthenticatedApi.getModelConfig()`, a `null` secret is a non-empty value that was withheld. As
  * passed to `AuthenticatedApi.updateModel()` or `addModel()`, a `null` secret keeps (or copies)
- * the stored value.
+ * the stored value. It has none of the fields that only a deployment sets on its own models.
  */
-export type RedactedAiModelConfig = Omit<AiModelConfig, "apiToken" | "extraHeaders"> & {
+export type RedactedAiModelConfig = Omit<AiModelConfig,
+    "apiToken" | "extraHeaders" | "reasoning" | "compactionInputBudget" | "behavesLike"> & {
   /** `AiModelConfig.apiToken`, or null if withheld. */
   apiToken: string | null;
 
@@ -1883,6 +2252,14 @@ type SuggestedModel = {
    * window as the hard limit.
    */
   compactionInputBudget?: number;
+
+  /**
+   * Makes the model's default mode 'hidden' rather than 'enabled' (see GatewayModelMode): still
+   * resolvable for stored references, not offered in pickers. Set on models superseded by a newer
+   * one, which chats, spawners, and preferences created earlier may still name. A deployment's
+   * admin can override the default for its AI Gateway.
+   */
+  hidden?: true;
 };
 
 // The literal is kept apart from the export so SuggestedModelId can derive the model ids from it.
@@ -1906,17 +2283,23 @@ const SUGGESTED_MODEL_CATALOG = {
   },
   "anthropic": {
     "claude-opus-5-5": {name: "Claude Opus 5.5", contextWindow: 1000000},
+    "claude-sonnet-5-5": {name: "Claude Sonnet 5.5", contextWindow: 1000000},
     "claude-fable-5-1": {name: "Claude Fable 5.1", contextWindow: 1000000},
-    "claude-opus-5": {name: "Claude Opus 5", contextWindow: 1000000},
-    "claude-sonnet-5": {name: "Claude Sonnet 5", contextWindow: 1000000},
+    "claude-opus-5": {name: "Claude Opus 5", contextWindow: 1000000, hidden: true},
+    "claude-sonnet-5": {name: "Claude Sonnet 5", contextWindow: 1000000, hidden: true},
     "claude-haiku-4-5": {name: "Claude Haiku 4.5", contextWindow: 200000},
   },
   "openai": {
     // pi's GPT-6 catalog reports a 272K window, but these models support 1.05M. Use 272K as the
     // preferred compaction budget, not as the hard context limit.
+    "gpt-6.1-sol": {
+      name: "GPT-6.1 Sol", contextWindow: 1050000, outputLimit: 128000,
+      compactionInputBudget: 272000,
+    },
     "gpt-6-sol": {
       name: "GPT-6 Sol", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
+      hidden: true,
     },
     "gpt-6-luna": {
       name: "GPT-6 Luna", contextWindow: 1050000, outputLimit: 128000,
@@ -1929,14 +2312,17 @@ const SUGGESTED_MODEL_CATALOG = {
     "gpt-5.6-sol": {
       name: "GPT 5.6 Sol", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
+      hidden: true,
     },
     "gpt-5.6-luna": {
       name: "GPT 5.6 Luna", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
+      hidden: true,
     },
     "gpt-5.6-terra": {
       name: "GPT 5.6 Terra", contextWindow: 1050000, outputLimit: 128000,
       compactionInputBudget: 272000,
+      hidden: true,
     },
   },
   "google": {
@@ -1946,7 +2332,10 @@ const SUGGESTED_MODEL_CATALOG = {
   },
 } satisfies Record<AiModelProvider, Record<string, SuggestedModel>>;
 
-/** Models offered in the picker, by provider and model id. */
+/**
+ * Models built into the Workshop, by provider and model id. Pickers skip the hidden ones, unless
+ * the admin of an AI Gateway deployment enabled them there.
+ */
 export const SUGGESTED_MODELS: Record<AiModelProvider, Record<string, SuggestedModel>> =
     SUGGESTED_MODEL_CATALOG;
 
@@ -2974,7 +3363,7 @@ export interface Overseer extends RpcTarget {
    * Retry the agent on the given chat. This starts the agent without adding a new user message.
    * The agent will re-process the existing chat history using the specified model.
    *
-   * If an agent is already running, this does nothing.
+   * Throws if an agent is already running on the chat.
    */
   retryAgent(chatId: number, modelId: string): Promise<void>;
 

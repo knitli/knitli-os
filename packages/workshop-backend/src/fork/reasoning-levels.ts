@@ -74,14 +74,27 @@ export function piCatalogThinkingLevelMap(
  * The effective thinking-level map for a constructed model: the caller's catalog map (or pi's
  * own lookup when the caller has none, which also repairs construction paths that drop it),
  * with fork corrections merged over it. Returns undefined when neither source has a map.
+ *
+ * A caller-provided map passes through byte-identical (upstream pins `off: "none"` sends
+ * for descriptors that carry pi's maps). Only the repaired leg -- pi's own lookup when the
+ * caller has none -- drops a string `off`: pi's impls read `map.off` only when no effort is
+ * requested and send a string one as the request's effort, so attaching a repaired map with
+ * a string `off` would name an effort on turns that asked for none (upstream pins the absent
+ * field for map-less gateway descriptors in ai-gateway-cost.test.ts). A null `off` is never
+ * sent and passes through. Level mapping only ever reads the set level's entry.
  */
 export function resolveThinkingLevelMap(
     piProvider: string, modelId: string,
     catalogMap: ThinkingLevelMap | undefined): ThinkingLevelMap | undefined {
   let base = catalogMap ?? piCatalogThinkingLevelMap(piProvider, modelId);
   let override = FORK_THINKING_LEVEL_OVERRIDES[`${piProvider} ${modelId}`];
-  if (!override) return base;
-  return {...base, ...override};
+  let merged = !override ? base : {...base, ...override};
+  if (catalogMap !== undefined || merged === undefined || typeof merged.off !== "string") {
+    return merged;
+  }
+  let stripped = {...merged};
+  delete stripped.off;
+  return stripped;
 }
 
 /**

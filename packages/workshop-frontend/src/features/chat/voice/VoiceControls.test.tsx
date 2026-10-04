@@ -25,7 +25,7 @@ it("preserves utterance separators when editing and sending pending voice instru
     const [pendingText, setPendingText] = React.useState("First request\nSecond request");
     return <ChatComposer
       createCapsuleGatekeeper={async () => null} getOverseer={() => ({} as RpcStub<Overseer>)}
-      onSend={() => {}} isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+      onSend={() => {}} isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
       conversationDraft={{ text: pendingText, readOnly: false, canSend: true,
         onChange: setPendingText, onSend: () => onSend(pendingText) }}
     />;
@@ -83,7 +83,7 @@ it("reports the pending editor selection from before a replacement", async () =>
   try {
     await act(async () => root.render(<ChatComposer
       createCapsuleGatekeeper={async () => null} getOverseer={() => ({} as RpcStub<Overseer>)}
-      onSend={() => {}} isAgentActive={false} models={[]} selectedModel="model-a" onModelChange={() => {}}
+      onSend={() => {}} isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
       conversationDraft={{ text: "Spoken words", readOnly: false, canSend: true,
         onChange: onPendingTextChange, onSend: () => {} }}
     />));

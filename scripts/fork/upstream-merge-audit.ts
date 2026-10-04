@@ -142,7 +142,8 @@ export function normalizeForFormatComparison(source: string): string {
 
 /** True for Tier-1 paths, whose content is ours alone -- see `fork-boundary.json`. */
 export function isForkOwned(path: string): boolean {
-  return forkBoundary().forkOwned.some(entry => path.startsWith(entry.path));
+  return forkBoundary().forkOwned.some(entry =>
+    entry.path.includes("/") ? path.startsWith(entry.path) : path === entry.path);
 }
 
 /**

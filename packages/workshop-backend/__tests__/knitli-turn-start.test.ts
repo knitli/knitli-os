@@ -4,9 +4,8 @@ import { runInDurableObject } from "cloudflare:test";
 import type {
   AiChatAuthorInfo, AiModelConfig, PromptSelection,
 } from "@gadgets/workshop-shared/api";
-import {
-  DEFAULT_ADMIN_CONFIG, serializeAdminConfig,
-} from "../src/admin-config.js";
+import { serializeAdminConfig } from "../src/admin-config.js";
+import { DEFAULT_ADMIN_CONFIG } from "../src/storage-schema/admin-settings-storage.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import { SYSTEM_PROMPT } from "../src/agent.js";
 

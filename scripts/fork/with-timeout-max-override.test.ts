@@ -86,11 +86,12 @@ describe("TESTS_WITH_TIMEOUT_MAX_SECONDS", () => {
 });
 
 describe("the override's env declaration", () => {
-  // A cached `vp` task is handed only what it declares in `env`, so a variable missing here would be
-  // silently dropped from every cached run -- the failure mode scripts/env-passthrough.test.ts
-  // documents. `vitest-task.test.ts` checks that each hand-declared task spreads this list.
+  // A cached `vp` task is handed only what it declares in `cache.env`, so a variable missing here
+  // would be silently dropped from every cached run -- the failure mode
+  // scripts/env-passthrough.test.ts documents. `vitest-task.test.ts` checks that each
+  // hand-declared task spreads this list.
   it("is carried by the shared list and by every generated test task", () => {
     assert.ok(TESTS_WITH_TIMEOUT_ENV.includes(VAR));
-    assert.ok(vitestTask("vitest run").env.includes(VAR));
+    assert.ok(vitestTask("vitest run").cache.env.includes(VAR));
   });
 });

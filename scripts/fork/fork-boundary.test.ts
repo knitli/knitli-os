@@ -67,6 +67,19 @@ for (const [name, mutate, pattern] of [
   ["Tier-1 entry needs a reason", (b: Record<string, unknown>) => {
     b["forkOwned"] = [{ path: "packages/a-feature/", reason: "" }];
   }, /forkOwned\[0\]\.reason needs a reason/],
+  ["Tier-1 root files are exact names, not prefixes", (b: Record<string, unknown>) => {
+    // Must parse: isForkOwned matches slash-less entries exactly.
+    const parsed = parseForkBoundary(JSON.stringify({
+      forkOwned: [{ path: "NOTES.md", reason: "Upstream has no such file." }],
+      removedUpstreamPaths: { "some/removed.yml": "Only ever fails here." },
+      formatExceptions: [],
+    }));
+    assert.deepEqual(parsed.forkOwned, [
+      { path: "NOTES.md", reason: "Upstream has no such file." },
+    ]);
+    // But an extensionless bare name stays rejected: it reads as a directory prefix.
+    b["forkOwned"] = [{ path: "NOTES", reason: "Upstream has no such file." }];
+  }, /forkOwned\[0\]\.path must name a directory or file path/],
   ["removed paths must be an object", (b: Record<string, unknown>) => {
     b["removedUpstreamPaths"] = [];
   }, /removedUpstreamPaths must be an object/],

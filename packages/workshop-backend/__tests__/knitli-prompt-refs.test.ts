@@ -5,10 +5,9 @@ import type {
   AiChatAuthorInfo, BlueprintMetadata, PromptRef,
 } from "@gadgets/workshop-shared/api";
 import * as Y from "yjs";
-import {
-  DEFAULT_ADMIN_CONFIG, serializeAdminConfig,
-} from "../src/admin-config.js";
-import { ADMIN_CONFIG_KEY } from "../src/blueprint-archive.js";
+import { serializeAdminConfig } from "../src/admin-config.js";
+import { DEFAULT_ADMIN_CONFIG } from "../src/storage-schema/admin-settings-storage.js";
+import { ADMIN_CONFIG_KEY } from "../src/storage-schema/blueprints-kv.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
 
 declare module "cloudflare:workers" {

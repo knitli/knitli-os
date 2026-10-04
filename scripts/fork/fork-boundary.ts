@@ -60,7 +60,12 @@ function checkKeys(where: string, value: Record<string, unknown>, allowed: strin
   }
 }
 
-function checkPath(where: string, value: unknown): string {
+function checkPath(where: string, value: unknown, allowRootFile = false): string {
+  if (typeof value === "string" && allowRootFile && !value.includes("/") && value.includes(".")) {
+    // An exact root filename (CLAUDE.md, .claude): isForkOwned matches these exactly, so they
+    // cannot swallow unrelated packages the way a bare prefix could.
+    return value;
+  }
   if (typeof value !== "string" || value.length === 0 || !value.includes("/")) {
     throw new Error(
       `${where} must name a directory or file path so it cannot match unrelated packages`);
@@ -94,7 +99,7 @@ export function parseForkBoundary(text: string): ForkBoundary {
     if (!isObject(entry)) throw new Error(`forkOwned[${i}] must be an object`);
     checkKeys(`forkOwned[${i}]`, entry, ["path", "reason"]);
     return {
-      path: checkPath(`forkOwned[${i}].path`, entry["path"]),
+      path: checkPath(`forkOwned[${i}].path`, entry["path"], true),
       reason: checkReason(`forkOwned[${i}].reason`, entry["reason"]),
     };
   });

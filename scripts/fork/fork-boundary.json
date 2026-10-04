@@ -129,8 +129,16 @@
       "reason": "The fork's maintenance playbook, documenting the divergence policy this file encodes."
     },
     {
-      "path": ".claude/",
-      "reason": "Committed Claude workstation settings; upstream has no equivalent directory."
+      "path": ".claude",
+      "reason": "Symlink to ./.agents for harness compatibility; upstream has no equivalent entry."
+    },
+    {
+      "path": "CLAUDE.md",
+      "reason": "Symlink to AGENTS.md for harness compatibility; upstream has no equivalent entry."
+    },
+    {
+      "path": ".agents/skills/kumo-design/SKILL.md",
+      "reason": "Fork design-guidance skill; .agents/skills is shared with upstream so this stays file-scoped."
     },
     {
       "path": ".serena/",
@@ -295,6 +303,62 @@
     {
       "path": "packages/workshop-backend/__integration__/openapi-publisher-auth.test.ts",
       "reason": "Fork-only publisher existing-auth and workspace ownership integration regressions."
+    },
+    {
+      "path": "packages/workshop-backend/src/voice-config.ts",
+      "reason": "Fork-owned speech-model curation parsing (DEFAULT_VOICE_CONFIG); upstream has no voice."
+    },
+    {
+      "path": "packages/workshop-backend/src/voice-session.ts",
+      "reason": "Fork-owned voice session DO and RPC surface; upstream has no voice."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/voice-config.test.ts",
+      "reason": "Regression test for the fork-owned voice curation parsing above."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/voice-session.test.ts",
+      "reason": "Regression test for the fork-owned voice session above."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/agent-speech-provenance.test.ts",
+      "reason": "Regression test for fork-owned speech provenance on agent messages."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/chat-submission-receipt.test.ts",
+      "reason": "Regression test for the fork-owned chat submission receipt."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-memory-restricted.test.ts",
+      "reason": "Regression test that the memory gatekeeper reads the containsRestrictedData latch fresh."
+    },
+    {
+      "path": "packages/workshop-backend/__integration__/voice-session-rpc.test.ts",
+      "reason": "Integration test for the fork-owned voice session RPC surface."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/admin/voice/",
+      "reason": "Fork-owned voice admin panel (AdminVoicePanel); no upstream counterpart."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/chat/voice/",
+      "reason": "Fork-owned voice chat UI (controls, settings, protocol, transport); no upstream counterpart."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/chat/composer/draft/speechRanges.ts",
+      "reason": "Fork-owned speech-range tracking for dictation; the draft/ dir is otherwise upstream's."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/chat/composer/useDictationAppendQueue.ts",
+      "reason": "Fork-owned dictation append queue; the composer dir is otherwise upstream's."
+    },
+    {
+      "path": "packages/workshop-frontend/src/homeVoiceFlow.test.tsx",
+      "reason": "Regression test for the fork-owned home voice flow."
+    },
+    {
+      "path": "packages/workshop-frontend/src/hooks/useVoicePreview.ts",
+      "reason": "Fork-owned voice preview hook; hooks/ is shared with upstream so this stays file-scoped."
     }
   ],
   "removedUpstreamPaths": {
@@ -308,29 +372,39 @@
   "formatExceptions": [],
   "reviewedSurvivors": [
     {
-      "token": "_response",
-      "path": "packages/workshop-backend/__tests__/external-message-production-commit-guard.test.ts",
-      "reason": "Fork-local parameter and variable names; upstream #586 removed its own unrelated uses."
+      "token": "getModelList",
+      "path": "plans/prompt-presets-and-reasoning-controls.md",
+      "reason": "Historical design record references the pre-#616 AiGatewayConfig API; the plan is frozen, not code."
     },
     {
-      "token": "PASSWORD_HASH",
-      "path": "packages/workshop-backend/__integration__/ai-executor-admin-rpc.test.ts",
-      "reason": "Fork-local test constant, same shape as upstream's remaining uses; self-contained."
+      "token": "$schema",
+      "path": "packages/mcp-shared/src/openapi-publisher.ts",
+      "reason": "JSON-Schema dialect identifier in emitted OpenAPI specs; unrelated to wrangler $schema."
     },
     {
-      "token": "RESTRICTED_EXCLUDING_MALLORY",
-      "path": "packages/workshop-backend/__tests__/authorize-observation-flags.test.ts",
-      "reason": "Identical to upstream; #578 kept these lines."
+      "token": "$schema",
+      "path": "packages/mcp-shared/__tests__/openapi-publisher.test.ts",
+      "reason": "Tests the JSON-Schema dialect identifier above; unrelated to wrangler $schema."
     },
     {
-      "token": "estimatedCost",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Identical to upstream; #588 kept #getCostFromAiGateway's fallback parameter."
+      "token": "$schema",
+      "path": "scripts/release/manifest-lib.ts",
+      "reason": "Shared HANDLED_CONFIG_KEYS allowlist permits the key; generated configs omit it, so allowing-but-dropping is fail-safe."
     },
     {
-      "token": "lastStepTokens",
-      "path": "packages/integration-tests/src/agent-session.ts",
-      "reason": "Identical to upstream; #588 kept the agent-session usage tracking."
+      "token": "TEST_ACTION_STATE",
+      "path": "packages/integration-tests/src/harness.ts",
+      "reason": "Adopted verbatim from upstream #620 via auto-merge; byte-identical, not a fork survival."
+    },
+    {
+      "token": "TestActionState",
+      "path": "packages/integration-tests/fixtures/gatekeeper-test/src/test-gatekeeper.ts",
+      "reason": "Shared with upstream #620; type and accessor are byte-identical."
+    },
+    {
+      "token": "anthropicCompat",
+      "path": "packages/workshop-backend/src/ai-models.ts",
+      "reason": "Shared local; upstream's pi-0.99 restructure kept the semantics and the fork thinking-level hunk below it is intact."
     }
   ]
 }

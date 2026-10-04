@@ -41,6 +41,9 @@ function scratchRepo(): string {
   run("init", "-q", "-b", "main");
   run("config", "user.email", "test@example.invalid");
   run("config", "user.name", "Test");
+  // The ambient gitconfig may sign commits; the scratch repo has no agent (and vp strips the
+  // env that would reach one), so opt out explicitly.
+  run("config", "commit.gpgsign", "false");
   return dir;
 }
 

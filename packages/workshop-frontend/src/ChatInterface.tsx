@@ -1,4 +1,4 @@
-import { logRpcFailure } from "./rpcErrors";
+import { logRpcFailure, rpcFailureDescription } from "./rpcErrors";
 import {
   Fragment,
   isValidElement,
@@ -2418,19 +2418,20 @@ export function computeChatEpochChanges(
   };
 }
 
-function inferSelectedModelFromMessages(messages: AiChatMessage[]): string | null {
+// The agent that last spoke in the chat: the author of the most recent agent message or agent error.
+function inferChatAgentFromMessages(messages: AiChatMessage[]): AiChatAuthorInfo | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
 
     if (msg.type === "error") {
       if (msg.author.type === "agent") {
-        return msg.author.id;
+        return msg.author;
       }
       continue;
     }
 
     if (msg.type === "message") {
-      return msg.author.type === "agent" ? msg.author.id : null;
+      return msg.author.type === "agent" ? msg.author : null;
     }
   }
 
@@ -2993,7 +2994,7 @@ function ChatInterface({
 
   // Get sorted list of chats from cache
   const chatList = useMemo(
-    () => Array.from(cacheRef.current.chats.values()).sort(
+    () => Array.from(cacheRef.current.chats.values()).toSorted(
       (a, b) => b.lastActive.getTime() - a.lastActive.getTime(),
     ),
     [chatListVersion],
@@ -3311,6 +3312,8 @@ function ChatInterface({
 
   const isAgentActive = !!currentChatMetadata?.activeAgent;
   const activeAgent = currentChatMetadata?.activeAgent;
+  // Names the chat's own model in the composer even when the picker no longer offers it.
+  const chatAgent = activeAgent ?? inferChatAgentFromMessages(currentMessages);
 
   // Notify parent when agent active state changes
   const onAgentActiveChangeRef = useRef(onAgentActiveChange);
@@ -3401,16 +3404,11 @@ function ChatInterface({
           availableModels.some((model) => model.id === initialVoiceModelRef.current?.modelId)) {
         setSelectedModel(initialVoiceModelRef.current.modelId);
       } else {
-        // 2. Otherwise, derive the model from the most recent agent message or agent error.
-        setSelectedModel(
-          fallbackToStoredModelSelection(
-            inferSelectedModelFromMessages(currentMessages),
-            availableModels,
-          ),
-        );
+        // 2. Otherwise, the one that last spoke.
+        setSelectedModel(fallbackToStoredModelSelection(chatAgent?.id ?? null, availableModels));
       }
     }
-  }, [selectedChatId, availableModels, currentMessages, activeAgent]);
+  }, [selectedChatId, availableModels, chatAgent?.id]);
 
   // Keep the ref in sync with selectedChatId state
   useEffect(() => {
@@ -4093,7 +4091,11 @@ function ChatInterface({
       }
     } catch (err) {
       if (!logRpcFailure("Failed to send message:", err, { reportSite: "chat.send" })) {
-        toasts.add({ title: "Failed to send message", variant: "error" });
+        toasts.add({
+          title: "Failed to send message",
+          description: rpcFailureDescription(err),
+          variant: "error",
+        });
       }
       throw err;
     }
@@ -4160,7 +4162,11 @@ function ChatInterface({
       onNavigateToChatRef.current(newChatId);
     } catch (err) {
       if (!logRpcFailure("Failed to create new chat:", err, { reportSite: "chat.new" })) {
-        toasts.add({ title: "Failed to start conversation", variant: "error" });
+        toasts.add({
+          title: "Failed to start conversation",
+          description: rpcFailureDescription(err),
+          variant: "error",
+        });
       }
       throw err;
     }
@@ -4722,7 +4728,11 @@ function ChatInterface({
       await overseer.retryAgent(selectedChatId, selectedModel);
     } catch (err) {
       console.error("Failed to retry agent:", err);
-      toasts.add({ title: "Failed to retry agent", variant: "error" });
+      toasts.add({
+        title: "Failed to retry agent",
+        description: rpcFailureDescription(err),
+        variant: "error",
+      });
     }
   };
 
@@ -5569,7 +5579,7 @@ function ChatInterface({
             onSend={handleNewChatSend}
             isAgentActive={false}
             models={availableModels}
-            selectedModel={selectedModel}
+            selectedModel={selectedModel === null ? null : { id: selectedModel }}
             onModelChange={handleModelChange}
             effortControl={effortLevels === null ? undefined : {
               levels: effortLevels.levels,
@@ -6570,7 +6580,10 @@ function ChatInterface({
                     } : undefined}
                     isAgentActive={isAgentActive}
                     models={availableModels}
-                    selectedModel={selectedModel}
+                    selectedModel={selectedModel === null ? null : {
+                      id: selectedModel,
+                      name: chatAgent?.id === selectedModel ? chatAgent.name : undefined,
+                    }}
                     onModelChange={handleModelChange}
                     effortControl={effortLevels === null ? undefined : {
                       levels: effortLevels.levels,

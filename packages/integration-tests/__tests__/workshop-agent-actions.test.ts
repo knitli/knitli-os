@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { RpcStub } from "capnweb";
-import { z } from "zod";
 import type { ActionState, AiChatMessage, Overseer } from "@gadgets/workshop-shared/api";
+import type { TestSession } from "../fixtures/gatekeeper-test/src/test-gatekeeper.js";
 import { openAgentSession, type WorkshopAgentSession } from "../src/agent-session.js";
 import {
-  startTestGatekeeperHarness, TEST_GATEKEEPER_WORKER, TEST_VENDOR_ID, type Harness,
+  startTestGatekeeperHarness, TEST_VENDOR_ID, testActionState, testControl, type Harness,
 } from "../src/harness.js";
 import {
   SCRIPTED_MODEL_ID, scriptedModelRouter, type ChatCompletionStep, type RoutedScriptedModel,
@@ -32,39 +32,22 @@ afterAll(async () => {
   }
 });
 
-const TEST_ACTION_STATE = z.object({
-  pending: z.array(z.object({ id: z.number(), value: z.number() })),
-  value: z.number().optional(),
-  applyCount: z.number(),
-});
-type TestActionState = z.infer<typeof TEST_ACTION_STATE>;
+const control = <T>(route: string, body: object) => testControl<T>(harness, route, body);
 
-async function actionState(label: string): Promise<TestActionState> {
-  const response = await harness.fetchWorker(
-      TEST_GATEKEEPER_WORKER, "http://gatekeeper-test.test/control/action-state",
-      { method: "POST", body: JSON.stringify({ label }) });
-  if (response.status !== 200) {
-    throw new Error(`Reading test action state failed with ${response.status}: ${await response.text()}`);
-  }
-  return TEST_ACTION_STATE.parse(await response.json());
-}
+const actionState = (label: string) => testActionState(harness, label);
+const failNextApply = (label: string, reason: string) =>
+  control("fail-next-apply", { label, reason });
+const applyAttempts = async (label: string) =>
+  (await control<{ attempts: number }>("apply-attempts", { label })).attempts;
 
-async function failNextApply(label: string, reason: string): Promise<void> {
-  const response = await harness.fetchWorker(
-      TEST_GATEKEEPER_WORKER, "http://gatekeeper-test.test/control/fail-next-apply",
-      { method: "POST", body: JSON.stringify({ label, reason }) });
-  if (response.status !== 204) {
-    throw new Error(`Arming an apply failure failed with ${response.status}: ${await response.text()}`);
-  }
-}
-
-const writeValues = (...values: number[]): ChatCompletionStep => ({
+// Each write is one writeValue() call's argument list.
+const writeValues = (...writes: (number | string)[]): ChatCompletionStep => ({
   toolCall: {
     id: "write-test-value",
     name: "executeCode",
     arguments: {
       code: `export default async function(self, env) { console.log(${
-        values.map(value => `await env.TEST_AMBIENT.writeValue(${value})`).join(", ")}); }`,
+        writes.map(args => `await env.TEST_AMBIENT.writeValue(${args})`).join(", ")}); }`,
     },
   },
 });
@@ -82,6 +65,14 @@ const labelOf = (session: WorkshopAgentSession) =>
 
 async function expectIdle(ws: RpcStub<Overseer>) {
   expect((await ws.listChats()).map(chat => chat.activeAgent)).toEqual([undefined]);
+}
+
+const SET_VALUE = { tag: "set-value", label: "Set value" };
+
+// Auto-approval applies after its RPC returns, so wait for the turn it resumes to finish.
+async function waitForResumedTurn(ws: RpcStub<Overseer>, model: RoutedScriptedModel) {
+  await waitFor("the resumed turn to finish", async () =>
+    model.remainingSteps() === 0 && !(await ws.listChats())[0]?.activeAgent || null);
 }
 
 async function waitForPendingActions(session: WorkshopAgentSession, count: number) {
@@ -162,6 +153,106 @@ it.concurrent("approving every held write applies each and resumes the agent onc
   expect((await actionState(label)).applyCount).toBe(2);
 });
 
+it.concurrent("approving a held write while its code runs lets the agent carry on", async () => {
+  const model = models.script([
+    { toolCall: { id: "write-then-wait", name: "executeCode", arguments: {
+      // The wait keeps the tool running while the test approves the write.
+      code: "export default async function(self, env) { " +
+          "await env.TEST_AMBIENT.writeValue(7); await scheduler.wait(2000); }",
+    } } },
+    { text: "The value is applied." },
+  ]);
+  await using session = await openSession(model, "agentmidtool");
+
+  const turn = session.runTurn("Set the test value to 7.");
+  const [action] = await waitForPendingActions(session, 1);
+  await withOwnerWorkspace(harness.url, session.username, ws => ws.approveAction(action.id));
+  expect(agentSaid((await turn).history, "The value is applied.")).toBe(1);
+});
+
+it.concurrent("always approving a held write's kind applies it and resumes the agent", async () => {
+  const model = models.script([
+    writeValues("7, { autoApprovable: true }"), { text: "The value is applied." },
+  ]);
+  await using session = await openSession(model, "agentalways");
+  const label = labelOf(session);
+
+  await session.runTurn("Set the test value to 7.");
+  const [action] = await waitForPendingActions(session, 1);
+  expect(model.requests).toHaveLength(1);
+
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await ws.setAutoApprovedActionKind(action.gatekeeperId!, SET_VALUE);
+    await waitForResumedTurn(ws, model);
+  });
+  expect(await actionState(label)).toEqual({ pending: [], value: 7, applyCount: 1 });
+  expect(await actionStatus(session, action.id)).toMatchObject(decidedBy(session, "approved"));
+  expect(model.requests).toHaveLength(2);
+});
+
+it.concurrent.each(["approve", "reject"] as const)(
+    "an always-approved write queued behind a held one applies once the user chooses %s",
+    async decision => {
+  const model = models.script([
+    writeValues(7), writeValues("8, { autoApprovable: true }"), { text: "The value is applied." },
+  ]);
+  await using session = await openSession(model, `agentqueued${decision}`);
+  const label = labelOf(session);
+
+  await session.runTurn("Set the test value to 7.");
+  const [held] = await waitForPendingActions(session, 1);
+  await withOwnerWorkspace(harness.url, session.username, ws =>
+      ws.setAutoApprovedActionKind(held.gatekeeperId!, SET_VALUE));
+
+  await session.runTurn("Set the test value to 8.");
+  await waitForPendingActions(session, 2);
+  expect(model.requests).toHaveLength(2);
+
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    await (decision === "approve" ? ws.approveAction(held.id) : ws.rejectAction(held.id));
+    await waitForResumedTurn(ws, model);
+  });
+  expect(await actionState(label))
+      .toEqual({ pending: [], value: 8, applyCount: decision === "approve" ? 2 : 1 });
+  expect(model.requests).toHaveLength(3);
+});
+
+it.concurrent("approving an older turn's held write leaves a newer finished turn ended", async () => {
+  const secondUrl = "https://gadgets-test.example/things/second";
+  const model = models.script([
+    writeValues(7),
+    { toolCall: { id: "request-second", name: "requestConnection", arguments: {
+      vendorId: TEST_VENDOR_ID, resourceUrl: secondUrl, reason: "Set the second value.",
+      bindingName: "SECOND",
+    } } },
+    { toolCall: { id: "write-second", name: "executeCode", arguments: {
+      code: "export default async function(self, env) { " +
+          "await env.SECOND.writeValue(8, { autoApprovable: true }); }",
+    } } },
+    { text: "The second value is applied." },
+  ]);
+  await using session = await openSession(model, "agentolder");
+
+  await session.runTurn("Set the test value to 7.");
+  const [held] = await waitForPendingActions(session, 1);
+  const { history } = await session.runTurn("Set the second value to 8.");
+  const request = history.find(message => message.type === "connectionRequest");
+  if (request?.type !== "connectionRequest") throw new Error("The agent did not request a connection");
+
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    using second = await ws.newGatekeeper(session.connectedAccount(TEST_VENDOR_ID).id, secondUrl);
+    if (!second) throw new Error("Failed to create the second connection");
+    const secondId = await second.getId();
+    await ws.setAutoApprovedActionKind(secondId, SET_VALUE);
+    await ws.acceptConnectionRequest(request.requestId, { gatekeeperId: secondId });
+    await waitForResumedTurn(ws, model);
+
+    await ws.approveAction(held.id);
+    await expectIdle(ws);
+  });
+  expect(model.requests).toHaveLength(4);
+});
+
 it.concurrent.each(["retry", "reject"] as const)(
     "a failed apply stays pending until the user chooses %s", async choice => {
   const model = models.script([writeValues(9), { text: "The retried value is applied." }]);
@@ -196,6 +287,41 @@ it.concurrent.each(["retry", "reject"] as const)(
     expect(model.requests).toHaveLength(1);
     expect(model.remainingSteps()).toBe(1);
   }
+});
+
+// Known bug, kept as a deterministic repro: Overseer.approveAction checks `pending`, then awaits
+// applyPendingAction before marking the action approved, so two concurrent approvals (separate
+// approval surfaces, tabs, or a retry after a dropped WebSocket) both dispatch the apply, and a
+// non-idempotent gatekeeper writes twice. Drop `.fails` once approval claims the action first.
+it.concurrent.fails("approving one action twice at once applies it once", async () => {
+  await using session = await openSession(models.script([{ text: "Ready." }]), "agentdoubleapprove");
+  const label = labelOf(session);
+  // A workspace is listed, so withOwnerWorkspace can open it, once it has seen activity.
+  await session.runTurn("Get ready.");
+
+  await withOwnerWorkspace(harness.url, session.username, async ws => {
+    using connection = await ws.newGatekeeper(session.connectedAccount(TEST_VENDOR_ID).id,
+        "https://gadgets-test.example/things/double-approval");
+    if (!connection) throw new Error("Failed to create the test connection");
+    using testSession = await connection.openSession() as RpcStub<TestSession>;
+    expect(await testSession.writeValue(23)).toBe(1);
+    const [action] = await waitForPendingActions(session, 1);
+
+    await control("hold-next-apply", { label });
+    const first = ws.approveAction(action.id);
+    try {
+      await waitFor("the first apply to be held", async () => await applyAttempts(label) === 1 || null);
+      await expect(() => ws.approveAction(action.id)).rejects.toThrow(`Action is not pending: ${action.id}`);
+    } finally {
+      await control("release-apply", { label });
+      await Promise.allSettled([first]);
+    }
+    await first;
+
+    expect(await applyAttempts(label)).toBe(1);
+    expect(await actionState(label)).toEqual({ pending: [], value: 23, applyCount: 1 });
+    expect(await actionStatus(session, action.id)).toMatchObject(decidedBy(session, "approved"));
+  });
 });
 
 it.concurrent("approving after a workspace restart applies and resumes once", async () => {

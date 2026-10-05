@@ -101,7 +101,10 @@ describe("TESTS_WITH_TIMEOUT_MAX_SECONDS", () => {
     ["Infinity", "is not finite"],
     ["86401", "is past the one-day ceiling"],
   ] as const) {
-    it(`rejects ${JSON.stringify(value)}, which ${reason}`, async t => {
+    // POSIX-only: the process-group probe needs negative-pid signals, which Windows does not have.
+    it(`rejects ${JSON.stringify(value)}, which ${reason}`, {
+      skip: process.platform === "win32" ? "the process-group probe is POSIX-only" : false,
+    }, async t => {
       // Not a bound on `elapsedMs`: that spans `node` and type-stripping startup for the wrapper itself,
       // which a loaded 2-vCPU CI runner stretched past 2s while the wrapper never spawned anything.
       // A command that started has either written `marker` (its first act) or is still alive in the

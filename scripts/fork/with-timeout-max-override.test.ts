@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { TESTS_WITH_TIMEOUT_ENV, vitestTask } from "../vitest-task-vite-config.ts";
 
@@ -9,7 +12,8 @@ import { TESTS_WITH_TIMEOUT_ENV, vitestTask } from "../vitest-task-vite-config.t
 //
 // Every case drives the real `with-timeout.ts`. The idle threshold is set far above any sleep so the
 // wall-clock cap is the only watchdog that can fire, and each kill-or-survive case keeps a ~5x margin
-// between the cap and the child's sleep rather than asserting a timing window.
+// between the cap and the child's sleep rather than asserting a timing window. The rejection cases
+// assert that the command never ran by what it would have left behind, not by how long the run took.
 const WITH_TIMEOUT = "scripts/with-timeout.ts";
 const VAR = "TESTS_WITH_TIMEOUT_MAX_SECONDS";
 const QUIET_FOR_1500_MS = "setTimeout(() => {}, 1500)";
@@ -76,11 +80,18 @@ describe("TESTS_WITH_TIMEOUT_MAX_SECONDS", () => {
     ["Infinity", "is not finite"],
     ["86401", "is past the one-day ceiling"],
   ] as const) {
-    it(`rejects ${JSON.stringify(value)}, which ${reason}`, async () => {
-      const { code, stderr, elapsedMs } = await run(0.3, QUIET_FOR_1500_MS, { [VAR]: value });
+    it(`rejects ${JSON.stringify(value)}, which ${reason}`, async t => {
+      // The command writes `marker` as its first act, so a started command leaves it behind. Not a
+      // bound on `elapsedMs`: that spans `node` and type-stripping startup for the wrapper itself,
+      // which a loaded 2-vCPU CI runner stretched past 2s while the wrapper never spawned anything.
+      const dir = mkdtempSync(join(tmpdir(), "with-timeout-"));
+      t.after(() => rmSync(dir, { recursive: true, force: true }));
+      const marker = join(dir, "ran");
+      const script = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "")`;
+      const { code, stderr } = await run(0.3, script, { [VAR]: value });
+      assert.equal(existsSync(marker), false, "the command started before the override was rejected");
       assert.equal(code, 2);
       assert.match(stderr, new RegExp(`^with-timeout: ${VAR} `, "m"));
-      assert.ok(elapsedMs < 1400, `the command ran for ${elapsedMs}ms instead of never starting`);
     });
   }
 });

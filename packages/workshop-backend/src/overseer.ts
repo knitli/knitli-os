@@ -83,7 +83,9 @@ import { AutoApprovalDrainer, autoApprovalRule } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
-import { isLoopLimitError, retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
+import {
+  abortFacetOnReset, isLoopLimitError, retryOnDoReset, wrapDoStubForTelemetry,
+} from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
 import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
 import type { AmbientVendorStatus } from "@gadgets/workshop-shared/api";  // Fork
@@ -4304,16 +4306,23 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  // Per gatekeeper facet name, how many times a reset has aborted it (see abortFacetOnReset).
+  private gatekeeperFacetEpochs = new Map<string, number>();
+
   // `cls` is for the one caller that has the class in hand but has deliberately not published the
   // record yet (`addGatekeeper`); everyone else resolves it from the record.
+  // A facet reset (e.g. the gatekeeper Worker deployed new code) aborts the facet, so the next
+  // call gets a fresh one instead of the dead incarnation (see abortFacetOnReset). The abort
+  // invalidates every stub minted before it, so don't hold the returned stub: mint per use.
   getGatekeeperFacet(id: number, cls?: GatekeeperClass): Fetcher<Gatekeeper<any>> {
-    return this.ctx.facets.get(`gatekeeper${id}`, async () => {
+    let name = `gatekeeper${id}`;
+    return abortFacetOnReset(this.ctx.facets.get(name, async () => {
       let resolved = cls ?? this.storage.gatekeepers.get(id)?.class;
       if (!resolved) {
         throw new Error("no such gatekeeper?");
       }
       return {class: resolved};
-    });
+    }), this.ctx.facets, name, this.gatekeeperFacetEpochs, this.logger.with({gatekeeperId: id}));
   }
 
   // The git cache's pull delegate (see GitPullDelegate): reaches the gatekeeper through its
@@ -4488,7 +4497,7 @@ class OverseerImpl implements AgentHooks {
       }
     }
 
-    return new GatekeeperClientImpl<any>(this, id, facet, actorUserId, joinAs);
+    return new GatekeeperClientImpl<any>(this, id, actorUserId, joinAs);
   }
 
   // Destroy a gatekeeper (connection) workpiece. Any binding edges pointing at it are severed so
@@ -10542,8 +10551,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // A connection published moments before a scope-widening restart is not usable by the
     // sessions that restart is about to sever (see #gatekeepersPendingRestart).
     this.impl.assertGatekeeperUsable(id);
-    return new GatekeeperClientImpl(this.impl, id, this.impl.getGatekeeperFacet(id),
-        this.clientUserId, this.#mintedCapabilityKind());
+    return new GatekeeperClientImpl(this.impl, id, this.clientUserId, this.#mintedCapabilityKind());
   }
 
   async ambientVendorStatus(vendorId: string): Promise<AmbientVendorStatus> {
@@ -12309,9 +12317,7 @@ export class GadgetClientImpl extends RpcTarget implements GadgetClient {
     let edge = record.bindings[name];
     if (!edge || edge.pending || !this.impl.storage.gatekeepers.get(edge.target)) return null;
     // The child capability counts exactly as this one does: it can outlive this object.
-    return new GatekeeperClientImpl(
-        this.impl, edge.target, this.impl.getGatekeeperFacet(edge.target),
-        this.clientUserId, this.joinedAs);
+    return new GatekeeperClientImpl(this.impl, edge.target, this.clientUserId, this.joinedAs);
   }
 
   async bind(name: string, target: WorkpieceId, chatId?: number): Promise<void> {
@@ -12589,8 +12595,9 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   // `actorUserId` (hex user DO ID of the client holding this capability) feeds analytics only.
   #leaveSession?: () => void;
 
+  // The facet is minted per call rather than held: a reset aborts it, and the abort leaves any
+  // stub minted before it dead for this capability's lifetime (see getGatekeeperFacet).
   constructor(private impl: OverseerImpl, private id: number,
-      private facet: Fetcher<Gatekeeper<Session>>,
       private actorUserId: string,
       joinedAs?: SessionKind) {
     super();
@@ -12599,6 +12606,10 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
 
   [Symbol.dispose]() {
     this.#leaveSession?.();
+  }
+
+  #facet(): Fetcher<Gatekeeper<Session>> {
+    return this.impl.getGatekeeperFacet(this.id);
   }
 
   async remove(): Promise<void> {
@@ -12640,11 +12651,11 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
 
   async describe(): Promise<ResourceDescription> {
     this.#getRecord();
-    return this.facet.describe();
+    return this.#facet().describe();
   }
 
   async openSession(): Promise<RpcStub<Session>> {
-    return this.impl.openGatekeeperSession(this.id, this.facet, {from: "user"});
+    return this.impl.openGatekeeperSession(this.id, this.#facet(), {from: "user"});
   }
 
   async getCreationSpec(): Promise<GatekeeperCreationSpec> {

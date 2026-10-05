@@ -4306,11 +4306,11 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  // `cls` is for the one caller that has the class in hand but has deliberately not published the
-  // record yet (`addGatekeeper`); everyone else resolves it from the record.
   // Per gatekeeper facet name, how many times a reset has aborted it (see abortFacetOnReset).
   private gatekeeperFacetEpochs = new Map<string, number>();
 
+  // `cls` is for the one caller that has the class in hand but has deliberately not published the
+  // record yet (`addGatekeeper`); everyone else resolves it from the record.
   // A facet reset (e.g. the gatekeeper Worker deployed new code) aborts the facet, so the next
   // call gets a fresh one instead of the dead incarnation (see abortFacetOnReset). The abort
   // invalidates every stub minted before it, so don't hold the returned stub: mint per use.

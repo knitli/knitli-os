@@ -83,7 +83,9 @@ import { AutoApprovalDrainer, autoApprovalRule } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
-import { isLoopLimitError, retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
+import {
+  abortFacetOnReset, isLoopLimitError, retryOnDoReset, wrapDoStubForTelemetry,
+} from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
 import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
 import type { AmbientVendorStatus } from "@gadgets/workshop-shared/api";  // Fork
@@ -4306,14 +4308,17 @@ class OverseerImpl implements AgentHooks {
 
   // `cls` is for the one caller that has the class in hand but has deliberately not published the
   // record yet (`addGatekeeper`); everyone else resolves it from the record.
+  // A facet reset (e.g. the gatekeeper Worker deployed new code) aborts the facet, so the next
+  // call gets a fresh one instead of the dead incarnation (see abortFacetOnReset).
   getGatekeeperFacet(id: number, cls?: GatekeeperClass): Fetcher<Gatekeeper<any>> {
-    return this.ctx.facets.get(`gatekeeper${id}`, async () => {
+    let name = `gatekeeper${id}`;
+    return abortFacetOnReset(this.ctx.facets.get(name, async () => {
       let resolved = cls ?? this.storage.gatekeepers.get(id)?.class;
       if (!resolved) {
         throw new Error("no such gatekeeper?");
       }
       return {class: resolved};
-    });
+    }), this.ctx.facets, name);
   }
 
   // The git cache's pull delegate (see GitPullDelegate): reaches the gatekeeper through its

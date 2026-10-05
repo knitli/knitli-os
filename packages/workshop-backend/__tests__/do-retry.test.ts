@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  isDoResetError, isLoopLimitError, retryOnDoReset, wrapDoStubForTelemetry,
+  abortFacetOnReset, isDoResetError, isLoopLimitError, retryOnDoReset, wrapDoStubForTelemetry,
 } from "../src/do-retry";
 import { createWorkshopLogger } from "../src/observability";
 
@@ -273,5 +273,37 @@ describe("retryOnDoReset", () => {
     // The frontend classifier reads the flags as own enumerable props; pin that they survive.
     expect({ ...(caught as object) }).toMatchObject(PRODUCTION_RESET);
     expect(recoveredEvents(info)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// abortFacetOnReset. A plain object stands in for the facet stub and for ctx.facets.
+
+function wrappedFacet(error: unknown) {
+  const aborted: [string, unknown][] = [];
+  const facets = { abort: (name: string, reason: unknown) => aborted.push([name, reason]) };
+  let calls = 0;
+  const facet = abortFacetOnReset(
+      { applyAction: async () => { calls++; throw error; } },
+      facets as unknown as DurableObjectFacets, "gatekeeper7");
+  return { facet, aborted, calls: () => calls };
+}
+
+describe("abortFacetOnReset", () => {
+  it("aborts the named facet on a reset, rethrowing by identity without retrying", async () => {
+    const error = resetError({ durableObjectReset: true });
+    const { facet, aborted, calls } = wrappedFacet(error);
+
+    await expect(facet.applyAction()).rejects.toBe(error);
+    expect(aborted).toEqual([["gatekeeper7", expect.any(Error)]]);
+    expect(calls()).toBe(1);
+  });
+
+  it("does not abort on an ordinary error or a bare connection loss", async () => {
+    for (const error of [new Error("some app error"), resetError({ retryable: true })]) {
+      const { facet, aborted } = wrappedFacet(error);
+      await expect(facet.applyAction()).rejects.toBe(error);
+      expect(aborted).toEqual([]);
+    }
   });
 });

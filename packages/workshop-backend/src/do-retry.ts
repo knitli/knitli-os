@@ -56,6 +56,39 @@ export function isLoopLimitError(e: unknown): boolean {
 export function wrapDoStubForTelemetry<T extends { id: DurableObjectId }>(
     stub: T, log: ReturnType<typeof createWorkshopLogger> = logger,
     onRejection?: (e: unknown) => void): T {
+  return observeStubRejections(stub, (operation, e) => {
+    if (isDoResetError(e)) {
+      log.warn("user DO reset observed", {
+        event: "user_do.reset.surfaced",
+        operation,
+        durableObjectId: stub.id.toString(),
+        error: e,
+      });
+    }
+    onRejection?.(e);
+  });
+}
+
+/** Wraps a facet stub so that a call rejecting with `durableObjectReset` aborts the facet
+ * `name`, and the next `facets.get(name, ...)` starts a fresh one. Without this the reset
+ * facet (e.g. after its Worker deployed new code) rejects every later call forever. The call
+ * is never retried -- it may not be replay-safe (`applyAction`) -- so the rejection is still
+ * rethrown by identity and the user's next attempt is what reaches the fresh facet. Only
+ * `durableObjectReset` aborts: bare `retryable` is a lost connection to a possibly-live facet,
+ * and aborting would sever its other callers. */
+export function abortFacetOnReset<T extends object>(
+    stub: T, facets: DurableObjectFacets, name: string): T {
+  return observeStubRejections(stub, (_operation, e) => {
+    if ((e as { durableObjectReset?: unknown } | null)?.durableObjectReset === true) {
+      facets.abort(name, new Error("Facet restarted after a Durable Object reset."));
+    }
+  });
+}
+
+// Calls `onRejection` with the method name and the error for every rejection of a method
+// called through the returned proxy, then rethrows by identity. Otherwise transparent.
+function observeStubRejections<T extends object>(
+    stub: T, onRejection: (operation: string, e: unknown) => void): T {
   return new Proxy(stub, {
     get(target, prop) {
       const value = Reflect.get(target, prop) as unknown;
@@ -72,15 +105,7 @@ export function wrapDoStubForTelemetry<T extends { id: DurableObjectId }>(
           try {
             return await (result as PromiseLike<unknown>);
           } catch (e) {
-            if (isDoResetError(e)) {
-              log.warn("user DO reset observed", {
-                event: "user_do.reset.surfaced",
-                operation: prop,
-                durableObjectId: target.id.toString(),
-                error: e,
-              });
-            }
-            onRejection?.(e);
+            onRejection(prop, e);
             throw e;
           }
         })();

@@ -13,15 +13,21 @@ import { TESTS_WITH_TIMEOUT_ENV, vitestTask } from "../vitest-task-vite-config.t
 // Every case drives the real `with-timeout.ts`. The idle threshold is set far above any sleep so the
 // wall-clock cap is the only watchdog that can fire, and each kill-or-survive case keeps a ~5x margin
 // between the cap and the child's sleep rather than asserting a timing window. The rejection cases
-// assert that the command never ran by what it would have left behind, not by how long the run took.
+// assert that the command never ran by what it would have left behind (a marker file, a live
+// process), not by how long the run took.
 const WITH_TIMEOUT = "scripts/with-timeout.ts";
 const VAR = "TESTS_WITH_TIMEOUT_MAX_SECONDS";
 const QUIET_FOR_1500_MS = "setTimeout(() => {}, 1500)";
 
-/** Runs the watchdog with `--max <flagMax>` over `script`, with `env` layered onto this process's. */
+/**
+ * Runs the watchdog with `--max <flagMax>` over `script`, with `env` layered onto this process's.
+ *
+ * The watchdog leads its own process group (`detached`), and `pid` is that group's id: everything it
+ * spawns stays in the group, even if the watchdog exits and orphans it. See `groupIsEmpty`.
+ */
 function run(
   flagMax: number, script: string, env: Record<string, string>,
-): Promise<{ code: number | null; stderr: string; elapsedMs: number }> {
+): Promise<{ code: number | null; stderr: string; elapsedMs: number; pid: number }> {
   return new Promise(resolve => {
     const startedAt = Date.now();
     // Neither switch is inherited: under `TESTS_WITH_TIMEOUT_DISABLE=1 vp run …` this suite itself
@@ -32,11 +38,26 @@ function run(
     const child = spawn(
       process.execPath,
       [WITH_TIMEOUT, "--idle", "30", "--max", String(flagMax), "--", "node", "-e", script],
-      { stdio: ["ignore", "ignore", "pipe"], env: childEnv });
+      { stdio: ["ignore", "ignore", "pipe"], env: childEnv, detached: true });
     let stderr = "";
     child.stderr.on("data", chunk => { stderr += chunk; });
-    child.on("close", code => resolve({ code, stderr, elapsedMs: Date.now() - startedAt }));
+    child.on("close", code => resolve({ code, stderr, elapsedMs: Date.now() - startedAt, pid: child.pid! }));
   });
+}
+
+/** True once no process is left in group `pgid`: signal 0 only probes, and ESRCH means none exist. */
+function groupIsEmpty(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+/** Kills whatever a case left in group `pgid`, so a regression cannot leak a process past the test. */
+function killGroup(pgid: number): void {
+  try { process.kill(-pgid, "SIGKILL"); } catch { /* already empty */ }
 }
 
 describe("TESTS_WITH_TIMEOUT_MAX_SECONDS", () => {
@@ -81,14 +102,19 @@ describe("TESTS_WITH_TIMEOUT_MAX_SECONDS", () => {
     ["86401", "is past the one-day ceiling"],
   ] as const) {
     it(`rejects ${JSON.stringify(value)}, which ${reason}`, async t => {
-      // The command writes `marker` as its first act, so a started command leaves it behind. Not a
-      // bound on `elapsedMs`: that spans `node` and type-stripping startup for the wrapper itself,
+      // Not a bound on `elapsedMs`: that spans `node` and type-stripping startup for the wrapper itself,
       // which a loaded 2-vCPU CI runner stretched past 2s while the wrapper never spawned anything.
+      // A command that started has either written `marker` (its first act) or is still alive in the
+      // wrapper's group: the wrapper can exit right after spawning it, before it has booted, so
+      // `close` can resolve with no marker yet. Read the group first. Empty means the command already
+      // exited, having written the marker before it did; the other order lets it finish between reads.
       const dir = mkdtempSync(join(tmpdir(), "with-timeout-"));
       t.after(() => rmSync(dir, { recursive: true, force: true }));
       const marker = join(dir, "ran");
       const script = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "")`;
-      const { code, stderr } = await run(0.3, script, { [VAR]: value });
+      const { code, stderr, pid } = await run(0.3, script, { [VAR]: value });
+      t.after(() => killGroup(pid));
+      assert.ok(groupIsEmpty(pid), "the command was still running after the wrapper exited");
       assert.equal(existsSync(marker), false, "the command started before the override was rejected");
       assert.equal(code, 2);
       assert.match(stderr, new RegExp(`^with-timeout: ${VAR} `, "m"));

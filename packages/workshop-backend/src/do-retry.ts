@@ -26,8 +26,7 @@ const logger = createWorkshopLogger("workshop.server");
  */
 export function isDoResetError(e: unknown): boolean {
   if (typeof e !== "object" || e === null) return false;
-  const flags = e as { durableObjectReset?: unknown; retryable?: unknown };
-  return flags.durableObjectReset === true || flags.retryable === true;
+  return isDurableObjectReset(e) || (e as { retryable?: unknown }).retryable === true;
 }
 
 /**
@@ -69,18 +68,49 @@ export function wrapDoStubForTelemetry<T extends { id: DurableObjectId }>(
   });
 }
 
+/** True when the rejection says the object's incarnation died (see the header). */
+export function isDurableObjectReset(e: unknown): boolean {
+  return typeof e === "object" && e !== null &&
+      (e as { durableObjectReset?: unknown }).durableObjectReset === true;
+}
+
 /** Wraps a facet stub so that a call rejecting with `durableObjectReset` aborts the facet
  * `name`, and the next `facets.get(name, ...)` starts a fresh one. Without this the reset
  * facet (e.g. after its Worker deployed new code) rejects every later call forever. The call
  * is never retried -- it may not be replay-safe (`applyAction`) -- so the rejection is still
- * rethrown by identity and the user's next attempt is what reaches the fresh facet. Only
- * `durableObjectReset` aborts: bare `retryable` is a lost connection to a possibly-live facet,
- * and aborting would sever its other callers. */
+ * rethrown by identity and the user's next attempt is what reaches the fresh facet.
+ *
+ * `epochs` (one Map per facets owner, keyed by facet name) makes the abort once per
+ * incarnation: the wrapper captures the name's epoch when minted and aborts only if it is still
+ * current, bumping it. Otherwise a late reset from a second call on the dead incarnation would
+ * abort the fresh facet a third call is already using.
+ *
+ * Accepted risks:
+ * - Bare `retryable` does not abort: it is a lost connection to a possibly-live facet, and
+ *   aborting would sever its other callers.
+ * - With enhanced error serialization (compat date >= 2026-04-21) an error's own properties
+ *   cross JS RPC, so a live facet that rethrows a reset it received from another Durable Object
+ *   unchanged also aborts here. That restarts a healthy facet (its in-flight calls fail, its
+ *   storage is kept), which only that facet's own code can cause.
+ * - `facets.abort` invalidates every stub minted before it (later calls throw the reason;
+ *   they do not re-resolve by name), so a caller that holds a stub must re-mint it. */
 export function abortFacetOnReset<T extends object>(
-    stub: T, facets: DurableObjectFacets, name: string): T {
-  return observeStubRejections(stub, (_operation, e) => {
-    if ((e as { durableObjectReset?: unknown } | null)?.durableObjectReset === true) {
+    stub: T, facets: DurableObjectFacets, name: string, epochs: Map<string, number>,
+    log: ReturnType<typeof createWorkshopLogger> = logger): T {
+  const epoch = epochs.get(name) ?? 0;
+  return observeStubRejections(stub, (operation, e) => {
+    if (!isDurableObjectReset(e) || (epochs.get(name) ?? 0) !== epoch) return;
+    epochs.set(name, epoch + 1);
+    try {
       facets.abort(name, new Error("Facet restarted after a Durable Object reset."));
+      log.warn("facet aborted after a reset", {
+        event: "facet.reset.aborted", operation, error: e,
+      });
+    } catch (abortError) {
+      // The caller must still see the reset itself, so never let this replace it.
+      log.error("failed to abort a reset facet", {
+        event: "facet.reset.abort.failed", operation, error: abortError,
+      });
     }
   });
 }
@@ -126,10 +156,9 @@ const RETRY_JITTER_MS = 250;
  * guidance in the error-handling docs linked above. Bare `retryable` (connection lost to a
  * possibly-live object) retries only if it isn't shedding load. */
 function shouldRetryAfterReset(e: unknown): boolean {
-  if (typeof e !== "object" || e === null) return false;
-  const flags = e as { durableObjectReset?: unknown; retryable?: unknown; overloaded?: unknown };
-  if (flags.durableObjectReset === true) return true;
-  return flags.retryable === true && flags.overloaded !== true;
+  if (isDurableObjectReset(e)) return true;
+  const flags = e as { retryable?: unknown; overloaded?: unknown } | null;
+  return flags?.retryable === true && flags.overloaded !== true;
 }
 
 /** Retries `callWithFreshStub` once if it rejects with a DO-reset shape. The caller asserts the

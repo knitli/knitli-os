@@ -277,33 +277,70 @@ describe("retryOnDoReset", () => {
 });
 
 // ---------------------------------------------------------------------------------------
-// abortFacetOnReset. A plain object stands in for the facet stub and for ctx.facets.
+// abortFacetOnReset. Plain objects stand in for the facet stubs and for ctx.facets.
 
-function wrappedFacet(error: unknown) {
-  const aborted: [string, unknown][] = [];
-  const facets = { abort: (name: string, reason: unknown) => aborted.push([name, reason]) };
+function fakeFacets(abort: (name: string, reason: unknown) => void = () => {}) {
+  const aborted: string[] = [];
+  const facets = {
+    abort: (name: string, reason: unknown) => { aborted.push(name); abort(name, reason); },
+  } as unknown as DurableObjectFacets;
+  const epochs = new Map<string, number>();
   let calls = 0;
-  const facet = abortFacetOnReset(
-      { applyAction: async () => { calls++; throw error; } },
-      facets as unknown as DurableObjectFacets, "gatekeeper7");
-  return { facet, aborted, calls: () => calls };
+  // Mints a wrapped stub whose applyAction rejects with `error`, as getGatekeeperFacet would.
+  const mint = (error: unknown) => abortFacetOnReset(
+      { applyAction: async () => { calls++; throw error; } }, facets, "gatekeeper7", epochs);
+  return { mint, aborted, calls: () => calls };
 }
 
 describe("abortFacetOnReset", () => {
-  it("aborts the named facet on a reset, rethrowing by identity without retrying", async () => {
-    const error = resetError({ durableObjectReset: true });
-    const { facet, aborted, calls } = wrappedFacet(error);
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
-    await expect(facet.applyAction()).rejects.toBe(error);
-    expect(aborted).toEqual([["gatekeeper7", expect.any(Error)]]);
+  it("aborts the named facet on a reset, rethrowing by identity without retrying", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = resetError(PRODUCTION_RESET);
+    const { mint, aborted, calls } = fakeFacets();
+
+    await expect(mint(error).applyAction()).rejects.toBe(error);
+    expect(aborted).toEqual(["gatekeeper7"]);
     expect(calls()).toBe(1);
   });
 
-  it("does not abort on an ordinary error or a bare connection loss", async () => {
-    for (const error of [new Error("some app error"), resetError({ retryable: true })]) {
-      const { facet, aborted } = wrappedFacet(error);
-      await expect(facet.applyAction()).rejects.toBe(error);
-      expect(aborted).toEqual([]);
+  it("does not abort on an ordinary error, a bare connection loss, or a non-Error", async () => {
+    const { mint, aborted } = fakeFacets();
+    for (const error of [new Error("some app error"), resetError({ retryable: true }), "boom", null]) {
+      await expect(mint(error).applyAction()).rejects.toBe(error);
     }
+    expect(aborted).toEqual([]);
+  });
+
+  it("aborts once per incarnation, never the fresh facet minted after the abort", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = resetError(PRODUCTION_RESET);
+    const { mint, aborted } = fakeFacets();
+    // Two calls in flight on the dead incarnation, minted before either rejected.
+    const first = mint(error);
+    const second = mint(error);
+
+    await expect(first.applyAction()).rejects.toBe(error);
+    const fresh = mint(new Error("still applying"));  // minted after the abort
+    await expect(second.applyAction()).rejects.toBe(error);  // the late reset
+    expect(aborted).toEqual(["gatekeeper7"]);
+
+    // The fresh incarnation's own reset still aborts it.
+    const freshReset = mint(error);
+    await fresh.applyAction().catch(() => {});
+    await expect(freshReset.applyAction()).rejects.toBe(error);
+    expect(aborted).toEqual(["gatekeeper7", "gatekeeper7"]);
+  });
+
+  it("rethrows the reset, not the abort's failure, when abort throws", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const error = resetError(PRODUCTION_RESET);
+    const { mint, aborted } = fakeFacets(() => { throw new Error("abort failed"); });
+
+    await expect(mint(error).applyAction()).rejects.toBe(error);
+    expect(aborted).toEqual(["gatekeeper7"]);
   });
 });

@@ -3,7 +3,7 @@
 
 import { act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { newMessagePortRpcSession, RpcTarget, type RpcStub } from 'capnweb'
 import {
   createOpenGadgetError,
@@ -13,7 +13,11 @@ import {
   type Overseer,
 } from '@gadgets/workshop-shared/api'
 import WorkspaceOpenErrorPage from './components/WorkspaceOpenErrorPage'
-import { DO_RESET_REOPEN_INTERVAL_MS, useWorkspaceOpen } from './useWorkspaceOpen'
+import {
+  DO_RESET_REOPEN_INTERVAL_MS,
+  useWorkspaceOpen,
+  WORKSPACE_HEARTBEAT_INTERVAL_MS,
+} from './useWorkspaceOpen'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -47,6 +51,10 @@ const { setImmediate } = globalThis as unknown as { setImmediate(callback: () =>
 const settle = () => act(async () => {
   for (let i = 0; i < 20; i++) await new Promise<void>(resolve => setImmediate(resolve))
 })
+const advance = async (ms: number) => {
+  await act(async () => { vi.advanceTimersByTime(ms) })
+  await settle()
+}
 
 const METADATA = {
   id: 'workspace-1',
@@ -245,6 +253,12 @@ describe('useWorkspaceOpen', () => {
     const RESET = 'Durable Object reset because its code was updated.'
 
     class OverseerTarget extends RpcTarget {
+      constructor(private server: ApiTarget) { super() }
+      getMetadata() {
+        this.server.probes++
+        if (this.server.resetting) throw new Error(RESET)
+        return METADATA
+      }
       subscribeToMetadata(callback: (metadata: GadgetMetadata) => void) {
         callback(METADATA)
         return new RpcTarget()
@@ -255,14 +269,16 @@ describe('useWorkspaceOpen', () => {
 
     class ApiTarget extends RpcTarget {
       opens = 0
+      probes = 0
+      resetting = false
       openGadget() {
         this.opens++
-        return new OverseerTarget()
+        return new OverseerTarget(this)
       }
     }
 
     async function openWorkspace() {
-      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
       vi.spyOn(console, 'debug').mockImplementation(() => {})
       const server = new ApiTarget()
       const { port1, port2 } = new MessageChannel()
@@ -287,11 +303,17 @@ describe('useWorkspaceOpen', () => {
         server,
         stub: () => state.overseer!.stub,
         retry: () => act(async () => state.retry()),
+        unmount: () => { act(() => root!.unmount()); root = undefined },
         close: () => { port1.close(); port2.close() },
       }
     }
 
-    afterEach(() => vi.useRealTimers())
+    let hidden = false
+
+    afterEach(() => {
+      vi.useRealTimers()
+      hidden = false
+    })
 
     it('reopens the workspace once when a call fails with do-reset', async () => {
       const { server, stub, close } = await openWorkspace()
@@ -372,6 +394,68 @@ describe('useWorkspaceOpen', () => {
       await settle()
       expect(server.opens).toBe(1)
       close()
+    })
+
+    describe('heartbeat', () => {
+      beforeEach(() => {
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden })
+      })
+      afterEach(() => {
+        delete (document as { hidden?: boolean }).hidden
+      })
+
+      it('notices a reset on an idle tab and reopens once, without toasting or logging', async () => {
+        const errors = vi.spyOn(console, 'error')
+        const warnings = vi.spyOn(console, 'warn')
+        const { server, close } = await openWorkspace()
+
+        await advance(WORKSPACE_HEARTBEAT_INTERVAL_MS - 1)
+        expect(server.probes).toBe(0)
+        server.resetting = true
+        await advance(1)
+        expect(server.probes).toBe(1)
+        await advance(0)
+        expect(server.opens).toBe(2)
+        expect(container!.textContent).toBe('Quarterly planning')
+
+        server.resetting = false
+        await advance(WORKSPACE_HEARTBEAT_INTERVAL_MS)
+        expect(server.probes).toBe(2)
+        expect(server.opens).toBe(2)
+        expect(errors).not.toHaveBeenCalled()
+        expect(warnings).not.toHaveBeenCalled()
+        close()
+      })
+
+      it('makes no probes while the tab is hidden', async () => {
+        const { server, close } = await openWorkspace()
+
+        hidden = true
+        await advance(3 * WORKSPACE_HEARTBEAT_INTERVAL_MS)
+        expect(server.probes).toBe(0)
+        hidden = false
+        await advance(WORKSPACE_HEARTBEAT_INTERVAL_MS)
+        expect(server.probes).toBe(1)
+        close()
+      })
+
+      it('stops probing a replaced handle and on unmount', async () => {
+        const { server, retry, unmount, close } = await openWorkspace()
+
+        await retry()
+        await settle()
+        expect(server.opens).toBe(2)
+        await advance(WORKSPACE_HEARTBEAT_INTERVAL_MS)
+        expect(server.probes).toBe(1)
+        // A probe on a disposed handle fails locally, so count the timers, not server calls.
+        expect(vi.getTimerCount()).toBe(1)
+
+        unmount()
+        expect(vi.getTimerCount()).toBe(0)
+        await advance(3 * WORKSPACE_HEARTBEAT_INTERVAL_MS)
+        expect(server.probes).toBe(1)
+        close()
+      })
     })
   })
 })

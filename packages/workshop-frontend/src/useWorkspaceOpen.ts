@@ -22,6 +22,9 @@ const OBSERVER_CANCELLED = 'OBSERVER_CONFIG_CANCELLED'
 /** Floor between do-reset reopens, so an object that keeps resetting cannot drive a reopen loop. */
 export const DO_RESET_REOPEN_INTERVAL_MS = 5000
 
+/** How often a visible tab probes its open workspace, so a reset is noticed with no user action. */
+export const WORKSPACE_HEARTBEAT_INTERVAL_MS = 30_000
+
 /**
  * Wraps the workspace handle so a do-reset failure of any call made on it, from any component,
  * reaches `onReset`. A Durable Object reset leaves the browser↔Worker socket healthy, so the
@@ -99,6 +102,7 @@ export function useWorkspaceOpen({
     let configureObservers: RpcStub<ObserverConfigCallback> | null = null
     let cancelled = false
     let doResetReopen: ReturnType<typeof setTimeout> | undefined
+    let heartbeat: ReturnType<typeof setInterval> | undefined
     const hadOpenWorkspace = id !== undefined && openWorkspaceIdRef.current === id
 
     const disposeAttempt = () => {
@@ -181,6 +185,14 @@ export function useWorkspaceOpen({
         }
         metadataSubscription = resolvedSubscription
 
+        // A reset reaches observeDoResets() only through a failing call, and a tab that just waits
+        // makes none. getMetadata() is a side-effect-free read; a reset is reported by the observer,
+        // and any other failure belongs to the paths that own it, so the probe stays silent.
+        const probed = overseerStub
+        heartbeat = setInterval(() => {
+          if (!document.hidden) probed.getMetadata().catch(() => {})
+        }, WORKSPACE_HEARTBEAT_INTERVAL_MS)
+
         openWorkspaceIdRef.current = id
         setError(null)
         if (connectionLost) setConnectionLost(false)
@@ -222,6 +234,7 @@ export function useWorkspaceOpen({
     return () => {
       cancelled = true
       clearTimeout(doResetReopen)
+      clearInterval(heartbeat)
       if (pendingObserverRejectRef.current) {
         pendingObserverRejectRef.current(new Error('Cancelled'))
         pendingObserverRejectRef.current = null

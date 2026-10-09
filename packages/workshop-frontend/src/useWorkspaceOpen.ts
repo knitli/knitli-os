@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { RpcStub, RpcTarget } from 'capnweb'
+import { RpcPromise, RpcStub, RpcTarget } from 'capnweb'
 import type {
   AuthenticatedApi,
   GadgetMetadata,
@@ -9,6 +9,7 @@ import type {
   Overseer,
 } from '@gadgets/workshop-shared/api'
 import { reportIssue } from './errorReporting'
+import { classifyRpcError, reportDoResetError } from './rpcErrors'
 import { linkActionLog } from './useActions'
 import { useDocumentTitle } from './useDocumentTitle'
 import {
@@ -17,6 +18,39 @@ import {
 } from './components/WorkspaceOpenErrorPage'
 
 const OBSERVER_CANCELLED = 'OBSERVER_CONFIG_CANCELLED'
+
+/** Floor between do-reset reopens, so an object that keeps resetting cannot drive a reopen loop. */
+export const DO_RESET_REOPEN_INTERVAL_MS = 5000
+
+/**
+ * Wraps the workspace handle so a do-reset failure of any call made on it, from any component,
+ * reaches `onReset`. A Durable Object reset leaves the browser↔Worker socket healthy, so the
+ * reconnect path never runs and the handle stays bound to the dead instance, which no longer knows
+ * our subscriptions (knitli-site#709). `onRpcBroken` sees a rejection without pulling the result,
+ * so pipelined and unawaited calls behave exactly as before. Calls on stubs a call returns (such as
+ * `getGadget()`) are not observed.
+ */
+function observeDoResets(stub: RpcStub<Overseer>, onReset: (error: unknown) => void) {
+  const observe = (error: unknown) => {
+    if (classifyRpcError(error) === 'do-reset') onReset(error)
+  }
+  return new Proxy(stub, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop)
+      if (typeof prop !== 'string' || prop in RpcPromise.prototype || typeof value !== 'function') {
+        return value
+      }
+      return new Proxy(value, {
+        apply(method, thisArg, args) {
+          const result = Reflect.apply(method, thisArg, args) as Partial<RpcPromise<unknown>>
+          // Optional only for plain-object test fakes; capnweb always returns an RpcPromise.
+          result?.onRpcBroken?.(observe)
+          return result
+        },
+      })
+    },
+  })
+}
 
 export type WorkspaceLoadError =
   | { kind: 'open'; failure: WorkspaceOpenFailureKind }
@@ -53,6 +87,7 @@ export function useWorkspaceOpen({
   const pendingObserverRejectRef = useRef<((error: unknown) => void) | null>(null)
   // Why the user cancelled the account prompt, when the modal knows the open cannot succeed.
   const observerCancelReasonRef = useRef<string | undefined>(undefined)
+  const lastDoResetReopenRef = useRef(0)
   const callbacksRef = useRef({ onMetadata, onShareKeyConsumed, onInvalidShareKey })
   callbacksRef.current = { onMetadata, onShareKeyConsumed, onInvalidShareKey }
 
@@ -63,6 +98,7 @@ export function useWorkspaceOpen({
     let metadataSubscription: RpcStub<{}> | null = null
     let configureObservers: RpcStub<ObserverConfigCallback> | null = null
     let cancelled = false
+    let doResetReopen: ReturnType<typeof setTimeout> | undefined
     const hadOpenWorkspace = id !== undefined && openWorkspaceIdRef.current === id
 
     const disposeAttempt = () => {
@@ -118,7 +154,19 @@ export function useWorkspaceOpen({
         })()
         configureObservers = new RpcStub(configureObserversTarget)
 
-        overseerStub = authenticatedApi.openGadget(id, shareKey, configureObservers)
+        // One reopen per opened handle, then a fresh open that replays state to the subscribers.
+        overseerStub = observeDoResets(
+          authenticatedApi.openGadget(id, shareKey, configureObservers),
+          resetError => {
+            if (cancelled || doResetReopen !== undefined) return
+            reportDoResetError('workspace.reopen', resetError, { gadgetId: id })
+            const wait = lastDoResetReopenRef.current + DO_RESET_REOPEN_INTERVAL_MS - Date.now()
+            doResetReopen = setTimeout(() => {
+              lastDoResetReopenRef.current = Date.now()
+              setReloadNonce(value => value + 1)
+            }, Math.max(0, wait))
+          },
+        )
         linkActionLog(overseerStub, id)
         setOverseer({ stub: overseerStub })
 
@@ -173,6 +221,7 @@ export function useWorkspaceOpen({
     void load()
     return () => {
       cancelled = true
+      clearTimeout(doResetReopen)
       if (pendingObserverRejectRef.current) {
         pendingObserverRejectRef.current(new Error('Cancelled'))
         pendingObserverRejectRef.current = null

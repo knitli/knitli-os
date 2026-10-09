@@ -4,7 +4,7 @@
 import { act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { RpcStub } from 'capnweb'
+import { newMessagePortRpcSession, RpcTarget, type RpcStub } from 'capnweb'
 import {
   createOpenGadgetError,
   OPEN_GADGET_ERROR_CODES,
@@ -13,7 +13,7 @@ import {
   type Overseer,
 } from '@gadgets/workshop-shared/api'
 import WorkspaceOpenErrorPage from './components/WorkspaceOpenErrorPage'
-import { useWorkspaceOpen } from './useWorkspaceOpen'
+import { DO_RESET_REOPEN_INTERVAL_MS, useWorkspaceOpen } from './useWorkspaceOpen'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -36,6 +36,17 @@ function disposableStub<T extends object>(value: T, dispose = vi.fn<() => void>(
 function api(overseer: RpcStub<Overseer>): RpcStub<AuthenticatedApi> {
   return { openGadget: () => overseer } as unknown as RpcStub<AuthenticatedApi>
 }
+
+// How the app consumes a failed call. Not `expect(call).rejects`: vitest's matcher handles an
+// RpcPromise in a way that never delivers its rejection to onRpcBroken, which no app path does.
+const failure = (call: Promise<unknown>) =>
+  call.then(() => { throw new Error('call succeeded') }, (error: Error) => error.message)
+
+// MessagePort delivery is a macrotask; the do-reset tests fake setTimeout but leave this real.
+const { setImmediate } = globalThis as unknown as { setImmediate(callback: () => void): void }
+const settle = () => act(async () => {
+  for (let i = 0; i < 20; i++) await new Promise<void>(resolve => setImmediate(resolve))
+})
 
 const METADATA = {
   id: 'workspace-1',
@@ -226,5 +237,141 @@ describe('useWorkspaceOpen', () => {
     await act(async () => { state.cancelObserverConfig(); await Promise.resolve() })
     expect(container.textContent)
       .toBe('To open this workspace, you must choose connected accounts for the services it uses.')
+  })
+
+  // Real capnweb over a MessageChannel: the socket stays healthy while calls fail with do-reset,
+  // as in knitli-site#709. A fake stub could not show that onRpcBroken observes the rejection.
+  describe('after a Durable Object reset over a healthy socket', () => {
+    const RESET = 'Durable Object reset because its code was updated.'
+
+    class OverseerTarget extends RpcTarget {
+      subscribeToMetadata(callback: (metadata: GadgetMetadata) => void) {
+        callback(METADATA)
+        return new RpcTarget()
+      }
+      stopAgent(): void { throw new Error(RESET) }
+      refuse(): void { throw new Error('Not allowed.') }
+    }
+
+    class ApiTarget extends RpcTarget {
+      opens = 0
+      openGadget() {
+        this.opens++
+        return new OverseerTarget()
+      }
+    }
+
+    async function openWorkspace() {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      vi.spyOn(console, 'debug').mockImplementation(() => {})
+      const server = new ApiTarget()
+      const { port1, port2 } = new MessageChannel()
+      newMessagePortRpcSession(port2, server)
+      const authenticatedApi = newMessagePortRpcSession<AuthenticatedApi>(port1)
+      let state!: ReturnType<typeof useWorkspaceOpen>
+      function Probe() {
+        state = useWorkspaceOpen({
+          id: 'workspace-1', authenticatedApi,
+          onInvalidShareKey: () => {}, onMetadata: () => {}, onShareKeyConsumed: () => {},
+        })
+        return <p>{state.metadata?.title}</p>
+      }
+      container = document.createElement('div')
+      document.body.append(container)
+      root = createRoot(container)
+      await act(async () => root!.render(<Probe />))
+      await settle()
+      expect(container.textContent).toBe('Quarterly planning')
+      expect(server.opens).toBe(1)
+      return {
+        server,
+        stub: () => state.overseer!.stub,
+        retry: () => act(async () => state.retry()),
+        close: () => { port1.close(); port2.close() },
+      }
+    }
+
+    afterEach(() => vi.useRealTimers())
+
+    it('reopens the workspace once when a call fails with do-reset', async () => {
+      const { server, stub, close } = await openWorkspace()
+      const dead = stub()
+
+      expect(await failure(dead.stopAgent(1))).toBe(RESET)
+      expect(await failure(dead.stopAgent(1))).toBe(RESET)
+      await act(async () => { vi.advanceTimersByTime(0) })
+      await settle()
+
+      expect(server.opens).toBe(2)
+      expect(stub()).not.toBe(dead)
+      expect(container!.textContent).toBe('Quarterly planning')
+
+      // A late failure on the replaced handle reopens nothing.
+      await failure(dead.stopAgent(1))
+      await act(async () => { vi.advanceTimersByTime(DO_RESET_REOPEN_INTERVAL_MS) })
+      await settle()
+      expect(server.opens).toBe(2)
+      close()
+    })
+
+    it('spaces repeated resets out instead of looping', async () => {
+      const { server, stub, close } = await openWorkspace()
+
+      expect(await failure(stub().stopAgent(1))).toBe(RESET)
+      await act(async () => { vi.advanceTimersByTime(0) })
+      await settle()
+      expect(server.opens).toBe(2)
+
+      expect(await failure(stub().stopAgent(1))).toBe(RESET)
+      await act(async () => { vi.advanceTimersByTime(DO_RESET_REOPEN_INTERVAL_MS - 1) })
+      await settle()
+      expect(server.opens).toBe(2)
+      await act(async () => { vi.advanceTimersByTime(1) })
+      await settle()
+      expect(server.opens).toBe(3)
+      close()
+    })
+
+    it('drops a pending reopen when its attempt is replaced, and ignores the replaced handle', async () => {
+      const { server, stub, retry, close } = await openWorkspace()
+      const first = stub()
+
+      // A retry replaces a handle that had not failed yet; a reset still in flight on it lands
+      // after the replacement and must not reopen again.
+      const late = failure(first.stopAgent(1))
+      await retry()
+      expect(await late).toBe(RESET)
+      await settle()
+      expect(server.opens).toBe(2)
+      await act(async () => { vi.advanceTimersByTime(DO_RESET_REOPEN_INTERVAL_MS) })
+      await settle()
+      expect(server.opens).toBe(2)
+
+      // Two resets wait out the floor, then a retry replaces the attempt before the reopen fires.
+      expect(await failure(stub().stopAgent(1))).toBe(RESET)
+      await act(async () => { vi.advanceTimersByTime(0) })
+      await settle()
+      expect(server.opens).toBe(3)
+      expect(await failure(stub().stopAgent(1))).toBe(RESET)
+      expect(await failure(stub().stopAgent(1))).toBe(RESET)
+      await retry()
+      await settle()
+      expect(server.opens).toBe(4)
+      await act(async () => { vi.advanceTimersByTime(DO_RESET_REOPEN_INTERVAL_MS) })
+      await settle()
+      expect(server.opens).toBe(4)
+      close()
+    })
+
+    it('does not reopen for a failure that is not a reset', async () => {
+      const { server, stub, close } = await openWorkspace()
+
+      expect(await failure((stub() as unknown as { refuse(): Promise<void> }).refuse()))
+        .toBe('Not allowed.')
+      await act(async () => { vi.advanceTimersByTime(DO_RESET_REOPEN_INTERVAL_MS) })
+      await settle()
+      expect(server.opens).toBe(1)
+      close()
+    })
   })
 })

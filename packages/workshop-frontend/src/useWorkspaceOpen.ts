@@ -32,12 +32,17 @@ export const WORKSPACE_HEARTBEAT_INTERVAL_MS = 30_000
  * our subscriptions (knitli-site#709). `onRpcBroken` sees a rejection without pulling the result,
  * so pipelined and unawaited calls behave exactly as before. Calls on stubs a call returns (such as
  * `getGadget()`) are not observed.
+ *
+ * Cap'n Web 0.12 moves a registration onto any stub a call returns and never drops it when that stub
+ * is disposed, so the session keeps `observe` for as long as the socket lives. `release()` empties it,
+ * so a replaced attempt leaves only an inert function behind, never its hooks and handles.
  */
 function observeDoResets(stub: RpcStub<Overseer>, onReset: (error: unknown) => void) {
+  let armed: ((error: unknown) => void) | null = onReset
   const observe = (error: unknown) => {
-    if (classifyRpcError(error) === 'do-reset') onReset(error)
+    if (armed && classifyRpcError(error) === 'do-reset') armed(error)
   }
-  return new Proxy(stub, {
+  const observed = new Proxy(stub, {
     get(target, prop) {
       const value: unknown = Reflect.get(target, prop)
       if (typeof prop !== 'string' || prop in RpcPromise.prototype || typeof value !== 'function') {
@@ -53,6 +58,7 @@ function observeDoResets(stub: RpcStub<Overseer>, onReset: (error: unknown) => v
       })
     },
   })
+  return { stub: observed, release: () => { armed = null } }
 }
 
 export type WorkspaceLoadError =
@@ -100,6 +106,7 @@ export function useWorkspaceOpen({
     let overseerStub: RpcStub<Overseer> | null = null
     let metadataSubscription: RpcStub<{}> | null = null
     let configureObservers: RpcStub<ObserverConfigCallback> | null = null
+    let releaseResetObserver: (() => void) | null = null
     let cancelled = false
     let doResetReopen: ReturnType<typeof setTimeout> | undefined
     let heartbeat: ReturnType<typeof setInterval> | undefined
@@ -109,6 +116,8 @@ export function useWorkspaceOpen({
       metadataSubscription?.[Symbol.dispose]()
       overseerStub?.[Symbol.dispose]()
       configureObservers?.[Symbol.dispose]()
+      releaseResetObserver?.()
+      releaseResetObserver = null
       metadataSubscription = null
       overseerStub = null
       configureObservers = null
@@ -159,10 +168,11 @@ export function useWorkspaceOpen({
         configureObservers = new RpcStub(configureObserversTarget)
 
         // One reopen per opened handle, then a fresh open that replays state to the subscribers.
-        overseerStub = observeDoResets(
+        const observed = observeDoResets(
           authenticatedApi.openGadget(id, shareKey, configureObservers),
           resetError => {
-            if (cancelled || doResetReopen !== undefined) return
+            // No `cancelled` check: a replaced attempt has already released this observer.
+            if (doResetReopen !== undefined) return
             reportDoResetError('workspace.reopen', resetError, { gadgetId: id })
             const wait = lastDoResetReopenRef.current + DO_RESET_REOPEN_INTERVAL_MS - Date.now()
             doResetReopen = setTimeout(() => {
@@ -171,6 +181,8 @@ export function useWorkspaceOpen({
             }, Math.max(0, wait))
           },
         )
+        overseerStub = observed.stub
+        releaseResetObserver = observed.release
         linkActionLog(overseerStub, id)
         setOverseer({ stub: overseerStub })
 

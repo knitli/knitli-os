@@ -61,10 +61,6 @@
       "reason": "Regression test for the fork-owned Web Push channel (src/fork/web-push.ts)."
     },
     {
-      "path": "packages/workshop-backend/__tests__/knitli-gatekeeper-session-lease.test.ts",
-      "reason": "Regression test that calls on a retained gatekeeper session renew the fork-owned client-activity lease."
-    },
-    {
       "path": "packages/workshop-backend/__tests__/knitli-idle-lease.test.ts",
       "reason": "Unit test for the fork-owned client-activity lease (src/fork/idle-lease.ts); exact path because this package's vitest include is non-recursive."
     },

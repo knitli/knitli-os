@@ -46,6 +46,9 @@ const logger = createWorkshopLogger("workshop.server");
 // fetch handler), so later requests skip the call. The DO holds the real answer.
 let bundledBlueprintInstallStarted = false;
 
+// Fork: workspace opens held per API socket, keyed by the socket's abortSession callback.
+const liveOpensBySession = new WeakMap<(reason: Error) => void, number>();
+
 const USER_SEARCH_POLICY_CACHE_TTL_MS = 30_000;
 
 function publicBlueprintInfo(id: string, metadata: BlueprintPublicInfo['metadata']): BlueprintPublicInfo {
@@ -332,11 +335,16 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   // Fork: workspace opens this session holds, counted per open rather than per workspace id (a page
   // can hold two opens of one workspace). The socket carries the idle close code only once an
   // expired lease has released the last of them; one workspace idling says nothing about others.
-  #liveOpens = 0;
+  // The count belongs to the socket, not to this capability: every AuthenticatedApiImpl minted on a
+  // socket shares its abortSession, which is therefore the key.
+  #adjustOpens(delta: 1 | -1): number {
+    let count = (liveOpensBySession.get(this.abortSession) ?? 0) + delta;
+    liveOpensBySession.set(this.abortSession, count);
+    return count;
+  }
 
   #openReleased(id: string, idle: boolean): void {
-    --this.#liveOpens;
-    if (idle && this.#liveOpens === 0) this.abortSession(new IdleSessionError(id));
+    if (this.#adjustOpens(-1) === 0 && idle) this.abortSession(new IdleSessionError(id));
   }
 
   async #openGadgetInternal(id: string, shareKey?: string,
@@ -377,7 +385,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     (notifyClosed as any)[Symbol.dispose] = () => {
       if (started && !closed) {
         closed = true;
-        --this.#liveOpens;
+        this.#adjustOpens(-1);
         // this.ctx.abort() would be nicer here, but it is still marked experimental in the
         // workers runtime.
         this.abortSession(new Error(`lost connection to workspace DO (gadget ${id})`));
@@ -386,7 +394,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     // Fork: counted from here, not from open()'s return, so an open parked on a step the client
     // controls is not invisible to another workspace's idle release on the same socket.
-    ++this.#liveOpens;
+    this.#adjustOpens(1);
     let result;
     try {
       result = await overseer.open(userId, profileId, notifyClosed, shareKey, configureObservers);
@@ -397,7 +405,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       // fallible cleanup below, so a rejection there cannot leak the count.
       if (!closed) {
         closed = true;
-        --this.#liveOpens;
+        this.#adjustOpens(-1);
       }
       // A denial proves this user's listing for the workspace is stale: revocation tries to drop it
       // (refreshAffectedCollaboratorListings), but that push is best-effort. Only catches entries

@@ -9,7 +9,7 @@ notice. The lease is that alarm.
 ## Behaviour
 
 - A call a browser makes through a capability the Overseer handed it (the workspace interface,
-  gadget and gatekeeper capabilities, calls through a gadget UI's facet stub, and calls on a gatekeeper session the browser retains) renews a 10-minute
+  gadget and gatekeeper capabilities, and calls through a gadget UI's facet stub) renews a 10-minute
   lease. `open()` arms it. Pings, the user's workspace list, the agent, hooks, gatekeeper callbacks
   and the alarm do not renew it.
 - A finished agent turn also renews it, so a user gets a full lease to read an answer.
@@ -41,6 +41,14 @@ already been released by the interface's disposal. If those later go idle, the O
 itself but the socket is not closed with the idle code, so the browser finds its retained
 capabilities broken instead of parking. The shipped client disposes the interface only on
 navigation, which drops what it minted too.
+
+A gatekeeper session the browser retains (`openSession()`), and capabilities such as cursors that
+its calls return, are called directly on the gatekeeper and never pass through the Overseer, so they
+do not renew the lease. Proxying them through the Overseer would renew it but changes their failure
+semantics: calls then die with the Overseer's access restarts instead of completing (it broke the
+`sensitive-observations` integration test, whose read must resolve before the 100 ms restart). The
+shipped client's visible-tab heartbeat renews the lease every 30 seconds while the page is alive,
+which covers a user working through such a session; a page that cannot run does no such work.
 
 ## What expiry costs
 

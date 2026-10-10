@@ -4,7 +4,7 @@ import { chatWorkbook, describeWorkbookBinding, dropWorkbook, isChatWorkbook, is
 import { deriveWorkbookBindings } from "./fork/workbook-names";
 import { withRequestedNames } from "./fork/workbook-checkpoint";
 import { isReasoningLevel } from "./fork/reasoning-levels";
-import { IdleLease, clientActivityOf, ownedByClient, reapIdleSession, renewOnClientCalls, renewOnStubCalls } from "./fork/idle-lease";
+import { IdleLease, clientActivityOf, ownedByClient, reapIdleSession, renewOnClientCalls } from "./fork/idle-lease";
 import { ActionApplyContextImpl, attestWorkspaceAudience, beginAdmission, forgetBuildAdmission,
   forgetContractedAdmissions } from "./fork/workspace-audience";
 import type { WorkspaceAudience } from "@gadgets/workshop-shared/gatekeeper";
@@ -9979,11 +9979,17 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async alarm() {
     // Fork: the reap runs even when another concern failed (that failure is rethrown after, so the
     // platform still retries it), or a failing delivery would keep an expired workspace resident.
+    let failed: { error: unknown } | undefined;
     try {
       await this.impl.runAlarmTasks();
-    } finally {
-      await this.impl.reapIdleSession();
+    } catch (error) {
+      // Logged here because an expiry that follows aborts the object and the abort is all the
+      // platform sees; the concern's own state is re-armed and retried by the next incarnation.
+      this.impl.logger.error("alarm task failed", { event: "overseer.alarm.task.failed", error });
+      failed = { error };
     }
+    await this.impl.reapIdleSession();
+    if (failed) throw failed.error;
   }
 
   // Initialize a brand-new workspace's storage. (Before git-backed code storage this also wrote
@@ -10016,6 +10022,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
              notifyClosed: NativeRpcStub<(reason?: "idle") => void>,
              shareKey?: string,
              configureObservers?: RpcStub<ObserverConfigCallback>): Promise<Overseer> {
+    // Fork: refuse before any state is touched once the incarnation has committed to expiring.
+    this.impl.idleLease.assertLive();
     // Fork: registered ahead of every await so an open parked on a step the client controls
     // (observer-config dialog, share-key redemption) is told when the lease expires. `using`
     // releases it on return; the returned interface registers its own. The lease itself is armed
@@ -13500,10 +13508,7 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   }
 
   async openSession(): Promise<RpcStub<Session>> {
-    let session = await this.impl.openGatekeeperSession(this.id, await this.#facet(), {from: "user"});
-    // Fork: the browser then calls the session directly, so its calls must renew the lease too.
-    let renew = clientActivityOf(this);
-    return renew ? renewOnStubCalls(session, renew) : session;
+    return this.impl.openGatekeeperSession(this.id, await this.#facet(), {from: "user"});
   }
 
   async getCreationSpec(): Promise<GatekeeperCreationSpec> {

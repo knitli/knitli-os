@@ -7,7 +7,6 @@
 // ever runs in that Worker's context again, so only the Overseer's own alarm can notice. The lease
 // is renewed by every call a browser makes (and never by the agent, hooks or the alarm), and the
 // alarm ends the incarnation once a full lease passes with no renewal and no agent work.
-import { RpcStub as NativeRpcStub, RpcTarget } from "cloudflare:workers";
 import { createWorkshopLogger } from "../observability";
 
 const logger = createWorkshopLogger("workshop.idle-lease");
@@ -69,10 +68,15 @@ export class IdleLease {
    * memory, and the alarm that fires early finds the lease renewed and re-arms.
    */
   touch(): boolean {
-    if (this.#committed) throw new WorkspaceSessionExpiredError();
+    this.assertLive();
     let first = this.#lastClientAt === undefined;
     this.#lastClientAt = this.now();
     return first;
+  }
+
+  /** Throws once expiry is committed, without renewing anything. */
+  assertLive(): void {
+    if (this.#committed) throw new WorkspaceSessionExpiredError();
   }
 
   /** An agent turn ended: the user may read its answer without touching the server. */
@@ -203,27 +207,6 @@ export function ownedByClient<T extends object>(capability: T, renew: (() => voi
 /** Read the renewal a capability was marked with, to pass on to capabilities it mints. */
 export function clientActivityOf(capability: object): (() => void) | undefined {
   return (capability as ClientCallTarget)[clientActivity];
-}
-
-/**
- * Wrap a stub a browser retains (a gatekeeper session, which it then calls directly, bypassing the
- * Overseer's capability classes) so each method call renews the lease first. Everything else,
- * disposal included, passes straight through. Same shape as OverseerImpl.getGadgetFacet's proxy:
- * a Proxy that presents as an RpcTarget, handed to the runtime inside a native stub.
- */
-export function renewOnStubCalls<T extends object>(stub: T, renew: () => void): T {
-  // @ts-expect-error NativeRpcStub's Stubable constraint cannot see through the generic.
-  return new NativeRpcStub(new Proxy(stub, {
-    get(target, prop) {
-      let member = Reflect.get(target, prop, target);
-      if (typeof member !== "function" || typeof prop === "symbol") return member;
-      return (...args: unknown[]) => {
-        renew();
-        return Reflect.apply(member, target, args);
-      };
-    },
-    getPrototypeOf() { return RpcTarget.prototype; },
-  })) as unknown as T;
 }
 
 /**

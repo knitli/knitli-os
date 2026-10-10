@@ -51,7 +51,9 @@ function advanceBeyondTheLease(): void {
   vi.setSystemTime(Date.now() + PAST_THE_LEASE_MS);
 }
 
-async function signIn(): Promise<{ session: Session; authenticated: RpcStub<AuthenticatedApi> }> {
+async function signIn(): Promise<{
+  session: Session; authenticated: RpcStub<AuthenticatedApi>; token: string;
+}> {
   // Invoke the handler directly so the WebSocket session shares the test's execution context.
   const response = await server.fetch(new Request("https://workshop.invalid/api", {
     headers: { Upgrade: "websocket" },
@@ -66,7 +68,7 @@ async function signIn(): Promise<{ session: Session; authenticated: RpcStub<Auth
   const name = "lease" + crypto.randomUUID().replaceAll("-", "");
   const token = await publicApi.createAccount(name, name, PASSWORD_HASH);
   if (token === null) throw new Error(`Failed to create ${name}.`);
-  return { session: { publicApi, closes }, authenticated: await publicApi.authenticate(token) };
+  return { session: { publicApi, closes }, authenticated: await publicApi.authenticate(token), token };
 }
 
 function overseerStub(id: string) {
@@ -198,6 +200,28 @@ describe("workspace client-activity lease", () => {
         .toEqual({ code: SESSION_IDLE_CLOSE_CODE, reason: "idle" });
   });
 
+  it("shares the open count across authenticated capabilities on one socket", async () => {
+    const { session, authenticated, token } = await signIn();
+    const second = await session.publicApi.authenticate(token);
+    const first = await authenticated.newGadget();
+    const firstId = (await first.getMetadata()).id;
+    using other = await second.newGadget();
+    const otherId = (await other.getMetadata()).id;
+
+    // The first capability's workspace idles while the second capability's is live on the socket.
+    advanceBeyondTheLease();
+    await other.getMetadata();
+    await runAlarm(firstId);
+    await settle();
+    expect(session.closes).toEqual([]);
+
+    first[Symbol.dispose]();
+    advanceBeyondTheLease();
+    await runAlarm(otherId);
+    expect(await waitFor("the idle close", () => session.closes[0]))
+        .toEqual({ code: SESSION_IDLE_CLOSE_CODE, reason: "idle" });
+  });
+
   it("releases a workspace once when the client vanishes mid-call, and never loops", async () => {
     const logs = spyOnLogs();
     const { session, authenticated } = await signIn();
@@ -267,9 +291,13 @@ describe("workspace client-activity lease", () => {
       asImpl(instance).runAlarmTasks = async () => { throw new Error("delivery failed"); };
     });
 
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     advanceBeyondTheLease();
     await runAlarm(metadata.id);
     expect(loggedEvents(logs, "overseer.session.lease.expired")).toHaveLength(1);
+    // The failure is logged before the abort, which is all the platform would otherwise see.
+    expect(errors.mock.calls.some(call =>
+        (call[0] as LogFields | undefined)?.event === "overseer.alarm.task.failed")).toBe(true);
   });
 
   it("does not arm the lease for a caller who has no access to the workspace", async () => {

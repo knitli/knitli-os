@@ -13,6 +13,12 @@ function clock(start = 1_000_000) {
 }
 
 describe("IdleLease", () => {
+  it("assertLive checks without arming or renewing", () => {
+    let lease = new IdleLease(clock().now);
+    lease.assertLive();
+    expect(lease.alarmTime()).toBeUndefined();
+  });
+
   it("is unarmed until a browser touches it, and the first touch says so", () => {
     let c = clock();
     let lease = new IdleLease(c.now);
@@ -75,6 +81,7 @@ describe("IdleLease", () => {
     expect(lease.alarmTime()).toBeUndefined();
     expect(lease.decide(false, false)).toBe("none");
     expect(() => lease.touch()).toThrow(WorkspaceSessionExpiredError);
+    expect(() => lease.assertLive()).toThrow(WorkspaceSessionExpiredError);
   });
 });
 

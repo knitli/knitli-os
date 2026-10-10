@@ -85,3 +85,8 @@ after enabling, using the kill switch for the baseline.
   would queue and, on resume, renew the lease.
 - A visible tab's heartbeat renews the lease every 30 seconds, so the server lease expires only for
   sessions whose page can no longer run (frozen, killed, offline); a live idle tab pauses itself.
+- Gadget activity is best-effort: the gadget frame and its code share an origin, so a gadget that
+  posts the `activity` message itself can keep a tab from pausing (and its facet calls renew the
+  lease anyway). The bootstrap ignores synthetic (untrusted) input events, which stops accidental
+  keep-alives, not a deliberately misbehaving gadget. The bound targets abandoned sessions, not a
+  hostile gadget the user has open.

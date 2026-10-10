@@ -8,6 +8,7 @@ import {
   type SpeechTextSelection,
 } from "../composer/draft/speechRanges";
 import { VoiceSessionTransport, voiceWebSocketUrl } from "./voiceProtocol";
+import { resumeConnection } from "../../../connectionPause";
 import type { VoiceControlsState } from "./VoiceControls";
 import { VoiceResponseRelay, type VoiceChatEvent, type VoiceResponseFrame } from "./voiceResponseRelay";
 
@@ -271,6 +272,7 @@ export const useVoiceChat = ({
   const start = (mode: VoiceMode) => {
     if ((mode === "conversation" && (chatId === null || !conversationAvailable)) || modeRef.current !== null || startingRef.current) return;
     startingRef.current = true;
+    resumeConnection();  // the session is created over the API connection; wake it if paused
     startingModeRef.current = mode;
     setState((current) => ({ ...current, mode, status: "idle", error: null }));
     const generation = ++generationRef.current;

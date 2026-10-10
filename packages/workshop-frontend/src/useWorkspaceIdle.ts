@@ -48,16 +48,21 @@ export function useWorkspaceIdle(busy: boolean): void {
     noteWorkspaceActivity()
     let hiddenAt: number | null = document.visibilityState === 'hidden' ? Date.now() : null
 
+    const canPause = () => !isConnectionPaused() && !busyRef.current && holds === 0
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
         hiddenAt = Date.now()
         return
       }
+      // A background tab's timers are throttled or suspended, so no tick may have seen the hidden
+      // threshold pass: judge the elapsed time here, before it is forgotten.
+      const hiddenFor = hiddenAt === null ? 0 : Date.now() - hiddenAt
       hiddenAt = null
-      noteWorkspaceActivity()
+      if (hiddenFor >= HIDDEN_PAUSE_MS && canPause()) pauseConnection()
+      else noteWorkspaceActivity()
     }
     const tick = () => {
-      if (isConnectionPaused() || busyRef.current || holds > 0) return
+      if (!canPause()) return
       const now = Date.now()
       if (hiddenAt !== null) {
         if (now - hiddenAt >= HIDDEN_PAUSE_MS) pauseConnection()

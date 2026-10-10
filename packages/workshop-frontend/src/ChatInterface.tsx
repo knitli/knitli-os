@@ -4817,6 +4817,7 @@ function ChatInterface({
 
   // Handle retrying the agent after an error
   const handleRetry = async () => {
+    resumeConnection();  // a deliberate retry wakes a paused workspace
     if (
       selectedChatId === null ||
       selectedModel === null

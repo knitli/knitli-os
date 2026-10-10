@@ -72,6 +72,17 @@ describe('useWorkspaceIdle', () => {
     expect(isConnectionPaused()).toBe(true)
   })
 
+  it('pauses on return to a tab whose timers were suspended past the hidden threshold', () => {
+    mount()
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+    act(() => { document.dispatchEvent(new Event('visibilitychange')) })
+    // No tick runs while hidden (suspended timers): only time passes.
+    vi.setSystemTime(Date.now() + HIDDEN_PAUSE_MS + 1000)
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+    act(() => { document.dispatchEvent(new Event('visibilitychange')) })
+    expect(isConnectionPaused()).toBe(true)
+  })
+
   it('pauses a hidden tab sooner, and unmounting resumes', () => {
     mount()
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })

@@ -452,8 +452,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     let initiationNonce = generateNonce();
 
     let authOnly = options?.scopes === "auth";
-    // A connection is made for one resource at a time: the caller must name what it wants.
-    let patterns = options?.resourceUrlPatterns ?? [];
+    // Deliberate departure from the GatekeeperConnectOptions contract, where omitting the patterns
+    // means "every resource this vendor offers": here it means the Outlook mailbox only. Bundling
+    // the resources would let one that needs administrator consent block the others, and the
+    // mailbox is the one that needs none. Teams and SharePoint must be named. An explicit empty
+    // list still means "none", which a persistent connection cannot be made with.
+    let patterns = options?.resourceUrlPatterns ?? [OUTLOOK_MAIL_RESOURCE.urlPattern];
     if (!authOnly && patterns.length === 0) {
       throw new Error(
           "Choose which Microsoft resource to connect (Outlook, Teams or SharePoint). " +

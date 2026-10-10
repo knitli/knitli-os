@@ -23,9 +23,13 @@ needs `CLIENT_ID`, `CLIENT_SECRET`, and `TENANT_ID` before it will answer anythi
 
 ## One resource per connect
 
-There is deliberately no connect-everything path. `connectAccount` refuses a request that names no
-resource, so the generic "Connect Account" button (which names none) shows an error asking the user
-to pick one; the resource picker names the resource, and so does an agent's connection request.
+There is deliberately no connect-everything path. The Workshop contract says a connect that omits
+`resourceUrlPatterns` means every resource the vendor offers; this gatekeeper **departs from that
+on purpose**. An omitted list (what the generic "Connect Account" button sends) requests the
+sign-in identity scopes plus the **Outlook mailbox only**, which needs no administrator consent.
+Teams and SharePoint are requested only when named, which the resource picker and an agent's
+connection request do. An explicit empty list still means "none" and is refused, since a persistent
+connection cannot be made with no resource.
 
 The reason is how Entra consents: a single consent request that bundles several resources' scopes
 fails as a whole when any one of them needs an administrator who has not consented. Connecting

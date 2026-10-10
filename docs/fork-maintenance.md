@@ -476,7 +476,8 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **What:** Entra ID sign-in pinned to one tenant (`TENANT_ID`, members on verified domains only),
   an Outlook mailbox, read-only Teams and a SharePoint List, each connected on its own.
 - **Divergences from the source fork, which sync will not reconcile for us:** no connect-everything
-  path (`connectAccount` refuses a request naming no resource, and recorded refresh scopes cover
+  path (`connectAccount` treats omitted `resourceUrlPatterns` as the Outlook mailbox only, against
+  the contract's "omitted = all resource types", and refuses an explicit `[]`; and recorded refresh scopes cover
   only what Entra reported granted); SharePoint `createItem` always goes through approval, with
   none of the fork's auto-apply rule or provisional-id machinery; the sign-in profile hints
   (`getAuthenticatedProfile`, `providesAuthProfile`) are not ported because the Workshop contract

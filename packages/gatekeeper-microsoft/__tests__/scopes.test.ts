@@ -143,16 +143,30 @@ describe("resourceUrlPatternsToOAuthScopes", () => {
     expect(scopes).not.toContain("Sites.ReadWrite.All");
   });
 
-  it("refuses a connection that names no resource, so there is no connect-everything path", async () => {
-    // Entra fails a whole consent request when one permission in it needs an administrator who has
-    // not consented, so a bundled request would let one resource block the others.
+  it("treats omitted patterns as the mailbox only, never every resource", async () => {
+    // Departs from the contract's "omitted = all resource types" on purpose: Entra fails a whole
+    // consent request when one permission in it needs an administrator who has not consented, so a
+    // bundled request would let Teams or SharePoint block the mailbox.
+    const expected = [...IDENTITY_SCOPES, ...MAIL_SCOPES].toSorted();
+
+    expect((await scopesFor(undefined)).toSorted()).toEqual(expected);
+    expect((await scopesFor({ scopes: "full" })).toSorted()).toEqual(expected);
+    expect((await scopesFor({})).toSorted()).toEqual(expected);
+  });
+
+  it("keeps an explicit empty list as none, which a persistent connection cannot be made with", async () => {
     const { vendor } = fakeVendor();
 
-    await expect(vendor.connectAccount(connectCallback(), undefined)).rejects.toThrow(/Choose which/);
     await expect(vendor.connectAccount(connectCallback(), { resourceUrlPatterns: [] } as never))
       .rejects.toThrow(/Choose which/);
-    await expect(vendor.connectAccount(connectCallback(), { scopes: "full" } as never))
-      .rejects.toThrow(/Choose which/);
+  });
+
+  it("requests only the named resources, and Teams or SharePoint only when named", async () => {
+    const both = await scopesFor({ resourceUrlPatterns: [TEAMS_PATTERN, SHAREPOINT_PATTERN] });
+
+    expect(both.toSorted()).toEqual(
+      [...IDENTITY_SCOPES, ...TEAMS_SCOPES, ...SHAREPOINT_SCOPES].toSorted());
+    expect(both).not.toContain("Mail.ReadWrite");
   });
 
   it("leaves sign-in insulated from the resource scopes entirely", async () => {

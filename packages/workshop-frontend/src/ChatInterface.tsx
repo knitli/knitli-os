@@ -3223,9 +3223,7 @@ function ChatInterface({
       try {
         const a = document.createElement("a");
         a.href = url;
-        // A converted attachment (a spreadsheet) stores a text summary, not the file it is named
-        // after, so it must not be saved under that file's name and extension.
-        a.download = attachment.convertedFrom && name ? `${name}.summary.md` : name ?? "attachment";
+        a.download = name ?? "attachment";
         a.click();
       } finally {
         setTimeout(() => URL.revokeObjectURL(url), 0);

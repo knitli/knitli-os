@@ -404,7 +404,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       new Promise<boolean>(resolve => { timeout = setTimeout(() => resolve(false), 3_000); }),
     ]).finally(() => clearTimeout(timeout));
     if (acknowledged) return;
-    await deliverWebPush(this.env, this.storage.webPushSubscriptions, notification);
+    let webPush = deliverWebPush(this.env, this.storage.webPushSubscriptions, notification);
     let subscriptions = Object.entries(this.storage.notificationSubscriptions.get());
     let results = await Promise.allSettled(subscriptions.map(async ([deviceKey, subscriptionId]) => {
       if (await deliver(this.env, subscriptionId, notification)) return;
@@ -413,6 +413,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       let { [deviceKey]: current, ...others } = this.storage.notificationSubscriptions.get();
       if (current === subscriptionId) this.storage.notificationSubscriptions.put(others);
     }));
+    await webPush;
     for (let result of results) {
       if (result.status === "rejected") throw result.reason;
     }

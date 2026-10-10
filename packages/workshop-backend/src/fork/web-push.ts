@@ -31,7 +31,10 @@ export type WebPushStore = {
   put(value: WebPushSubscriptions): void;
 };
 
-/** Most devices one user can subscribe; a bound on the fan-out of every notification. */
+/**
+ * Most devices one user can subscribe; a bound on the fan-out of every notification. A new device
+ * past it displaces the oldest, since a user can't list endpoints to free one by hand.
+ */
 export const MAX_WEB_PUSH_SUBSCRIPTIONS = 10;
 
 /**
@@ -39,7 +42,7 @@ export const MAX_WEB_PUSH_SUBSCRIPTIONS = 10;
  * user could point the Worker's requests at any URL. A leading dot matches subdomains.
  */
 const PUSH_SERVICE_HOSTS = [
-  "web.push.apple.com",
+  ".push.apple.com",
   "fcm.googleapis.com",
   ".push.services.mozilla.com",
   ".notify.windows.com",
@@ -112,10 +115,10 @@ export function addWebPushSubscription(
   if (p256dh.length !== 65 || p256dh[0] !== 4 || base64UrlDecode(subscription.auth).length !== 16) {
     throw new Error("Not a valid push subscription.");
   }
-  if (!(endpoint in existing) && Object.keys(existing).length >= MAX_WEB_PUSH_SUBSCRIPTIONS) {
-    throw new Error("Too many push subscriptions; remove one first.");
-  }
-  return { ...existing, [endpoint]: { p256dh: subscription.p256dh, auth: subscription.auth } };
+  // Insertion order: the first keys are the oldest subscriptions.
+  let kept = Object.entries(existing).filter(([known]) => known !== endpoint)
+      .slice(-(MAX_WEB_PUSH_SUBSCRIPTIONS - 1));
+  return Object.fromEntries([...kept, [endpoint, { p256dh: subscription.p256dh, auth: subscription.auth }]]);
 }
 
 function concat(...parts: Uint8Array[]): Uint8Array {
@@ -222,6 +225,8 @@ export function declarativePayload(notification: UserNotification, baseUrl: stri
   });
 }
 
+const SEND_TIMEOUT_MS = 10_000;
+
 /** `gone` (404/410) means the subscription no longer exists and should be forgotten. */
 type PushOutcome = "sent" | "gone" | "failed";
 
@@ -244,6 +249,8 @@ async function sendOne(
       body: await encryptPushPayload(encoder.encode(payload), target),
       // The endpoint is browser-supplied: never follow it somewhere the allowlist did not vet.
       redirect: "manual",
+      // A dead endpoint must not hold up the notification (or the platform push beside it).
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
     });
     await response.body?.cancel();
     if (response.ok) return "sent";

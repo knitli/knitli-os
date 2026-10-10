@@ -258,6 +258,7 @@ function fakeHooks(overrides: {
       return overrides.presetText;
     },
     getPromptCacheSalt: () => "",
+    setChatWorkspacePrompt: () => {},
   } as unknown as AgentHooks;
 }
 

@@ -222,6 +222,20 @@ describe("resolveListByUrl", () => {
 });
 
 describe("listColumns", () => {
+  it("keeps a calculated column as readable but not writable, and still drops bookkeeping", async () => {
+    stubFetch(() => jsonResponse({ value: [
+      { name: "Total", displayName: "Total", readOnly: true, calculated: { formula: "=[A]+[B]" } },
+      { name: "HiddenCalc", displayName: "x", hidden: true, readOnly: true, calculated: {} },
+      { name: "Author", displayName: "Created By", readOnly: true, personOrGroup: {} },
+    ] }));
+
+    const columns = await newApi().listColumns("site-1", "list-1");
+
+    expect(columns).toEqual([
+      { name: "Total", displayName: "Total", type: "unsupported", required: false, readOnly: true },
+    ]);
+  });
+
   it("keeps a number column's real bounds and drops the unbounded sentinels", async () => {
     stubFetch(() => jsonResponse({ value: [
       { name: "Qty", displayName: "Qty", number: { minimum: 1, maximum: 10 } },

@@ -203,6 +203,18 @@ describe("resource description", () => {
     expect(await gatekeeper.getAutoApprovableActions()).toEqual([]);
   });
 
+  it("stops reporting a list healthy once Graph says it is gone or refused", async () => {
+    stubFetch();
+    await gatekeeper.describe();
+
+    for (const status of [403, 404]) {
+      vi.unstubAllGlobals();
+      stubFetch(() => jsonResponse({ error: { code: "denied", message: "no" } }, status));
+      // The overseer tears the binding down on a throw, which is the right end for a deleted list.
+      await expect(gatekeeper.describe()).rejects.toThrow();
+    }
+  });
+
   it("serves the cached name when Graph fails, and only fails with nothing cached", async () => {
     stubFetch();
     await gatekeeper.describe();

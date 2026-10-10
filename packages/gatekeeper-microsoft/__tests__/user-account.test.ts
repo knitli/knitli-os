@@ -440,6 +440,28 @@ describe("consent coverage", () => {
 });
 
 describe("overlapping reconnects", () => {
+  it("does not invalidate a reconnect that is out at Microsoft when another one starts", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("idTokenClaims", { tid: TENANT, oid: "object-1" });
+    await account.prepareReconnect("a".repeat(64), IDENTITY_SCOPES);
+    const begunA = await account.beginOAuthFlow("a".repeat(64));
+
+    await account.prepareReconnect("b".repeat(64), IDENTITY_SCOPES);
+
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-2",
+      scope: "openid profile email https://graph.microsoft.com/User.Read offline_access",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+    // A's callback arrives after B started, and still completes.
+    await expect(account.acceptAuthCode("code-a", begunA!.oauthNonce)).resolves.toEqual(RECONNECT_HANDOFF);
+    // B's link is still good as well, and each is used once.
+    await expect(account.beginOAuthFlow("b".repeat(64))).resolves.not.toBeNull();
+    await expect(account.beginOAuthFlow("b".repeat(64))).resolves.toBeNull();
+  });
+
   it("keeps a flow's own scopes when another reconnect starts during its code exchange", async () => {
     const { context, account } = newAccount();
     const callback = fakeCallback();

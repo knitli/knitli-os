@@ -119,6 +119,10 @@ const MINT_FAILURE_COOLDOWN_MS = 60 * 1000;
 // later, so every login pays for its own lookup.
 const VERIFIED_DOMAIN_CACHE_MS = 24 * 60 * 60 * 1000;
 
+/** Storage key prefix of a connect flow's nonce record, and the key of the list of live ones. */
+const NONCE_KEY_PREFIX = "nonce:";
+const NONCE_INDEX_KEY = "nonces";
+
 /** Longest attacker-influenced value echoed back on the OAuth error page. */
 const MAX_OAUTH_ERROR_CHARS = 500;
 
@@ -565,13 +569,49 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.put("callback", callback);
     // Sign-in-only grants are transient: dropped shortly after the email is read.
     this.ctx.storage.kv.put<boolean>("authOnly", authOnly ?? false);
-    this.ctx.storage.kv.put<StoredNonce>("nonce", {
+    this.#putNonce({
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
       scopes: requestedScopes,
       initiator,
     });
+  }
+
+  // Connect flows are keyed by their nonce, one record each, so starting a flow never invalidates
+  // another that is already out at Microsoft. `NONCE_INDEX_KEY` lists the live ones.
+
+  #putNonce(record: StoredNonce): void {
+    let kv = this.ctx.storage.kv;
+    let live = (kv.get<string[]>(NONCE_INDEX_KEY) ?? []).filter(value => {
+      let other = kv.get<StoredNonce>(NONCE_KEY_PREFIX + value);
+      if (other && Date.now() < other.expiresAt) return true;
+      kv.delete(NONCE_KEY_PREFIX + value);
+      return false;
+    });
+    kv.put<StoredNonce>(NONCE_KEY_PREFIX + record.value, record);
+    kv.put<string[]>(NONCE_INDEX_KEY, [...live, record.value]);
+  }
+
+  /** The flow record for `value` if it is live and at `stage`, removed so it can be used once. */
+  #takeNonce(value: string, stage: StoredNonce["stage"]): StoredNonce | null {
+    let kv = this.ctx.storage.kv;
+    let stored = kv.get<StoredNonce>(NONCE_KEY_PREFIX + value);
+    if (!stored || stored.stage !== stage || Date.now() >= stored.expiresAt ||
+        !constantTimeEqual(stored.value, value)) {
+      return null;
+    }
+    kv.delete(NONCE_KEY_PREFIX + value);
+    kv.put<string[]>(
+        NONCE_INDEX_KEY, (kv.get<string[]>(NONCE_INDEX_KEY) ?? []).filter(other => other !== value));
+    return stored;
+  }
+
+  #liveNonces(): StoredNonce[] {
+    let kv = this.ctx.storage.kv;
+    return (kv.get<string[]>(NONCE_INDEX_KEY) ?? [])
+        .map(value => kv.get<StoredNonce>(NONCE_KEY_PREFIX + value))
+        .filter((record): record is StoredNonce => record !== undefined && Date.now() < record.expiresAt);
   }
 
   /**
@@ -583,7 +623,7 @@ export class UserAccount extends DurableObject<Env> {
    */
   async prepareReconnect(
       initiationNonce: string, requestedScopes: string[], initiator?: ConnectInitiator) {
-    this.ctx.storage.kv.put<StoredNonce>("nonce", {
+    this.#putNonce({
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
@@ -596,10 +636,11 @@ export class UserAccount extends DurableObject<Env> {
   /**
    * Whether the browser presenting `accessEmail` may continue this connect: a link the Workshop
    * bound to a person is theirs alone, and one issued without an initiator is good for whoever
-   * holds the nonce, as before (fork).
+   * holds the nonce, as before (fork). Every flow in progress must allow the browser; they are all
+   * this one account's owner's, so they name the same person.
    */
   async initiatorMatches(accessEmail: string | null): Promise<boolean> {
-    return initiatorAllows(this.ctx.storage.kv.get<StoredNonce>("nonce")?.initiator, accessEmail);
+    return this.#liveNonces().every(record => initiatorAllows(record.initiator, accessEmail));
   }
 
   /**
@@ -633,15 +674,12 @@ export class UserAccount extends DurableObject<Env> {
    */
   async beginOAuthFlow(initiationNonce: string):
       Promise<{oauthNonce: string, scopes: string[], authOnly: boolean} | null> {
-    let stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
-    if (!stored || stored.stage !== "initiation" ||
-        Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, initiationNonce)) {
-      return null;
-    }
+    let stored = this.#takeNonce(initiationNonce, "initiation");
+    if (!stored) return null;
 
     // Replace the consumed initiation nonce with a fresh OAuth nonce.
     let oauthNonce = generateNonce();
-    this.ctx.storage.kv.put<StoredNonce>("nonce", {
+    this.#putNonce({
       value: oauthNonce,
       expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
       stage: "oauth",
@@ -660,12 +698,8 @@ export class UserAccount extends DurableObject<Env> {
    */
   async acceptAuthCode(code: string, oauthNonce: string): Promise<ConnectHandoff | null> {
     // Verify and consume the OAuth nonce.
-    let stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
-    if (!stored || stored.stage !== "oauth" ||
-        Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, oauthNonce)) {
-      return null;
-    }
-    this.ctx.storage.kv.delete("nonce");
+    let stored = this.#takeNonce(oauthNonce, "oauth");
+    if (!stored) return null;
 
     let config = this.#requireConfig();
 

@@ -82,6 +82,11 @@ knowing before enabling it, because none of them is a setting a deployment can c
 - **A grant cannot be narrowed afterwards.** Reconnecting an account re-requests what it already
   holds, so there is no "keep the mailbox, drop Teams". Shedding Teams means disconnecting the
   Microsoft account altogether and connecting again naming only the mailbox.
+- **A Teams service administrator can open private channels they have not joined.** A channel is
+  checked against the team's channel listing, which Graph also serves to administrators for
+  channels they are not in, and the call that would prove membership (`ChannelMember.Read.All`) is
+  not among the permissions requested. For everyone else the listing is exactly the channels they
+  can see.
 - **Nothing is live.** Reads happen when a gadget asks for them; no arriving message wakes anything.
   Change notifications would need a public subscription endpoint renewed every few days, and the
   bulk `getAllMessages` / `/delta` feeds are application permissions — neither fits a delegated,

@@ -175,6 +175,7 @@ type GraphColumnDefinition = {
   readOnly?: boolean;
   required?: boolean;
   defaultValue?: { value?: string; formula?: string };
+  calculated?: unknown;
   text?: { allowMultipleLines?: boolean; maxLength?: number };
   number?: { minimum?: number; maximum?: number };
   boolean?: unknown;
@@ -256,16 +257,18 @@ function columnTypeOf(column: GraphColumnDefinition): ColumnType {
  * Normalise one Graph `columnDefinition`, or null when it is not a column a caller should see.
  *
  * Hidden and read-only columns are dropped: neither can be filled in, and the read-only set is where
- * SharePoint keeps its own bookkeeping (`ID`, `Created`, `Author`, …). `Title` survives the drop
- * unconditionally — it is the one column every list has, it is what a list's items are named by, and
- * some lists mark it read-only in a view definition while still accepting it on create.
+ * SharePoint keeps its own bookkeeping (`ID`, `Created`, `Author`, …). Two survive the drop. `Title`
+ * is the one column every list has, it is what a list's items are named by, and some lists mark it
+ * read-only in a view definition while still accepting it on create. A calculated column is
+ * read-only too, but it is the list's own data, so it stays as a readable, never-writable column.
  */
 function normalizeColumn(column: GraphColumnDefinition): ColumnDefinition | null {
   let name = typeof column.name === "string" ? column.name : "";
   if (!name || !INTERNAL_NAME_PATTERN.test(name)) return null;
 
   let isTitle = name === "Title";
-  if (!isTitle && (column.hidden === true || column.readOnly === true)) return null;
+  let isCalculated = column.calculated !== undefined && column.hidden !== true;
+  if (!isTitle && !isCalculated && (column.hidden === true || column.readOnly === true)) return null;
   if (!isTitle && isSystemColumn(name)) return null;
 
   let type = columnTypeOf(column);

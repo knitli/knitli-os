@@ -493,7 +493,8 @@ describe("resource surface", () => {
     expect(expansion.url).toContain(`/gatekeeper/microsoft/${DO_ID}/`);
     // The reconnect re-requests the union, so the mailbox is not dropped on the way to adding
     // Teams and the list.
-    const requested = context.storage.kv.get<{ scopes: string[] }>("nonce")!.scopes;
+    const nonce = context.storage.kv.get<string[]>("nonces")!.at(-1)!;
+    const requested = context.storage.kv.get<{ scopes: string[] }>(`nonce:${nonce}`)!.scopes;
     expect(requested).toContain("Mail.ReadWrite");
     expect(requested).toContain("ChannelMessage.Read.All");
     expect(requested).toContain("Sites.ReadWrite.All");

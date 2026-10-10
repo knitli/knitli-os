@@ -580,6 +580,9 @@ export class SharePointListGatekeeperImpl
       // every listing — so a Graph blip after introduction must not cost the user their binding.
       // With nothing cached this is introduction time, where failing is the right answer.
       if (!cached) throw err;
+      // A refusal or a missing list is not a blip: the list is gone or the owner lost it, and
+      // the binding should go with it rather than be reported healthy from a stale name.
+      if (err instanceof GraphApiError && (err.status === 403 || err.status === 404)) throw err;
       meta = cached;
     }
 

@@ -1,6 +1,8 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { WebPushSync } from './features/notifications/webPush/WebPushSync'
+import { hasSignOutWorkerHandoff, releaseOnSignOut } from './features/notifications/webPush/browserSubscription'
 
 interface AuthContextType {
   authenticatedApi: RpcStub<AuthenticatedApi>
@@ -48,7 +50,15 @@ export function AuthProvider({ children, authenticatedApi, onLogout }: AuthProvi
   const isAdmin = isAdminResult?.authenticatedApi === authenticatedApi ? isAdminResult.value : false
 
   return (
-    <AuthContext.Provider value={{ authenticatedApi, logout: onLogout, currentUser, isAdmin }}>
+    <AuthContext.Provider value={{ authenticatedApi, logout: () => {
+      // Sign out first, as push cleanup is best effort and must not hold the session open if the page
+      // goes: a service worker finishes it. Without one the page has to (bounded), or the redirect
+      // could cut it off.
+      const cleanup = releaseOnSignOut(authenticatedApi)
+      if (hasSignOutWorkerHandoff()) onLogout()
+      else void cleanup.finally(onLogout)
+    }, currentUser, isAdmin }}>
+      <WebPushSync />
       {children}
     </AuthContext.Provider>
   )

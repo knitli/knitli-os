@@ -85,7 +85,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
         await api.addWebPushSubscription(toSubscriptionInfo(existing.toJSON())).catch((error: unknown) => {
           console.error('Failed to register this device’s push subscription:', error)
         })
-        rememberBrowserEndpoint(existing.endpoint)
+        if (!cancelled) rememberBrowserEndpoint(existing.endpoint)
         if (!cancelled) setStatus('on')
       } else {
         setStatus('off')

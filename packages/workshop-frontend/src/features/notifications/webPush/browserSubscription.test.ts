@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { releaseOnSignOut, syncBrowserSubscription } from './browserSubscription'
+import { hasSignOutWorkerHandoff, releaseOnSignOut, syncBrowserSubscription } from './browserSubscription'
 import { applicationServerKey } from './pushSupport'
 
 const KEY = 'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8'
@@ -98,11 +98,27 @@ describe('syncBrowserSubscription', () => {
       expect(api.addWebPushSubscription).toHaveBeenCalledWith({ endpoint: 'https://web.push.apple.com/new', p256dh: 'P2', auth: 'A2' })
     })
 
+    it('retries a transient subscribe failure, keeping the owner so the next run resubscribes', async () => {
+      const api = fakeApi()
+      const { subscription } = install()
+      rotate(subscription)
+      subscribe.mockRejectedValue(new Error('push service unavailable'))
+      localStorage.setItem(OWNER_KEY, 'me@example.com')
+      await expect(syncBrowserSubscription(asStub(api), new AbortController().signal)).rejects.toThrow('unavailable')
+      expect(localStorage.getItem(OWNER_KEY)).toBe('me@example.com')
+
+      // The stale subscription is gone; the next run finds an owner with no subscription and restores it.
+      install(false)
+      subscribe.mockResolvedValue({ endpoint: 'https://web.push.apple.com/new', toJSON: () => ({ endpoint: 'https://web.push.apple.com/new', keys: { p256dh: 'P2', auth: 'A2' } }) })
+      await syncBrowserSubscription(asStub(api), new AbortController().signal)
+      expect(api.addWebPushSubscription).toHaveBeenCalledWith({ endpoint: 'https://web.push.apple.com/new', p256dh: 'P2', auth: 'A2' })
+    })
+
     it('leaves the device off, for Settings to offer Turn on, where subscribing needs a tap', async () => {
       const api = fakeApi()
       const { subscription } = install()
       rotate(subscription)
-      subscribe.mockRejectedValue(new Error('needs a user gesture'))
+      subscribe.mockRejectedValue(new DOMException('needs a user gesture', 'NotAllowedError'))
       localStorage.setItem(OWNER_KEY, 'me@example.com')
       await syncBrowserSubscription(asStub(api), new AbortController().signal)
       expect(api.addWebPushSubscription).not.toHaveBeenCalled()
@@ -115,6 +131,15 @@ describe('syncBrowserSubscription', () => {
     install(false)
     await syncBrowserSubscription(asStub(api), new AbortController().signal)
     expect(api.whoami).not.toHaveBeenCalled()
+  })
+})
+
+describe('hasSignOutWorkerHandoff', () => {
+  it('is true only while a service worker controls the page', () => {
+    install()
+    expect(hasSignOutWorkerHandoff()).toBe(false)
+    Object.assign(navigator.serviceWorker, { controller: {} })
+    expect(hasSignOutWorkerHandoff()).toBe(true)
   })
 })
 

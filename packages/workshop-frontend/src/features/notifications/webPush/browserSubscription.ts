@@ -109,9 +109,17 @@ export const syncBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, si
   if (pushAvailability(currentPushEnvironment()) !== 'supported' || Notification.permission !== 'granted') return
   const pushManager = await findPushManager()
   const subscription = await pushManager?.getSubscription()
-  if (!pushManager || !subscription || signal.aborted) return
+  if (!pushManager || signal.aborted) return
+  // No subscription but an owner on record: one we should have, lost to a failed key-rotation
+  // replacement or dropped by the browser. Try to restore it, as the user never turned it off.
+  if (!subscription && !readOwner()) return
   const { id } = await api.whoami()
   if (signal.aborted) return
+  if (!subscription) {
+    const key = await api.getWebPushPublicKey()
+    if (key && !signal.aborted && ownsBrowserSubscription(id)) await subscribeAnew(api, pushManager, key, signal, id)
+    return
+  }
   if (!ownsBrowserSubscription(id)) {
     const foreign = readOwner()
     await subscription.unsubscribe()
@@ -125,7 +133,7 @@ export const syncBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, si
     return
   }
   await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
-  rememberBrowserEndpoint(subscription.endpoint)
+  if (!signal.aborted) rememberBrowserEndpoint(subscription.endpoint)
 }
 
 /**
@@ -141,12 +149,27 @@ const resubscribe = async (
   if (signal.aborted) return
   await api.removeWebPushSubscription(stale.endpoint).catch(() => {})
   if (signal.aborted) return
-  const fresh = await pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationServerKey(key) })
-    .catch(() => null)
+  await subscribeAnew(api, pushManager, key, signal, owner)
+}
+
+/**
+ * Subscribes without a tap and registers the result. Only the browser refusing for lack of one
+ * (iOS) turns the device off for Settings to offer Turn on; any other failure throws, so the
+ * caller's retry runs, and the owner marker left behind tells the next run to try again.
+ */
+const subscribeAnew = async (
+  api: RpcStub<AuthenticatedApi>, pushManager: PushManager, key: string, signal: AbortSignal, owner: string,
+) => {
+  let fresh: PushSubscription
+  try {
+    fresh = await pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationServerKey(key) })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'NotAllowedError') return forgetBrowserSubscription(owner)
+    throw error
+  }
   if (signal.aborted) return
-  if (!fresh) return forgetBrowserSubscription(owner)
   await api.addWebPushSubscription(toSubscriptionInfo(fresh.toJSON()))
-  rememberBrowserEndpoint(fresh.endpoint)
+  if (!signal.aborted) rememberBrowserEndpoint(fresh.endpoint)
 }
 
 /**
@@ -157,6 +180,13 @@ const resubscribe = async (
  * `owner`, the id this tab was signed in as, guards that. Both it and the endpoint this tab
  * registered are optional guards; without a registered endpoint nothing is released.
  */
+/**
+ * Whether a service worker controls the page and so can finish sign-out cleanup after the page is
+ * gone. Without one (Safari's declarative push can outlive its registration) the page itself must
+ * finish before it navigates away.
+ */
+export const hasSignOutWorkerHandoff = () => !!navigator.serviceWorker?.controller
+
 export const releaseOnSignOut = async (api: RpcStub<AuthenticatedApi>, owner?: string) => {
   if (pushAvailability(currentPushEnvironment()) !== 'supported') return
   // Before any await, so it is sent even if the page is navigated away at once (the Cloudflare Access

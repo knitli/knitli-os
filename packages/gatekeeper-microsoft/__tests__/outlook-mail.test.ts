@@ -525,6 +525,48 @@ describe("queued mutations", () => {
     });
   });
 
+  describe("queued changes seen by the session that queued them", () => {
+    it("reports a queued read-state flip on the message's metadata, last one winning", async () => {
+      stubFetch();
+      const session = await startSession();
+      const message = await session.getMessage(MESSAGE.id);
+      expect((await message.getMetadata()).isRead).toBe(false);
+
+      await message.markRead();
+      expect((await message.getMetadata()).isRead).toBe(true);
+
+      await message.markUnread();
+      expect((await message.getMetadata()).isRead).toBe(false);
+    });
+
+    it("reports a queued move as the message's folder, and in later listings", async () => {
+      stubFetch();
+      const session = await startSession();
+      const message = await session.getMessage(MESSAGE.id);
+      await message.moveToFolder("folder-archive");
+
+      expect((await message.getMetadata()).folderId).toBe("folder-archive");
+      const page = await (await session.listMessages()).next();
+      expect(page![0].info.folderId).toBe("folder-archive");
+    });
+
+    it("leaves other messages and the real mailbox alone, and stops once the action is applied", async () => {
+      stubFetch(call => new URL(call.url).pathname.endsWith("/me/messages/other")
+        ? jsonResponse({ ...MESSAGE, id: "other" })
+        : defaultRoute(call));
+      const session = await startSession();
+      const message = await session.getMessage(MESSAGE.id);
+      await message.markRead();
+
+      expect((await (await session.getMessage("other")).getMetadata()).isRead).toBe(false);
+
+      await applyApprovedAction(approvals.actions[0].id);
+      // The write is done and the queue is empty, so what is read is the mailbox itself.
+      expect(context.storage.kv.get(`pending:action:${approvals.actions[0].id}`)).toBeUndefined();
+      expect((await message.getMetadata()).isRead).toBe(false);
+    });
+  });
+
   it("records no observation for the reads that only describe a queued action", async () => {
     // Nothing read to prepare the approval text is returned to the caller, so it must not put the
     // workspace in restricted mode.

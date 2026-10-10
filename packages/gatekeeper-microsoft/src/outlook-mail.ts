@@ -11,10 +11,13 @@
 //                                      getAgentCatalog
 //
 // Mutations return `void` and nothing is written to the mailbox before approval — no draft is
-// created, no id is minted, and no later read reflects a queued action. Simulating pending state
-// would mean carrying an overlay for a mailbox that other clients mutate concurrently; reporting
-// nothing is honest about what has actually happened. `awaitDecision` is therefore set on every
-// action so the agent stops rather than re-reading a mailbox its action has not reached yet.
+// created and no id is minted. Queued read-state flips and moves are overlaid on the message
+// metadata a session returns (`withPendingState`), so a gadget that marks a message read and
+// immediately reads it back sees what it asked for, and does not submit the change twice. Folder
+// listings are not reshaped: a message queued to move still appears in the folder it is leaving,
+// and a draft is not readable at all. `awaitDecision` is set on every action so an agent, which
+// the Workshop can suspend, stops rather than re-reading a mailbox its action has not reached yet;
+// it has no effect on a gadget, which is what the overlay is for.
 //
 // Every message id handled here is a Graph immutable id (see graph-api.ts). That is what lets an
 // action queued now still apply after the message has moved folders in the meantime.
@@ -75,6 +78,22 @@ type OutlookMailSessionContext = {
   approvalQueue: RpcStub<ApprovalQueue>;
   pendingActions: PendingActionStore<OutlookMailAction>;
 };
+
+/**
+ * `info` as the mailbox will be once this session's queued actions are applied: the read state of
+ * the last queued flip, and the destination of the last queued move. Only the fields those actions
+ * change are touched.
+ */
+function withPendingState(
+    pendingActions: PendingActionStore<OutlookMailAction>, info: OutlookMessageInfo)
+    : OutlookMessageInfo {
+  let { isRead, folderId } = info;
+  for (let { action } of pendingActions.list()) {
+    if (action.type === "setRead" && action.messageId === info.id) isRead = action.read;
+    if (action.type === "move" && action.messageId === info.id) folderId = action.destinationFolderId;
+  }
+  return { ...info, isRead, ...(folderId !== undefined ? { folderId } : {}) };
+}
 
 function describeMessage(info: OutlookMessageInfo): string {
   return [
@@ -223,7 +242,7 @@ class OutlookMessageCursorImpl extends RpcTarget implements Cursor<OutlookMessag
     }
 
     const entries = page.items.map(info => ({
-      info,
+      info: withPendingState(this.#ctx.pendingActions, info),
       message: new OutlookMessageStub(this.#ctx, info.id, info) as OutlookMessage,
     }));
 
@@ -318,7 +337,7 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
       description: `Read metadata for an Outlook message.\n\n${describeMessage(info)}`,
     });
 
-    return info;
+    return withPendingState(this.#ctx.pendingActions, info);
   }
 
   async getBody(): Promise<string> {

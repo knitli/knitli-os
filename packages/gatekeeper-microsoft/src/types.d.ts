@@ -178,8 +178,8 @@ export interface OutlookMessage {
    * Mark this message as read.
    *
    * Queued for approval: nothing changes in the mailbox until a human (or an auto-approval policy)
-   * approves it, and the result is not observable from this session — later reads still report the
-   * mailbox as it is now. Returns as soon as the request is queued.
+   * approves it. This message's `getMetadata()` and the `info` of later listings report it as read
+   * meanwhile. Returns as soon as the request is queued.
    */
   markRead(): Promise<void>;
 
@@ -193,8 +193,10 @@ export interface OutlookMessage {
   /**
    * Move this message to the folder with the given id (see `listFolders()`).
    *
-   * Queued for approval: the message stays where it is until the action is approved, and this call
-   * reports nothing about the outcome. The message keeps the same id after a move.
+   * Queued for approval: the message stays where it is until the action is approved. Meanwhile this
+   * message's `getMetadata()` and the `info` of later listings report the new `folderId`, but folder
+   * listings still include it in the folder it is leaving. The message keeps the same id after a
+   * move.
    */
   moveToFolder(folderId: string): Promise<void>;
 

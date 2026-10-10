@@ -28,6 +28,7 @@ import {
 import {
   type ActionDescriptionBuilder, buildDescription, type RenderedDescription,
 } from "@gadgets/gatekeeper-kit/action-description";
+import { authorizeRestricted } from "./restricted-observation";
 import { formatApprovalField, sanitizeApprovalTitle } from "./approval-text";
 import { AccessTokenCache, AccessTokenRequest } from "./auth-retry";
 import { GraphMailApi, MAX_REPLY_BODY_BYTES, validateSearchQuery } from "./graph-api";
@@ -209,6 +210,15 @@ class OutlookMessageCursorImpl extends RpcTarget implements Cursor<OutlookMessag
       this.#nextLink = nextLink;
       this.#pages = pages;
       this.#exhausted = !page.nextLink;
+      if (page.nextLink) {
+        // A bound stopped the skip above while Graph still had more to give. `null` would read as
+        // "the listing is finished" and strand whatever matches further on.
+        throw new Error(pages >= MAX_CURSOR_PAGES
+            ? `This cursor has already returned ${MAX_CURSOR_PAGES} pages. Narrow the search ` +
+              "instead of paging further."
+            : "This cursor skipped 5 pages with nothing on them without reaching the end of the " +
+              "results. Narrow the search instead of paging further.");
+      }
       return null;
     }
 
@@ -217,7 +227,7 @@ class OutlookMessageCursorImpl extends RpcTarget implements Cursor<OutlookMessag
       message: new OutlookMessageStub(this.#ctx, info.id, info) as OutlookMessage,
     }));
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: `Read ${entries.length} Outlook messages`,
       description:
           `Fetch the next page of messages from ${this.#describeScope}.\n\n` +
@@ -251,7 +261,7 @@ class OutlookFolderStub extends RpcTarget implements OutlookFolder {
     let info = this.#cachedInfo ?? await this.#ctx.api.getFolder(this.#folderId);
     this.#cachedInfo = info;
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Outlook folder: ${info.name}`),
       description:
           "Read metadata for this mail folder.\n\n" +
@@ -265,7 +275,7 @@ class OutlookFolderStub extends RpcTarget implements OutlookFolder {
     let info = this.#cachedInfo;
     let scope = info ? `the "${info.name}" folder` : "the selected mail folder";
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: "List Outlook messages in a folder",
       description: `Create a cursor over the most recent messages in ${scope}.`,
     });
@@ -303,7 +313,7 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
     let info = await this.#ctx.api.getMessage(this.#messageId);
     this.#cachedInfo = info;
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Message info: ${info.subject}`),
       description: `Read metadata for an Outlook message.\n\n${describeMessage(info)}`,
     });
@@ -315,7 +325,7 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
     let info = await this.#ensureInfo();
     let body = await this.#ctx.api.getMessageBody(this.#messageId);
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Read message: ${info.subject}`),
       description: `Read the body of an Outlook message.\n\n${describeMessage(info)}`,
     });
@@ -328,7 +338,7 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
     let info = await this.#ensureInfo();
     let attachments = await this.#ctx.api.listAttachments(this.#messageId);
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`List ${attachments.length} attachments: ${info.subject}`),
       description:
           "List the attachments on an Outlook message.\n\n" +
@@ -351,7 +361,7 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
     let { info: attachment, content } =
         await this.#ctx.api.getAttachmentBytes(this.#messageId, attachmentId);
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(
           `Read attachment: ${attachment.name} (${content.byteLength} bytes) — ${info.subject}`),
       description:
@@ -403,7 +413,7 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
     let info = await this.#readInfoForAction("move");
     // Reading the destination is what turns an opaque id into something a human can approve.
     let folder = await this.#ctx.api.getFolder(folderId);
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Read destination folder: ${folder.name}`),
       description: "Read the destination folder's name to describe a pending move.",
     });
@@ -469,7 +479,7 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
   /** Read the message so the approval prompt can describe what is being acted on. */
   async #readInfoForAction(what: string): Promise<OutlookMessageInfo> {
     let info = await this.#ensureInfo();
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Read message before ${what}: ${info.subject}`),
       description: `Read the message details needed to describe this pending action.\n\n` +
           describeMessage(info),
@@ -490,7 +500,7 @@ class OutlookMailSessionImpl extends RpcTarget implements OutlookMailSession {
   }
 
   async listMessages(): Promise<Cursor<OutlookMessageEntry>> {
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: "List Outlook messages",
       description: "Create a cursor over the most recent messages in the connected mailbox.",
     });
@@ -503,7 +513,7 @@ class OutlookMailSessionImpl extends RpcTarget implements OutlookMailSession {
     // asking a human to approve a search that cannot run.
     let validated = validateSearchQuery(query);
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: "Search Outlook",
       description:
           "Create a cursor over mailbox messages matching this search.\n\n" +
@@ -528,7 +538,7 @@ class OutlookMailSessionImpl extends RpcTarget implements OutlookMailSession {
   async listFolders(): Promise<OutlookFolderEntry[]> {
     let folders = await this.#ctx.api.listFolders();
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: `List ${folders.length} Outlook folders`,
       description:
           "List the mail folders in the connected mailbox.\n\n" +
@@ -577,9 +587,9 @@ export class OutlookMailGatekeeperImpl
    */
   #api(): GraphMailApi {
     return new GraphMailApi(opts => this.#getAccessToken(opts), {
-      onCredentialsRejected: async (detail: string) => {
+      onCredentialsRejected: async (detail: string, rejectedToken: string) => {
         this.#tokens.invalidate();
-        await this.#account().reportCredentialsRejected(detail);
+        await this.#account().reportCredentialsRejected(detail, rejectedToken);
       },
     });
   }

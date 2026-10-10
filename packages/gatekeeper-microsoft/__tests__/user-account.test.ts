@@ -367,6 +367,24 @@ describe("consent coverage", () => {
       [...IDENTITY_SCOPES, ...MAIL_SCOPES, "Team.ReadBasic.All"]);
   });
 
+  it("treats a token response without a scope as covering what was requested", async () => {
+    // RFC 6749 lets the server omit `scope` when it equals the request; reading that as "no
+    // resources" would send the user round the reconnect loop for a valid grant.
+    const { context, account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1",
+      expires_in: 3600,
+      refresh_token: "refresh-1",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await connect(account, fakeCallback(), { scopes: [...IDENTITY_SCOPES, ...MAIL_SCOPES] });
+
+    expect(await account.getGrantedResourceUrlPatterns())
+      .toEqual(["https://outlook.office.com/mail/*"]);
+    expect(context.storage.kv.get("grantScopes")).toEqual([...IDENTITY_SCOPES, ...MAIL_SCOPES]);
+  });
+
   it("records only the scopes the grant covers, so a refresh never re-asks for a declined one", async () => {
     // The recorded scopes are sent again on every refresh and reconnect. Entra fails a request
     // naming a permission nobody consented to, which would take the consented resources down too.
@@ -555,13 +573,31 @@ describe("mint failure taxonomy", () => {
       token: "access-live", expires: new Date(Date.now() + 30 * 60 * 1000),
     });
 
-    await account.reportCredentialsRejected("conditional access policy");
+    await account.reportCredentialsRejected("conditional access policy", "access-live");
 
     expect(callback.credentialsExpired).toHaveBeenCalledTimes(1);
     // The rejected token must not keep being served from cache.
     expect(context.storage.kv.get("accessToken")).toBeUndefined();
     await expect(account.getAccessToken()).rejects.toThrow(/sign in again/i);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores a late rejection of a token the account has since replaced", async () => {
+    // Every resource binding caches its own token, so one can report a challenge for the old
+    // token after a reconnect has already made a new one live.
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-new");
+    context.storage.kv.put("accessToken", {
+      token: "access-new", expires: new Date(Date.now() + 30 * 60 * 1000),
+    });
+
+    await account.reportCredentialsRejected("conditional access policy", "access-old");
+
+    expect(callback.credentialsExpired).not.toHaveBeenCalled();
+    expect(context.storage.kv.get("accessToken")).toMatchObject({ token: "access-new" });
+    expect(context.storage.kv.get("mintFailure")).toBeUndefined();
   });
 });
 

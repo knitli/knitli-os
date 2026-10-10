@@ -175,11 +175,11 @@ function fakeGatekeeperContext() {
 }
 
 function fakeApprovalQueue() {
-  const observations: { title: string; description: string }[] = [];
+  const observations: { title: string; description: string; containsRestrictedData?: boolean }[] = [];
   const actions: { id: number; description: Record<string, unknown> }[] = [];
   const queue = {
     dup: () => queue,
-    authorizeObservation: vi.fn(async (description: { title: string; description: string }) => {
+    authorizeObservation: vi.fn(async (description: { title: string; description: string; containsRestrictedData?: boolean }) => {
       observations.push(description);
     }),
     submitAction: vi.fn(async (id: number, description: Record<string, unknown>) => {
@@ -634,55 +634,40 @@ describe("observers", () => {
 });
 
 describe("agent catalog", () => {
-  it("lists teams before chats and flattens the names their counterparts chose", async () => {
-    stubFetch(call => call.url.includes("/me/joinedTeams")
-      ? jsonResponse({ value: [TEAM, { ...TEAM, id: "team-2", displayName: "Ops\n```\nfake" }] })
-      : defaultRoute(call));
+  it("names no team or chat, and asks Graph for nothing", async () => {
+    // The catalog enters the agent's prompt with no approval in the way, and this resource refuses
+    // every observer, so team names and chat topics must not appear in it.
+    const calls = stubFetch(call => defaultRoute(call));
 
     const catalog = await gatekeeper.getAgentCatalog();
 
-    // The catalog enters the agent's prompt with no approval in the way, so a name somebody else
-    // wrote cannot span lines or bring a fence of its own along.
-    expect(catalog!.entries.map(entry => entry.title))
-      .toEqual(["Engineering", "Ops ``` fake", "Project Falcon"]);
-    expect(catalog!.truncated).toBe(false);
+    expect(calls).toHaveLength(0);
+    expect(catalog!.entries.map(entry => entry.id)).toEqual(["teams", "chats"]);
+    const text = JSON.stringify(catalog);
+    expect(text).not.toContain(TEAM.displayName);
+    expect(text).not.toContain("Falcon");
   });
 
-  it("names an unnamed chat by its kind rather than leaving the entry blank", async () => {
-    stubFetch(call => call.url.includes("/me/chats")
-      ? jsonResponse({ value: [{ id: "chat-9", chatType: "oneOnOne" }] })
-      : defaultRoute(call));
+  it("still works for a user in more teams than the listing ceiling", async () => {
+    stubFetch(() => { throw new Error("the catalog must not call Graph"); });
 
-    const catalog = await gatekeeper.getAgentCatalog();
-
-    expect(catalog!.entries.map(entry => entry.title)).toEqual(["Engineering", "(oneOnOne chat)"]);
+    await expect(gatekeeper.getAgentCatalog()).resolves.not.toBeNull();
   });
+});
 
-  it("caps a large surface at 25 entries and flags the catalog truncated", async () => {
-    const manyTeams = Array.from({ length: 30 }, (_unused, index) => ({
-      id: `team-${index}`, displayName: `Team ${index}`,
-    }));
-    stubFetch(call => call.url.includes("/me/joinedTeams")
-      ? jsonResponse({ value: manyTeams })
-      : defaultRoute(call));
-    const catalog = await gatekeeper.getAgentCatalog();
+describe("restricted observations", () => {
+  it("marks every Teams read restricted, since the data cannot be shared", async () => {
+    stubFetch(call => defaultRoute(call));
+    const session = await startSession();
 
-    expect(catalog!.entries).toHaveLength(25);
-    expect(catalog!.truncated).toBe(true);
-    expect(catalog!.entries[0].title).toBe("Team 0");
-  });
+    await session.listTeams();
+    const chats = await session.listChats();
+    await chats.next();
 
-  it("flags truncation when the chat listing itself has another page", async () => {
-    stubFetch(call => call.url.includes("/me/chats")
-      ? jsonResponse({
-        value: [CHAT],
-        "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/chats?$skiptoken=abc",
-      })
-      : defaultRoute(call));
-    const catalog = await gatekeeper.getAgentCatalog();
-
-    expect(catalog!.entries).toHaveLength(2);
-    expect(catalog!.truncated).toBe(true);
+    expect(approvals.observations.length).toBeGreaterThan(0);
+    for (const observation of approvals.observations) {
+      expect(observation.containsRestrictedData).toBe(true);
+    }
   });
 });
 
@@ -694,7 +679,7 @@ describe("credential death", () => {
     const session = await startSession();
 
     await expect(session.listTeams()).rejects.toThrow(/sign in again/i);
-    expect(reportCredentialsRejected).toHaveBeenCalledWith("insufficient_claims");
+    expect(reportCredentialsRejected).toHaveBeenCalledWith("insufficient_claims", "token-1");
   });
 
   it("drops its own token memo, so the call after a reconnect uses the new token", async () => {

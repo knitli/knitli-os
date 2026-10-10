@@ -589,9 +589,23 @@ export class GraphSharePointApi {
 
   /** The list's columns, normalised, with SharePoint's plumbing dropped. */
   async listColumns(siteId: string, listId: string): Promise<ColumnDefinition[]> {
-    let body = await this.#fetchJson<GraphCollection<GraphColumnDefinition>>(
-        graphUrl(["sites", siteId, "lists", listId, "columns"]));
-    return (body.value ?? [])
+    // Every page: a column missing from the schema would look unknown to `createItem()`, and a
+    // required one would let an invalid create be approved and then fail at apply time.
+    let columns: GraphColumnDefinition[] = [];
+    let url: string | undefined = graphUrl(["sites", siteId, "lists", listId, "columns"]);
+    for (let page = 0; url; page++) {
+      if (page >= MAX_LIST_PAGES) {
+        throw new Error(
+            `This list has more columns than this can read (${MAX_LIST_PAGES} pages). Use a list ` +
+            "with fewer columns.");
+      }
+      let body: GraphCollection<GraphColumnDefinition> =
+          await this.#fetchJson<GraphCollection<GraphColumnDefinition>>(url);
+      columns.push(...(body.value ?? []));
+      let next = body["@odata.nextLink"];
+      url = next ? assertGraphUrl(next) : undefined;
+    }
+    return columns
         .map(normalizeColumn)
         .filter((column): column is ColumnDefinition => column !== null);
   }

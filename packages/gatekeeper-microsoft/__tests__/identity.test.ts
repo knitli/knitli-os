@@ -111,6 +111,8 @@ describe("classifyTokenFailure", () => {
     { code: 50173, what: "grant invalidated by a password change or admin revocation" },
     { code: 7000222, what: "client secret expired" },
     { code: 65001, what: "consent not granted" },
+    { code: 70043, what: "refresh token expired by a sign-in frequency policy" },
+    { code: 70044, what: "session no longer satisfies the sign-in frequency policy" },
   ];
 
   for (const { code, what } of permanentCodes) {

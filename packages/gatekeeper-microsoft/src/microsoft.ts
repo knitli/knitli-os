@@ -523,11 +523,16 @@ export class UserAccount extends DurableObject<Env> {
   // Persist a freshly minted grant. Storing the returned refresh token is mandatory, not an
   // optimization: Entra retires the presented token on every mint, so keeping the old value strands
   // the account the moment the retired token stops being honored.
-  #storeGrant(grant: EntraTokenGrant): void {
+  //
+  // A token response may omit `scope` when it equals the scope that was requested (RFC 6749
+  // §5.1). A grant that has just been made says nothing wrong in that case, so `requestedScopes`
+  // stands in for what it covers; a refresh passes none and leaves the recorded scopes alone.
+  #storeGrant(grant: EntraTokenGrant, requestedScopes?: string[]): void {
     if (grant.refreshToken) this.ctx.storage.kv.put<string>("refreshToken", grant.refreshToken);
     this.ctx.storage.kv.put<EntraAccessToken>("accessToken", grant.accessToken);
-    if (grant.grantedScopes.length > 0) {
-      this.ctx.storage.kv.put<string[]>("grantedScopes", grant.grantedScopes);
+    let granted = grant.grantedScopes.length > 0 ? grant.grantedScopes : requestedScopes;
+    if (granted && granted.length > 0) {
+      this.ctx.storage.kv.put<string[]>("grantedScopes", granted);
     }
     if (grant.idTokenClaims) {
       this.ctx.storage.kv.put<IdTokenClaims>("idTokenClaims", grant.idTokenClaims);
@@ -721,7 +726,7 @@ export class UserAccount extends DurableObject<Env> {
         return { callback, stageId, authOnly };
       }
 
-      this.#storeGrant(grant);
+      this.#storeGrant(grant, recordedScopes);
       this.ctx.storage.kv.put<string[]>("grantScopes", recordedScopes);
       // These credentials are new, so any recorded permanent failure no longer applies.
       this.ctx.storage.kv.delete("mintFailure");
@@ -768,7 +773,7 @@ export class UserAccount extends DurableObject<Env> {
       let staged = commitStagedCredentials<StagedGrant>(
           this.ctx.storage.kv, Date.now(), stageId);
       if (!staged) throw new Error("No reconnect is awaiting confirmation. Please try again.");
-      this.#storeGrant(staged.grant);
+      this.#storeGrant(staged.grant, staged.scopes);
       this.ctx.storage.kv.put<string[]>("grantScopes", staged.scopes);
       // These credentials are new, so any recorded permanent failure no longer applies — and
       // clearing it re-arms the one-shot expiry notification for whatever kills them next.
@@ -885,9 +890,16 @@ export class UserAccount extends DurableObject<Env> {
    * happily while every Graph call fails, which leaves the account undead: refreshes succeed, work
    * fails, and the UI never offers a reconnect. Treating the challenge as credential death is what
    * surfaces the reconnect prompt.
+   *
+   * `rejectedToken` is the access token Graph refused. Each resource binding caches its own copy,
+   * so a late report can name a token the account has since replaced (a reconnect landed in
+   * between); the report is then about credentials that no longer exist and is dropped, rather than
+   * killing the fresh grant.
    */
-  async reportCredentialsRejected(detail?: string): Promise<void> {
+  async reportCredentialsRejected(detail?: string, rejectedToken?: string): Promise<void> {
     await this.#updateCredentials(async () => {
+      let current = this.ctx.storage.kv.get<EntraAccessToken>("accessToken");
+      if (rejectedToken !== undefined && current && current.token !== rejectedToken) return;
       // The current token is known-bad, so don't keep serving it from cache.
       this.ctx.storage.kv.delete("accessToken");
       this.#recordMintFailure({

@@ -130,11 +130,11 @@ function fakeGatekeeperContext() {
 }
 
 function fakeApprovalQueue() {
-  const observations: { title: string; description: string }[] = [];
+  const observations: { title: string; description: string; containsRestrictedData?: boolean }[] = [];
   const actions: { id: number; description: Record<string, unknown> }[] = [];
   const queue = {
     dup: () => queue,
-    authorizeObservation: vi.fn(async (description: { title: string; description: string }) => {
+    authorizeObservation: vi.fn(async (description: { title: string; description: string; containsRestrictedData?: boolean }) => {
       observations.push(description);
     }),
     submitAction: vi.fn(async (id: number, description: Record<string, unknown>) => {
@@ -241,6 +241,59 @@ describe("reads", () => {
       "Message info: Quarterly report",
     ]);
     expect(approvals.actions).toHaveLength(0);
+  });
+
+  it("marks every read restricted, since the mailbox can only be observed by its owner", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    await session.listFolders();
+    const cursor = await session.listMessages();
+    const page = await cursor.next();
+    await page![0].message.getBody();
+    await page![0].message.getMetadata();
+    await page![0].message.listAttachments();
+
+    expect(approvals.observations.length).toBeGreaterThanOrEqual(5);
+    for (const observation of approvals.observations) {
+      expect(observation.containsRestrictedData).toBe(true);
+    }
+  });
+
+  it("cuts off a very long body and says so", async () => {
+    stubFetch(call => call.url.includes("select=id%2Cbody") || call.url.includes("$select=id,body")
+      ? jsonResponse({ id: MESSAGE.id, body: { contentType: "text", content: "x".repeat(300_000) } })
+      : defaultRoute(call));
+    const session = await startSession();
+    const page = await (await session.listMessages()).next();
+
+    const body = await page![0].message.getBody();
+
+    expect(body.length).toBeLessThan(300_000);
+    expect(body.endsWith("[message body truncated]")).toBe(true);
+  });
+
+  it("refuses to buffer a message response over the byte cap", async () => {
+    stubFetch(call => call.url.includes("select=id%2Cbody") || call.url.includes("$select=id,body")
+      ? jsonResponse({ id: MESSAGE.id, body: { content: "x".repeat(3 * 1024 * 1024) } })
+      : defaultRoute(call));
+    const session = await startSession();
+    const page = await (await session.listMessages()).next();
+
+    await expect(page![0].message.getBody()).rejects.toThrow(/too large to read here/);
+  });
+
+  it("does not report the end while Graph still offers pages", async () => {
+    // Five empty pages in a row, each with a next link: stopping with null would strand every
+    // match further on, so the cursor says it gave up instead.
+    stubFetch(() => jsonResponse({
+      value: [],
+      "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skiptoken=more",
+    }));
+    const session = await startSession();
+    const cursor = await session.listMessages();
+
+    await expect(cursor.next()).rejects.toThrow(/skipped 5 pages with nothing on them/);
   });
 
   it("exposes folders as capabilities", async () => {
@@ -582,7 +635,7 @@ describe("credential death", () => {
     const session = await startSession();
 
     await expect(session.listFolders()).rejects.toThrow(/sign in again/i);
-    expect(reportCredentialsRejected).toHaveBeenCalledWith("insufficient_claims");
+    expect(reportCredentialsRejected).toHaveBeenCalledWith("insufficient_claims", "token-1");
   });
 
   it("drops its own token memo, so the call after a reconnect uses the new token", async () => {

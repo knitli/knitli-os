@@ -38,6 +38,16 @@ it. Adding a resource to an account that already has one re-requests the union o
 nothing already granted is dropped; and the scopes recorded for later refreshes cover only what
 Entra reported as actually granted, so a refresh never asks for a permission nobody consented to.
 
+## Restricted mode
+
+The mailbox and Teams refuse every observer (nothing here can show a collaborator has the same
+access), so each read of them is marked `containsRestrictedData`: once an agent has read a message
+or a chat, the workspace is in restricted mode — no public web fetches, and every action needs
+manual approval — and a gadget bound to either stays single-user. The Teams agent catalog is
+static for the same reason: it names no team or chat, because the catalog is loaded into every
+prompt without any observation. Message bodies over 256 KiB are cut off and flagged; a message too
+large to fetch under the byte cap is refused.
+
 ## Connect links are bound to the initiator
 
 The Workshop attaches the initiating person's Cloudflare Access email to every connect, reconnect

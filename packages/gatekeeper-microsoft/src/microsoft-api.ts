@@ -99,6 +99,8 @@ const PERMANENT_AADSTS_CODES = new Set([
   50173,   // grant invalidated (password change, admin session revocation)
   65001,   // the user or administrator has not consented to the requested permissions
   700082,  // refresh token expired due to inactivity
+  70043,   // refresh token expired or invalid due to a sign-in frequency policy
+  70044,   // session no longer satisfies the sign-in frequency policy
   7000215, // invalid client secret
   7000222, // client secret expired
 ]);

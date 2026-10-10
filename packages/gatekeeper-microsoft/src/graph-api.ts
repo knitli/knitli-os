@@ -14,6 +14,7 @@
 // path segments are percent-encoded and every query parameter goes through `URLSearchParams`.
 // Interpolating either raw would let a crafted id escape into the path or into OData syntax.
 
+import { ResponseTooLargeError, readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
 import {
   AccessTokenProvider, CredentialsRejectedReporter, claimsChallengeDetail, fetchWithAuthRetry,
 } from "./auth-retry";
@@ -84,6 +85,15 @@ const MAX_SEARCH_QUERY_CHARS = 400;
 
 /** Longest reply body accepted, matching the cap the mail UIs impose in practice. */
 export const MAX_REPLY_BODY_BYTES = 64 * 1024;
+
+/**
+ * Largest Graph response read when fetching a message body. The text is sender-controlled, and
+ * Graph can wrap it in markup or escapes, so this sits well above the character ceiling below.
+ */
+const MAX_MESSAGE_RESPONSE_BYTES = 2 * 1024 * 1024;
+
+/** Longest message body returned to the caller; the rest is cut off and flagged. */
+export const MAX_MESSAGE_BODY_CHARS = 256 * 1024;
 
 type GraphRecipient = {
   emailAddress?: { address?: string; name?: string };
@@ -578,9 +588,25 @@ export class GraphMailApi {
 
   /** The message body as plain text (see the text body preference on reads). */
   async getMessageBody(messageId: string): Promise<string> {
-    let message = await this.#fetchJson<GraphMessage>(
+    let response = await this.#request(
         graphUrl(["me", "messages", messageId], { $select: "id,body" }));
-    return typeof message.body?.content === "string" ? message.body.content : "";
+    if (!response.ok) throw await this.#toError(response);
+    // The body is whatever the sender wrote, so it is read under a byte cap rather than buffered
+    // whole. A message too large to read fails with a reason instead of exhausting the Worker.
+    let text: string;
+    try {
+      text = await readTextCapped(response, MAX_MESSAGE_RESPONSE_BYTES);
+    } catch (err) {
+      if (err instanceof ResponseTooLargeError) {
+        throw new Error("This message is too large to read here. Open it in Outlook instead.", { cause: err });
+      }
+      throw err;
+    }
+    let message = JSON.parse(text) as GraphMessage;
+    let content = typeof message.body?.content === "string" ? message.body.content : "";
+    return content.length > MAX_MESSAGE_BODY_CHARS
+        ? `${content.slice(0, MAX_MESSAGE_BODY_CHARS)}\n[message body truncated]`
+        : content;
   }
 
   /**

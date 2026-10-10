@@ -31,8 +31,9 @@ import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import {
   ActionKind, AgentCatalog, ApprovalQueue, Cursor, Gatekeeper, GatekeeperUserVerifier,
-  ResourceDescription, boundAgentCatalog,
+  ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { authorizeRestricted } from "./restricted-observation";
 import { formatApprovalField, sanitizeApprovalTitle } from "./approval-text";
 import { AccessTokenCache, AccessTokenRequest } from "./auth-retry";
 import type { GraphPage } from "./graph-api";
@@ -66,13 +67,6 @@ const MAX_LINE_EXCERPT_CHARS = 120;
 
 /** Longest display name echoed into a per-line entry of a page listing. */
 const MAX_NAME_CHARS = 80;
-
-/**
- * Combined ceiling on the teams and chats offered to the agent catalog. Both grow with the user's
- * membership, so they share a bound well under the shared AGENT_CATALOG_MAX_ENTRIES ceiling;
- * everything past it stays reachable through the session's listTeams() and listChats().
- */
-const MAX_CATALOG_ENTRIES = 25;
 
 // ── Session context ─────────────────────────────────────────────────
 //
@@ -252,7 +246,7 @@ class TeamsPageWalk<T, E> {
     }
 
     let entries = this.#spec.toEntries(page.items);
-    await this.#ctx.approvalQueue.authorizeObservation(this.#spec.describePage(entries));
+    await authorizeRestricted(this.#ctx.approvalQueue, this.#spec.describePage(entries));
 
     this.#started = started;
     this.#nextLink = nextLink;
@@ -401,7 +395,7 @@ class TeamsSearchCursorImpl extends RpcTarget implements Cursor<TeamsSearchHitEn
       message: new TeamsSearchHitStub(this.#ctx, info) as TeamsMessage,
     }));
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: `Read ${entries.length} Microsoft Teams search results`,
       description:
           "Fetch the next page of Teams messages matching this search.\n\n" +
@@ -435,7 +429,7 @@ class TeamsTeamStub extends RpcTarget implements TeamsTeam {
     let info = this.#cachedInfo ?? await this.#ctx.api.getTeam(this.#teamId);
     this.#cachedInfo = info;
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Teams team: ${info.displayName}`),
       description:
           "Read metadata for this Microsoft Teams team.\n\n" +
@@ -449,7 +443,7 @@ class TeamsTeamStub extends RpcTarget implements TeamsTeam {
     let channels = await this.#ctx.api.listChannels(this.#teamId);
     let scope = this.#scope();
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: `List ${channels.length} Microsoft Teams channels`,
       description:
           `List the channels of ${scope.label} that the connected user can see.` +
@@ -472,7 +466,7 @@ class TeamsTeamStub extends RpcTarget implements TeamsTeam {
   async getChannel(channelId: string): Promise<TeamsChannel> {
     let info = await this.#ctx.api.getChannel(this.#teamId, channelId);
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Teams channel: ${info.displayName}`),
       description:
           "Open a Microsoft Teams channel by id.\n\n" +
@@ -485,7 +479,7 @@ class TeamsTeamStub extends RpcTarget implements TeamsTeam {
   async listMembers(): Promise<Cursor<TeamsMemberInfo>> {
     let scope = this.#scope();
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: "List Microsoft Teams team members",
       description: `Create a cursor over the roster of ${scope.label}.${scopeField(scope)}`,
     });
@@ -521,7 +515,7 @@ class TeamsChannelStub extends RpcTarget implements TeamsChannel {
     let info = this.#cachedInfo ?? await this.#ctx.api.getChannel(this.#teamId, this.#channelId);
     this.#cachedInfo = info;
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Teams channel: ${info.displayName}`),
       description:
           "Read metadata for this Microsoft Teams channel.\n\n" +
@@ -534,7 +528,7 @@ class TeamsChannelStub extends RpcTarget implements TeamsChannel {
   async listMessages(): Promise<Cursor<TeamsMessageEntry>> {
     let scope = scopeOf("the selected channel", "Channel", this.#cachedInfo?.displayName);
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: "List Microsoft Teams channel messages",
       description:
           `Create a cursor over the top-level messages of ${scope.label}.${scopeField(scope)}`,
@@ -570,7 +564,7 @@ class TeamsChatStub extends RpcTarget implements TeamsChat {
     let info = this.#cachedInfo ?? await this.#ctx.api.getChat(this.#chatId);
     this.#cachedInfo = info;
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Teams chat: ${chatLabel(info)}`),
       description:
           "Read metadata for this Microsoft Teams chat.\n\n" +
@@ -583,7 +577,7 @@ class TeamsChatStub extends RpcTarget implements TeamsChat {
   async listMembers(): Promise<Cursor<TeamsMemberInfo>> {
     let scope = this.#scope();
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: "List Microsoft Teams chat members",
       description: `Create a cursor over everyone in ${scope.label}.${scopeField(scope)}`,
     });
@@ -594,7 +588,7 @@ class TeamsChatStub extends RpcTarget implements TeamsChat {
   async listMessages(): Promise<Cursor<TeamsMessageEntry>> {
     let scope = this.#scope();
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: "List Microsoft Teams chat messages",
       description: `Create a cursor over the messages in ${scope.label}.${scopeField(scope)}`,
     });
@@ -640,7 +634,7 @@ class TeamsChannelMessageStub extends RpcTarget implements TeamsChannelMessage {
         this.#teamId, this.#channelId, this.#messageId);
     this.#cachedInfo = info;
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Teams message from ${senderName(info.from)}`),
       description: `Read a Microsoft Teams channel message.\n\n${describeMessage(info)}`,
     });
@@ -654,7 +648,7 @@ class TeamsChannelMessageStub extends RpcTarget implements TeamsChannelMessage {
         "the reply chain under the selected message", "Message",
         body === undefined ? undefined : oneLine(body, MAX_EXCERPT_CHARS) || "(no text)");
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: "List Microsoft Teams message replies",
       description: `Create a cursor over ${scope.label}.${scopeField(scope)}`,
     });
@@ -683,7 +677,7 @@ class TeamsSearchHitStub extends RpcTarget implements TeamsMessage {
   async getInfo(): Promise<TeamsMessageInfo> {
     let info = await this.#ctx.api.getSearchHitMessage(this.#hit);
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Teams message from ${senderName(info.from)}`),
       description:
           `Read the Microsoft Teams message behind a search result.\n\n${describeMessage(info)}`,
@@ -707,7 +701,7 @@ class TeamsSessionImpl extends RpcTarget implements TeamsSession {
   async listTeams(): Promise<TeamsTeamEntry[]> {
     let teams = await this.#ctx.api.listJoinedTeams();
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: `List ${teams.length} Microsoft Teams teams`,
       description:
           "List the teams the connected user has joined.\n\n" +
@@ -724,7 +718,7 @@ class TeamsSessionImpl extends RpcTarget implements TeamsSession {
   async getTeam(teamId: string): Promise<TeamsTeam> {
     let info = await this.#ctx.api.getTeam(teamId);
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Teams team: ${info.displayName}`),
       description:
           "Open a Microsoft Teams team by id.\n\n" +
@@ -735,7 +729,7 @@ class TeamsSessionImpl extends RpcTarget implements TeamsSession {
   }
 
   async listChats(): Promise<Cursor<TeamsChatEntry>> {
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: "List Microsoft Teams chats",
       description: "Create a cursor over the chats the connected user takes part in.",
     });
@@ -746,7 +740,7 @@ class TeamsSessionImpl extends RpcTarget implements TeamsSession {
   async getChat(chatId: string): Promise<TeamsChat> {
     let info = await this.#ctx.api.getChat(chatId);
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: sanitizeApprovalTitle(`Teams chat: ${chatLabel(info)}`),
       description:
           "Open a Microsoft Teams chat by id.\n\n" +
@@ -761,7 +755,7 @@ class TeamsSessionImpl extends RpcTarget implements TeamsSession {
     // asking a human to approve a search that cannot run.
     let validated = validateTeamsSearchQuery(query);
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await authorizeRestricted(this.#ctx.approvalQueue, {
       title: "Search Microsoft Teams",
       description:
           "Create a cursor over the Teams messages matching this search.\n\n" +
@@ -808,9 +802,9 @@ export class TeamsGatekeeperImpl
    */
   #api(): GraphTeamsApi {
     return new GraphTeamsApi(opts => this.#getAccessToken(opts), {
-      onCredentialsRejected: async (detail: string) => {
+      onCredentialsRejected: async (detail: string, rejectedToken: string) => {
         this.#tokens.invalidate();
-        await this.#account().reportCredentialsRejected(detail);
+        await this.#account().reportCredentialsRejected(detail, rejectedToken);
       },
     });
   }
@@ -844,40 +838,31 @@ export class TeamsGatekeeperImpl
   }
 
   /**
-   * Teams and chats by name, so an agent can find where a conversation lives without paging the
-   * session API. Teams come first: they are the named, stable half of the surface, while a chat's
-   * identity is often only who is in it.
+   * Static discovery labels, naming no team, channel or chat.
    *
-   * The Workshop loads this into every chat's prompt on every turn and no approval stands in the
-   * way, so the titles — counterpart-controlled text, like nearly everything Teams returns — are
-   * each flattened to a single line by `catalogTitle` and cannot forge the structure they land in.
+   * The Workshop loads the catalog into every chat's prompt on every turn with no approval in the
+   * way, and it must hold nothing that needs observer verification. Team names and chat topics are
+   * private, counterpart-controlled text that this resource refuses to show anyone but its owner —
+   * and an observation of them would put the workspace in restricted mode, which a catalog read
+   * cannot do. So the catalog only says where to look; the names come from `listTeams()` and
+   * `listChats()`, which are audited. It also makes no Graph request, so it cannot fail for a user
+   * with more teams than the listing ceiling.
    */
   async getAgentCatalog(): Promise<AgentCatalog | null> {
-    let api = this.#api();
-    let [teams, chats] = await Promise.all([api.listJoinedTeams(), api.listChats()]);
-
-    let entries = [
-      ...teams.map(team => ({
-        id: team.id,
-        title: catalogTitle(team.displayName),
-        description: "Microsoft Teams team the connected user has joined. Open it with getTeam().",
-      })),
-      ...chats.items.map(chat => ({
-        id: chat.id,
-        title: catalogTitle(chatLabel(chat)),
-        description:
-            `Microsoft Teams ${chat.chatKind} chat. Open it with getChat().` +
-            (chat.lastUpdatedAt ? ` Last active ${chat.lastUpdatedAt.toISOString()}.` : ""),
-      })),
-    ];
-
-    let catalog = boundAgentCatalog(entries.slice(0, MAX_CATALOG_ENTRIES));
-    // A user can belong to more teams and chats than the catalog advertises; boundAgentCatalog only
-    // flags its own, far larger ceiling, so the drop at MAX_CATALOG_ENTRIES — and the chats past
-    // the first page — are reported here.
-    if (entries.length > MAX_CATALOG_ENTRIES || chats.nextLink) catalog.truncated = true;
-
-    return catalog;
+    return {
+      entries: [
+        {
+          id: "teams",
+          title: "Microsoft Teams teams",
+          description: "The teams the connected user has joined. List them with listTeams().",
+        },
+        {
+          id: "chats",
+          title: "Microsoft Teams chats",
+          description: "The chats the connected user takes part in. List them with listChats().",
+        },
+      ],
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -912,9 +897,4 @@ export class TeamsGatekeeperImpl
   }
 
   async removeObserver(_id: string): Promise<void> {}
-}
-
-/** Flatten a name for the catalog. `boundAgentCatalog` applies the length cap. */
-function catalogTitle(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
 }

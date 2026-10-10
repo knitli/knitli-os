@@ -49,7 +49,7 @@ export type AccessTokenProvider = (opts?: AccessTokenRequest) => Promise<string>
  * mark the account dead so the Workshop offers a reconnect; failures are swallowed by the caller so
  * a notification problem cannot mask the underlying request error.
  */
-export type CredentialsRejectedReporter = (detail: string) => Promise<void>;
+export type CredentialsRejectedReporter = (detail: string, rejectedToken: string) => Promise<void>;
 
 /**
  * How long this client will sit out a throttling `Retry-After`, and what to do when the server asks
@@ -213,7 +213,7 @@ export async function fetchWithAuthRetry(
         // connection is healthy. A reporting failure is swallowed — it must not replace the real
         // error with a notification error.
         if (opts.onCredentialsRejected) {
-          await opts.onCredentialsRejected(claimsDetail).catch(() => {});
+          await opts.onCredentialsRejected(claimsDetail, token).catch(() => {});
         }
         return response;
       }

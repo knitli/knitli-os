@@ -330,6 +330,15 @@ class SharePointItemCursorImpl extends RpcTarget implements Cursor<ListItem> {
       this.#nextLink = nextLink;
       this.#pages = pages;
       this.#exhausted = !page.nextLink;
+      if (page.nextLink) {
+        // A bound stopped the skip above while Graph still had more to give. `null` would read as
+        // "the list is finished" and strand whatever matches further on.
+        throw new Error(pages >= MAX_CURSOR_PAGES
+            ? `This cursor has already returned ${MAX_CURSOR_PAGES} pages. Narrow the query with ` +
+              "`where` instead of paging further."
+            : "This cursor skipped 5 pages with nothing on them without reaching the end of the " +
+              "list. Narrow the query with `where` instead of paging further.");
+      }
       return null;
     }
 
@@ -499,9 +508,9 @@ export class SharePointListGatekeeperImpl
   #api(retryAfter: RetryAfterPolicy): GraphSharePointApi {
     return new GraphSharePointApi(opts => this.#getAccessToken(opts), {
       retryAfter,
-      onCredentialsRejected: async (detail: string) => {
+      onCredentialsRejected: async (detail: string, rejectedToken: string) => {
         this.#tokens.invalidate();
-        await this.#account().reportCredentialsRejected(detail);
+        await this.#account().reportCredentialsRejected(detail, rejectedToken);
       },
     });
   }

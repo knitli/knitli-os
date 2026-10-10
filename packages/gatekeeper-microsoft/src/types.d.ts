@@ -145,7 +145,10 @@ export interface OutlookMessage {
   /** Get message metadata (sender, recipients, subject, timestamps, read state). */
   getMetadata(): Promise<OutlookMessageInfo>;
 
-  /** Get the full message body as plain text. */
+  /**
+   * Get the message body as plain text. A very long body is cut off and ends with
+   * "[message body truncated]"; a message too large to read at all throws.
+   */
   getBody(): Promise<string>;
 
   /**

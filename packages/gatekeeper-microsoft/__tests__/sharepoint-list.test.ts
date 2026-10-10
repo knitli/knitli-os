@@ -363,6 +363,42 @@ describe("createItem", () => {
     }
   });
 
+  it("reads every page of the list's columns", async () => {
+    // A required column on a later page must be known, or an invalid create is approved and then
+    // fails at apply time.
+    const calls = stubFetch(call => {
+      if (!new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)) return defaultRoute(call);
+      return new URL(call.url).searchParams.has("$skiptoken")
+        ? jsonResponse({ value: [{ name: "Region", displayName: "Region", required: true, text: {} }] })
+        : jsonResponse({
+          value: GRAPH_COLUMNS,
+          "@odata.nextLink":
+            `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${LIST_ID}/columns?$skiptoken=2`,
+        });
+    });
+    const session = await startSession();
+
+    const columns = await session.getColumns();
+
+    expect(columns.map(column => column.name)).toContain("Region");
+    expect(calls.filter(call => call.url.includes("/columns"))).toHaveLength(2);
+    await expect(session.createItem({ Title: "x" })).rejects.toThrow(/"Region" is required/);
+  });
+
+  it("does not report the end of the list while Graph still offers pages", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/items`)
+      ? jsonResponse({
+        value: [],
+        "@odata.nextLink":
+          `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${LIST_ID}/items?$skiptoken=more`,
+      })
+      : defaultRoute(call));
+    const session = await startSession();
+    const cursor = await session.getItems();
+
+    await expect(cursor.next()).rejects.toThrow(/skipped 5 pages with nothing on them/);
+  });
+
   it("drops the pending action when the queue refuses the submission", async () => {
     stubFetch();
     approvals.queue.submitAction.mockRejectedValueOnce(new Error("queue is down"));

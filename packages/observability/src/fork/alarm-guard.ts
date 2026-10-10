@@ -53,7 +53,7 @@ export function alarmsDisabled(env: object): boolean {
 
 /**
  * The kill-switch check every `alarm()` handler starts with: when `ALARMS_DISABLED` is on it
- * deletes the alarm, logs `alarm.disabled`, and returns true, so the caller returns at once.
+ * re-arms an hourly probe, logs `alarm.disabled`, and returns true, so the caller returns at once.
  */
 export async function haltIfAlarmsDisabled(
   state: AlarmGuardState,
@@ -65,8 +65,13 @@ export async function haltIfAlarmsDisabled(
   return true;
 }
 
+/** How often a halted alarm wakes to check whether `ALARMS_DISABLED` has been turned off. */
+export const ALARM_DISABLED_PROBE_MS = HOUR_MS;
+
+// Re-arms a probe rather than deleting the alarm: nothing else would wake the object once the
+// switch is cleared (a redeploy does not invoke Durable Objects), so the work would stay dormant.
 async function halt(state: AlarmGuardState, key: string): Promise<void> {
-  await state.storage.deleteAlarm();
+  await state.storage.setAlarm(Date.now() + ALARM_DISABLED_PROBE_MS);
   logger.warn("alarm halted by ALARMS_DISABLED", { event: "alarm.disabled", alarmKey: key });
 }
 
@@ -137,7 +142,7 @@ export function alarmBackoffMs(
 /**
  * Wraps an `alarm()` body so it cannot loop:
  *
- * 1. With `disabled` (the `ALARMS_DISABLED` kill switch) it deletes the alarm, logs
+ * 1. With `disabled` (the `ALARMS_DISABLED` kill switch) it re-arms the hourly probe, logs
  *    `alarm.disabled`, and returns without running `run`.
  * 2. It counts runs per clock hour. Past `maxPerHour` the circuit opens: it logs
  *    `alarm.circuit.open` once per hour at error level, skips `run`, and does not re-arm
@@ -213,11 +218,18 @@ export const ALARM_RUNS_PER_HOUR: Readonly<Record<string, number>> = {
   overseer: 3_600,
   // 500 schedules at the 60 s minimum, staggered so each firing is its own run, plus 20%.
   scheduler: 36_000,
-  // At most about one push a second (Gmail's documented notification limit; Chat is assumed
-  // alike) plus an equal allowance for retry, backlog (20 deliveries per run) and renewal runs.
-  "google.chat-hooks": 7_200,
-  "google.gmail-hooks": 7_200,
 };
+
+/**
+ * Runs per clock hour a Google hook driver legitimately needs with `registrations` hooks. Gmail
+ * documents at most one notification a second per watched user, so 3,600 push runs an hour; each
+ * push queues a row per matching hook and a run drains `deliveriesPerRun` of them, adding
+ * `3,600 * registrations / deliveriesPerRun` runs; an equal 3,600 covers retry, history-paging and
+ * renewal runs. Chat documents no rate, so the same ceiling is assumed.
+ */
+export function hookAlarmRunsPerHour(registrations: number, deliveriesPerRun: number): number {
+  return 7_200 + Math.ceil((3_600 * registrations) / deliveriesPerRun);
+}
 
 /**
  * The seam upstream `alarm()` handlers call: {@link guardedAlarm} with the `ALARMS_DISABLED` kill

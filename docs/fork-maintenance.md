@@ -979,10 +979,10 @@ ids are facet-local, not Activity ids.
   each of the 20 upstream `alarm()` handlers; `docs/alarm-audit.md` lists them; one row in the
   `packages/gatekeeper-kit/README.md` module inventory (Tier 2).
 - **What:** every `alarm()` starts with `haltIfAlarmsDisabled(this.ctx, this.env, key)`, which
-  deletes the alarm when the Worker var `ALARMS_DISABLED` is `"true"`. The four handlers that
+  skips the work and re-arms an hourly probe when the Worker var `ALARMS_DISABLED` is `"true"`, so clearing it resumes every object without recovery code. The four handlers that
   re-arm (`OverseerDurableObject`, `ScheduleDriver`, Google `ChatHookDriver` and `GmailHookDriver`)
   call
-  `guardedAlarmFor(ctx, env, key, run)` instead: at most the per-handler hourly cap in `ALARM_RUNS_PER_HOUR` (default 120; scheduler 36,000, overseer 3,600, Google hook drivers 7,200, each derived in `docs/alarm-audit.md`) (the count is persisted on every run, so eviction cannot reset it), and a throwing run is
+  `guardedAlarmFor(ctx, env, key, run)` instead: at most the per-handler hourly cap in `ALARM_RUNS_PER_HOUR` (default 120; scheduler 36,000, overseer 3,600, Google hook drivers 7,200 + 180 per registration, each derived in `docs/alarm-audit.md`) (the count is persisted on every run, so eviction cannot reset it), and a throwing run is
   replaced by an exponential-backoff alarm instead of being rethrown to the platform. The
   scheduler's "reports and rethrows alarm infrastructure failures" test now asserts the backoff
   alarm instead.

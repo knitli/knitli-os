@@ -18,10 +18,12 @@ How Cloudflare handles alarms:
 ## The guard
 
 - **Kill switch.** Setting the Worker var `ALARMS_DISABLED` to `"true"` and redeploying makes every
-  handler delete its alarm the next time it fires (log event `alarm.disabled`). Every handler
-  checks it first, via `haltIfAlarmsDisabled` or `guardedAlarmFor`. For a one-shot cleanup handler
-  this means the cleanup does not run until the account re-arms it; an abandoned connect attempt
-  keeps its storage until then.
+  handler skip its work the next time it fires (log event `alarm.disabled`) and re-arm an hourly
+  probe. Clearing the variable and redeploying therefore resumes everything within the hour with
+  no per-object recovery: a redeploy does not invoke Durable Objects, so deleting the alarm
+  instead would leave scheduled work dormant. Every handler checks it first, via
+  `haltIfAlarmsDisabled` or `guardedAlarmFor`. While it is on, each object with an alarm costs one
+  trivial run an hour; a one-shot cleanup is deferred, not lost.
 - **`guardedAlarm`.** Wraps a re-arming handler: at most `maxPerHour` runs per clock hour, 120 unless the handler's cap below applies (then
   `alarm.circuit.open`), and a throwing run is swallowed and replaced by an exponential-backoff
   alarm (30 s doubling to 1 h, `alarm.failed`), giving up after 8 consecutive failures
@@ -71,8 +73,8 @@ not connected. A completed connect or `revoke()` deletes it. When it fires the h
 | `workshop-backend` `UserDurableObject` handoff sweep (`user.ts`) | `#armHandoffSweep` re-arms for the next pending expiry | each run deletes the records that are due, so the next time is in the future; an unlistable record re-arms a full lifetime ahead | kill switch | SAFE |
 | `workshop-backend` `OverseerDurableObject` (`overseer.ts`, `runAlarmTasks`) | `#updateAlarm` re-arms at `now` while an external-message response is ready, and at the agent keep-alive time | a response that can never be delivered, or a drain that keeps failing, re-arms at `now` and rethrows: a tight loop | `guardedAlarmFor` key `overseer` (cap 3,600/h) | GUARDED. The breaker bounds the loop; it does not remove the undeliverable record. |
 | `gatekeeper-scheduler` `ScheduleDriver` | recovery alarm before each pass, then the earliest schedule time; `now` while a revoked account still has storage | a schedule whose firing fails permanently re-runs forever | `guardedAlarmFor` key `scheduler` (cap 36,000/h) | GUARDED. The guard's counter key is ignored when revocation cleanup checks for remaining data. A large revoked account's cleanup is one pass per alarm, well inside the cap. |
-| `gatekeeper-google` `ChatHookDriver` (`chat-hooks.ts`) | `#reschedule` to the earliest of queue retry, subscription renewal or expiry | failures are caught per message and renewal and write a later time first | `guardedAlarmFor` key `google.chat-hooks` (cap 7,200/h) | GUARDED |
-| `gatekeeper-google` `GmailHookDriver` (`gmail-hooks.ts`) | `#reschedule`; `syncAt` and `watch.renewAt` default to `now` when unset | a sync or watch step that throws leaves them at `now` | `guardedAlarmFor` key `google.gmail-hooks` (cap 7,200/h) | GUARDED |
+| `gatekeeper-google` `ChatHookDriver` (`chat-hooks.ts`) | `#reschedule` to the earliest of queue retry, subscription renewal or expiry | failures are caught per message and renewal and write a later time first | `guardedAlarmFor` key `google.chat-hooks` (cap scales with registrations, see below) | GUARDED |
+| `gatekeeper-google` `GmailHookDriver` (`gmail-hooks.ts`) | `#reschedule`; `syncAt` and `watch.renewAt` default to `now` when unset | a sync or watch step that throws leaves them at `now` | `guardedAlarmFor` key `google.gmail-hooks` (cap scales with registrations, see below) | GUARDED |
 
 ## Hourly caps
 
@@ -85,8 +87,7 @@ cap below still stops one within seconds.
 |---|---|---|
 | `scheduler` | 36,000 | An account holds at most 500 enabled schedules (`MAX_ENABLED_SCHEDULES_PER_ACCOUNT`), each at least 60 s apart (`MIN_INTERVAL_MS`): 500 x 60 = 30,000 firings an hour. A run delivers up to 20 due schedules, so runs never exceed firings when they are staggered. Plus 20% for recovery and replan runs. |
 | `overseer` | 3,600 | Runs come from the 60 s agent keep-alive (60/h) and from each external response becoming ready. Each response ends an agent turn, which is a model call, so one per second per workspace is far above real traffic. Passes inside a run loop within the run and do not count. |
-| `google.gmail-hooks` | 7,200 | A push wakes the driver at once. Gmail limits notifications to about one a second per mailbox, so 3,600 pushes an hour. An equal 3,600 covers retry runs (backoff from 1 min), backlog runs (a run starts at most 20 deliveries, `MAX_DELIVERIES_PER_RUN`), history paging (10 pages a sync) and watch renewal. |
-| `google.chat-hooks` | 7,200 | Same shape: one run per Workspace Events push (assumed capped near one a second per subscription), plus an equal allowance for retries, 20-delivery backlog runs and subscription renewals (every 3 h). |
+| `google.gmail-hooks`, `google.chat-hooks` | 7,200 + 180 x registrations | Computed per run by `hookAlarmRunsPerHour`. **Documented:** Gmail allows at most one notification per second per watched user and drops the rest, so 3,600 push runs an hour; a Gmail watch must be renewed at least every 7 days. **Code:** each push queues one row per matching hook, and a run starts at most 20 deliveries (`MAX_DELIVERIES_PER_RUN`), adding 3,600 x registrations / 20 = 180 x registrations drain runs; the registration count per driver is not capped in code. **Estimated:** an equal 3,600 for retry, history-paging and renewal runs. **Assumed:** Google's Workspace Events and Chat docs state no event rate or batching interval, so Chat uses the same one-per-second ceiling. With 41 registrations the cap is 14,580. |
 | connect timeouts, `PendingLogin`, handoff sweep | none | They never re-arm in a loop; the kill switch is their only guard. |
 
 A workload that stays above its cap is not a loop: raise the entry and its row together.

@@ -6,12 +6,14 @@
  */
 export {
   ALARM_FLOOR_MS,
+  ALARM_DISABLED_PROBE_MS,
   ALARM_RUNS_PER_HOUR,
   alarmBackoffMs,
   alarmsDisabled,
   guardedAlarm,
   guardedAlarmFor,
   haltIfAlarmsDisabled,
+  hookAlarmRunsPerHour,
   scheduleAlarm,
   type AlarmGuardRecord,
   type AlarmGuardState,

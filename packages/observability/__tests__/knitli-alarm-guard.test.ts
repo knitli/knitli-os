@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import {
+  ALARM_DISABLED_PROBE_MS,
   ALARM_GUARD_KEY_PREFIX,
   ALARM_RUNS_PER_HOUR,
   alarmBackoffMs,
@@ -7,6 +8,7 @@ import {
   guardedAlarm,
   guardedAlarmFor,
   haltIfAlarmsDisabled,
+  hookAlarmRunsPerHour,
   scheduleAlarm,
   type AlarmGuardRecord,
   type AlarmGuardState,
@@ -88,12 +90,13 @@ describe("alarm guard", () => {
     expect(alarmsDisabled({})).toBe(false);
   });
 
-  it("kill switch deletes the alarm, logs once, and never runs the body", async () => {
+  it("kill switch re-arms an hourly probe, logs once, and never runs the body", async () => {
     state.alarm = T0 + 10;
     const run = vi.fn(ok);
+    const before = Date.now();
     expect(await state.fire({ disabled: true }, run)).toBe(0);
     expect(run).not.toHaveBeenCalled();
-    expect(state.alarm).toBeNull();
+    expect(state.alarm).toBeGreaterThanOrEqual(before + ALARM_DISABLED_PROBE_MS);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({
       event: "alarm.disabled", alarmKey: "test",
@@ -105,7 +108,7 @@ describe("alarm guard", () => {
     expect(await haltIfAlarmsDisabled(state, {}, "k")).toBe(false);
     expect(state.alarm).toBe(T0 + 10);
     expect(await haltIfAlarmsDisabled(state, { ALARMS_DISABLED: "true" }, "k")).toBe(true);
-    expect(state.alarm).toBeNull();
+    expect(state.alarm).toBeGreaterThan(Date.now());
     expect(state.writes).toBe(0);
   });
 
@@ -172,7 +175,7 @@ describe("alarm guard", () => {
     expect(state.alarm).toBe((Math.floor(Date.now() / HOUR) + 1) * HOUR); // real clock: no `now` option
     state.alarm = T0 + 5;
     await guardedAlarmFor(state, { ALARMS_DISABLED: "true" }, "k", run);
-    expect(state.alarm).toBeNull();
+    expect(state.alarm).toBeGreaterThan(Date.now());
   });
 
   it("guardedAlarmFor uses the listed cap for a key, and a listed cap exceeds the default", async () => {
@@ -180,6 +183,21 @@ describe("alarm guard", () => {
     expect(ALARM_RUNS_PER_HOUR["scheduler"]).toBeGreaterThan(120);
     for (let i = 0; i < 200; i++) await guardedAlarmFor(state, {}, "scheduler", run);
     expect(run).toHaveBeenCalledTimes(200);
+  });
+
+  it("scales a hook driver's cap with its registrations", () => {
+    expect(hookAlarmRunsPerHour(0, 20)).toBe(7_200);
+    expect(hookAlarmRunsPerHour(41, 20)).toBe(7_200 + 7_380);
+    expect(hookAlarmRunsPerHour(1, 20)).toBeGreaterThan(hookAlarmRunsPerHour(0, 20));
+  });
+
+  it("resumes on the next probe once the switch is cleared", async () => {
+    const run = vi.fn(ok);
+    await guardedAlarmFor(state, { ALARMS_DISABLED: "true" }, "k", run);
+    const probe = state.alarm;
+    expect(probe).not.toBeNull();
+    await guardedAlarmFor(state, {}, "k", run); // the probe fires with the switch off
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
   it("deferWhenOpen re-arms for the next hour, never sooner", async () => {

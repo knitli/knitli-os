@@ -30,18 +30,21 @@ function installBrowser(options: { permission: NotificationPermission; subscribe
   let current = options.subscribed ? subscription : null
   const pushManager = {
     getSubscription: vi.fn<() => Promise<typeof subscription | null>>(async () => current),
+    // Like the browser, subscribing asks for permission itself.
     subscribe: vi.fn<(options: PushSubscriptionOptionsInit) => Promise<typeof subscription>>(async () => {
+      if (notification.permission === 'denied') throw new Error('denied')
+      notification.permission = 'granted'
       current = subscription
       return subscription
     }),
   }
-  const register = vi.fn<(url: string) => Promise<{ pushManager: typeof pushManager }>>(async () => ({ pushManager }))
-  Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { register } })
-  vi.stubGlobal('PushManager', function PushManager() {})
   const notification = {
     permission: options.permission,
     requestPermission: vi.fn<() => Promise<NotificationPermission>>(async () => 'granted'),
   }
+  const register = vi.fn<(url: string) => Promise<{ pushManager: typeof pushManager }>>(async () => ({ pushManager }))
+  Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { register } })
+  vi.stubGlobal('PushManager', function PushManager() {})
   vi.stubGlobal('Notification', notification)
   return { pushManager, register, subscription, notification }
 }
@@ -85,9 +88,13 @@ describe('NotificationsSetting', () => {
     const container = await render(api)
     expect(browser.register).toHaveBeenCalledWith('/sw.js')
 
-    await act(async () => button(container, 'Turn on')!.click())
+    // iOS only honors subscribe() made straight from the tap: nothing may be awaited before it.
+    await act(async () => {
+      button(container, 'Turn on')!.click()
+      expect(browser.pushManager.subscribe).toHaveBeenCalledTimes(1)
+    })
 
-    expect(browser.notification.requestPermission).toHaveBeenCalled()
+    expect(browser.notification.requestPermission).not.toHaveBeenCalled()
     expect(browser.pushManager.subscribe).toHaveBeenCalledWith({
       userVisibleOnly: true, applicationServerKey: applicationServerKey(KEY),
     })
@@ -145,11 +152,25 @@ describe('NotificationsSetting', () => {
     const container = await render(api)
     expect(api.addWebPushSubscription).not.toHaveBeenCalled()
     expect(container.textContent).not.toContain('On for this device')
-
-    await act(async () => button(container, 'Turn on')!.click())
+    // Dropped before the tap, so that await is not in the way of subscribe().
     expect(browser.subscription.unsubscribe).toHaveBeenCalled()
-    expect(browser.pushManager.subscribe).toHaveBeenCalled()
+
+    await act(async () => {
+      button(container, 'Turn on')!.click()
+      expect(browser.pushManager.subscribe).toHaveBeenCalledTimes(1)
+    })
     expect(localStorage.getItem('gadgets.webPush.owner')).toBe('me@example.com')
+  })
+
+  it('reports blocked when the browser’s own prompt is refused', async () => {
+    const browser = installBrowser({ permission: 'default', subscribed: false })
+    browser.pushManager.subscribe.mockImplementationOnce(async () => {
+      browser.notification.permission = 'denied'
+      throw new Error('denied')
+    })
+    const container = await render(fakeApi())
+    await act(async () => button(container, 'Turn on')!.click())
+    expect(container.textContent).toContain('blocked')
   })
 
   it('keeps Turn off available when re-registering an existing subscription fails', async () => {

@@ -23,7 +23,14 @@ export type PushStatus =
 
 const SERVICE_WORKER_URL = '/sw.js'
 
-type Ready = { registration: ServiceWorkerRegistration; key: string; owner: string }
+// `existing` is the user's own, current subscription if the browser already has one: read before the
+// tap, because iOS only honors `subscribe()` made straight from the gesture, with no await before it.
+type Ready = {
+  registration: ServiceWorkerRegistration
+  key: string
+  owner: string
+  existing: PushSubscription | null
+}
 
 /**
  * This device's push subscription for the signed-in user: whether it is on, and turning it on or
@@ -55,7 +62,15 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
       const registration = await navigator.serviceWorker.register(SERVICE_WORKER_URL)
       const subscription = await registration.pushManager.getSubscription()
       if (cancelled) return
-      setReady({ registration, key, owner })
+      // Another user's subscription (or one made with an old key) is replaced, never shared; doing
+      // it here keeps that await out of the tap.
+      let existing = subscription
+      if (existing && (!subscribedWithKey(existing, key) || !ownsBrowserSubscription(owner))) {
+        await existing.unsubscribe()
+        existing = null
+      }
+      if (cancelled) return
+      setReady({ registration, key, owner, existing })
       if (Notification.permission === 'denied') {
         setStatus('blocked')
       } else if (subscription && Notification.permission === 'granted' && subscribedWithKey(subscription, key)
@@ -108,22 +123,22 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
     if (!ready) return
     setBusy(true)
     try {
-      const permission = await Notification.requestPermission()
-      if (permission !== 'granted') {
-        setStatus(permission === 'denied' ? 'blocked' : 'off')
-        return
-      }
       const { registration, key, owner } = ready
-      let subscription = await registration.pushManager.getSubscription()
-      // Another user's subscription (or one made with an old key) is replaced, never shared.
-      if (subscription && (!subscribedWithKey(subscription, key) || !ownsBrowserSubscription(owner))) {
-        await subscription.unsubscribe()
-        subscription = null
+      let subscription = Notification.permission === 'granted' ? ready.existing : null
+      if (!subscription) {
+        // The first await, so still inside the tap; subscribe() asks for permission itself.
+        try {
+          subscription = await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: applicationServerKey(key),
+          })
+        } catch (error) {
+          if (Notification.permission === 'denied') setStatus('blocked')
+          else if (Notification.permission === 'default') setStatus('off')
+          else throw error
+          return
+        }
       }
-      subscription ??= await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: applicationServerKey(key),
-      })
       claimBrowserSubscription(owner)
       try {
         await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
@@ -133,6 +148,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
         claimBrowserSubscription(null)
         throw error
       }
+      setReady({ ...ready, existing: subscription })
       setStatus('on')
     } finally {
       setBusy(false)
@@ -147,9 +163,13 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
         await releaseBrowserSubscription(api, ready.registration.pushManager)
       } catch (error) {
         // A server failure leaves the device off; a browser failure leaves it on, with Turn off still offered.
-        if (!(await ready.registration.pushManager.getSubscription())) setStatus('off')
+        if (!(await ready.registration.pushManager.getSubscription())) {
+          setReady({ ...ready, existing: null })
+          setStatus('off')
+        }
         throw error
       }
+      setReady({ ...ready, existing: null })
       setStatus('off')
     } finally {
       setBusy(false)

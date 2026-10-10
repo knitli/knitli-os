@@ -140,6 +140,7 @@ function fakeHooks(): AgentHooks {
     getChatModelData: () => undefined,
     emitChatStreamEvent: () => {},
     getPromptCacheSalt: () => "",
+    setChatWorkspacePrompt: () => {},
   } as unknown as AgentHooks;
 }
 

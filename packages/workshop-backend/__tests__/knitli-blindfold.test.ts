@@ -83,6 +83,7 @@ function baseHooks(overrides: Record<string, any> = {}): AgentHooks {
     emitChatStreamEvent: () => {},
     getPromptRefText: async () => undefined,
     getPromptCacheSalt: () => "",
+    setChatWorkspacePrompt: () => {},
     ...overrides,
   } as unknown as AgentHooks;
 }

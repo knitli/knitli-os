@@ -38,6 +38,15 @@ it. Adding a resource to an account that already has one re-requests the union o
 nothing already granted is dropped; and the scopes recorded for later refreshes cover only what
 Entra reported as actually granted, so a refresh never asks for a permission nobody consented to.
 
+## Blueprints connect the mailbox only
+
+A blueprint's Connect button asks the gatekeeper for an account without naming a resource, and an
+omitted resource list means the Outlook mailbox here (see "One resource per connect"). A blueprint
+binding for Teams or SharePoint List therefore connects an account that has the mailbox permission
+and not the Teams or Sites one, and the binding fails when it reaches Graph. Connect Teams or
+SharePoint from the Connections page, naming the resource, before using such a blueprint. The
+Workshop is deliberately not changed to pass the binding's resource.
+
 ## Restricted mode
 
 The mailbox and Teams refuse every observer (nothing here can show a collaborator has the same

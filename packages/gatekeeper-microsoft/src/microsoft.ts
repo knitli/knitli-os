@@ -14,6 +14,7 @@ import {
   INVALID_LINK_HTML, connectHandoffPageHtml, htmlResponse,
 } from "@gadgets/gatekeeper-kit/connect-pages";
 import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
+import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import {
   clearCredentialExpiryLatch, notifyCredentialsExpiredOnce,
 } from "@gadgets/gatekeeper-kit/credential-expiry";
@@ -151,6 +152,8 @@ export type Env = Cloudflare.Env & {
   /** Cloudflare Access settings, used to identify the browser that opens a connect link (fork). */
   CF_ACCESS_ISS?: string;
   CF_ACCESS_AUD?: string;
+  /** Emergency stop for every Durable Object alarm; see the shared alarm guard. */
+  ALARMS_DISABLED?: string;
 }
 
 function getBaseUrl(env: Env) {
@@ -1005,6 +1008,8 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm(_alarmInfo?: AlarmInvocationInfo): Promise<void> {
+    // The deployment-wide kill switch comes first: the cleanup below deletes an account.
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "microsoft.connect-timeout")) return;
     // Drop the account if the flow never completed, or if this was a transient sign-in-only grant
     // (used once to read the email for login). Serialized so the wipe cannot land in the middle of
     // a mint, leaving a freshly minted token behind on a deleted account.

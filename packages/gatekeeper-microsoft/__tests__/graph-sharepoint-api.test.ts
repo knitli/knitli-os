@@ -428,6 +428,26 @@ describe("listItems", () => {
 });
 
 describe("getItem and createItem", () => {
+  it("reads every person and lookup column of a list that has more than 12, in bounded requests", async () => {
+    const people: ColumnDefinition[] = Array.from({ length: 30 }, (_unused, index) => ({
+      name: `Person${index}`, displayName: `P${index}`, type: "person", required: false,
+      readOnly: false,
+    }));
+    const calls = stubFetch(call => {
+      const names = (new URL(call.url).searchParams.get("$expand") ?? "").match(/Person\d+/g) ?? [];
+      return jsonResponse({ id: "42", fields: Object.fromEntries(names.map(name => [name, name])) });
+    });
+
+    const item = await newApi().getItem("site-1", "list-1", "42", [...SCHEMA, ...people]);
+
+    expect(calls).toHaveLength(3);
+    for (const call of calls) {
+      expect((new URL(call.url).searchParams.get("$expand")!.match(/Person\d+/g) ?? []).length)
+        .toBeLessThanOrEqual(12);
+    }
+    expect(Object.keys(item.fields).filter(name => name.startsWith("Person"))).toHaveLength(30);
+  });
+
   it("reads one item with only the schema's fields expanded", async () => {
     const calls = stubFetch(() => jsonResponse(ITEM));
 
@@ -504,6 +524,19 @@ describe("buildItemsFilter", () => {
     ], SCHEMA)).toBe(
       "fields/Qty lt 600 and fields/Done eq false and " +
       "fields/Due ge '2026-01-01T00:00:00.000Z' and startswith(fields/Title,'Lap')");
+  });
+
+  it("compares a date-only column as the calendar date given, never as an instant", () => {
+    const dateOnly: ColumnDefinition[] = [
+      { name: "Due", displayName: "Due", type: "dateTime", required: false, readOnly: false,
+        dateOnly: true },
+    ];
+
+    expect(buildItemsFilter([{ column: "Due", op: "ge", value: "2026-09-15" }], dateOnly))
+      .toBe("fields/Due ge '2026-09-15T00:00:00.000Z'");
+    expect(() => buildItemsFilter(
+      [{ column: "Due", op: "ge", value: "2026-09-15T23:30:00-05:00" }], dateOnly))
+      .toThrow(/calendar date like "2026-09-15"/);
   });
 
   it("doubles a quote so a value cannot close its own literal", () => {

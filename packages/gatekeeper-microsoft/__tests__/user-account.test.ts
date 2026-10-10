@@ -439,6 +439,25 @@ describe("consent coverage", () => {
   });
 });
 
+describe("alarm", () => {
+  it("deletes an account whose flow never completed", async () => {
+    const { context, account } = newAccount();
+
+    await account.alarm();
+
+    expect(context.storage.deleteAll).toHaveBeenCalled();
+  });
+
+  it("does nothing while the deployment's alarm kill switch is on", async () => {
+    const context = fakeContext();
+    const account = new UserAccount(context as never, { ...env, ALARMS_DISABLED: "true" } as never);
+
+    await account.alarm();
+
+    expect(context.storage.deleteAll).not.toHaveBeenCalled();
+  });
+});
+
 describe("overlapping reconnects", () => {
   it("does not invalidate a reconnect that is out at Microsoft when another one starts", async () => {
     const { context, account } = newAccount();

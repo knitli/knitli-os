@@ -399,6 +399,16 @@ function filterLiteral(column: ColumnDefinition, value: string | number | boolea
     }
     case "dateTime": {
       if (typeof value !== "string") throw mismatch();
+      // A date-only column has no time zone, so it is compared as the calendar date given; an
+      // instant would be converted to UTC first and could land on the neighbouring day.
+      if (column.dateOnly) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !parseIsoDate(value)) {
+          throw new Error(
+              `Column "${column.name}" holds dates with no time, so its value must be a calendar ` +
+              'date like "2026-09-15".');
+        }
+        return odataString(`${value}T00:00:00.000Z`);
+      }
       let parsed = parseIsoDate(value)?.valueOf() ?? Number.NaN;
       if (Number.isNaN(parsed)) {
         throw new Error(
@@ -724,11 +734,23 @@ export class GraphSharePointApi {
    */
   async getItem(siteId: string, listId: string, itemId: string, columns: ColumnDefinition[])
       : Promise<ListItem> {
-    let selected = defaultSelection(columns);
-    return listItemFrom(await this.#fetchJsonCapped<GraphListItem>(
-        graphUrl(["sites", siteId, "lists", listId, "items", itemId], {
-          $expand: selected.length > 0 ? `fields($select=${selected.join(",")})` : "fields",
-        })));
+    // One request reads at most 12 person or lookup columns, so a list with more is read in
+    // several, and the fields merged: the caller has no `select` here to pick the rest with.
+    let first = defaultSelection(columns);
+    let rest = columns.filter(isLookupBacked).slice(MAX_LOOKUP_FIELDS).map(column => column.name);
+    let groups = [first];
+    for (let at = 0; at < rest.length; at += MAX_LOOKUP_FIELDS) {
+      groups.push(rest.slice(at, at + MAX_LOOKUP_FIELDS));
+    }
+    let item: ListItem | undefined;
+    for (let group of groups) {
+      let part = listItemFrom(await this.#fetchJsonCapped<GraphListItem>(
+          graphUrl(["sites", siteId, "lists", listId, "items", itemId], {
+            $expand: group.length > 0 ? `fields($select=${group.join(",")})` : "fields",
+          })));
+      item = item ? { ...item, fields: { ...item.fields, ...part.fields } } : part;
+    }
+    return item!;
   }
 
   /**

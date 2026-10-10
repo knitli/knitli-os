@@ -253,6 +253,12 @@ Intentional, reviewed differences from upstream. Keep this current.
   and sends use `redirect: "manual"`. At most 10 subscriptions per user; 404/410 prunes one.
   Payloads are fixed templates plus the chat title bounded to 96 characters, encrypted to the
   device.
+- **UI:** `packages/workshop-frontend/src/features/notifications/webPush/` (settings switch and
+  subscription hook), `public/sw.js` (push-only worker, no `fetch` handler so the WebSocket and
+  sign-in redirects are never intercepted) and `public/manifest.webmanifest`, all Tier 1. Upstream
+  seams: a manifest link in `index.html` (with `crossorigin="use-credentials"` for Cloudflare
+  Access) and the Notifications section in `SettingsPage.tsx`. Both files are served from the
+  router's static assets at the origin root, which gives the worker scope `/`; no router change.
 - **At sync:** Tier 2 for the seams only; if upstream reshapes `publishNotification()`, keep the
   single `deliverWebPush()` call after the acknowledgement check and before the platform delivery.
 

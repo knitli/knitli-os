@@ -19,6 +19,8 @@ import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
 import { formatAlwaysAvailableResourcesPrompt } from "./agent-catalog";
 import { isPromptFileAnywhere } from "./fork/prompt-files";
+import { READ_SHEET_TOOL_DESCRIPTION, workbookReplayText } from "./fork/workbook-agent";
+import { deriveWorkbookBindings } from "./fork/workbook-names";
 import { formatInstanceInstructions } from "./admin-config";
 import type { AiGatewayLogRoute } from "./ai-gateway";
 import type { SpawnCallableOptions } from "./agent-spawner-binding";
@@ -243,7 +245,8 @@ async function describeBinding(
     {name, gadget}: {name: string, gadget?: string},
     chatBindings: Map<string, ChatBindingEntry>,
     chatId: number,
-    hooks: Pick<AgentHooks, "describeBinding" | "describeGitBinding" | "listGadgetInfo">)
+    hooks: Pick<AgentHooks, "describeBinding" | "describeGitBinding" | "describeAttachmentBinding" |
+                            "listGadgetInfo">)
     : Promise<string> {
   if (gadget === undefined) {
     let envName = `env.${name}`;
@@ -256,6 +259,9 @@ async function describeBinding(
       case "value":
         return `${envName} is the arguments array of a call delivered to this agent (one ` +
             `element per parameter of the call). Any RPC stubs among them may be called directly.`;
+      case "attachment":
+        // The bare name here, not the `env.`-prefixed form: the description writes `env.` itself.
+        return hooks.describeAttachmentBinding(chatId, name, entry.id);
       default:
         return entry satisfies never;
     }
@@ -492,6 +498,23 @@ export interface AgentHooks {
 
   /** Describe the env.GIT binding (see GIT_BINDING_NAME), for the describeBinding tool. */
   describeGitBinding(envName: string): string;
+
+  /**
+   * Describe the spreadsheet attachment bound as `envName` in the chat's env -- its file name, the
+   * shape of each sheet, and the API the binding offers in executeCode -- for the describeBinding
+   * tool. `id` is a chat attachment id; the chat is passed so an attachment that is not this
+   * chat's is refused.
+   */
+  describeAttachmentBinding(chatId: number, envName: string, id: string): Promise<string>;
+
+  /**
+   * One range of the spreadsheet attachment bound as `envName`, as the readSheet tool's result: a
+   * header line, then addressed rows. `range` is `A150:AV160` or `150:160` (1-based, inclusive),
+   * or undefined for the first rows. Refused, as describeAttachmentBinding is, for an attachment
+   * that is not this chat's.
+   */
+  readWorkbookRange(chatId: number, envName: string, id: string, sheet: string,
+                    range: string | undefined): Promise<string>;
 
   /**
    * Add a binding to the given gadget, pointing at the given workpiece. The binding is provisional
@@ -905,6 +928,7 @@ let SPAWNED_AGENT_TOOLS = [
   "observeUserChanges",
   "describeBinding",
   "executeCode",
+  "readSheet",
 ] as const;
 
 // How the task reaches an agent spawned with spawn(): as the chat's first message.
@@ -2167,6 +2191,16 @@ async function runAgentPass(
             if (msg.attachments?.length) {
               let parts: (TextContent | ImageContent)[] = [];
               if (content) parts.push({type: "text", text: content});
+              // Spreadsheets reach the model as a summary, their rows behind an env binding (see
+              // fork/workbook-binding.d.ts). Names are derived here, synchronously and in message
+              // order, before any body is fetched: the fetches below run concurrently, and a name
+              // that depended on their interleaving would differ between a live turn and its replays.
+              let workbookNames = new Map<string, string>();
+              for (let {name, attachmentId} of deriveWorkbookBindings(
+                  msg.attachments, new Set([...chatBindings.keys(), ...claimedNames]))) {
+                chatBindings.set(name, {type: "attachment", id: attachmentId});
+                workbookNames.set(attachmentId, name);
+              }
               let attachmentParts = await Promise.all(msg.attachments.map(
                   async (attachment): Promise<(TextContent | ImageContent)[]> => {
                 let filename = attachment.name ? ` (${attachment.name})` : "";
@@ -2178,6 +2212,11 @@ async function runAgentPass(
                     mimeType: attachment.mimeType,
                   }];
                 } else if (isTextLikeAttachmentMimeType(attachment.mimeType)) {
+                  let workbookName = workbookNames.get(attachment.id);
+                  if (workbookName !== undefined) {
+                    return [{type: "text", text: workbookReplayText(
+                        filename, new TextDecoder().decode(data), workbookName)}];
+                  }
                   return [{
                     type: "text",
                     text: `\n\n[Attached text file${filename}]\n${new TextDecoder().decode(data)}`,
@@ -2461,6 +2500,14 @@ async function runAgentPass(
                 case "webFetch":
                   if (toolCall.output === undefined) {
                     throw new Error("webFetch tool call in log is missing output");
+                  }
+                  toolOutput = {text: toolCall.output};
+                  break;
+                case "readSheet":
+                  // The recorded page, never a fresh read: the attachment may since have been
+                  // deleted, and the model already reasoned over exactly this text.
+                  if (toolCall.output === undefined) {
+                    throw new Error("readSheet tool call in log is missing output");
                   }
                   toolOutput = {text: toolCall.output};
                   break;
@@ -3532,6 +3579,39 @@ async function runAgentPass(
       }
     }),
 
+    readSheet: defineTool({
+      name: "readSheet",
+      label: "Read sheet",
+      description: READ_SHEET_TOOL_DESCRIPTION,
+      // Three plain strings on purpose: the flattest schema is the one every provider's function
+      // calling handles, with no enum or nested object for a smaller model to get wrong.
+      parameters: Type.Object({
+        file: Type.String({
+          description: "Binding name of the spreadsheet, as given in the attachment text.",
+        }),
+        sheet: Type.String({description: "Sheet name, exactly as listed in the attachment text."}),
+        range: Type.Optional(Type.String({
+          description:
+              "\"A150:AV160\" or \"150:160\" (rows only), 1-based and inclusive. " +
+              "Default: the first 50 rows.",
+        })),
+      }),
+      execute: async (toolCallId, {file, sheet, range}) => {
+        try {
+          let entry = chatBindings.get(file);
+          if (entry?.type !== "attachment") {
+            throw new Error(`There is no workbook named "${file}" in your env. Use the name ` +
+                `given after the attachment text, e.g. readSheet(file: "big_xlsx", ...).`);
+          }
+          let text = await hooks.readWorkbookRange(chatId, file, entry.id, sheet, range);
+          return toolResult(text, {output: text} as Partial<AiToolCall>);
+        } catch (error) {
+          toolCallNotes.set(toolCallId, {error: toolErrorText(error)});
+          throw error;
+        }
+      }
+    }),
+
     observeUserChanges: defineTool({
       name: "observeUserChanges",
       label: "Observe user changes",
@@ -3981,12 +4061,21 @@ async function runAgentPass(
     }),
   };
 
+  // readSheet exists only where there is a spreadsheet to read. Replay has already registered
+  // every attachment binding the log holds, so this is settled before the first request, and a
+  // chat without one sends exactly the tool list it always has.
+  if (![...chatBindings.values()].some(entry => entry.type === "attachment")) {
+    delete tools.readSheet;
+  }
+
   if (agentContext.spawnerConfig) {
     // Restrict sub-agents to a narrower set of tools. No user is present to approve changes, so
     // they get nothing that modifies gadgets or requests connections; they can inspect and call
     // bindings, fetch the web, and work on worktrees (writes to gadgets are refused by
     // assertMayModifyWorkpiece).
-    tools = Object.fromEntries(SPAWNED_AGENT_TOOLS.map(name => [name, tools[name]]));
+    // (readSheet is absent from `tools` in a chat without a spreadsheet.)
+    tools = Object.fromEntries(
+        SPAWNED_AGENT_TOOLS.filter(name => tools[name]).map(name => [name, tools[name]]));
   }
 
   // Calls that reached a tool's execute(), so tool_execution_end can tell the ones pi rejected.

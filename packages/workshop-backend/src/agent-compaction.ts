@@ -5,6 +5,7 @@ import {
 import {composeEpochChanges, type CodeChange} from "@gadgets/workshop-shared/code-change";
 import type {Api, Message, Model} from "@earendil-works/pi-ai";
 import type {ChatBindingEntry, CompactionCheckpoint} from "./storage-schema/overseer-storage";
+import {foldWorkbookBindings} from "./fork/workbook-names";
 import {zeroUsage} from "./ai-invoke";
 
 // Context compaction keeps long chats within the model's limit. It summarizes the messages before a
@@ -320,6 +321,8 @@ export function buildCompactionState(
   let compacted = messages.filter(message => message.sequence < compactedTo);
   let chatBindings = new Map(previous?.chatBindings ?? initialBindings);
   let nextChangeId = previous?.nextChangeId ?? 0;
+  // Names held by connection requests still pending, which replay keeps workbook names clear of.
+  let pendingNames = new Set<string>();
 
   for (let message of compacted) {
     if (message.type === "message") {
@@ -328,6 +331,7 @@ export function buildCompactionState(
           chatBindings.set(capsule.bindingName, {type: "workpiece", id: capsule.gatekeeperId});
         }
       }
+      foldWorkbookBindings(message, chatBindings, pendingNames);
       for (let call of message.toolCalls ?? []) {
         if (call.error) continue;
         if (call.toolName === "createGadget" && call.output !== undefined) {
@@ -346,6 +350,8 @@ export function buildCompactionState(
       if (message.bindingName !== undefined) {
         chatBindings.set(message.bindingName, {type: "value", messageSequence: message.sequence});
       }
+    } else if (message.type === "connectionRequest" && message.state === "pending") {
+      if (message.bindingName !== undefined) pendingNames.add(message.bindingName);
     } else if (message.type === "connectionRequest" && message.state === "accepted" &&
                message.gatekeeperId !== undefined && message.bindingName !== undefined) {
       if (!chatBindings.has(message.bindingName)) {

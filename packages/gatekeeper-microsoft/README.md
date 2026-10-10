@@ -170,13 +170,10 @@ get "Could not verify SharePoint access right now." and can be retried later.
   existed for. Before re-approving an action that failed without a clear reason, look at the list.
 - **`createItem()` reports nothing about the outcome**, as the mailbox's writes do: it returns once
   the action is queued, and returns no item id. The row appears in later reads only after approval.
-- **A column added in SharePoint is not picked up while the connection is warm.** The list's schema
-  is cached in memory per Durable Object instance, and the only thing that invalidates it is a Graph
-  4xx at apply time. Since `createItem()` validates against the cached schema *before* submitting, a
-  newly added column never reaches that path — it is refused with `Unknown column "X". Use internal
-  column names from getColumns().`, and `getColumns()` keeps returning the old schema, until the
-  instance goes idle. After adding a column, leave the workspace alone for a few minutes before
-  writing to it.
+- **A column added in SharePoint can take a few minutes to show in reads.** The list's schema is
+  cached for 5 minutes per Durable Object instance, so `getColumns()` and `getItems()` may report
+  the old one until then. `createItem()` does not wait: a value refused against the cached schema is
+  checked once more against the live schema before the refusal is reported.
 - **Reads have their own throttling ceiling.** A read waits out a SharePoint `Retry-After` for at
   most 10 s (writes get 60 s, since an approval queue rather than a caller is waiting). Past it
   `getColumns()`, `getItems()` and `getItem()` fail with `SharePoint is throttling this connection

@@ -216,6 +216,18 @@ describe("resolveListByUrl", () => {
 });
 
 describe("listColumns", () => {
+  it("reports a text column's length limit, and nothing for an unlimited one", async () => {
+    stubFetch(() => jsonResponse({ value: [
+      { name: "Title", displayName: "Title", text: { maxLength: 255 } },
+      { name: "Notes", displayName: "Notes", text: { maxLength: 0, allowMultipleLines: true } },
+      { name: "Plain", displayName: "Plain", text: {} },
+    ] }));
+
+    const columns = await newApi().listColumns("site-1", "list-1");
+
+    expect(columns.map(column => column.maxLength)).toEqual([255, undefined, undefined]);
+  });
+
   it("normalises each facet Graph reports onto a type a form can use", async () => {
     const calls = stubFetch(() => jsonResponse({ value: GRAPH_COLUMNS }));
 

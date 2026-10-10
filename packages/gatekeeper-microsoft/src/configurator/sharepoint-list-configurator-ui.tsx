@@ -38,6 +38,11 @@ export default {
     return isPlausibleListUrl(values.url);
   },
 
+  // The resource's host is a wildcard, so the runtime cannot seed the form from the URL pattern.
+  initialValuesFromResourceUrl({ resourceUrl }) {
+    return resourceUrl ? { url: resourceUrl } : {};
+  },
+
   resourceUrl({ values }) {
     return (values.url ?? "").trim();
   },

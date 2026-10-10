@@ -106,6 +106,8 @@ export type ColumnDefinition = {
   choices?: string[];
   /** A `text` column that accepts more than one line. */
   multiline?: boolean;
+  /** Longest value a `text` column accepts, in characters, when the list sets a limit. */
+  maxLength?: number;
   /** A `person` or `lookup` column that holds more than one value. */
   multiple?: boolean;
 };
@@ -160,7 +162,7 @@ type GraphColumnDefinition = {
   hidden?: boolean;
   readOnly?: boolean;
   required?: boolean;
-  text?: { allowMultipleLines?: boolean };
+  text?: { allowMultipleLines?: boolean; maxLength?: number };
   number?: unknown;
   boolean?: unknown;
   dateTime?: unknown;
@@ -267,6 +269,9 @@ function normalizeColumn(column: GraphColumnDefinition): ColumnDefinition | null
     ...(type === "choice" ? { choices: Array.isArray(choices) ? choices.filter(
         (choice): choice is string => typeof choice === "string") : [] } : {}),
     ...(type === "text" && column.text?.allowMultipleLines === true ? { multiline: true } : {}),
+    // Graph reports 0 (or nothing) for a column with no limit of its own.
+    ...(type === "text" && Number.isInteger(column.text?.maxLength) && column.text!.maxLength! > 0
+        ? { maxLength: column.text!.maxLength } : {}),
     ...(multiple === true ? { multiple: true } : {}),
   };
 }

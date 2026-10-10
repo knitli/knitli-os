@@ -296,6 +296,73 @@ describe("createItem", () => {
     expect(approvals.actions).toHaveLength(0);
   });
 
+  it("suspends the agent until the decision, since the row is not simulated", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    await session.createItem({ Title: "New laptop" });
+
+    expect(approvals.actions[0].description.awaitDecision).toBe(true);
+  });
+
+  it("refuses an oversized text value before anything is queued", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        ? jsonResponse({ value: [
+            { name: "Title", displayName: "Title", required: true, text: { maxLength: 10 } },
+          ] })
+        : defaultRoute(call));
+    const session = await startSession();
+
+    await expect(session.createItem({ Title: "x".repeat(11) }))
+        .rejects.toThrow(/accepts at most 10 characters, but got 11/);
+    expect(approvals.actions).toHaveLength(0);
+
+    await session.createItem({ Title: "x".repeat(10) });
+    expect(approvals.actions).toHaveLength(1);
+  });
+
+  it("re-reads the schema before refusing a column the cache does not know", async () => {
+    let added = false;
+    const calls = stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        ? jsonResponse({ value: added
+            ? [...GRAPH_COLUMNS, { name: "Priority", displayName: "Priority", text: {} }]
+            : GRAPH_COLUMNS })
+        : defaultRoute(call));
+    const session = await startSession();
+    await session.getColumns();
+
+    added = true; // an administrator adds a column while the old schema is cached
+    await session.createItem({ Title: "New laptop", Priority: "high" });
+
+    expect(approvals.actions).toHaveLength(1);
+    expect(calls.filter(call => call.url.includes("/columns"))).toHaveLength(2);
+  });
+
+  it("still refuses a column the live schema does not have either", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    await expect(session.createItem({ Title: "x", Nope: 1 })).rejects.toThrow(/Unknown column "Nope"/);
+  });
+
+  it("re-reads the schema once the cached one is a few minutes old", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls = stubFetch();
+      const session = await startSession();
+      await session.getColumns();
+      await session.getColumns();
+      expect(calls.filter(call => call.url.includes("/columns"))).toHaveLength(1);
+
+      vi.advanceTimersByTime(6 * 60 * 1000);
+      await session.getColumns();
+
+      expect(calls.filter(call => call.url.includes("/columns"))).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("drops the pending action when the queue refuses the submission", async () => {
     stubFetch();
     approvals.queue.submitAction.mockRejectedValueOnce(new Error("queue is down"));

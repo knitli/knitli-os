@@ -36,6 +36,9 @@ const MAX_CURSOR_PAGES = 40;
 /** Longest caller- or provider-supplied name echoed back in an error message. */
 const MAX_NAME_ECHO_CHARS = 100;
 
+/** How long a loaded column schema is trusted before it is read again. */
+const COLUMN_CACHE_TTL_MS = 5 * 60 * 1000;
+
 /** Throttling ceiling for reads: an agent is waiting on these synchronously. */
 const READ_RETRY_AFTER: RetryAfterPolicy = { maxWaitMs: 10_000, tooLong: sharePointThrottled };
 
@@ -171,6 +174,13 @@ function validateValue(column: ColumnDefinition, value: unknown): unknown {
       if (typeof value !== "string") {
         throw new Error(`Column "${column.name}" expects text, but got ${describeType(value)}.`);
       }
+      // Checked here so an oversized value is refused now, not approved and then refused by
+      // SharePoint at apply time, where a failed create stays pending and holds up the queue.
+      if (column.maxLength !== undefined && value.length > column.maxLength) {
+        throw new Error(
+            `Column "${column.name}" accepts at most ${column.maxLength} characters, but got ` +
+            `${value.length}.`);
+      }
       return value;
     case "number":
       if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -243,8 +253,10 @@ type SharePointListSessionContext = {
   listId: string;
   /** The list's display name, as `describe()` last saw it. Provider text: sanitize before echoing. */
   listName(): string;
-  /** The list's columns, read once per Durable Object lifetime unless a create invalidates them. */
+  /** The list's columns, cached for a few minutes unless a create invalidates them. */
   columns(): Promise<ColumnDefinition[]>;
+  /** Reads the columns again, bypassing the cache. */
+  refreshColumns(): Promise<ColumnDefinition[]>;
 };
 
 // ── SharePointItemCursorImpl ────────────────────────────────────────
@@ -415,8 +427,15 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
   }
 
   async createItem(fields: Record<string, unknown>): Promise<void> {
-    let columns = await this.#ctx.columns();
-    let validated = validateFields(fields, columns);
+    let validated: Record<string, unknown>;
+    try {
+      validated = validateFields(fields, await this.#ctx.columns());
+    } catch {
+      // The list may have changed since its schema was cached (a column or choice added, a
+      // requirement dropped). Refused locally, the call would never reach SharePoint to find out,
+      // so check once against the live schema before reporting the refusal.
+      validated = validateFields(fields, await this.#ctx.refreshColumns());
+    }
 
     if (this.#ctx.pendingActions.list().length >= MAX_PENDING_ACTIONS) {
       throw new Error(
@@ -430,6 +449,9 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
         ...describeCreateItem(validated),
         actionKind: CREATE_ITEM_ACTION,
         implementsRevert: false,
+        // The new row is not visible to later reads until it is approved and applied, so an agent
+        // that kept working would query a list where its item is absent and likely resubmit it.
+        awaitDecision: true,
       });
     } catch (err) {
       this.#ctx.pendingActions.remove(actionId);
@@ -453,7 +475,7 @@ export class SharePointListGatekeeperImpl
     extends DurableObject<Env, SharePointListGatekeeperImplProps>
     implements Gatekeeper<SharePointListSession> {
   #tokens = new AccessTokenCache(opts => this.#account().getAccessToken(opts));
-  #columnCache: ColumnDefinition[] | undefined;
+  #columnCache: { columns: ColumnDefinition[]; loadedAt: number } | undefined;
 
   #account(): DurableObjectStub<UserAccount> {
     return this.ctx.exports.UserAccount.get(
@@ -484,12 +506,18 @@ export class SharePointListGatekeeperImpl
     });
   }
 
-  /** The list's columns, cached for this object's lifetime. Invalidated by any 4xx from a create. */
+  /** The list's columns, cached for a few minutes. Invalidated by any 4xx from a create. */
   async #columns(): Promise<ColumnDefinition[]> {
-    if (this.#columnCache) return this.#columnCache;
+    if (this.#columnCache && Date.now() - this.#columnCache.loadedAt < COLUMN_CACHE_TTL_MS) {
+      return this.#columnCache.columns;
+    }
+    return await this.#refreshColumns();
+  }
+
+  async #refreshColumns(): Promise<ColumnDefinition[]> {
     let columns =
         await this.#api(READ_RETRY_AFTER).listColumns(this.ctx.props.siteId, this.ctx.props.listId);
-    this.#columnCache = columns;
+    this.#columnCache = { columns, loadedAt: Date.now() };
     return columns;
   }
 
@@ -542,6 +570,7 @@ export class SharePointListGatekeeperImpl
       listId: this.ctx.props.listId,
       listName: () => this.#listName(),
       columns: () => this.#columns(),
+      refreshColumns: () => this.#refreshColumns(),
     });
   }
 

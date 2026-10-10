@@ -21,6 +21,8 @@ function install(subscribed = true, getSubscription?: () => Promise<unknown>) {
   Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { getRegistration: async () => registration } })
   vi.stubGlobal('PushManager', function PushManager() {})
   vi.stubGlobal('Notification', { permission: 'granted' })
+  // This tab registered it, as sign-in's sync or Turn on would have.
+  sessionStorage.setItem('gadgets.webPush.endpoint', subscription.endpoint)
   return { registration, subscription }
 }
 
@@ -36,6 +38,7 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   localStorage.clear()
+  sessionStorage.clear()
   delete (navigator as { serviceWorker?: unknown }).serviceWorker
 })
 
@@ -189,7 +192,29 @@ describe('releaseOnSignOut', () => {
     Object.assign(navigator.serviceWorker, { controller: { postMessage } })
     localStorage.setItem(OWNER_KEY, 'me@example.com')
     void releaseOnSignOut(asStub(api), 'me@example.com')
-    expect(postMessage).toHaveBeenCalledWith({ type: 'release-push-subscription' })
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'release-push-subscription', endpoint: 'https://web.push.apple.com/refreshed',
+    })
+  })
+
+  it('releases nothing, and sends nothing to the worker, when this tab registered no subscription itself', async () => {
+    const api = fakeApi()
+    const { subscription } = install()
+    sessionStorage.clear()
+    const postMessage = vi.fn<(message: unknown) => void>()
+    Object.assign(navigator.serviceWorker, { controller: { postMessage } })
+    localStorage.setItem(OWNER_KEY, 'next@example.com')
+    await releaseOnSignOut(asStub(api))
+    expect(postMessage).not.toHaveBeenCalled()
+    expect(subscription.unsubscribe).not.toHaveBeenCalled()
+  })
+
+  it('leaves alone a replacement another tab made, even without knowing who is signing out', async () => {
+    const api = fakeApi()
+    const { subscription } = install()
+    sessionStorage.setItem('gadgets.webPush.endpoint', 'https://web.push.apple.com/old')
+    await releaseOnSignOut(asStub(api))
+    expect(subscription.unsubscribe).not.toHaveBeenCalled()
   })
 
   it('does not ask the service worker to drop a subscription another tab claimed for someone else', () => {

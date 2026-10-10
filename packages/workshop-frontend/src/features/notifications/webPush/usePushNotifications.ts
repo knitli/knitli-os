@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { claimBrowserSubscription, forgetBrowserSubscription, ownsBrowserSubscription, releaseBrowserSubscription } from './browserSubscription'
+import { claimBrowserSubscription, forgetBrowserSubscription, ownsBrowserSubscription, rememberBrowserEndpoint, releaseBrowserSubscription } from './browserSubscription'
 import {
   applicationServerKey,
   currentPushEnvironment,
@@ -65,6 +65,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
       const isCurrent = (candidate: PushSubscription | null) =>
         candidate !== null && subscribedWithKey(candidate, key) && ownsBrowserSubscription(owner)
       let subscription = await registration.pushManager.getSubscription()
+      if (cancelled) return
       // Another user's subscription (or one made with an old key) is replaced, never shared; doing
       // it here keeps that await out of the tap. The app-wide sync may be replacing it too, so look
       // again afterwards and go by what the browser holds now.
@@ -84,6 +85,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
         await api.addWebPushSubscription(toSubscriptionInfo(existing.toJSON())).catch((error: unknown) => {
           console.error('Failed to register this device’s push subscription:', error)
         })
+        rememberBrowserEndpoint(existing.endpoint)
         if (!cancelled) setStatus('on')
       } else {
         setStatus('off')
@@ -143,6 +145,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
         }
       }
       claimBrowserSubscription(owner)
+      rememberBrowserEndpoint(subscription.endpoint)
       try {
         await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
       } catch (error) {
@@ -151,6 +154,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
         try {
           await subscription.unsubscribe()
           forgetBrowserSubscription(owner)
+          rememberBrowserEndpoint(null)
         } catch {
           setReady({ ...ready, existing: subscription })
           setStatus('on')

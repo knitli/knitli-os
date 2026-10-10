@@ -1,0 +1,11 @@
+{
+  "name": "Cloudflare OS",
+  "short_name": "Cloudflare OS",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

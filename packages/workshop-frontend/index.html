@@ -8,6 +8,10 @@
     <meta http-equiv="Content-Security-Policy" content="frame-src srcdoc:;">
 
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Fork: Web Push. With credentials: behind Cloudflare Access an uncredentialed manifest fetch
+         is redirected to sign-in, and the app can't be installed. -->
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <title>Cloudflare OS</title>
   </head>
   <body>

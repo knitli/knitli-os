@@ -61,6 +61,18 @@
       "reason": "Regression test for the fork-owned Web Push channel (src/fork/web-push.ts)."
     },
     {
+      "path": "packages/workshop-frontend/src/features/notifications/webPush/",
+      "reason": "Fork-owned Web Push settings UI and subscription hook; no upstream counterpart."
+    },
+    {
+      "path": "packages/workshop-frontend/public/sw.js",
+      "reason": "Fork-owned push-only service worker; upstream ships no public/sw.js."
+    },
+    {
+      "path": "packages/workshop-frontend/public/manifest.webmanifest",
+      "reason": "Fork-owned web app manifest, needed for Home Screen installs that iOS requires for push."
+    },
+    {
       "path": "packages/workshop-backend/__tests__/knitli-idle-lease.test.ts",
       "reason": "Unit test for the fork-owned client-activity lease (src/fork/idle-lease.ts); exact path because this package's vitest include is non-recursive."
     },

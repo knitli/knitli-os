@@ -25,6 +25,17 @@ import type { AssetManifestEntry, CollectedAssets, CollectedModule } from "./has
 export const MANIFEST_VERSION = 1;
 
 /** A `{ binding: "NAME" }`-shaped wrangler binding declaration. */
+/**
+ * A `send_email` binding. The three restriction attributes are Cloudflare's (see its send-bindings
+ * docs); they must reach the manifest, or a restricted source binding would deploy unrestricted.
+ */
+export interface SendEmailDecl {
+  name: string;
+  destination_address?: string;
+  allowed_destination_addresses?: string[];
+  allowed_sender_addresses?: string[];
+}
+
 export interface BindingDecl {
   binding: string;
 }
@@ -120,7 +131,7 @@ export interface WranglerConfig {
   /** Browser Rendering binding (Gadget PDF exports). */
   browser?: BindingDecl;
   /** Send Email bindings (gatekeeper-email's outbound mail), keyed by `name`, not `binding`. */
-  send_email?: { name: string }[];
+  send_email?: SendEmailDecl[];
   /** Artifacts binding — closed beta, cut from customer manifests. */
   artifacts?: BindingDecl;
   /** Worker limits. First-party deployment tuning; cut from customer manifests. */
@@ -416,6 +427,33 @@ function workerKind(pkgName: string): WorkerEntry["kind"] {
  * Builds one worker's manifest entry from its parsed wrangler.jsonc and collected modules.
  * `modules` entries are { name, type, sha256, size } (bytes stripped by the caller).
  */
+const SEND_EMAIL_STRING_LISTS = ["allowed_destination_addresses", "allowed_sender_addresses"];
+
+// Copies a send_email entry whole, or throws: an unrecognised field could be a restriction this
+// generator doesn't know about, and dropping it would deploy the binding unrestricted.
+function sendEmailBinding(pkgName: string, decl: SendEmailDecl): SendEmailDecl {
+  const known = new Set(["name", "destination_address", ...SEND_EMAIL_STRING_LISTS]);
+  const unknown = Object.keys(decl).filter((k) => !known.has(k));
+  if (unknown.length > 0) {
+    throw new Error(`${pkgName}/wrangler.jsonc send_email "${decl.name}" has field(s) this ` +
+        `generator doesn't handle: ${unknown.join(", ")}`);
+  }
+  const bad = (field: string) => new Error(
+      `${pkgName}/wrangler.jsonc send_email "${decl.name}": ${field} has the wrong type`);
+  if (typeof decl.name !== "string") throw bad("name");
+  if (decl.destination_address !== undefined && typeof decl.destination_address !== "string") {
+    throw bad("destination_address");
+  }
+  for (const field of SEND_EMAIL_STRING_LISTS) {
+    const value = decl[field as keyof SendEmailDecl];
+    if (value !== undefined &&
+        !(Array.isArray(value) && value.every((v) => typeof v === "string"))) {
+      throw bad(field);
+    }
+  }
+  return { ...decl };
+}
+
 export function buildWorkerEntry(
   { pkgName, config, mainModule, modules, deployInputs }: WorkerBuild,
 ): WorkerEntry {
@@ -452,7 +490,7 @@ export function buildWorkerEntry(
     bindings.push({ type: "browser", name: config.browser.binding });
   }
   for (const sender of config.send_email ?? []) {
-    bindings.push({ type: "send_email", name: sender.name });
+    bindings.push({ type: "send_email", ...sendEmailBinding(pkgName, sender) });
   }
   for (const loader of config.worker_loaders ?? []) {
     bindings.push({ type: "worker_loader", name: loader.binding });

@@ -666,9 +666,6 @@ export default function GadgetEditor() {
   const [hasChatZero, setHasChatZero] = useState(false)
   const [_hasBindings, setHasBindings] = useState(false)
   const [isAgentActive, setIsAgentActive] = useState(false)
-  // Idle tabs drop their socket so the workspace's Durable Objects can go idle, never mid-stream.
-  // Nothing resumes by itself: sending, deciding an action, or the Paused chip does.
-  useWorkspaceIdle(isAgentActive)
   // The workpieces any chat proposes changes to (see AiChatMetadata.proposedChangeWorkpieces).
   const [anyChatProposedWorkpieces, setAnyChatProposedWorkpieces] =
     useState<readonly WorkpieceId[]>([])
@@ -710,6 +707,10 @@ export default function GadgetEditor() {
   const pinInitialChatSelection =
     singleInitialChat && !hasCommittedCode && !userNavigatedToList
   const effectiveSelectedChatId = selectedChatId ?? (pinInitialChatSelection ? 0 : null)
+  // Idle tabs drop their socket so the workspace's Durable Objects can go idle, never mid-stream.
+  // Nothing resumes by itself: sending, deciding an action, or the Paused chip does. isAgentActive goes stale when the chat list replaces the chat (no chat reports in), so it only
+  // counts while a chat is selected.
+  useWorkspaceIdle(isAgentActive && effectiveSelectedChatId !== null)
   const { request: voiceStartRequest, consume: consumeVoiceStart } = useInitialVoiceChat(id, effectiveSelectedChatId)
 
   // ── workpiece selection ──────────────────────────────────────────────────────

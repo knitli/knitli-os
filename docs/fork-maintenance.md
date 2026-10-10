@@ -482,6 +482,13 @@ Intentional, reviewed differences from upstream. Keep this current.
   none of the fork's auto-apply rule or provisional-id machinery; the sign-in profile hints
   (`getAuthenticatedProfile`, `providesAuthProfile`) are not ported because the Workshop contract
   here has no such hook; the connect-initiator guard above is applied, which the source fork lacks.
+- **SharePoint observers write, but cannot read rows:** a list-bound gadget admits collaborators who
+  can open the list, and every row read names all of them in `excludeObservers`, so rows are
+  unreadable (for the owner too) while any collaborator is authorized, and no collaborator is added
+  once rows were read. The session carries no caller identity, so the contract cannot allow a read
+  for the owner and refuse it for a collaborator. A Workshop change that passes the caller into the
+  session would let the owner keep row reads; the logic is `#authorizeRows` and `addObserver` in
+  `sharepoint-list.ts`.
 - **Why:** per-resource consent isolates an unconsented permission from the other resources; the
   initiator guard is required of every hand-rolled gatekeeper this installation uses.
 - **At sync:** nothing to reconcile in the package (upstream has none). If upstream ships its own

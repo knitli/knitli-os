@@ -601,6 +601,132 @@ describe("observers", () => {
   it("forgets an observer without asking anyone", async () => {
     await expect(gatekeeper.removeObserver("user-1")).resolves.toBeUndefined();
   });
+
+  describe("rows are never shown to a collaborator", () => {
+    /**
+     * Behaves as the overseer does for `excludeObservers`: an observation naming an observer who is
+     * still authorized is refused. `authorized` is the set of observers still in the sharing graph.
+     */
+    function overseerLike(authorized: Set<string>) {
+      approvals.queue.authorizeObservation.mockImplementation(async description => {
+        approvals.observations.push(description);
+        const excluded = (description as { excludeObservers?: string[] }).excludeObservers ?? [];
+        if (excluded.some(id => authorized.has(id))) {
+          throw new Error("observation blocked: an excluded observer is still authorized");
+        }
+      });
+    }
+
+    async function admit(id: string): Promise<void> {
+      await gatekeeper.addObserver(id, new RpcStub(new TestVerifier(() => true)) as never);
+    }
+
+    it("lets a shared gadget read the schema and submit items", async () => {
+      stubFetch();
+      const authorized = new Set(["user-1"]);
+      overseerLike(authorized);
+      await admit("user-1");
+      const session = await startSession();
+
+      await expect(session.getColumns()).resolves.toBeDefined();
+      await expect(session.createItem({ Title: "New laptop" })).resolves.toBeUndefined();
+
+      expect(approvals.actions).toHaveLength(1);
+    });
+
+    it("blocks every row read while an observer is authorized", async () => {
+      stubFetch();
+      overseerLike(new Set(["user-1"]));
+      await admit("user-1");
+      const session = await startSession();
+
+      await expect(session.getItem("7")).rejects.toThrow(/observation blocked/);
+      await expect(session.getItems()).rejects.toThrow(/observation blocked/);
+      // The exclusion names every tracked observer, and the read is restricted.
+      const rowReads = approvals.observations.slice();
+      expect(rowReads).toHaveLength(2);
+      for (const read of rowReads) {
+        expect(read).toMatchObject({ containsRestrictedData: true, excludeObservers: ["user-1"] });
+      }
+    });
+
+    it("names every observer in the exclusion", async () => {
+      stubFetch();
+      overseerLike(new Set(["user-1", "user-2"]));
+      await admit("user-1");
+      await admit("user-2");
+      const session = await startSession();
+
+      await expect(session.getItem("7")).rejects.toThrow(/observation blocked/);
+
+      expect(approvals.observations[0]).toMatchObject({ excludeObservers: ["user-1", "user-2"] });
+    });
+
+    it("lets the owner read rows again once the observer is removed", async () => {
+      stubFetch();
+      overseerLike(new Set(["user-1"]));
+      await admit("user-1");
+      const session = await startSession();
+      await expect(session.getItem("7")).rejects.toThrow(/observation blocked/);
+
+      await gatekeeper.removeObserver("user-1");
+
+      await expect(session.getItem("7")).resolves.toMatchObject({ id: "7" });
+      const cursor = await session.getItems();
+      expect((await cursor.next())!.length).toBeGreaterThan(0);
+    });
+
+    it("lets the owner read rows when nobody was ever admitted, with no exclusion", async () => {
+      stubFetch();
+      const session = await startSession();
+
+      await session.getItem("7");
+
+      expect(approvals.observations[0]).toMatchObject({ containsRestrictedData: true });
+      expect(approvals.observations[0]).not.toHaveProperty("excludeObservers");
+    });
+
+    it("refuses a collaborator once rows have been read", async () => {
+      stubFetch();
+      const session = await startSession();
+      await session.getItem("7");
+
+      await expect(admit("user-1")).rejects.toThrow(/already read rows of this SharePoint list/);
+    });
+
+    it("refuses a collaborator while a row read is still being authorized", async () => {
+      stubFetch();
+      let release!: () => void;
+      approvals.queue.authorizeObservation.mockImplementationOnce(
+        () => new Promise<void>(resolve => { release = resolve; }));
+      const session = await startSession();
+      const read = session.getItem("7");
+      await vi.waitFor(() => expect(approvals.queue.authorizeObservation).toHaveBeenCalled());
+
+      await expect(admit("user-1")).rejects.toThrow(/already read rows/);
+
+      release();
+      await read;
+    });
+
+    it("does not count opening a cursor as reading rows", async () => {
+      stubFetch();
+      const session = await startSession();
+      await session.getItems();
+
+      await expect(admit("user-1")).resolves.toBeUndefined();
+    });
+
+    it("remembers a read across a Durable Object restart", async () => {
+      stubFetch();
+      const session = await startSession();
+      await session.getItem("7");
+
+      gatekeeper = newGatekeeper();
+
+      await expect(admit("user-1")).rejects.toThrow(/already read rows/);
+    });
+  });
 });
 
 describe("MicrosoftVerifier.hasListAccess", () => {

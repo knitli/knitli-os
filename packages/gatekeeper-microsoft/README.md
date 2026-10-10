@@ -175,6 +175,25 @@ the check runs on their token, not the owner's. A collaborator without site acce
 have access to this SharePoint list." If Microsoft cannot be reached to answer the question, they
 get "Could not verify SharePoint access right now." and can be retried later.
 
+**A shared gadget can write to the list and read its schema, but nobody can read its rows.**
+SharePoint lets individual items carry their own permissions, which a check on the list cannot see,
+and every read runs on the owner's token, so showing rows to a collaborator could expose items they
+may not open. A gadget session carries no caller identity (the same session serves the owner and
+everyone using the gadget), so the read cannot be allowed for one and refused for another. What the
+Workshop offers instead is to name the observers on a read, which blocks it while any of them is
+still authorized. So:
+
+- `getColumns()` and `createItem()` work for everyone. `createItem()` still goes through approval
+  and is validated exactly as before.
+- `getItems()` and `getItem()` (and every page of a cursor) are blocked for **everyone, the owner
+  included, while any collaborator is authorized on the gadget**. The owner reads rows again when
+  the collaborators are removed.
+- Once a gadget has read rows, **no collaborator can be added** to it ("This gadget has already read
+  rows of this SharePoint list…"); the record is kept for the life of the binding.
+- Row reads are marked restricted (no public web fetches, manual approval of every action).
+
+A Workshop change that gave the session its caller would lift the owner's loss of row reads.
+
 ### Known limits
 
 - **Duplicate window after a crash.** If the worker dies between SharePoint accepting the row and

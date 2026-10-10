@@ -7,7 +7,9 @@
 //
 // Approval model:
 //   submitAction (always manual): createItem
-//   authorizeObservation (audit-only): getColumns, every getItems page, getItem
+//   authorizeObservation (audit-only): getColumns
+//   authorizeObservation (restricted, blocked while any observer is authorized): every getItems
+//     page, getItem -- see "Observers" below
 //
 // `createItem` returns once the action is queued and reports nothing about its outcome, as the
 // mailbox's writes do. `applyAction` leaves a failed action pending, so an approver can retry it or
@@ -16,7 +18,8 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import {
-  ActionKind, ApprovalQueue, Cursor, Gatekeeper, GatekeeperUserVerifier, ResourceDescription,
+  ActionKind, ApprovalQueue, Cursor, Gatekeeper, GatekeeperUserVerifier, ObservationDescription,
+  ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { buildDescription, type RenderedDescription } from "@gadgets/gatekeeper-kit/action-description";
 import { formatApprovalField, sanitizeApprovalTitle } from "./approval-text";
@@ -54,6 +57,12 @@ const META_KEY = "sp:meta";
 
 /** A SharePoint list item id: a positive whole number, as a string. */
 const ITEM_ID_PATTERN = /^[1-9][0-9]*$/;
+
+/** Storage key of the ids of the observers admitted to this binding. */
+const OBSERVERS_KEY = "sp:observers";
+
+/** Storage key set once row content has been shown, after which no observer is admitted. */
+const ROWS_OBSERVED_KEY = "sp:rowsObserved";
 
 /** The one action this gatekeeper submits. */
 const CREATE_ITEM_ACTION: ActionKind = { tag: "create-item", label: "Create list items" };
@@ -257,6 +266,11 @@ type SharePointListSessionContext = {
   columns(): Promise<ColumnDefinition[]>;
   /** Reads the columns again, bypassing the cache. */
   refreshColumns(): Promise<ColumnDefinition[]>;
+  /**
+   * Authorizes an observation that concerns the list's rows. `revealsRows` is true when the data
+   * returned afterwards is row content, as opposed to opening a cursor that returns none yet.
+   */
+  authorizeRows(description: ObservationDescription, revealsRows: boolean): Promise<void>;
 };
 
 // ── SharePointItemCursorImpl ────────────────────────────────────────
@@ -342,13 +356,13 @@ class SharePointItemCursorImpl extends RpcTarget implements Cursor<ListItem> {
       return null;
     }
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await this.#ctx.authorizeRows({
       title: sanitizeApprovalTitle(
           `Read ${page.items.length} items from ${this.#ctx.listName()}`),
       description:
           "Fetch the next page of items from this SharePoint list.\n\n" +
           formatApprovalField("Item ids", page.items.map(item => item.id).join(", ")),
-    });
+    }, true);
 
     this.#started = started;
     this.#nextLink = nextLink;
@@ -399,7 +413,8 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
     }
     buildItemsFilter(where, columns);
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    // No row has been returned yet, but a cursor that could never be read is better refused here.
+    await this.#ctx.authorizeRows({
       title: sanitizeApprovalTitle(`List items in ${this.#ctx.listName()}`),
       description:
           "Create a cursor over the items of this SharePoint list.\n\n" +
@@ -407,7 +422,7 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
               ? where.map(clause => `${clause.column} ${clause.op} ${displayValue(clause.value)}`)
                   .join("\n")
               : "(none)"),
-    });
+    }, false);
 
     return new SharePointItemCursorImpl(this.#ctx, () =>
         this.#ctx.api.listItems(this.#ctx.siteId, this.#ctx.listId, {
@@ -426,11 +441,11 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
           `"${echoName(id)}" is not a SharePoint item id. Item ids are positive whole numbers.`);
     }
 
-    await this.#ctx.approvalQueue.authorizeObservation({
+    await this.#ctx.authorizeRows({
       title: sanitizeApprovalTitle(`Read item ${echoName(id)} from ${this.#ctx.listName()}`),
       description:
           "Read one item of this SharePoint list.\n\n" + formatApprovalField("Item id", id),
-    });
+    }, true);
 
     return await this.#ctx.api.getItem(this.#ctx.siteId, this.#ctx.listId, id);
   }
@@ -484,6 +499,7 @@ export class SharePointListGatekeeperImpl
     extends DurableObject<Env, SharePointListGatekeeperImplProps>
     implements Gatekeeper<SharePointListSession> {
   #tokens = new AccessTokenCache(opts => this.#account().getAccessToken(opts));
+  #rowReadsInFlight = 0;
   #columnCache: { columns: ColumnDefinition[]; loadedAt: number } | undefined;
 
   #account(): DurableObjectStub<UserAccount> {
@@ -571,15 +587,18 @@ export class SharePointListGatekeeperImpl
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<SharePointListSession> {
+    let queue = approvalQueue.dup();
     return new SharePointListSessionImpl({
       api: this.#api(READ_RETRY_AFTER),
-      approvalQueue: approvalQueue.dup(),
+      approvalQueue: queue,
       pendingActions: new PendingActionStore<SharePointListAction>(this.ctx.storage.kv),
       siteId: this.ctx.props.siteId,
       listId: this.ctx.props.listId,
       listName: () => this.#listName(),
       columns: () => this.#columns(),
       refreshColumns: () => this.#refreshColumns(),
+      authorizeRows: (description, revealsRows) =>
+          this.#authorizeRows(queue, description, revealsRows),
     });
   }
 
@@ -621,20 +640,79 @@ export class SharePointListGatekeeperImpl
     throw new Error("revert is not implemented");
   }
 
+  // ---------------------------------------------------------------------------
+  // Observers
+  //
+  // A session carries no caller identity: gadget code calls it with the owner's binding whoever is
+  // using the gadget, so a read cannot be allowed for the owner and refused for a collaborator.
+  // What the contract does offer is `excludeObservers`: an observation naming an observer is
+  // blocked for as long as that observer is still authorized. So collaborators are admitted
+  // (list access, checked on their own token), and every read of row content names all of them —
+  // rows can be read only while there are none. The schema and creating items touch no row, so
+  // they work for everyone. Rows hold unique per-item permissions the list-level check cannot
+  // see, which is why they are never shown to a collaborator.
+
+  #observerIds(): string[] {
+    return this.ctx.storage.kv.get<string[]>(OBSERVERS_KEY) ?? [];
+  }
+
   /**
-   * Observer admission: the collaborator must be able to open this list themselves.
+   * Authorize an observation of the list's rows, blocked while any observer is authorized, and
+   * restricted because collaborators are never verified against row-level permissions.
    *
-   * A list is one access unit — anything read through this gatekeeper came out of it — so a single
-   * check answers for every past and future observation, and nothing needs to be tracked per
-   * observer. The check runs on the observer's own Microsoft token, inside the verifier the overseer
+   * `revealsRows` marks the point after which no observer may be admitted: rows have been shown to
+   * the owner, and an observer could not be shown to have the right to all of them. It is counted
+   * while the authorization is in flight, so an observer admitted meanwhile is refused rather than
+   * missing from the exclusion list this call already computed.
+   */
+  async #authorizeRows(
+      queue: RpcStub<ApprovalQueue>, description: ObservationDescription,
+      revealsRows: boolean): Promise<void> {
+    let observers = this.#observerIds();
+    if (revealsRows) this.#rowReadsInFlight++;
+    try {
+      await queue.authorizeObservation({
+        ...description,
+        containsRestrictedData: true,
+        ...(observers.length > 0 ? { excludeObservers: observers } : {}),
+      });
+      if (revealsRows) this.ctx.storage.kv.put(ROWS_OBSERVED_KEY, true);
+    } finally {
+      if (revealsRows) this.#rowReadsInFlight--;
+    }
+  }
+
+  /**
+   * Observer admission: the collaborator must be able to open this list themselves, and no row may
+   * have been read yet, since rows are never shown to a collaborator (see above).
+   *
+   * The list check runs on the observer's own Microsoft token, inside the verifier the overseer
    * minted for them, so this gatekeeper never sees their credentials and cannot be fooled by the
    * owner's access standing in for theirs.
    */
-  async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+  async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    this.#assertNoRowsRead();
     let verifier = user as unknown as Fetcher<SharePointVerifierApi>;
     let allowed = await verifier.hasListAccess(this.ctx.props.siteId, this.ctx.props.listId);
     if (!allowed) throw new Error("You do not have access to this SharePoint list.");
+    // Checked again: a row read may have started while the access check was out.
+    this.#assertNoRowsRead();
+    let observers = this.#observerIds();
+    if (!observers.includes(id)) this.ctx.storage.kv.put(OBSERVERS_KEY, [...observers, id]);
   }
 
-  async removeObserver(_id: string): Promise<void> {}
+  #assertNoRowsRead(): void {
+    if (this.#rowReadsInFlight > 0 || this.ctx.storage.kv.get<boolean>(ROWS_OBSERVED_KEY)) {
+      throw new Error(
+          "This gadget has already read rows of this SharePoint list, which cannot be shown to " +
+          "other users. Its owner can share it again from a workspace that has not read them.");
+    }
+  }
+
+  async removeObserver(id: string): Promise<void> {
+    let observers = this.#observerIds();
+    if (observers.includes(id)) {
+      this.ctx.storage.kv.put(OBSERVERS_KEY, observers.filter(other => other !== id));
+    }
+  }
 }

@@ -1,5 +1,6 @@
 import {
-  DEFAULT_GATEKEEPER_WRANGLER, OBSERVABILITY, defineGadgetsWorker, type DurableObjectMigration,
+  DEFAULT_GATEKEEPER_WRANGLER, OBSERVABILITY, bindings, defineGadgetsWorker,
+  type DurableObjectMigration,
 } from "@gadgets/scripts/worker-config";
 
 export default defineGadgetsWorker({
@@ -7,6 +8,10 @@ export default defineGadgetsWorker({
   entrypoint: ".wrangler/validate/src/email.ts",
   compatibilityFlags: ["allow_irrevocable_stub_storage", "nodejs_als"],
   observability: OBSERVABILITY,
+  env: {
+    // Outbound mail for EmailSession.send(), always from the bound mailbox's address.
+    SEND_EMAIL: bindings.sendEmail(),
+  },
 });
 
 export const wrangler = DEFAULT_GATEKEEPER_WRANGLER;

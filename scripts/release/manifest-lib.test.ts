@@ -225,6 +225,31 @@ test("worker limits and placement are read and dropped", () => {
       "limits/placement must not reach the deploy contract");
 });
 
+test("send_email bindings keep their restrictions, and unknown fields fail the release", () => {
+  const build = (send_email: unknown) => buildWorkerEntry({
+    pkgName: "gatekeeper-email",
+    config: { send_email } as never,
+    mainModule: "email.js",
+    modules: [],
+  });
+  const restricted = {
+    name: "SEND_EMAIL",
+    allowed_sender_addresses: ["noreply@example.com"],
+    allowed_destination_addresses: ["a@example.com"],
+    destination_address: "ops@example.com",
+  };
+  assert.deepEqual(
+      build([restricted]).bindings.find((b) => b.name === "SEND_EMAIL"),
+      { type: "send_email", ...restricted });
+  assert.deepEqual(
+      build([{ name: "SEND_EMAIL" }]).bindings.find((b) => b.name === "SEND_EMAIL"),
+      { type: "send_email", name: "SEND_EMAIL" });
+  assert.throws(() => build([{ name: "SEND_EMAIL", allowed_cc_addresses: [] }]),
+      /allowed_cc_addresses/);
+  assert.throws(() => build([{ name: "SEND_EMAIL", allowed_sender_addresses: "x@example.com" }]),
+      /allowed_sender_addresses has the wrong type/);
+});
+
 // The deploy wizard sends a gatekeeper's manifest shortName as the install slug verbatim, and
 // the slug becomes a GATEKEEPER_<SLUG> binding name, so the deploy service rejects anything
 // outside this charset (packages/deploy/src/naming.ts). A shortName that fails here reaches

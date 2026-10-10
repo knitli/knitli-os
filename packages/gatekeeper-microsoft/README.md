@@ -159,6 +159,30 @@ per cursor. Filters are structured (`{column, op, value}`, at most five clauses,
 `and`); there is no way to pass a raw OData string. Every read is recorded as an observation in the
 workspace's activity, and nothing a read does can change the list.
 
+### The marker column, and retried creates
+
+A create that may have landed must not be repeated. Every `createItem()` therefore carries its own
+action id in a column named `GadgetsActionId`, and applying an action first looks that id up: if a
+row already has it (the first attempt landed but its answer was lost, or the worker died before
+recording it), the retry stops there instead of adding a second row.
+
+**This changes your list's schema.** The first approved create adds the column, a single line of
+text, indexed, if it is not there. The approval prompt for a create says so ("Schema change")
+whenever the column is absent, so it is decided there and not discovered afterwards. Everything
+else treats it as invisible: it is left out of `getColumns()`, out of the values `getItems()` and
+`getItem()` return, and a caller cannot write it. It does show in SharePoint, as "Gadgets action id".
+
+If the connection is not permitted to add columns, the action fails with a message naming the
+column: add a single line of text column with the internal name `GadgetsActionId` yourself, then
+retry the action. Creating columns is a schema operation, and whether the permission this connection
+holds covers it is checked on the first live create (see the verification checklist).
+
+The same retry problem exists for Outlook reply drafts, which Graph creates anew on every call.
+There the first attempt is recorded before the draft is made, and a retry first looks in Drafts for
+a draft in the same conversation, created since then, that begins with the same reply text; if
+there is one it stops. A reply with no text cannot be recognised that way, so a retried empty reply
+can still leave two drafts.
+
 ### Approval
 
 Every `createItem()` lands in the approval queue with a fenced key/value description of the values,
@@ -201,11 +225,6 @@ A Workshop change that gave the session its caller would lift the owner's loss o
 
 ### Known limits
 
-- **Duplicate window after a crash.** If the worker dies between SharePoint accepting the row and
-  the gatekeeper forgetting the pending action, the row exists while the action still looks
-  pending — approving it again creates a second row. The source fork closed most of this window
-  with a durable outcome record; this port dropped that together with the auto-apply machinery it
-  existed for. Before re-approving an action that failed without a clear reason, look at the list.
 - **`createItem()` reports nothing about the outcome**, as the mailbox's writes do: it returns once
   the action is queued, and returns no item id. The row appears in later reads only after approval.
 - **A column added in SharePoint can take a few minutes to show in reads.** The list's schema is
@@ -433,6 +452,9 @@ identifies the cause, and guessing without it wastes a round trip.
       ask the agent to list folders and move a message into it. The subfolder must appear —
       Graph's root listing omits child folders, so this exercises the traversal — and the move must
       apply.
+- [ ] **A retried reply draft does not duplicate.** Approve a reply draft, then apply the same
+      action again (re-approve after a forced failure) → Drafts holds one draft, not two. Record
+      whether the conversation-and-date filter on Drafts worked against Graph.
 - [ ] **A reply draft cannot inject markup.** Have the agent draft a reply whose comment contains
       `<b>bold</b> <script>alert(1)</script>`, approve it, then open the draft in Outlook. Record
       what you see: inert text (expected) or rendered HTML. If Graph interprets the comment as HTML,
@@ -471,6 +493,16 @@ the site's members can see.
       fenced description of the values and the gadget gets no item id; approve → the row is created.
 - [ ] **Validation happens before the queue.** Submit with a required field missing → refused
       immediately, naming the column, with nothing left in the approval queue.
+- [ ] **The marker column is added with consent.** On a list without `GadgetsActionId`, submit a
+      create → the approval prompt shows a "Schema change" line. Approve → the column appears in the
+      list settings (single line of text, indexed) and the row is created. If the connection is
+      refused, the action fails with the manual-column message and nothing is created. Record which
+      it was.
+- [ ] **A retry does not duplicate.** Approve a create, then re-approve the same action (or stop the
+      worker between SharePoint's answer and the record, if you can) → still one row with that
+      `GadgetsActionId`. Check the filter works on a list past 5,000 items, or note that it does not.
+- [ ] **The marker stays out of sight.** `getColumns()`, `getItems()` and `getItem()` never mention
+      `GadgetsActionId`, and `createItem({GadgetsActionId: …})` is refused as an unknown column.
 - [ ] **Types round-trip.** Write a choice, a number, a boolean, and a date → each is stored with
       the right type in SharePoint (a date lands as the moment you meant, not a day out).
 - [ ] **Sharing respects SharePoint's own access.** Share the gadget with a colleague who has site

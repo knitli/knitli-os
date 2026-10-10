@@ -628,6 +628,65 @@ describe("approved actions", () => {
     expect(write.init.body).toBe(JSON.stringify({ comment: "On it." }));
   });
 
+  describe("retrying a reply draft", () => {
+    const withConversation = { ...MESSAGE, conversationId: "conv-1" };
+
+    /** First attempt: Graph accepts the draft but the answer is lost, so the action stays pending. */
+    async function firstAttemptLosesItsAnswer(drafts: () => Response) {
+      let createReplyAttempts = 0;
+      const calls = stubFetch(call => {
+        const path = new URL(call.url).pathname;
+        if (path.endsWith("/createReply")) {
+          createReplyAttempts++;
+          if (createReplyAttempts === 1) throw new Error("connection reset");
+          return new Response(null, { status: 204 });
+        }
+        if (path.endsWith("/me/mailFolders/drafts/messages")) return drafts();
+        if (/\/me\/messages\/[^/]+$/.test(path)) return jsonResponse(withConversation);
+        return defaultRoute(call);
+      });
+      const session = await startSession();
+      const message = await firstMessage(session);
+      await message.createReplyDraft("On it, will send numbers tomorrow.");
+      const id = approvals.actions[0].id;
+      await expect(applyApprovedAction(id)).rejects.toThrow();
+      return { calls, id, creates: () => calls.filter(call => call.url.endsWith("/createReply")) };
+    }
+
+    it("records when the first attempt began, before making the draft", async () => {
+      const { id } = await firstAttemptLosesItsAnswer(() => jsonResponse({ value: [] }));
+
+      expect(context.storage.kv.get(`pending:action:${id}`)).toMatchObject({
+        type: "replyDraft", attemptedAt: expect.any(String),
+      });
+    });
+
+    it("does not make a second draft when the first attempt's draft is in Drafts", async () => {
+      const { id, creates, calls } = await firstAttemptLosesItsAnswer(() => jsonResponse({
+        value: [{ id: "draft-1", bodyPreview: "On it,   will send numbers tomorrow.\n\nFrom: Bob" }],
+      }));
+
+      await applyApprovedAction(id);
+
+      expect(creates()).toHaveLength(1);
+      expect(context.storage.kv.get(`pending:action:${id}`)).toBeUndefined();
+      const lookup = decodeURIComponent(
+        calls.find(call => call.url.includes("/mailFolders/drafts/messages"))!.url);
+      expect(lookup).toContain("conversationId eq 'conv-1'");
+      expect(lookup).toContain("createdDateTime ge ");
+    });
+
+    it("makes the draft when the first attempt left none behind", async () => {
+      const { id, creates } = await firstAttemptLosesItsAnswer(
+        () => jsonResponse({ value: [{ id: "other", bodyPreview: "Something unrelated" }] }));
+
+      await applyApprovedAction(id);
+
+      expect(creates()).toHaveLength(2);
+      expect(context.storage.kv.get(`pending:action:${id}`)).toBeUndefined();
+    });
+  });
+
   it("discards a rejected action without touching the mailbox", async () => {
     const calls = stubFetch();
     const session = await startSession();

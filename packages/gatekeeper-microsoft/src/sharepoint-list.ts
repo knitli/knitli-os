@@ -26,7 +26,7 @@ import { formatApprovalField, sanitizeApprovalTitle } from "./approval-text";
 import { AccessTokenCache, AccessTokenRequest, RetryAfterPolicy } from "./auth-retry";
 import { GraphApiError, truncate } from "./graph-api";
 import {
-  ColumnDefinition, GraphSharePointApi, ListItem, buildItemsFilter, parseIsoDate,
+  ColumnDefinition, GraphSharePointApi, ListItem, MARKER_COLUMN, buildItemsFilter, parseIsoDate,
   sharePointThrottled,
 } from "./graph-sharepoint-api";
 import { MAX_PENDING_ACTIONS, PendingActionStore } from "./pending-actions";
@@ -74,6 +74,8 @@ type SharePointListAction = {
   type: "createItem";
   /** Validated against the list's schema before submission, so apply time rarely sees a 4xx. */
   fields: Record<string, unknown>;
+  /** Stamped on the row, so a retry of this action can tell its own earlier create from none. */
+  marker: string;
 };
 
 /** The list's name and link, as `describe()` last read them. */
@@ -101,11 +103,19 @@ function displayValue(value: unknown): string {
  * list. Values go in builder fields, which approval surfaces show literally, so a submitted
  * `<script>` or a run of backticks cannot restyle the prompt around it.
  */
-function describeCreateItem(fields: Record<string, unknown>): RenderedDescription {
+function describeCreateItem(
+    fields: Record<string, unknown>, addsMarkerColumn: boolean): RenderedDescription {
   let builder = buildDescription("Create a new item in this SharePoint list with the values below.");
   let entries = Object.entries(fields);
   if (entries.length === 0) builder.prose("_This item sets no column values._");
   for (let [name, value] of entries) builder.inline(name, displayValue(value));
+  // A change to the user's own list, so it is part of what is being approved, not a side effect.
+  if (addsMarkerColumn) {
+    builder.inline("Schema change",
+        `Adds a column named ${MARKER_COLUMN} (single line of text, indexed) to this list, if it ` +
+        "is not there yet. Every item created through this connection is stamped with its own " +
+        "action id there, so a retried create finds its earlier row instead of adding a second.");
+  }
   return builder.finish();
 }
 
@@ -274,6 +284,8 @@ type SharePointListSessionContext = {
   columns(): Promise<ColumnDefinition[]>;
   /** Reads the columns again, bypassing the cache. */
   refreshColumns(): Promise<ColumnDefinition[]>;
+  /** Whether the list, as last read, already has the marker column. */
+  hasMarkerColumn(): boolean;
   /**
    * Authorizes an observation that concerns the list's rows. `revealsRows` is true when the data
    * returned afterwards is row content, as opposed to opening a cursor that returns none yet.
@@ -482,11 +494,13 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
           "Too many pending SharePoint list actions. Resolve existing actions before adding more.");
     }
 
-    let actionId = this.#ctx.pendingActions.submit({ type: "createItem", fields: validated });
+    let actionId = this.#ctx.pendingActions.submit({
+      type: "createItem", fields: validated, marker: crypto.randomUUID(),
+    });
     try {
       await this.#ctx.approvalQueue.submitAction(actionId, {
         title: sanitizeApprovalTitle(`Create item in ${this.#ctx.listName()}`),
-        ...describeCreateItem(validated),
+        ...describeCreateItem(validated, !this.#ctx.hasMarkerColumn()),
         actionKind: CREATE_ITEM_ACTION,
         implementsRevert: false,
         // The new row is not visible to later reads until it is approved and applied, so an agent
@@ -516,6 +530,7 @@ export class SharePointListGatekeeperImpl
     implements Gatekeeper<SharePointListSession> {
   #tokens = new AccessTokenCache(opts => this.#account().getAccessToken(opts));
   #rowReadsInFlight = 0;
+  #markerPresent = false;
   #columnCache: { columns: ColumnDefinition[]; loadedAt: number } | undefined;
 
   #account(): DurableObjectStub<UserAccount> {
@@ -556,8 +571,11 @@ export class SharePointListGatekeeperImpl
   }
 
   async #refreshColumns(): Promise<ColumnDefinition[]> {
-    let columns =
+    let all =
         await this.#api(READ_RETRY_AFTER).listColumns(this.ctx.props.siteId, this.ctx.props.listId);
+    this.#markerPresent = all.some(column => column.name === MARKER_COLUMN);
+    // The marker is bookkeeping: the schema callers see and validate against leaves it out.
+    let columns = all.filter(column => column.name !== MARKER_COLUMN);
     this.#columnCache = { columns, loadedAt: Date.now() };
     return columns;
   }
@@ -616,6 +634,7 @@ export class SharePointListGatekeeperImpl
       listName: () => this.#listName(),
       columns: () => this.#columns(),
       refreshColumns: () => this.#refreshColumns(),
+      hasMarkerColumn: () => this.#markerPresent,
       authorizeRows: (description, revealsRows) =>
           this.#authorizeRows(queue, description, revealsRows),
     });
@@ -629,9 +648,21 @@ export class SharePointListGatekeeperImpl
     let action = pendingActions.get(actionId);
     if (!action) throw new Error(`Unknown pending SharePoint list action: ${actionId}`);
 
+    let { siteId, listId } = this.ctx.props;
+    let api = this.#api(APPLY_RETRY_AFTER);
     try {
-      await this.#api(APPLY_RETRY_AFTER)
-          .createItem(this.ctx.props.siteId, this.ctx.props.listId, action.fields);
+      // The marker column is added here, on the approval that described it. Anything outside the
+      // create (listing, adding the column, looking the marker up) is safe to repeat.
+      let columns = await api.listColumns(siteId, listId);
+      if (!columns.some(column => column.name === MARKER_COLUMN)) {
+        await this.#addMarkerColumn(api);
+        this.#columnCache = undefined;
+      }
+      // An earlier attempt may have created the row and lost its answer, or died before recording
+      // it; that row carries this action's marker.
+      if (!await api.hasItemWithMarker(siteId, listId, action.marker)) {
+        await api.createItem(siteId, listId, { ...action.fields, [MARKER_COLUMN]: action.marker });
+      }
     } catch (err) {
       // A 4xx means the schema this create was validated against no longer matches the list. The
       // action stays pending for an approver to retry or reject.
@@ -641,6 +672,20 @@ export class SharePointListGatekeeperImpl
       throw err;
     }
     pendingActions.remove(actionId);
+  }
+
+  async #addMarkerColumn(api: GraphSharePointApi): Promise<void> {
+    try {
+      await api.createMarkerColumn(this.ctx.props.siteId, this.ctx.props.listId);
+    } catch (err) {
+      if (err instanceof GraphApiError && (err.status === 401 || err.status === 403)) {
+        throw new Error(
+            `This connection is not allowed to add the ${MARKER_COLUMN} column to the list. Add a ` +
+            `single line of text column with the internal name ${MARKER_COLUMN} yourself, then ` +
+            "retry this action.", { cause: err });
+      }
+      throw err;
+    }
   }
 
   async rejectAction(actionId: number): Promise<void | {restart?: boolean}> {

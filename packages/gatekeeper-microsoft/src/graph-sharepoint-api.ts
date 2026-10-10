@@ -78,6 +78,13 @@ const SYSTEM_COLUMN_NAMES = new Set([
 /** `LinkTitle`, `LinkTitleNoMenu`, `LinkTitle2`: the rendered-link twins of `Title`. */
 const SYSTEM_COLUMN_PREFIXES = ["_", "LinkTitle"];
 
+/**
+ * The column every create stamps with its own id. A retried create (the response was lost, or the
+ * worker died before it recorded success) looks the id up first and finds its earlier row instead of
+ * making a second one.
+ */
+export const MARKER_COLUMN = "GadgetsActionId";
+
 /** Internal column names are alphanumeric plus `_xHHHH_` escapes; nothing else may reach OData. */
 const INTERNAL_NAME_PATTERN = /^[A-Za-z0-9_]+$/;
 
@@ -306,7 +313,8 @@ function listItemFrom(item: GraphListItem): ListItem {
   let fields: Record<string, unknown> = {};
   for (let [key, value] of Object.entries(item.fields ?? {})) {
     // `@odata.etag` and friends are OData control information, not list data.
-    if (!key.startsWith("@")) fields[key] = value;
+    // The marker is this gatekeeper's own bookkeeping, not list data.
+    if (!key.startsWith("@") && key !== MARKER_COLUMN) fields[key] = value;
   }
   return {
     id: item.id,
@@ -696,6 +704,38 @@ export class GraphSharePointApi {
           method: "POST",
           body: JSON.stringify({ fields }),
         }));
+  }
+
+  /**
+   * Add the marker column (see `MARKER_COLUMN`) to the list. Indexed, so looking a row up by it
+   * works on a list past the view threshold.
+   */
+  async createMarkerColumn(siteId: string, listId: string): Promise<void> {
+    await this.#fetchJson<unknown>(
+        graphUrl(["sites", siteId, "lists", listId, "columns"]), {
+          method: "POST",
+          body: JSON.stringify({
+            name: MARKER_COLUMN,
+            displayName: "Gadgets action id",
+            description: "Added by Gadgets so a retried create can recognise its own earlier row.",
+            indexed: true,
+            text: { allowMultipleLines: false, maxLength: 64 },
+          }),
+        });
+  }
+
+  /** Whether a row already carries `marker`, i.e. an earlier attempt at this create landed. */
+  async hasItemWithMarker(siteId: string, listId: string, marker: string): Promise<boolean> {
+    let body = await this.#fetchJson<GraphCollection<GraphListItem>>(
+        graphUrl(["sites", siteId, "lists", listId, "items"], {
+          $expand: `fields($select=${MARKER_COLUMN})`,
+          $filter: `fields/${MARKER_COLUMN} eq ${odataString(marker)}`,
+          $top: "1",
+        }), {
+          // Lets the lookup run on a list whose marker column was added by hand without an index.
+          headers: { Prefer: "HonorNonIndexedQueriesWarningMayFailRandomly" },
+        });
+    return (body.value ?? []).length > 0;
   }
 
   /** The internal names to expand, defaulting to every column the list has. */

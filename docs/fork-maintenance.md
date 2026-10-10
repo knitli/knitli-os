@@ -513,7 +513,9 @@ Intentional, reviewed differences from upstream. Keep this current.
   path (`connectAccount` treats omitted `resourceUrlPatterns` as the Outlook mailbox only, against
   the contract's "omitted = all resource types", and refuses an explicit `[]`; and recorded refresh scopes cover
   only what Entra reported granted); SharePoint `createItem` always goes through approval, with
-  none of the fork's auto-apply rule or provisional-id machinery; the sign-in profile hints
+  none of the fork's auto-apply rule or provisional-id machinery, and each create is stamped with a
+  `GadgetsActionId` marker column (added to the user's list on the first approved create) so a retry
+  finds its earlier row, with Outlook reply drafts reconciled by read-back instead; the sign-in profile hints
   (`getAuthenticatedProfile`, `providesAuthProfile`) are not ported because the Workshop contract
   here has no such hook; the connect-initiator guard above is applied, which the source fork lacks.
 - **SharePoint observers write, but cannot read rows:** a list-bound gadget admits collaborators who

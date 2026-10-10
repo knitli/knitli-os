@@ -77,6 +77,12 @@ function defaultRoute(call: Call): Response {
   if (method === "POST" && path.endsWith(`/lists/${LIST_ID}/items`)) {
     return jsonResponse(CREATED_ITEM, 201);
   }
+  // Adding the marker column.
+  if (method === "POST" && path.endsWith(`/lists/${LIST_ID}/columns`)) {
+    return jsonResponse({ name: "GadgetsActionId" }, 201);
+  }
+  // Looking a row up by its marker: nothing has landed yet.
+  if (call.url.includes("GadgetsActionId")) return jsonResponse({ value: [] });
   if (path.endsWith(`/lists/${LIST_ID}/columns`)) return jsonResponse({ value: GRAPH_COLUMNS });
   if (/\/items\/[^/]+$/.test(path)) {
     const id = path.split("/").pop()!;
@@ -96,8 +102,15 @@ function stubFetch(handler: (call: Call) => Response | Promise<Response> = defau
   return calls;
 }
 
+/** The requests that create a row, as opposed to adding the marker column. */
 function creates(calls: Call[]): Call[] {
-  return calls.filter(call => (call.init.method ?? "GET").toUpperCase() === "POST");
+  return calls.filter(call => (call.init.method ?? "GET").toUpperCase() === "POST"
+      && new URL(call.url).pathname.endsWith("/items"));
+}
+
+function isItemCreate(call: Call): boolean {
+  return (call.init.method ?? "GET").toUpperCase() === "POST"
+      && new URL(call.url).pathname.endsWith("/items");
 }
 
 const reportCredentialsRejected = vi.fn(async (_detail?: string) => {});
@@ -499,13 +512,98 @@ describe("applyAction", () => {
     await applyApprovedAction(1);
 
     expect(creates(calls)).toHaveLength(1);
-    expect(JSON.parse(String(creates(calls)[0].init.body)))
-        .toEqual({ fields: { Title: "New laptop" } });
+    expect(JSON.parse(String(creates(calls)[0].init.body)).fields).toMatchObject({
+      Title: "New laptop", GadgetsActionId: expect.any(String),
+    });
     expect(context.storage.kv.get("pending:action:1")).toBeUndefined();
   });
 
+  it("adds the marker column on the approval that described it, once", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+    await session.createItem({ Title: "one" });
+    await applyApprovedAction(1);
+
+    const columnPosts = () => calls.filter(call => (call.init.method ?? "GET") === "POST"
+        && new URL(call.url).pathname.endsWith("/columns"));
+    expect(columnPosts()).toHaveLength(1);
+    expect(JSON.parse(String(columnPosts()[0].init.body))).toMatchObject({
+      name: "GadgetsActionId", indexed: true, text: { allowMultipleLines: false },
+    });
+
+    // Now the list has it, so the next create adds nothing.
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        && (call.init.method ?? "GET") === "GET"
+      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] })
+      : defaultRoute(call));
+    const again = stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        && (call.init.method ?? "GET") === "GET"
+      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] })
+      : defaultRoute(call));
+    await session.createItem({ Title: "two" });
+    await applyApprovedAction(2);
+    expect(again.filter(call => (call.init.method ?? "GET") === "POST"
+        && new URL(call.url).pathname.endsWith("/columns"))).toHaveLength(0);
+  });
+
+  it("finds its own earlier row on a retry instead of creating a second", async () => {
+    // The first attempt landed and its answer was lost: the marker lookup now finds the row.
+    const calls = stubFetch(call => call.url.includes("GadgetsActionId")
+      ? jsonResponse({ value: [{ id: "101", fields: { GadgetsActionId: "x" } }] })
+      : defaultRoute(call));
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+
+    await applyApprovedAction(1);
+
+    expect(creates(calls)).toHaveLength(0);
+    expect(context.storage.kv.get("pending:action:1")).toBeUndefined();
+  });
+
+  it("looks the row up by this action's own marker, the same one it then stamps", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+    const marker = (context.storage.kv.get("pending:action:1") as { marker: string }).marker;
+
+    await applyApprovedAction(1);
+
+    const lookup = calls.find(call => call.url.includes("GadgetsActionId"))!;
+    expect(decodeURIComponent(lookup.url)).toContain(`fields/GadgetsActionId eq '${marker}'`);
+    expect(JSON.parse(String(creates(calls)[0].init.body)).fields.GadgetsActionId).toBe(marker);
+  });
+
+  it("tells the user how to add the column by hand when the connection may not", async () => {
+    const calls = stubFetch(call => (call.init.method ?? "GET") === "POST"
+        && new URL(call.url).pathname.endsWith("/columns")
+      ? jsonResponse({ error: { code: "accessDenied", message: "no" } }, 403)
+      : defaultRoute(call));
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+
+    await expect(applyApprovedAction(1)).rejects.toThrow(/Add a single line of text column/);
+
+    expect(creates(calls)).toHaveLength(0);
+    expect(context.storage.kv.get("pending:action:1")).toBeDefined();
+  });
+
+  it("keeps the marker out of everything the caller sees", async () => {
+    const withMarker = [...GRAPH_COLUMNS, { name: "GadgetsActionId", displayName: "x", text: {} }];
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+      ? jsonResponse({ value: withMarker })
+      : new URL(call.url).pathname.endsWith("/items/7")
+        ? jsonResponse({ ...ITEM, fields: { ...ITEM.fields, GadgetsActionId: "secret" } })
+        : defaultRoute(call));
+    const session = await startSession();
+
+    expect((await session.getColumns()).map(column => column.name)).not.toContain("GadgetsActionId");
+    expect((await session.getItem("7")).fields).not.toHaveProperty("GadgetsActionId");
+    await expect(session.createItem({ Title: "x", GadgetsActionId: "forged" }))
+        .rejects.toThrow(/Unknown column "GadgetsActionId"/);
+  });
+
   it("rethrows a failed create and leaves the action pending for a retry", async () => {
-    stubFetch(call => (call.init.method ?? "GET").toUpperCase() === "POST"
+    stubFetch(call => isItemCreate(call)
         ? jsonResponse({ error: { code: "activityLimitReached" } }, 429)
         : defaultRoute(call));
     const session = await startSession();
@@ -517,7 +615,7 @@ describe("applyAction", () => {
   });
 
   it("forgets the cached schema when a create is refused", async () => {
-    const calls = stubFetch(call => (call.init.method ?? "GET").toUpperCase() === "POST"
+    const calls = stubFetch(call => isItemCreate(call)
         ? jsonResponse({ error: { code: "invalidRequest", message: "Field 'Title' is invalid" } }, 400)
         : defaultRoute(call));
     const session = await startSession();
@@ -527,8 +625,11 @@ describe("applyAction", () => {
 
     // A 4xx means the list's columns are no longer what this create was validated against, so the
     // next caller re-reads them rather than validating against a schema SharePoint has moved past.
+    const columnReads = () => calls.filter(call => call.url.includes("/columns")
+        && (call.init.method ?? "GET") === "GET").length;
+    const before = columnReads();
     await session.getColumns();
-    expect(calls.filter(call => call.url.includes("/columns"))).toHaveLength(2);
+    expect(columnReads()).toBe(before + 1);
   });
 
   it("drops a rejected action without writing anything", async () => {
@@ -553,6 +654,18 @@ describe("applyAction", () => {
 });
 
 describe("approval prompt", () => {
+  it("mentions no schema change once the list already has the marker column", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] })
+      : defaultRoute(call));
+    const session = await startSession();
+
+    await session.createItem({ Title: "x" });
+
+    const fields = approvals.actions[0].description.fields as { label: string }[];
+    expect(fields.map(field => field.label)).toEqual(["Title"]);
+  });
+
   it("shows submitted values as literal fields, never in the prompt's prose", async () => {
     stubFetch();
     await gatekeeper.describe();
@@ -570,9 +683,11 @@ describe("approval prompt", () => {
     expect(implementsRevert).toBe(false);
     expect(description).toBe("Create a new item in this SharePoint list with the values below.");
     // A multi-line value is shown whole as a text field, which surfaces render literally.
-    expect(fields).toEqual([{
-      label: "Title", kind: "text", value: "```\n**Approved by IT** <script>alert(1)</script>",
-    }]);
+    expect(fields).toEqual([
+      { label: "Title", kind: "text", value: "```\n**Approved by IT** <script>alert(1)</script>" },
+      // The list has no marker column yet, so the approver is told the create will add one.
+      { label: "Schema change", kind: "text", value: expect.stringContaining("GadgetsActionId") },
+    ]);
     expect(descriptionIsComplete).toBe(true);
   });
 });

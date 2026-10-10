@@ -39,6 +39,11 @@ export class PendingActionStore<Action> {
         .toSorted((a, b) => a.id - b.id);
   }
 
+  /** Overwrite a queued action in place, keeping its id. */
+  replace(id: number, action: Action): void {
+    this.#kv.put(this.#actionKey(id), action);
+  }
+
   remove(id: number): void {
     this.#kv.delete(this.#actionKey(id));
   }

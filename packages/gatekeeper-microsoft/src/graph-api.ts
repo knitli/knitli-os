@@ -86,6 +86,13 @@ const MAX_SEARCH_QUERY_CHARS = 400;
 /** Longest reply body accepted, matching the cap the mail UIs impose in practice. */
 export const MAX_REPLY_BODY_BYTES = 64 * 1024;
 
+/** How much of a reply's text a draft preview is compared on; previews are cut near 255 characters. */
+const DRAFT_MATCH_CHARS = 200;
+
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 /**
  * Largest Graph response read when fetching a message body. The text is sender-controlled, and
  * Graph can wrap it in markup or escapes, so this sits well above the character ceiling below.
@@ -714,6 +721,29 @@ export class GraphMailApi {
    * Create a reply draft in the mailbox's Drafts folder, with `comment` inserted above the quoted
    * original. Nothing is sent: the user reviews and sends the draft from Outlook.
    */
+  /**
+   * Whether a draft reply to this message's conversation, starting with `comment`, was created at or
+   * after `since` (an ISO timestamp). Used before replaying a draft whose first attempt may have
+   * landed with its answer lost: createReply makes a new draft every time, so replaying blind
+   * leaves two. The comment sits at the top of the draft, so it is what a draft's preview begins
+   * with; a comment that says nothing cannot be recognised and reports no draft.
+   */
+  async hasReplyDraft(messageId: string, comment: string, since: string): Promise<boolean> {
+    let wanted = collapseWhitespace(comment).slice(0, DRAFT_MATCH_CHARS);
+    if (!wanted) return false;
+    let conversationId = (await this.getMessage(messageId)).conversationId;
+    if (!conversationId) return false;
+    let body = await this.#fetchJson<GraphCollection<GraphMessage>>(
+        graphUrl(["me", "mailFolders", "drafts", "messages"], {
+          $filter: `conversationId eq '${conversationId.replaceAll("'", "''")}' and ` +
+              `createdDateTime ge ${since}`,
+          $select: "id,bodyPreview",
+          $top: "10",
+        }));
+    return (body.value ?? []).some(draft =>
+        collapseWhitespace(draft.bodyPreview ?? "").startsWith(wanted));
+  }
+
   async createReplyDraft(messageId: string, comment: string, replyAll: boolean): Promise<void> {
     if (new TextEncoder().encode(comment).byteLength > MAX_REPLY_BODY_BYTES) {
       throw new Error(`Reply body must be at most ${MAX_REPLY_BODY_BYTES} bytes.`);

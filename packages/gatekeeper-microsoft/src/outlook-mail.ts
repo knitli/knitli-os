@@ -46,6 +46,9 @@ export const OUTLOOK_MAIL_URL = "https://outlook.office.com/mail/";
 /** Ceiling on pages a single cursor will pull, so an agent cannot walk an entire mailbox. */
 const MAX_CURSOR_PAGES = 40;
 
+/** Slack allowed between this worker's clock and Graph's when looking for an earlier draft. */
+const DRAFT_CLOCK_SKEW_MS = 30 * 1000;
+
 // ── Action types ────────────────────────────────────────────────────
 //
 // Actions store the message's immutable id and the caller's intent, never a pre-built API payload:
@@ -54,7 +57,11 @@ const MAX_CURSOR_PAGES = 40;
 type OutlookMailAction =
   | { type: "setRead"; messageId: string; read: boolean }
   | { type: "move"; messageId: string; destinationFolderId: string }
-  | { type: "replyDraft"; messageId: string; body: string; replyAll: boolean };
+  | {
+    type: "replyDraft"; messageId: string; body: string; replyAll: boolean;
+    /** When the first attempt to create the draft began; set once, kept across retries. */
+    attemptedAt?: string;
+  };
 
 /** Grouped so a user can auto-approve read-state flips without also auto-approving moves/drafts. */
 const MARK_READ_ACTION: ActionKind = { tag: "outlookMarkRead", label: "Mark messages read/unread" };
@@ -658,9 +665,18 @@ export class OutlookMailGatekeeperImpl
       case "move":
         await api.moveMessage(action.messageId, action.destinationFolderId);
         break;
-      case "replyDraft":
+      case "replyDraft": {
+        // createReply makes a new draft each time, so a retry could leave two. The first attempt is
+        // recorded before it runs; a retry then looks for a draft that attempt already made.
+        if (action.attemptedAt === undefined) {
+          pendingActions.replace(actionId, { ...action, attemptedAt: new Date().toISOString() });
+        } else {
+          let since = new Date(Date.parse(action.attemptedAt) - DRAFT_CLOCK_SKEW_MS).toISOString();
+          if (await api.hasReplyDraft(action.messageId, action.body, since)) break;
+        }
         await api.createReplyDraft(action.messageId, action.body, action.replyAll);
         break;
+      }
       default:
         action satisfies never;
         throw new Error(`unknown action type: ${(action as {type: string}).type}`);

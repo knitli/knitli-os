@@ -24,28 +24,37 @@ const writeOwner = (owner: string | null) => {
   }
 }
 
-/** Whether this browser's subscription was made for the signed-in user. */
-export const ownsBrowserSubscription = async (api: RpcStub<AuthenticatedApi>) =>
-  readOwner() === (await api.whoami()).id
+/** Whether this browser's subscription was made for `owner`, the signed-in user's id. */
+export const ownsBrowserSubscription = (owner: string) => readOwner() === owner
 
-/** Records the signed-in user as the owner of this browser's subscription. */
-export const claimBrowserSubscription = async (api: RpcStub<AuthenticatedApi>) =>
-  writeOwner((await api.whoami()).id)
+/** Records `owner` (the signed-in user's id; null forgets it) as the owner of this browser's subscription. */
+export const claimBrowserSubscription = (owner: string | null) => writeOwner(owner)
+
+/**
+ * The push manager holding this origin's subscription. Safari 18.4's declarative push also exposes
+ * one on `window`, and its subscription survives the removal of the service worker registration
+ * (webkit.org/blog/16535), so a missing registration does not mean a missing subscription.
+ */
+export const findPushManager = async (): Promise<PushManager | undefined> =>
+  (await navigator.serviceWorker.getRegistration())?.pushManager
+    ?? (window as { pushManager?: PushManager }).pushManager
 
 /**
  * Removes this browser's subscription from the browser and the server, and forgets its owner. The
  * browser side goes first and does not depend on the server: if the server call fails or stalls,
  * the endpoint is already dead (the server prunes it on its next 404/410) and nobody else's
- * notifications can reach this browser. `signal` abandons the release before it touches the
- * browser, for a caller that stopped waiting and whose session may have been replaced.
+ * notifications can reach this browser. `signal` abandons the release, checked after every await
+ * that precedes a mutation, for a caller that stopped waiting and whose session may have been
+ * replaced by one that has claimed a new subscription.
  */
 export const releaseBrowserSubscription = async (
-  api: RpcStub<AuthenticatedApi>, registration: ServiceWorkerRegistration, signal?: AbortSignal,
+  api: RpcStub<AuthenticatedApi>, pushManager: PushManager, signal?: AbortSignal,
 ) => {
-  const subscription = await registration.pushManager.getSubscription()
+  const subscription = await pushManager.getSubscription()
   if (signal?.aborted) return
   if (!subscription) return writeOwner(null)
   await subscription.unsubscribe()
+  if (signal?.aborted) return
   writeOwner(null)
   await api.removeWebPushSubscription(subscription.endpoint)
 }
@@ -59,14 +68,13 @@ export const releaseBrowserSubscription = async (
  */
 export const syncBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, signal: AbortSignal) => {
   if (pushAvailability(currentPushEnvironment()) !== 'supported' || Notification.permission !== 'granted') return
-  const registration = await navigator.serviceWorker.getRegistration()
-  const subscription = await registration?.pushManager.getSubscription()
+  const subscription = await (await findPushManager())?.getSubscription()
   if (!subscription || signal.aborted) return
-  const owned = await ownsBrowserSubscription(api)
+  const { id } = await api.whoami()
   if (signal.aborted) return
-  if (!owned) {
+  if (!ownsBrowserSubscription(id)) {
     await subscription.unsubscribe()
-    writeOwner(null)
+    if (!signal.aborted) writeOwner(null)
     return
   }
   const key = await api.getWebPushPublicKey()
@@ -94,8 +102,8 @@ export const releaseOnSignOut = async (api: RpcStub<AuthenticatedApi>) => {
   try {
     await Promise.race([
       (async () => {
-        const registration = await navigator.serviceWorker.getRegistration()
-        if (registration && !stopped.signal.aborted) await releaseBrowserSubscription(api, registration, stopped.signal)
+        const pushManager = await findPushManager()
+        if (pushManager && !stopped.signal.aborted) await releaseBrowserSubscription(api, pushManager, stopped.signal)
       })(),
       timeout,
     ])

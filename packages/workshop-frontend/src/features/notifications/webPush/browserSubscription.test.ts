@@ -120,6 +120,35 @@ describe('releaseOnSignOut', () => {
     expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
   })
 
+  it('releases a declarative Safari subscription that outlived its service worker registration', async () => {
+    const api = fakeApi()
+    const { subscription } = install()
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { getRegistration: async () => undefined } })
+    vi.stubGlobal('pushManager', { getSubscription: async () => subscription })
+    localStorage.setItem(OWNER_KEY, 'me@example.com')
+    await releaseOnSignOut(asStub(api))
+    expect(subscription.unsubscribe).toHaveBeenCalled()
+    expect(api.removeWebPushSubscription).toHaveBeenCalledWith('https://web.push.apple.com/refreshed')
+    expect(localStorage.getItem(OWNER_KEY)).toBeNull()
+  })
+
+  it('does not clear a replacement’s owner or call the server once abandoned while unsubscribing', async () => {
+    vi.useFakeTimers()
+    const api = fakeApi()
+    const { subscription } = install()
+    let finishUnsubscribe!: () => void
+    subscription.unsubscribe.mockReturnValue(new Promise((resolve) => { finishUnsubscribe = () => resolve(true) }))
+    localStorage.setItem(OWNER_KEY, 'me@example.com')
+    const done = releaseOnSignOut(asStub(api))
+    await vi.advanceTimersByTimeAsync(3000)
+    await done
+    localStorage.setItem(OWNER_KEY, 'next@example.com')
+    finishUnsubscribe()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
+    expect(api.removeWebPushSubscription).not.toHaveBeenCalled()
+  })
+
   it('never blocks or fails the sign-out when the server is unreachable', async () => {
     const api = fakeApi()
     api.removeWebPushSubscription.mockRejectedValue(new Error('offline'))

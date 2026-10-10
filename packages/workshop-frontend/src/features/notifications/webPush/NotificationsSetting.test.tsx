@@ -111,6 +111,33 @@ describe('NotificationsSetting', () => {
     expect(button(container, 'Turn on')).toBeDefined()
   })
 
+  it('rolls the browser subscription back when registering it with the server fails', async () => {
+    const api = fakeApi()
+    api.addWebPushSubscription.mockRejectedValue(new Error('offline'))
+    const browser = installBrowser({ permission: 'default', subscribed: false })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const container = await render(api)
+
+    await act(async () => button(container, 'Turn on')!.click())
+    expect(browser.subscription.unsubscribe).toHaveBeenCalled()
+    expect(localStorage.getItem('gadgets.webPush.owner')).toBeNull()
+    expect(button(container, 'Turn on')).toBeDefined()
+  })
+
+  it('stays on, with Turn off available, when the browser refuses to unsubscribe', async () => {
+    const api = fakeApi()
+    const browser = installBrowser({ permission: 'granted', subscribed: true })
+    browser.subscription.unsubscribe.mockRejectedValue(new Error('refused'))
+    localStorage.setItem('gadgets.webPush.owner', 'me@example.com')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const container = await render(api)
+
+    await act(async () => button(container, 'Turn off')!.click())
+    expect(container.textContent).toContain('On for this device')
+    expect(button(container, 'Turn off')).toBeDefined()
+    expect(localStorage.getItem('gadgets.webPush.owner')).toBe('me@example.com')
+  })
+
   it('does not adopt a subscription left by another user: shows it off and replaces it on turn-on', async () => {
     const api = fakeApi()
     const browser = installBrowser({ permission: 'granted', subscribed: true })

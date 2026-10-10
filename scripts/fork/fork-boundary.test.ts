@@ -128,6 +128,20 @@ test("reviewedSurvivors default to none and parse when present", () => {
   }]);
 });
 
+test("reviewedSurvivors accept root files", () => {
+  const withAck = validBoundary();
+  withAck["reviewedSurvivors"] = [{
+    token: "oldHash",
+    path: "pnpm-lock.yaml",
+    reason: "Integrity hash kept by a fork-only transitive dep.",
+  }];
+  assert.deepEqual(parseForkBoundary(JSON.stringify(withAck)).reviewedSurvivors, [{
+    token: "oldHash",
+    path: "pnpm-lock.yaml",
+    reason: "Integrity hash kept by a fork-only transitive dep.",
+  }]);
+});
+
 for (const [name, mutate, pattern] of [
   ["survivor acks must be an array", (b: Record<string, unknown>) => {
     b["reviewedSurvivors"] = {};

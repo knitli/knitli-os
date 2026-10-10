@@ -6,6 +6,7 @@ import type {
 } from "@gadgets/workshop-shared/api";
 import * as Y from "yjs";
 import { serializeAdminConfig } from "../src/admin-config.js";
+import { buildReleasePack, buildSnapshotRelease } from "../src/blueprint-release.js";
 import { DEFAULT_ADMIN_CONFIG } from "../src/storage-schema/admin-settings-storage.js";
 import { ADMIN_CONFIG_KEY } from "../src/storage-schema/blueprints-kv.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
@@ -26,10 +27,12 @@ const GADGET_TEXT_V1 = "Gadget prompt, first draft.";
 const GADGET_TEXT_V2 = "Gadget prompt, revised.";
 const BLUEPRINT_TEXT_V1 = "Blueprint prompt, first edition.";
 
-function testMetadata(title: string, version: number, prompt: boolean): BlueprintMetadata {
+function testMetadata(
+    title: string, version: number, prompt: boolean, commitId?: string): BlueprintMetadata {
   return {
     title, description: `${title} description`, author: USER,
     created: new Date(0), version, lastUpdated: new Date(0),
+    ...(commitId === undefined ? {} : { commitId }),
     bindings: {}, ...(prompt ? { prompt: true as const } : {}),
   };
 }
@@ -50,10 +53,17 @@ async function blueprintBody(files: [string, string][]): Promise<ReadableStream<
 type RefHarness = {
   impl: any;
   kv: Map<string, string>;
-  r2: Map<string, [string, string][]>;
+  r2: Map<string, [string, string][] | Uint8Array>;
   commitFiles(files: Record<string, string>): Promise<string>;
   setGadgetHead(commit: string): void;
 };
+
+// Pack-era content for a release-commit pin: R2 holds the release pack itself.
+async function packBody(files: [string, string][]): Promise<{ commitId: string, pack: Uint8Array }> {
+  let release = await buildSnapshotRelease(new Map(files));
+  let pack = await buildReleasePack(oid => release.objects.get(oid), release.commitId);
+  return { commitId: release.commitId, pack };
+}
 
 async function withRefHarness(fn: (harness: RefHarness) => Promise<void>): Promise<void> {
   let stub = env.TEST_OVERSEER.getByName(`prompt-ref-${crypto.randomUUID()}`);
@@ -71,7 +81,11 @@ async function withRefHarness(fn: (harness: RefHarness) => Promise<void>): Promi
       BLUEPRINT_CONTENT: {
         get: async (key: string) => {
           let files = r2.get(key);
-          return files === undefined ? null : { body: await blueprintBody(files) };
+          if (files === undefined) return null;
+          if (files instanceof Uint8Array) {
+            return { arrayBuffer: async () => files.slice().buffer as ArrayBuffer };
+          }
+          return { body: await blueprintBody(files) };
         },
       },
     };
@@ -130,6 +144,16 @@ describe("stampPromptRef", () => {
     });
   }, 30000);
 
+  it("stamps a prompt-marked blueprint to its release commit", async () => {
+    await withRefHarness(async ({ impl, kv }) => {
+      let { commitId } = await packBody(
+          [["server.js", "x\n"], ["PROMPT.md", BLUEPRINT_TEXT_V1]]);
+      kv.set("bp1", kvRecord(testMetadata("Reviewer", 3, true, commitId)));
+      expect(await impl.stampPromptRef({ kind: "blueprint", id: "bp1" }))
+          .toEqual({ kind: "blueprint", id: "bp1", version: commitId });
+    });
+  }, 30000);
+
   it("rejects unmarked and missing blueprints", async () => {
     await withRefHarness(async ({ impl, kv }) => {
       kv.set("bp-plain", kvRecord(testMetadata("App", 1, false)));
@@ -157,6 +181,17 @@ describe("getPromptRefText", () => {
       kv.set("bp1", kvRecord(testMetadata("Reviewer", 2, true)));
       r2.set("bp1/2", [["server.js", "x\n"], ["PROMPT.md", BLUEPRINT_TEXT_V1]]);
       let ref: PromptRef = { kind: "blueprint", id: "bp1", version: 2 };
+      expect(await impl.getPromptRefText(ref)).toBe(BLUEPRINT_TEXT_V1);
+    });
+  }, 30000);
+
+  it("resolves a blueprint ref from its pinned release commit", async () => {
+    await withRefHarness(async ({ impl, kv, r2 }) => {
+      let { commitId, pack } = await packBody(
+          [["server.js", "x\n"], ["PROMPT.md", BLUEPRINT_TEXT_V1]]);
+      kv.set("bp1", kvRecord(testMetadata("Reviewer", 3, true, commitId)));
+      r2.set(`bp1/${commitId}`, pack);
+      let ref: PromptRef = { kind: "blueprint", id: "bp1", version: commitId };
       expect(await impl.getPromptRefText(ref)).toBe(BLUEPRINT_TEXT_V1);
     });
   }, 30000);

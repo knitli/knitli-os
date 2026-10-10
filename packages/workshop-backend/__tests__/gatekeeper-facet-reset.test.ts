@@ -20,12 +20,14 @@ it("aborts gatekeeper<id> when a call through getGatekeeperFacet rejects with a 
     let impl = (instance as unknown as { impl: object }).impl;
     let reset = Object.assign(new Error("Durable Object reset."), { durableObjectReset: true });
     let abort = vi.fn<(name: string, reason: unknown) => void>();
-    let facets = { get: () => ({ applyAction: async () => { throw reset; } }), abort };
-    // The real method on a view of the real impl whose ctx.facets is the fake.
-    let view = Object.create(impl, { ctx: { value: { facets } } }) as
-        { getGatekeeperFacet(id: number): { applyAction(): Promise<void> } };
+    let facet = { applyAction: async () => { throw reset; } };
+    let facets = { get: () => facet, abort };
+    // The real method on a view of the real impl whose ctx is faked. getGatekeeperFacet is
+    // async and validates through ctx.restore, so the fake restores the facet directly.
+    let view = Object.create(impl, { ctx: { value: { facets, restore: async () => facet } } }) as
+        { getGatekeeperFacet(id: number): Promise<{ applyAction(): Promise<void> }> };
 
-    await expect(view.getGatekeeperFacet(7).applyAction()).rejects.toBe(reset);
+    await expect((await view.getGatekeeperFacet(7)).applyAction()).rejects.toBe(reset);
     expect(abort).toHaveBeenCalledExactlyOnceWith("gatekeeper7", expect.any(Error));
     vi.restoreAllMocks();
   });

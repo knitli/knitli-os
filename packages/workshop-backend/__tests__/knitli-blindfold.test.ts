@@ -82,6 +82,7 @@ function baseHooks(overrides: Record<string, any> = {}): AgentHooks {
     getGadgetHead: () => undefined,
     emitChatStreamEvent: () => {},
     getPromptRefText: async () => undefined,
+    getPromptCacheSalt: () => "",
     ...overrides,
   } as unknown as AgentHooks;
 }
@@ -257,6 +258,7 @@ async function withBlindfoldTurn(
       whoami: async () => USER,
       getChatContext: async () => ({ profile: USER }),
       setGadgetLastActive: async () => {},
+      publishNotification: async () => {},
     };
     impl.users = { idFromString: (id: string) => id, get: () => userStub };
     impl.ensureAmbientCapsules = async () => {};

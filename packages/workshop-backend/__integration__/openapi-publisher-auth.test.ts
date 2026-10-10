@@ -120,7 +120,8 @@ it("PUB-R09 a publisher session lists a provisional workspace with no chat activ
   await runInDurableObject(workspace, async instance => {
     const impl = (instance as unknown as { impl: any }).impl;
     impl.storage.gatekeepers.put({ id: 1, resourceTitle: 'Publisher fixture', class: {}, creationSpec: { type: 'gatekeeper', vendorId: 'native', resourceUrl: 'https://provider.invalid', typeUrlPattern: 'https://*' } });
-    impl.getGatekeeperFacet = () => ({ startSession: async () => new PublisherFixtureSession() });
+    impl.getGatekeeperFacet =
+        async () => ({ startSession: async () => new PublisherFixtureSession() });
   });
   const listed = async () => (await user.listGadgets()).some(g => g.id === id.toString());
   expect(await listed()).toBe(false);
@@ -143,7 +144,8 @@ it("PUB-R09 binding loopback sessions do not list a provisional workspace", asyn
   await runInDurableObject(workspace, async instance => {
     const impl = (instance as unknown as { impl: any }).impl;
     impl.storage.gatekeepers.put({ id: 1, resourceTitle: 'Publisher fixture', class: {}, creationSpec: { type: 'gatekeeper', vendorId: 'native', resourceUrl: 'https://provider.invalid', typeUrlPattern: 'https://*' } });
-    impl.getGatekeeperFacet = () => ({ startSession: async () => new PublisherFixtureSession() });
+    impl.getGatekeeperFacet =
+        async () => ({ startSession: async () => new PublisherFixtureSession() });
     const bump = vi.spyOn(impl, 'bumpLastActive');
     for (const caller of [{ from: 'gadget', gadgetId: 100 }, { from: 'agent', chatId: 1 }]) {
       expect(await impl.startGatekeeperSession({ type: 'gatekeeper', id: 1 }, caller)).toBeInstanceOf(PublisherFixtureSession);

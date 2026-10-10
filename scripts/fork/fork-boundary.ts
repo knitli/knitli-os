@@ -146,7 +146,10 @@ export function parseForkBoundary(text: string): ForkBoundary {
     }
     return {
       token: entry["token"],
-      path: checkPath(`reviewedSurvivors[${i}].path`, entry["path"]),
+      // Root files allowed: survivor matching is exact on (token, path), so unlike a
+      // forkOwned prefix a root filename cannot swallow unrelated packages. Lockfile
+      // integrity hashes kept by fork-only transitive deps land here.
+      path: checkPath(`reviewedSurvivors[${i}].path`, entry["path"], true),
       reason: checkReason(`reviewedSurvivors[${i}].reason`, entry["reason"]),
     };
   });

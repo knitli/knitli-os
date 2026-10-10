@@ -35,7 +35,7 @@
     "@gadgets/gatekeeper-kit": "workspace:*",
     "@gadgets/observability": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
-    "@modelcontextprotocol/client": "2.0.0"
+    "@modelcontextprotocol/client": "2.2.0"
   },
   "devDependencies": {
     "@gadgets/scripts": "workspace:*",

@@ -2302,6 +2302,14 @@ function messageInfoFromParsed(
   };
 }
 
+/** A Gmail history ID, checked to be the decimal integer its readers compare as a `BigInt`. */
+function gmailHistoryId(value: unknown): string {
+  if (typeof value !== "string" || !/^\d{1,20}$/.test(value)) {
+    throw new Error("Gmail returned an invalid history ID.");
+  }
+  return value;
+}
+
 export class GmailApi {
   private selfEmail: string;
 
@@ -3220,5 +3228,68 @@ export class GmailApi {
       `https://gmail.googleapis.com/gmail/v1/users/me/labels/${labelId}`, {method: "DELETE"});
     if (!response.ok) await gmailApiFailure("labels.delete", response);
     await response.body?.cancel();
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Push notifications
+  // ─────────────────────────────────────────────────────────────────
+
+  /** The mailbox's primary address and its current history ID. */
+  async getProfile(): Promise<{emailAddress: string; historyId: string}> {
+    const response = await this.authedFetch("https://gmail.googleapis.com/gmail/v1/users/me/profile");
+    if (!response.ok) await gmailApiFailure("users.getProfile", response);
+    const profile = await response.json() as {emailAddress?: unknown; historyId?: unknown};
+    if (typeof profile.emailAddress !== "string") throw new Error("Gmail returned an invalid profile.");
+    return {emailAddress: profile.emailAddress, historyId: gmailHistoryId(profile.historyId)};
+  }
+
+  /**
+   * Have Gmail publish every change to this mailbox to `topicName`, replacing any watch this
+   * Cloud project already has on it. Unfiltered: readers decide which changes matter.
+   */
+  async watch(topicName: string): Promise<{historyId: string; expiration: number}> {
+    const response = await this.authedFetch("https://gmail.googleapis.com/gmail/v1/users/me/watch", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({topicName}),
+    });
+    if (!response.ok) await gmailApiFailure("users.watch", response);
+    const watch = await response.json() as {historyId?: unknown; expiration?: unknown};
+    return {historyId: gmailHistoryId(watch.historyId), expiration: Number(watch.expiration)};
+  }
+
+  /**
+   * One page of the messages added to the mailbox after `startHistoryId`, by history record.
+   * Each message is partial: `labelIds` is what it arrived with, and is not guaranteed present.
+   * A `GmailApiError` with status 404 means `startHistoryId` is too old to read from.
+   */
+  async listMessagesAdded(startHistoryId: string, pageToken?: string): Promise<{
+    records: Array<{id: string; messages: Array<{id: string; threadId: string; labelIds?: string[]}>}>;
+    historyId: string;
+    nextPageToken?: string;
+  }> {
+    const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/history");
+    url.searchParams.set("startHistoryId", startHistoryId);
+    url.searchParams.set("historyTypes", "messageAdded");
+    url.searchParams.set("maxResults", "500");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    const response = await this.authedFetch(url.toString());
+    if (!response.ok) await gmailApiFailure("history.list", response);
+    const data = await response.json() as {
+      history?: Array<{
+        id?: unknown;
+        messagesAdded?: Array<{message: {id: string; threadId: string; labelIds?: string[]}}>;
+      }>;
+      historyId?: unknown;
+      nextPageToken?: string;
+    };
+    return {
+      records: (data.history ?? []).map(record => ({
+        id: gmailHistoryId(record.id),
+        messages: (record.messagesAdded ?? []).map(added => added.message),
+      })),
+      historyId: gmailHistoryId(data.historyId),
+      nextPageToken: data.nextPageToken,
+    };
   }
 }

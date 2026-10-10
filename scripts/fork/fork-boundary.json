@@ -371,40 +371,165 @@
   },
   "formatExceptions": [],
   "reviewedSurvivors": [
-    {
-      "token": "getModelList",
-      "path": "plans/prompt-presets-and-reasoning-controls.md",
-      "reason": "Historical design record references the pre-#616 AiGatewayConfig API; the plan is frozen, not code."
-    },
-    {
-      "token": "$schema",
-      "path": "packages/mcp-shared/src/openapi-publisher.ts",
-      "reason": "JSON-Schema dialect identifier in emitted OpenAPI specs; unrelated to wrangler $schema."
-    },
-    {
-      "token": "$schema",
-      "path": "packages/mcp-shared/__tests__/openapi-publisher.test.ts",
-      "reason": "Tests the JSON-Schema dialect identifier above; unrelated to wrangler $schema."
-    },
-    {
-      "token": "$schema",
-      "path": "scripts/release/manifest-lib.ts",
-      "reason": "Shared HANDLED_CONFIG_KEYS allowlist permits the key; generated configs omit it, so allowing-but-dropping is fail-safe."
-    },
-    {
-      "token": "TEST_ACTION_STATE",
-      "path": "packages/integration-tests/src/harness.ts",
-      "reason": "Adopted verbatim from upstream #620 via auto-merge; byte-identical, not a fork survival."
-    },
-    {
-      "token": "TestActionState",
-      "path": "packages/integration-tests/fixtures/gatekeeper-test/src/test-gatekeeper.ts",
-      "reason": "Shared with upstream #620; type and accessor are byte-identical."
-    },
-    {
-      "token": "anthropicCompat",
-      "path": "packages/workshop-backend/src/ai-models.ts",
-      "reason": "Shared local; upstream's pi-0.99 restructure kept the semantics and the fork thinking-level hunk below it is intact."
-    }
+      {
+        "token": "M1HhlnGWqcA",
+        "path": "pnpm-lock.yaml",
+        "reason": "Integrity hash of @modelcontextprotocol/client@2.0.0, kept because the fork's agents@0.24.0 dep pulls it transitively via @cloudflare/codemode; upstream never had agents."
+      },
+      {
+        "token": "PQp9ZTwKXNeO5wzbfKL7H3MYpCorM4oFBoQrdjnBgEoqG",
+        "path": "pnpm-lock.yaml",
+        "reason": "Integrity hash of @modelcontextprotocol/client@2.0.0, kept because the fork's agents@0.24.0 dep pulls it transitively via @cloudflare/codemode; upstream never had agents."
+      },
+      {
+        "token": "QXemssEuuOvLLmLO",
+        "path": "pnpm-lock.yaml",
+        "reason": "Integrity hash of @modelcontextprotocol/client@2.0.0, kept because the fork's agents@0.24.0 dep pulls it transitively via @cloudflare/codemode; upstream never had agents."
+      },
+      {
+        "token": "RjhsvS1FKrDbKux",
+        "path": "pnpm-lock.yaml",
+        "reason": "Integrity hash of @modelcontextprotocol/client@2.0.0, kept because the fork's agents@0.24.0 dep pulls it transitively via @cloudflare/codemode; upstream never had agents."
+      },
+      {
+        "token": "kqM3IQHtISw",
+        "path": "pnpm-lock.yaml",
+        "reason": "Integrity hash of @modelcontextprotocol/client@2.0.0, kept because the fork's agents@0.24.0 dep pulls it transitively via @cloudflare/codemode; upstream never had agents."
+      },
+      {
+        "token": "pJCEwGG7Lfr",
+        "path": "pnpm-lock.yaml",
+        "reason": "Integrity hash of @modelcontextprotocol/client@2.0.0, kept because the fork's agents@0.24.0 dep pulls it transitively via @cloudflare/codemode; upstream never had agents."
+      },
+      {
+        "token": "ScriptKind",
+        "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
+        "reason": "Frozen design record referencing the same API; not code."
+      },
+      {
+        "token": "ScriptKind",
+        "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
+        "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
+      },
+      {
+        "token": "getPreEmitDiagnostics",
+        "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
+        "reason": "Frozen design record referencing the same API; not code."
+      },
+      {
+        "token": "getPreEmitDiagnostics",
+        "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
+        "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
+      },
+      {
+        "token": "CompilerOptions",
+        "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
+        "reason": "Frozen design record referencing the same API; not code."
+      },
+      {
+        "token": "CompilerOptions",
+        "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
+        "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
+      },
+      {
+        "token": "createCompilerHost",
+        "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
+        "reason": "Frozen design record referencing the same API; not code."
+      },
+      {
+        "token": "createCompilerHost",
+        "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
+        "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
+      },
+      {
+        "token": "flattenDiagnosticMessageText",
+        "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
+        "reason": "Frozen design record referencing the same API; not code."
+      },
+      {
+        "token": "flattenDiagnosticMessageText",
+        "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
+        "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
+      },
+      {
+        "token": "shouldCreateNewSourceFile",
+        "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
+        "reason": "Frozen design record referencing the same API; not code."
+      },
+      {
+        "token": "shouldCreateNewSourceFile",
+        "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
+        "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
+      },
+      {
+        "token": "createSourceFile",
+        "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
+        "reason": "Frozen design record referencing the same API; not code."
+      },
+      {
+        "token": "createSourceFile",
+        "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
+        "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
+      },
+      {
+        "token": "pendingAction",
+        "path": "packages/integration-tests/__tests__/fork/observer-privacy.test.ts",
+        "reason": "Local in the fork's observer-privacy test; unrelated to upstream's removed uses."
+      },
+      {
+        "token": "_gadget",
+        "path": "packages/integration-tests/__tests__/fork/observer-privacy.test.ts",
+        "reason": "Intentionally-ignored local in the fork test."
+      },
+      {
+        "token": "_gadget",
+        "path": "packages/integration-tests/__tests__/workshop-blueprints.test.ts",
+        "reason": "Intentionally-ignored local in the test."
+      },
+      {
+        "token": "fromBase64",
+        "path": "packages/workshop-backend/src/user.ts",
+        "reason": "Standard Uint8Array.fromBase64 runtime API, not the upstream helper #659 removed."
+      },
+      {
+        "token": "menuItem",
+        "path": "packages/workshop-frontend/src/features/chat/controls/ComposerEffortSelector.test.tsx",
+        "reason": "Local query helper in the fork's effort-selector test."
+      },
+      {
+        "token": "menuItem",
+        "path": "packages/workshop-frontend/src/features/chat/controls/ComposerPromptSelector.test.tsx",
+        "reason": "Local query helper in the fork's prompt-selector test."
+      },
+      {
+        "token": "readAllPullReviewComments",
+        "path": "packages/gatekeeper-github/src/github.ts",
+        "reason": "Upstream's own helper, still present in merged github.ts; #702 moved most uses to kit."
+      },
+      {
+        "token": "syncPullReviewComments",
+        "path": "packages/gatekeeper-github/src/github.ts",
+        "reason": "Upstream's own helper, still present in merged github.ts; #702 moved most uses to kit."
+      },
+      {
+        "token": "commentTargetFromResponse",
+        "path": "packages/gatekeeper-github/src/github.ts",
+        "reason": "Upstream's own helper, still present in merged github.ts; #702 moved most uses to kit."
+      },
+      {
+        "token": "recordOversized",
+        "path": "packages/workshop-backend/src/git-cache.ts",
+        "reason": "Upstream's own helper, still present in merged git-cache.ts; #656 moved most uses."
+      },
+      {
+        "token": "currentCompactions",
+        "path": "packages/workshop-frontend/src/ChatInterface.tsx",
+        "reason": "Local in merged ChatInterface; #683 dwindled upstream's uses."
+      },
+      {
+        "token": "isVisibleSavedChangesMessage",
+        "path": "packages/workshop-frontend/src/ChatInterface.tsx",
+        "reason": "Local predicate in merged ChatInterface; #659 dwindled upstream's uses."
+      }
   ]
 }

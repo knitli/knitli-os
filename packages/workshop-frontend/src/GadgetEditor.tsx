@@ -18,7 +18,7 @@ import {
 } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { useAuthenticatedApi } from './AuthContext'
-import { useConnectionLost } from './RpcContext'
+import { useConnectionLost, useRpcStub } from './RpcContext'
 import UserMenu from './components/UserMenu'
 import SiteLogo from './components/SiteLogo'
 
@@ -36,6 +36,7 @@ import {
 } from '@gadgets/workshop-shared/api'
 import ObserverConfigModal from './ObserverConfigModal'
 import WorkpieceCodeInterface from './features/code/WorkpieceCodeInterface'
+import type { ChatContentReader } from './features/code/otClient'
 import GadgetUI from './GadgetUI'
 import GadgetUseView from './GadgetUseView'
 import Connections from './Connections'
@@ -57,6 +58,8 @@ import { FormatGlyph } from './components/format/FormatVisuals'
 import ShareModal from './ShareModal'
 import { GadgetPresence } from './components/GadgetPresence'
 import BlueprintModal from './BlueprintModal'
+import { UpdateFromBlueprintDialog } from './features/blueprint-updates/UpdateFromBlueprintDialog'
+import { useBlueprintUpdateAvailable } from './features/blueprint-updates/useBlueprintUpdateAvailable'
 import TopBarNotice from './TopBarNotice'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
 import { useActionEntries, useActions } from './useActions'
@@ -354,6 +357,11 @@ const WORKSPACE_TRANSITION_MS = 200
 
 const isBrowser = typeof window !== 'undefined'
 
+// Below Tailwind's `md` breakpoint the chat and the workspace pane take turns filling the screen
+// (the `max-md:` classes in the layout below), where above it they sit side by side. The query is
+// the one `max-md:` compiles to, so the two agree at fractional widths and at any root font size.
+const isSinglePaneLayout = () => window.matchMedia?.('(width < 48rem)').matches ?? false
+
 function clampChatWidth(width: number) {
   if (!isBrowser) return Math.max(MIN_CHAT_WIDTH, Math.min(DEFAULT_CHAT_WIDTH, width))
   const max = Math.max(MIN_CHAT_WIDTH, window.innerWidth - MIN_WORKSPACE_WIDTH)
@@ -421,6 +429,18 @@ function getInitialAppRailExpanded(): boolean {
   }
 }
 
+// The menu item that opens the "Update from blueprint" dialog, in the desktop and mobile menus.
+const UpdateFromBlueprintLabel = ({ updateAvailable }: { updateAvailable: boolean }) => (
+  <>
+    <span className="min-w-0 flex-1">Update from blueprint…</span>
+    {updateAvailable && (
+      <span className="ml-3 flex-shrink-0 text-[11px] leading-4 font-medium text-kumo-brand">
+        Update available
+      </span>
+    )}
+  </>
+)
+
 function NoGadgetPlaceholder({ height }: { height: string }) {
   return (
     <div className="flex items-center justify-center px-6 text-center" style={{ height }}>
@@ -443,9 +463,10 @@ export default function GadgetEditor() {
   const id = params.id
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
+  const publicApi = useRpcStub()
 
-  const { chat: chatParam, w: workpieceParam } = useSearch({ strict: false }) as
-    { chat?: number; w?: number }
+  const { chat: chatParam, w: workpieceParam, showChat: showChatParam } =
+    useSearch({ strict: false }) as { chat?: number; w?: number; showChat?: true }
   const urlChatId = chatParam !== undefined ? chatParam : null
   const urlWorkpieceId = workpieceParam !== undefined ? workpieceParam : null
 
@@ -520,6 +541,7 @@ export default function GadgetEditor() {
   const [activityClosing, setActivityClosing] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [blueprintModalOpen, setBlueprintModalOpen] = useState(false)
+  const [blueprintUpdateDialogOpen, setBlueprintUpdateDialogOpen] = useState(false)
   const [previewMode, _setPreviewMode] = useState(false)
   const [workpieceRailExpanded, setWorkpieceRailExpanded] = useState(getInitialAppRailExpanded)
   const workpieceRailWidth = workpieceRailExpanded
@@ -630,6 +652,9 @@ export default function GadgetEditor() {
   // content), likewise subscription-shaped (see ChatLiveEditPreviews).
   const [liveEditPreviews, setLiveEditPreviews] =
     useState<ChatLiveEditPreviews | undefined>(undefined)
+  // The selected chat's uncommitted content as the code view holds it, plumbed the other way:
+  // the chat reads it to look for unresolved merge conflicts before accepting.
+  const [chatContent, setChatContent] = useState<ChatContentReader | undefined>(undefined)
   const [streamingActiveFileState, setStreamingActiveFileState] = useState<{
     chatId: number
     file: ActiveFileTarget | null | undefined
@@ -750,6 +775,15 @@ export default function GadgetEditor() {
   const selectedGadgetSummary =
     selectedWorkpieceSummary?.type === 'gadget' ? selectedWorkpieceSummary : undefined
   const selectedGadgetId = selectedGadgetSummary?.id ?? null
+  // A gadget still pending in a chat has no committed code for an update to be merged into.
+  const canUpdateFromBlueprint = selectedGadgetSummary?.commitId !== undefined
+  // An upstream that names no blueprint records that the gadget was built from scratch, so there
+  // is no blueprint whose update it could sensibly take. No upstream at all is different: the
+  // gadget's origin is unknown, or this is a "use" collaborator's view, which is not told.
+  const builtFromScratch = selectedGadgetSummary?.upstream !== undefined &&
+    selectedGadgetSummary.upstream.blueprintId === undefined
+  const blueprintUpdateAvailable =
+    useBlueprintUpdateAvailable(publicApi, selectedGadgetSummary?.upstream)
   // A worktree has only Code; the chosen tab is remembered for the next gadget.
   const activeTab: RightTab = selectedWorkpieceSummary?.type === 'worktree' ? 'code' : chosenTab
 
@@ -1111,6 +1145,22 @@ export default function GadgetEditor() {
     turnOutputRef.current = null
     setUserNavigatedToList(false)
   }, [id])
+
+  // ?showChat (a notification's "Open task") asks to see the chat, not merely select it: full-screen
+  // preview covers it, and on a phone so does the pane. Declared after the reset above, so arriving
+  // from another workspace beats its stored view; dropped once honoured, so the next request for
+  // the same chat works too.
+  useEffect(() => {
+    if (!showChatParam) return
+    exitGadgetFullscreen()
+    if (isSinglePaneLayout()) setWorkspaceVisibility('closed')
+    navigate({
+      to: '/workspace/$id',
+      params: { id: id! },
+      search: (prev: Record<string, unknown>) => ({ ...prev, showChat: undefined }),
+      replace: true,
+    })
+  }, [showChatParam, id, navigate, setWorkspaceVisibility, exitGadgetFullscreen])
 
   // ── navigation helper ────────────────────────────────────────────────────────
   const navigateToChat = useCallback(
@@ -1573,14 +1623,40 @@ export default function GadgetEditor() {
             <ShareNetwork size={15} />
           </WorkshopIconButton>
 
-          <WorkshopIconButton
-            onClick={() => setBlueprintModalOpen(true)}
-            disabled={!selectedGadgetStub}
-            title="Blueprints"
-            aria-label="Blueprints"
-          >
-            <Blueprint size={16} />
-          </WorkshopIconButton>
+          <DropdownMenu>
+            <DropdownMenu.Trigger
+              render={
+                <WorkshopIconButton
+                  disabled={!selectedGadgetStub}
+                  title={blueprintUpdateAvailable ? 'Blueprints (update available)' : 'Blueprints'}
+                  aria-label={blueprintUpdateAvailable ? 'Blueprints (update available)' : 'Blueprints'}
+                  className="relative"
+                >
+                  <Blueprint size={16} />
+                  {blueprintUpdateAvailable && (
+                    <span
+                      aria-hidden="true"
+                      className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-kumo-brand"
+                    />
+                  )}
+                </WorkshopIconButton>
+              }
+            />
+            <DropdownMenu.Content className={MENU_CONTENT} style={MENU_POSITIONER_STYLE}>
+              <DropdownMenu.Item onClick={() => setBlueprintModalOpen(true)} className={MENU_ITEM}>
+                Publish as blueprint…
+              </DropdownMenu.Item>
+              {!builtFromScratch && (
+                <DropdownMenu.Item
+                  disabled={!canUpdateFromBlueprint}
+                  onClick={() => setBlueprintUpdateDialogOpen(true)}
+                  className={MENU_ITEM}
+                >
+                  <UpdateFromBlueprintLabel updateAvailable={blueprintUpdateAvailable} />
+                </DropdownMenu.Item>
+              )}
+            </DropdownMenu.Content>
+          </DropdownMenu>
 
           {!metadata.owner && (
             <WorkshopIconButton
@@ -1650,11 +1726,17 @@ export default function GadgetEditor() {
                 type="button"
                 ref={mobileMenuButtonRef}
                 aria-label="More workspace views and actions"
-                className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg ${
+                className={`relative flex h-11 w-11 shrink-0 items-center justify-center rounded-lg ${
                   mobileMoreActive ? 'bg-kumo-tint text-kumo-default' : 'text-kumo-subtle'
                 }`}
               >
                 <DotsThree size={20} weight="bold" />
+                {blueprintUpdateAvailable && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-kumo-brand"
+                  />
+                )}
               </button>
             }
           />
@@ -1707,8 +1789,17 @@ export default function GadgetEditor() {
                   onClick={() => setBlueprintModalOpen(true)}
                   className={MENU_ITEM}
                 >
-                  Blueprints
+                  Publish as blueprint…
                 </DropdownMenu.Item>
+                {!builtFromScratch && (
+                  <DropdownMenu.Item
+                    disabled={!selectedGadgetStub || !canUpdateFromBlueprint}
+                    onClick={() => setBlueprintUpdateDialogOpen(true)}
+                    className={MENU_ITEM}
+                  >
+                    <UpdateFromBlueprintLabel updateAvailable={blueprintUpdateAvailable} />
+                  </DropdownMenu.Item>
+                )}
                 <DropdownMenu.Item
                   disabled={!mobilePreviewActive}
                   onClick={enterGadgetFullscreen}
@@ -1771,6 +1862,7 @@ export default function GadgetEditor() {
                   onChatChangesChange={setChatChanges}
                   onLiveRowsChange={setLiveRows}
                   onLiveEditPreviewsChange={setLiveEditPreviews}
+                  chatContent={chatContent}
                   onStreamingActiveFileChange={handleStreamingActiveFileChange}
                   pendingConsoleLogCount={consoleLogCount}
                   consoleLogPreview={
@@ -1998,6 +2090,7 @@ export default function GadgetEditor() {
                   isAgentActive={isAgentActive}
                   isVisible={activeTab === 'code'}
                   onHasCodeChange={setHasCode}
+                  onChatContentChange={setChatContent}
                 />
               ) : (
                 <NoGadgetPlaceholder height="100%" />
@@ -2080,6 +2173,25 @@ export default function GadgetEditor() {
               overseer={overseer.stub}
               gadget={selectedGadgetStub}
               metadata={metadata}
+            />
+          )}
+          {blueprintUpdateDialogOpen && selectedGadgetStub && selectedGadgetSummary && (
+            <UpdateFromBlueprintDialog
+              gadget={{
+                title: selectedGadgetSummary.title,
+                upstream: selectedGadgetSummary.upstream,
+                client: selectedGadgetStub,
+              }}
+              overseer={overseer.stub}
+              publicApi={publicApi}
+              onClose={() => setBlueprintUpdateDialogOpen(false)}
+              onProposed={chatId => {
+                setBlueprintUpdateDialogOpen(false)
+                navigateToChat(chatId)
+                // The proposal is in the chat, with whatever the agent says of it, and so is the
+                // way to accept it. Where a pane hides the chat, selecting it is not showing it.
+                if (isSinglePaneLayout()) setWorkspaceVisibility('closed')
+              }}
             />
           )}
         </>

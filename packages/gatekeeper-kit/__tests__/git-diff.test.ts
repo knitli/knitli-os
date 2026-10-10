@@ -1,6 +1,6 @@
 // Pure-logic coverage for git-diff.ts: tree-object parsing, the pruning tree-to-tree walk, and
-// the line-level unified diff whose hunks must match the shape parsePatch produces from GitHub's
-// own patches.
+// the line-level unified diff whose hunks must match the shape a gatekeeper's patch reader
+// produces from the provider's own patches.
 
 import { describe, expect, it } from "vitest";
 import {
@@ -412,6 +412,54 @@ describe("diffGitTrees", () => {
       { kind: "removed", text: "hello", oldLineNumber: 1 },
       { kind: "added", text: "\uFEFFhello", newLineNumber: 1 },
     ]);
+  });
+
+  it("omits the hunks, not the counts, of a file past the per-file output cap", async () => {
+    // A rewrite past the edit-distance cap takes the wholesale path: every line removed and added.
+    const lines = (prefix: string) =>
+      text(Array.from({ length: 3000 }, (_, i) => `${prefix}${i}`).join("\n") + "\n");
+    const { source } = fakeSource(
+      {
+        [oid(30)]: [{ mode: "100644", name: "lock.json", oid: oid(1) }],
+        [oid(31)]: [{ mode: "100644", name: "lock.json", oid: oid(2) }],
+      },
+      { [oid(1)]: lines("old"), [oid(2)]: lines("new") },
+    );
+    const [file] = await diffGitTrees(source, oid(30), oid(31));
+    expect(file).toEqual({
+      path: "lock.json", status: "modified", additions: 3000, deletions: 3000,
+      diffOmitted: true, hunks: [],
+    });
+  });
+
+  it("still emits a large added file under the per-file output cap in full", async () => {
+    const added = Array.from({ length: 2000 }, (_, i) => `line${i}`);
+    const { source } = fakeSource(
+      { [oid(30)]: [], [oid(31)]: [{ mode: "100644", name: "gen.txt", oid: oid(1) }] },
+      { [oid(1)]: text(added.join("\n") + "\n") },
+    );
+    const [file] = await diffGitTrees(source, oid(30), oid(31));
+    expect(file.diffOmitted).toBe(false);
+    expect(file.additions).toBe(2000);
+    expect(file.hunks[0].lines.map(line => line.text)).toEqual(added);
+  });
+
+  it("omits the remaining files once the total output budget is spent", async () => {
+    const count = 12;
+    const content = text(Array.from({ length: 1000 }, () => "x".repeat(100)).join("\n") + "\n");
+    const names = Array.from({ length: count }, (_, i) => `f${String(i).padStart(2, "0")}.txt`);
+    const { source } = fakeSource(
+      { [oid(30)]: [], [oid(31)]: names.map(name => ({ mode: "100644", name, oid: oid(1) })) },
+      { [oid(1)]: content },
+    );
+    // Each file fits the per-file cap, but together they overrun the total.
+    const files = await diffGitTrees(source, oid(30), oid(31));
+    const emitted = files.filter(file => !file.diffOmitted);
+    expect(emitted.length).toBeGreaterThan(0);
+    expect(emitted.length).toBeLessThan(count);
+    expect(files.map(file => file.diffOmitted)).toEqual(
+      names.map((_, i) => i >= emitted.length));
+    for (const file of files) expect(file.additions).toBe(1000);
   });
 
   it("throws TreeUnavailableError when a needed tree cannot be loaded", async () => {

@@ -699,10 +699,11 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 
 ### Ambient-provisioned accounts bypass resource policy at minting
 
-- **Where:** `getGatekeeperClassFor()`'s policy call in `packages/workshop-backend/src/user.ts`
-  (passes `account.autoProvisioned`), the `ambient` branch of `isResourceDisabled()` in
-  `packages/workshop-backend/src/admin-config.ts`, and the matching bypass in
-  `filterEnabledResources()` for listings.
+- **Where:** `getGatekeeperClassFor()`'s policy calls in `packages/workshop-backend/src/user.ts`
+  (pass `account.autoProvisioned`), `createResourceGatekeeper()`'s (passes the vendor's
+  `autoProvisionsAccount`, since a creation names no account), the `ambient` branch of
+  `isResourceDisabled()` in `packages/workshop-backend/src/admin-config.ts`, and the matching
+  bypass in `filterEnabledResources()` for listings.
 - **What:** an account provisioned without an OAuth flow skips the resource-allowance check when
   a capability is minted, and its resources list unfiltered. Vendor-level checks still apply: a
   disabled gatekeeper, or an ambient vendor the admin set to "disabled", is refused the same way.
@@ -714,6 +715,13 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 - **2026-09-30 sync:** upstream #586's admin-policy test provisions ambiently and expects resource
   refusal at minting; the test now connects a regular account for the resource assertions (the
   ambient mechanism there was harness convenience, not what the test pins).
+- **2026-10-10 sync:** upstream #694 added a second mint-time policy assert
+  (`#assertResourceEnabled`, called from `getGatekeeperClassFor` and the new account-less
+  `createResourceGatekeeper`) that takes no ambient flag. Under upstream's opt-out check that is
+  correct; under the fork's opt-in check it refused every ambient mint, so the fork threads
+  ambience through both callers. The admin-policy test's new creation hunk is adapted the same
+  way the minting assertions were: a disabled pattern still blocks a regular account's mint,
+  while the ambient-vendor creation queues.
 
 ### Worktree commits require full 40-hex SHAs (retired 2026-09-26)
 

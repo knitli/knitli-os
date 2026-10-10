@@ -292,7 +292,10 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
     impl.env = {
       ...impl.env,
       BLUEPRINTS: { delete: async () => {} },
-      BLUEPRINT_CONTENT: { delete: async () => {} },
+      BLUEPRINT_CONTENT: {
+        delete: async () => {},
+        list: async () => ({ objects: [], truncated: false }),
+      },
     };
     Object.defineProperty(impl.ctx, "exports", {
       value: { AdminSettings: { getByName: () => ({ deleteFeaturedBlueprint: async () => {} }) } },

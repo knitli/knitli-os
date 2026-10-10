@@ -257,6 +257,7 @@ function fakeHooks(overrides: {
       overrides.presetCalls?.push(ref);
       return overrides.presetText;
     },
+    getPromptCacheSalt: () => "",
   } as unknown as AgentHooks;
 }
 

@@ -1,4 +1,5 @@
 import { formatAttachmentSize } from "../../attachmentFormatting";
+import { MAX_SPREADSHEET_UPLOAD_BYTES, isSpreadsheetMimeType } from "./spreadsheetTypes";
 
 export const MAX_CHAT_ATTACHMENT_BYTES = 1024 * 1024;
 export const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 5 * 1024 * 1024;
@@ -19,6 +20,14 @@ const canvasToBlob = (canvas: HTMLCanvasElement, type: string, quality: number):
 export const prepareChatAttachment = async (
   file: File,
 ): Promise<{ blob: Blob; mimeType: string }> => {
+  if (isSpreadsheetMimeType(file.type)) {
+    if (file.size > MAX_SPREADSHEET_UPLOAD_BYTES) {
+      throw new Error(
+        `Spreadsheets must be ${formatAttachmentSize(MAX_SPREADSHEET_UPLOAD_BYTES)} or smaller.`,
+      );
+    }
+    return { blob: file, mimeType: file.type };
+  }
   if (!file.type.startsWith("image/")) {
     if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
       throw new Error(

@@ -1,21 +1,49 @@
-// Pure helpers for simulating pull request diffs from raw git objects. When a pull request's head
-// branch has queued pushes, GitHub cannot compute the diff (the pushed commits are not on the
-// remote yet), so the gatekeeper computes it locally: a pruning tree-to-tree walk enumerates the
-// changed paths, and jsdiff's line-level Myers diff produces hunks in the same shape GitHub's own
-// patches are parsed into (`parsePatch` in github.ts).
+// Pure helpers for simulating a pull/merge request's diff from raw git objects. When the source
+// branch has queued pushes, the provider cannot compute the diff (the pushed commits are not on
+// the remote yet), so the gatekeeper computes it locally: a pruning tree-to-tree walk enumerates
+// the changed paths, and jsdiff's line-level Myers diff produces hunks in the same shape a
+// provider's unified patches parse into, so one reader (a gatekeeper's `parsePatch`) serves both.
 //
 // This module deliberately has no platform imports (in particular no `cloudflare:workers`), so its
-// logic runs under the package's Node vitest project. All object reads go through an injected
-// `TreeDiffSource`, so the callers decide where bytes come from (the workspace git cache, with
-// GitHub's git-data REST API as fallback for the on-remote side).
+// logic runs under the kit's Node vitest project. All object reads go through an injected
+// `TreeDiffSource`, so the callers decide where bytes come from (the workspace git cache, with the
+// provider's object-by-oid REST endpoints as fallback for the on-remote side, where it has them).
 
 import { structuredPatch } from "diff";
 import type { GitOid } from "@gadgets/workshop-shared/gatekeeper";
-import type {
-  GitHubPullRequestDiffFile,
-  GitHubPullRequestDiffHunk,
-  GitHubPullRequestDiffLine,
-} from "./types";
+
+/** One line inside a diff hunk. */
+export type GitDiffLine = {
+  kind: "context" | "added" | "removed";
+  text: string;
+  oldLineNumber?: number;
+  newLineNumber?: number;
+};
+
+/** One hunk inside a changed file: its `@@` header and lines. */
+export type GitDiffHunk = {
+  header: string;
+  lines: GitDiffLine[];
+};
+
+/**
+ * One changed file in a diff, in the shape the GitHub and GitLab gatekeepers expose to agents
+ * (their agent-facing `.d.ts` files restate it under a vendor-prefixed name; GitLab's omits
+ * `"copied"`, which GitLab never reports).
+ */
+export type GitDiffFile = {
+  path: string;
+  previousPath?: string;
+  status: "added" | "modified" | "removed" | "renamed" | "copied";
+  additions: number;
+  deletions: number;
+  /** True when the patch is not included (e.g. binary files, very large files or diffs). */
+  diffOmitted?: boolean;
+  hunks: GitDiffHunk[];
+};
+
+/** A `GitDiffFile` found by a tree walk, which detects neither renames nor copies. */
+export type TreeDiffFile = GitDiffFile & { status: "added" | "modified" | "removed" };
 
 /** One entry of a git tree object: mode as written (e.g. `"100644"`, `"40000"`), name, and oid. */
 export type GitTreeEntry = {
@@ -31,7 +59,7 @@ export type GitTreeEntry = {
  * `TreeUnavailableError`, and the caller degrades (an enumerable-but-wrong diff would be worse
  * than none). `getBlob` returns `"unavailable"` for a blob that cannot or should not be loaded
  * (missing, or over the size cap); the affected file is then reported with `diffOmitted: true`
- * rather than failing the whole diff -- the same shape GitHub uses for large and binary files.
+ * rather than failing the whole diff -- the same shape providers use for large and binary files.
  */
 export type TreeDiffSource = {
   getTree(oid: GitOid): Promise<GitTreeEntry[] | null>;
@@ -55,6 +83,18 @@ export const MAX_DIFF_LINES_PER_FILE = 20000;
 export const MAX_DIFF_BLOB_BYTES = 1024 * 1024;
 /** Total bytes of blob content one tree diff may load; further files are reported as omitted. */
 export const MAX_DIFF_TOTAL_BYTES = 20 * 1024 * 1024;
+/**
+ * Caps on emitted hunks, measured cheaply as line text length plus `DIFF_LINE_OVERHEAD` per
+ * line: per file, and across one tree diff (past either, files keep their line counts but are
+ * reported with diffOmitted and no hunks).
+ * Gatekeepers cache the whole simulated comparison as one Durable Object storage value, which
+ * is capped at 2 MB; the total stays well under that, leaving room for the rest of the record
+ * and for non-Latin-1 text, which V8's serializer stores at two bytes per character.
+ */
+export const MAX_DIFF_OUTPUT_PER_FILE = 256 * 1024;
+export const MAX_DIFF_OUTPUT_TOTAL = 768 * 1024;
+/** Approximate serialized size of one diff line's fields beyond its text. */
+const DIFF_LINE_OVERHEAD = 48;
 /**
  * Myers edit-distance cap (jsdiff's `maxEditLength`). A file whose minimal diff would exceed
  * this many edits is emitted as one whole remove-then-add block instead -- still a correct
@@ -196,24 +236,26 @@ function isBinary(bytes: Uint8Array): boolean {
 }
 
 /**
- * Diff two trees into the same per-file shape GitHub's compare/PR-files responses normalize to.
- * Gitlinks (submodule pointers), binary files, files over `MAX_DIFF_BLOB_BYTES`, and files whose
- * content is unavailable are reported with `diffOmitted: true` and no hunks; renames are not
- * detected (they appear as a remove plus an add, which GitHub's own rename detection will
- * supersede once the work reaches the remote).
+ * Diff two trees into the same per-file shape a provider's compare / changed-files responses
+ * normalize to. Gitlinks (submodule pointers), binary files, files over `MAX_DIFF_BLOB_BYTES`,
+ * and files whose content is unavailable are reported with `diffOmitted: true`, no hunks and zero
+ * counts; a file whose hunks would exceed the `MAX_DIFF_OUTPUT_*` caps keeps its counts but not
+ * its hunks. Renames are not detected (they appear as a remove plus an add, which the provider's
+ * own rename detection will supersede once the work reaches the remote).
  */
 export async function diffGitTrees(
   source: TreeDiffSource,
   oldTree: GitOid | null,
   newTree: GitOid | null,
-): Promise<GitHubPullRequestDiffFile[]> {
+): Promise<TreeDiffFile[]> {
   const entries: ChangedEntry[] = [];
   await walkTreeDiff(source, oldTree, newTree, "", entries);
 
-  const files: GitHubPullRequestDiffFile[] = [];
+  const files: TreeDiffFile[] = [];
   let budget = MAX_DIFF_TOTAL_BYTES;
+  let outputBudget = MAX_DIFF_OUTPUT_TOTAL;
   for (const entry of entries) {
-    const omitted: GitHubPullRequestDiffFile = {
+    const omitted: TreeDiffFile = {
       path: entry.path,
       status: entry.status,
       additions: 0,
@@ -223,7 +265,7 @@ export async function diffGitTrees(
     };
 
     // Submodule pointers have no blob content; a same-oid entry differs only in mode. Both are
-    // reported without a patch, like GitHub does.
+    // reported without a patch, as providers do.
     const oldKind = entry.oldEntry ? treeEntryKind(entry.oldEntry.mode) : undefined;
     const newKind = entry.newEntry ? treeEntryKind(entry.newEntry.mode) : undefined;
     if (oldKind === "gitlink" || newKind === "gitlink" ||
@@ -247,6 +289,12 @@ export async function diffGitTrees(
     const decoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
     const { hunks, additions, deletions } =
       diffTextLines(decoder.decode(oldContent), decoder.decode(newContent));
+    const outputSize = diffOutputSize(hunks);
+    if (outputSize > Math.min(MAX_DIFF_OUTPUT_PER_FILE, outputBudget)) {
+      files.push({ ...omitted, additions, deletions });
+      continue;
+    }
+    outputBudget -= outputSize;
     files.push({
       path: entry.path,
       status: entry.status,
@@ -259,6 +307,15 @@ export async function diffGitTrees(
   return files;
 }
 
+function diffOutputSize(hunks: GitDiffHunk[]): number {
+  let size = 0;
+  for (const { header, lines } of hunks) {
+    size += header.length;
+    for (const { text } of lines) size += text.length + DIFF_LINE_OVERHEAD;
+  }
+  return size;
+}
+
 function splitLines(text: string): string[] {
   if (text.length === 0) return [];
   const lines = text.split("\n");
@@ -266,7 +323,7 @@ function splitLines(text: string): string[] {
   return lines;
 }
 
-/** The marker line git and GitHub emit after a final line missing its newline. */
+/** The marker line git (and every provider's patch output) emits after a final line missing its newline. */
 const NO_NEWLINE_MARKER = "\\ No newline at end of file";
 
 /** git's default unified-diff context. */
@@ -275,7 +332,7 @@ const HUNK_CONTEXT_LINES = 3;
 /**
  * A hunk's `@@` header in git's own format: the count is omitted when it is 1, and a zero-count
  * side names the line it attaches after (git's `-l,0` / `+m,0` convention, 0 at the start of
- * the file) -- which is how GitHub's patches spell it, so `parsePatch` sees one grammar.
+ * the file) -- which is how provider patches spell it, so a patch reader sees one grammar.
  */
 function hunkHeader(oldStart: number, oldCount: number, newStart: number, newCount: number)
     : string {
@@ -286,10 +343,10 @@ function hunkHeader(oldStart: number, oldCount: number, newStart: number, newCou
 /**
  * Unified-diff a file's text at line granularity: jsdiff's `structuredPatch` (a Myers diff, the
  * same engine behind workshop-backend's formatUnifiedDiff) with git's default 3 lines of
- * context, converted to the same shape `parsePatch` produces from GitHub's own patches --
- * including git's `\ No newline at end of file` marker after a final line missing its newline
- * (a numberless context line, exactly as `parsePatch` preserves it), which jsdiff emits
- * natively.
+ * context, converted to the same shape a gatekeeper's patch reader produces from the provider's
+ * own patches -- including git's `\ No newline at end of file` marker after a final line missing
+ * its newline (a numberless context line, exactly as such readers preserve it), which jsdiff
+ * emits natively.
  *
  * Minimality is bounded two ways, both degrading to one whole remove-then-add block (still a
  * correct unified diff, just not a minimal one): a diff needing more than
@@ -300,7 +357,7 @@ function hunkHeader(oldStart: number, oldCount: number, newStart: number, newCou
  * diffs minimally.
  */
 export function diffTextLines(oldText: string, newText: string): {
-  hunks: GitHubPullRequestDiffHunk[];
+  hunks: GitDiffHunk[];
   additions: number;
   deletions: number;
 } {
@@ -339,11 +396,11 @@ export function diffTextLines(oldText: string, newText: string): {
   }
 
   // Convert jsdiff's hunks (prefixed line strings, one-based starts and counts) to numbered
-  // lines, walking each hunk exactly as `parsePatch` walks a GitHub patch. One convention
+  // lines, walking each hunk exactly as a patch reader walks a provider patch. One convention
   // differs: jsdiff reports a zero-count side's start as one *past* the attach-after line,
   // where git writes the attach-after line itself, so those starts shift down by one (the
   // shift never affects numbering -- a zero-count side numbers no lines).
-  const hunks: GitHubPullRequestDiffHunk[] = [];
+  const hunks: GitDiffHunk[] = [];
   let additions = 0;
   let deletions = 0;
   for (const hunk of patch.hunks) {
@@ -351,7 +408,7 @@ export function diffTextLines(oldText: string, newText: string): {
     const newStart = hunk.newLines === 0 ? hunk.newStart - 1 : hunk.newStart;
     let oldLine = oldStart;
     let newLine = newStart;
-    const lines: GitHubPullRequestDiffLine[] = [];
+    const lines: GitDiffLine[] = [];
     for (const raw of hunk.lines) {
       if (raw.startsWith("+")) {
         lines.push({ kind: "added", text: raw.slice(1), newLineNumber: newLine++ });
@@ -382,11 +439,11 @@ export function diffTextLines(oldText: string, newText: string): {
 function wholesaleDiff(
   oldLines: string[], newLines: string[], oldNoEol: boolean, newNoEol: boolean,
   start: number, oldEnd: number, newEnd: number,
-): { hunks: GitHubPullRequestDiffHunk[]; additions: number; deletions: number } {
-  const marker: GitHubPullRequestDiffLine = { kind: "context", text: NO_NEWLINE_MARKER };
+): { hunks: GitDiffHunk[]; additions: number; deletions: number } {
+  const marker: GitDiffLine = { kind: "context", text: NO_NEWLINE_MARKER };
   const contextBefore = Math.min(HUNK_CONTEXT_LINES, start);
   const contextAfter = Math.min(HUNK_CONTEXT_LINES, oldLines.length - oldEnd);
-  const lines: GitHubPullRequestDiffLine[] = [];
+  const lines: GitDiffLine[] = [];
   for (let i = start - contextBefore; i < start; i++) {
     lines.push({ kind: "context", text: oldLines[i], oldLineNumber: i + 1, newLineNumber: i + 1 });
   }

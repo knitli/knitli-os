@@ -100,10 +100,10 @@ const DefaultReasoningSetting = ({ level, disabled, onChange }: {
         text:
           'The reasoning level of the agent’s turns on every model listed here that has no level ' +
           'of its own. Built-in sets none: each model is then asked the way the Workshop asks it ' +
-          'by default, which the model’s Settings name. That is Adaptive, where the model decides ' +
-          'how much to reason, a fixed level, or no level sent. A level that a model lacks is ' +
-          'fitted to the nearest one it has. One-shot calls (titles, summaries, gadget model ' +
-          'bindings) are not affected, and neither are the models users added.',
+          'by default, which the model’s Settings name. That is Provider default, where the model ' +
+          'reasons at whatever effort its provider defaults to, a fixed level, or no level sent. A ' +
+          'level that a model lacks is fitted to the nearest one it has. One-shot calls (titles, ' +
+          'summaries, gadget model bindings) are not affected, and neither are the models users added.',
       }}
     >
       <Select<ReasoningLevel | typeof BUILT_IN>
@@ -407,8 +407,8 @@ export const AdminModelsPanel = ({ admin, gatewayModels, onChanged }: {
                 onChange={changeModelsDevSuggestions}
               >
                 While you add a model, your browser downloads models.dev’s public model list to
-                suggest model IDs, names and limits. A suggestion only fills in the form: nothing
-                is added until you select “Add model”.
+                suggest model IDs, names, limits and what a model can do. A suggestion only fills
+                in the form: nothing is added until you select “Add model”.
               </SettingSwitch>
               <AddGatewayModelForm
                 providers={gatewayModels.providers}
@@ -417,6 +417,7 @@ export const AdminModelsPanel = ({ admin, gatewayModels, onChanged }: {
                 disabled={busy}
                 suggestions={suggestions}
                 onAdd={(model) => write(() => admin.addGatewayModel(model))}
+                onTest={(model) => admin.testNewGatewayModel(model)}
               />
             </>
           )}

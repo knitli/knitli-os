@@ -1,4 +1,4 @@
-import {DurableObject, RpcStub} from "cloudflare:workers";
+import {DurableObject, RpcStub, RpcTarget, restore} from "cloudflare:workers";
 import {skipRpcValidation, validateRpc} from "capnweb-validate";
 import type {
   ActionDescription, ActionKind, ApprovalQueue, Cursor, Gatekeeper, GatekeeperUserVerifier,
@@ -53,14 +53,18 @@ import {
   pendingThreadMessages, threadMayMatch,
 } from "./gmail-overlay";
 import {
-  ActionDescriptionBuilder, buildDescription, RenderedDescription, sanitizeTitle,
+  ActionDescriptionBuilder, buildDescription, plainInline, RenderedDescription, sanitizeTitle,
 } from "@gadgets/gatekeeper-kit/action-description";
 import {AccessTokenCache, AccessTokenRequest} from "./auth-retry";
 import {CursorPager} from "./cursor";
 import {ApprovalQueueRpcTarget, RpcCursor, SharedApprovalQueue} from "./shared-approval-queue";
+import {
+  UNDELIVERED_GMAIL_LABELS, type GmailHookDelivery, type GmailHookParams, type GmailMessageHookTarget,
+} from "./gmail-hooks";
+import {pushHooksConfigured, type PushHooksEnv} from "./pubsub-push";
 import TYPES_CODE from "./types.txt";
 
-type Env = Cloudflare.Env;
+type Env = Cloudflare.Env & PushHooksEnv;
 
 const GMAIL_RESTRICTED_THREAD_PROVIDER_PAGE_SIZE = 500;
 const GMAIL_RESTRICTED_THREAD_RESULT_PAGE_SIZE = 20;
@@ -1553,9 +1557,9 @@ function publicLabels(ids: string[], labels: GmailLabelRaw[], resources: GmailLa
   return result;
 }
 
-type GmailContext = {
+/** What reading a binding's mail needs. */
+type GmailReadContext = {
   api: GmailApi;
-  approvalQueue: SharedApprovalQueue;
   store: GmailStore;
   selfEmail: string;
   searchQuery?: string;
@@ -1563,6 +1567,13 @@ type GmailContext = {
   labelName?: string;
   restricted: boolean;
   providerLabels(): Promise<GmailLabelRaw[]>;
+};
+
+/** What every capability of this binding shares, over one approval queue. */
+type GmailContext = GmailReadContext & {
+  approvalQueue: SharedApprovalQueue;
+  /** Bind `hook` to new mail in `threadId`, or to what the binding lists when undefined. */
+  subscribe(threadId: string | undefined, hook: RpcStub<GmailMessageHookTarget>): Promise<void>;
 };
 
 async function submitAction(
@@ -1590,7 +1601,7 @@ async function submitAction(
 
 type GmailLabelSnapshot = {labels: GmailLabelRaw[]; resources: GmailLabelResource[]};
 
-async function currentLabels(ctx: GmailContext): Promise<GmailLabelSnapshot> {
+async function currentLabels(ctx: GmailReadContext): Promise<GmailLabelSnapshot> {
   const provider = await ctx.providerLabels();
   const resources = ctx.store.listLabels();
   return {
@@ -1909,11 +1920,11 @@ async function restrictedThreadScope(
   return gmailRestrictedScope(admitted);
 }
 
-function effectiveListQuery(ctx: GmailContext, caller?: string): string | undefined {
+function effectiveListQuery(ctx: GmailReadContext, caller?: string): string | undefined {
   return combineGmailQueries(ctx.searchQuery, caller);
 }
 
-function listLabelIds(ctx: GmailContext, defaultInbox: boolean): string[] | undefined {
+function listLabelIds(ctx: GmailReadContext, defaultInbox: boolean): string[] | undefined {
   if (ctx.labelId) return [ctx.labelId];
   if (defaultInbox && !ctx.searchQuery) return ["INBOX"];
   return undefined;
@@ -1933,7 +1944,7 @@ type GmailListRequest = {
 };
 
 function listRequest(
-    ctx: GmailContext, defaultInbox: boolean, callerQuery?: string): GmailListRequest {
+    ctx: GmailReadContext, defaultInbox: boolean, callerQuery?: string): GmailListRequest {
   const query = effectiveListQuery(ctx, callerQuery);
   const labelIds = listLabelIds(ctx, defaultInbox);
   return {
@@ -2371,6 +2382,10 @@ class GmailSessionImpl extends ApprovalQueueRpcTarget implements GmailSession {
     return new GmailDraftStub(this.#ctx, state.logicalId);
   }
 
+  async subscribeNewMessages(hook: RpcStub<GmailMessageHookTarget>): Promise<void> {
+    await this.#ctx.subscribe(undefined, hook);
+  }
+
   async createDraft(input: GmailDraftInput): Promise<GmailDraft> {
     if (this.#ctx.restricted) {
       throw new Error("createDraft() is only available on a whole-mailbox Gmail binding.");
@@ -2513,6 +2528,9 @@ class GmailScopedSessionImpl extends ApprovalQueueRpcTarget implements GmailScop
   getThread(id: string): Promise<GmailThread> { return this.#mailbox.getThread(id); }
   listDrafts(): Promise<Cursor<GmailDraftEntry>> { return this.#mailbox.listDrafts(); }
   getDraft(id: string): Promise<GmailDraft> { return this.#mailbox.getDraft(id); }
+  subscribeNewMessages(hook: RpcStub<GmailMessageHookTarget>): Promise<void> {
+    return this.#mailbox.subscribeNewMessages(hook);
+  }
 
   [Symbol.dispose](): void {
     this.#mailbox[Symbol.dispose]();
@@ -2846,6 +2864,9 @@ class GmailThreadStub extends ApprovalQueueRpcTarget implements GmailThread {
   @skipRpcValidation()
   async removeLabel(label: GmailMutableLabel, lastMessageId?: string): Promise<void> {
     await this.#mutate("removeLabel", lastMessageId, label);
+  }
+  async subscribeNewMessages(hook: RpcStub<GmailMessageHookTarget>): Promise<void> {
+    await this.#ctx.subscribe(this.#threadId, hook);
   }
 }
 
@@ -3370,6 +3391,69 @@ class GmailAttachmentStub extends ApprovalQueueRpcTarget implements GmailAttachm
     });
     this.#validate?.();
     return content;
+  }
+}
+
+// ── Hook delivery ───────────────────────────────────────────────────
+
+/**
+ * What a hook's delivery stub restores to: one firing at a time, of a message only if it is new
+ * mail the binding would list (in the hook's thread, for a thread hook).
+ */
+@validateRpc()
+class GmailHookDeliveryImpl extends RpcTarget implements GmailHookDelivery {
+  constructor(
+    private readonly params: GmailHookParams,
+    private readonly readContext: () => Promise<GmailReadContext>,
+    private readonly context: (read: GmailReadContext, approvalQueue: RpcStub<ApprovalQueue>) => GmailContext,
+  ) {
+    super();
+  }
+
+  async deliver(callback: RpcStub<GmailMessageHookTarget>, approvalQueue: RpcStub<ApprovalQueue>,
+                messageId: string): Promise<void> {
+    if (!GMAIL_PROVIDER_ID_RE.test(messageId)) throw new TypeError("Invalid Gmail message ID.");
+    const {threadId} = this.params;
+    // Re-checks the pinned account and the bound label, as opening a session does.
+    const read = await this.readContext();
+    let metadata: GmailMessageFull;
+    try {
+      metadata = await read.api.getMessageMetadata(messageId);
+    } catch (error) {
+      // Deleted since it arrived.
+      if (error instanceof GmailApiError && error.status === 404) return;
+      throw error;
+    }
+    if (metadata.id !== messageId) throw new Error("Gmail message identity changed unexpectedly.");
+    const provider = parseGmailMessageMetadata(metadata);
+    if (provider.labelIds.some(label => UNDELIVERED_GMAIL_LABELS.includes(label))) return;
+    if (threadId !== undefined && provider.threadId !== threadId) return;
+    const overlay = loadGmailOverlay(read.store);
+    if (overlay.hiddenMessageIds.has(messageId)) return;
+    // The same admission as listMessages(): the inbox, or the bound label.
+    const labels = await currentLabels(read);
+    if (!messageMayMatch(overlayMessageInfo(overlay, provider, labels.resources).labelIds,
+        listRequest(read, threadId === undefined).predicates)) {
+      return;
+    }
+
+    // Only now, so a skipped message takes no reference to the approval queue.
+    const ctx = this.context(read, approvalQueue);
+    const scope = ctx.restricted ? gmailRestrictedScope([messageId]) : GMAIL_MAILBOX_SCOPE;
+    const message = new GmailMessageStub(ctx, messageId, provider.threadId, scope, undefined, provider);
+    let info: GmailMessageInfo;
+    try {
+      info = await messageInfo(ctx, provider, overlay, labels);
+      await ctx.approvalQueue.authorizeObservation({
+        title: sanitizeTitle(`New Gmail message: ${info.subject}`),
+        description: "Read the sender, recipients, timestamp, subject, and labels of a new message this hook watches for.",
+      });
+    } catch (error) {
+      message[Symbol.dispose]();
+      throw error;
+    }
+    admitReturnedLabels(ctx, info.labels);
+    await callback.receiveMessage({info, message});
   }
 }
 
@@ -4200,6 +4284,7 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
         snippet: `Gmail messages with label: ${this.ctx.props.labelName}`,
         suggestedBindingName: "GMAIL_LABEL",
         tsType: "GmailScopedSession",
+        hookTsType: "GmailMessageHook",
       };
     }
     if (this.ctx.props.searchQuery !== undefined) {
@@ -4218,6 +4303,7 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
       snippet: "Your personal Gmail inbox",
       suggestedBindingName: "GMAIL_INBOX",
       tsType: "GmailSession",
+      hookTsType: "GmailMessageHook",
     };
   }
 
@@ -4229,17 +4315,29 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
   async startSession(
       approvalQueue: RpcStub<ApprovalQueue>,
   ): Promise<GmailScopedSession | GmailSession> {
+    const ctx = this.#context(await this.#readContext(), approvalQueue);
+    return ctx.restricted ? new GmailScopedSessionImpl(ctx) : new GmailSessionImpl(ctx);
+  }
+
+  [restore](params: GmailHookParams): GmailHookDelivery {
+    // The binding's own props decide admission; `params` can only narrow it to a thread.
+    if (params.threadId !== undefined && !GMAIL_PROVIDER_ID_RE.test(params.threadId)) {
+      throw new TypeError("Invalid Gmail thread ID.");
+    }
+    return new GmailHookDeliveryImpl(
+      params, () => this.#readContext(), (read, approvalQueue) => this.#context(read, approvalQueue));
+  }
+
+  async #readContext(): Promise<GmailReadContext> {
     if (this.ctx.props.searchQuery !== undefined) {
       validateGmailQueryForGrouping(this.ctx.props.searchQuery);
     }
     const selfEmail = await this.#getSelfEmail();
     const api = new GmailApi(selfEmail, opts => this.#getAccessToken(opts));
     const bindingLabel = await this.#resolveBindingLabel(api);
-    const store = new GmailStore(this.ctx.storage);
-    const ctx: GmailContext = {
+    return {
       api,
-      approvalQueue: new SharedApprovalQueue(approvalQueue.dup()),
-      store,
+      store: new GmailStore(this.ctx.storage),
       selfEmail,
       searchQuery: this.ctx.props.searchQuery,
       labelId: bindingLabel.id,
@@ -4247,7 +4345,46 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
       restricted: this.ctx.props.searchQuery !== undefined || bindingLabel.id !== undefined,
       providerLabels: () => api.listLabelRecords(),
     };
-    return ctx.restricted ? new GmailScopedSessionImpl(ctx) : new GmailSessionImpl(ctx);
+  }
+
+  #context(read: GmailReadContext, approvalQueue: RpcStub<ApprovalQueue>): GmailContext {
+    const ctx: GmailContext = {
+      ...read,
+      approvalQueue: new SharedApprovalQueue(approvalQueue.dup()),
+      subscribe: (threadId, hook) => this.#subscribe(ctx, threadId, hook),
+    };
+    return ctx;
+  }
+
+  async #subscribe(
+      ctx: GmailContext, threadId: string | undefined, hook: RpcStub<GmailMessageHookTarget>): Promise<void> {
+    if (!pushHooksConfigured(this.env)) throw new Error("Gmail hooks are not configured on this deployment.");
+    if (ctx.searchQuery !== undefined) {
+      throw new Error(
+        "A Gmail search binding can't be watched for new mail. Connect the inbox or a label instead.");
+    }
+    const {emailAddress} = await ctx.api.getProfile();
+    const params: GmailHookParams = threadId === undefined ? {} : {threadId};
+    using delivery: RpcStub<GmailHookDelivery> = await this.ctx.restore(params);
+    const controller = this.ctx.exports.GmailHookController({props: {
+      ...params,
+      key: crypto.randomUUID(),
+      mailbox: emailAddress.toLowerCase(),
+      userObjectId: this.ctx.props.userObjectId,
+      // Only the driver's prefilter: the inbox for a mailbox hook, the bound label on a label
+      // binding, and nothing for a thread hook on a whole mailbox.
+      labelId: threadId === undefined ? ctx.labelId ?? "INBOX" : ctx.labelId,
+      delivery,
+    }});
+    const label = ctx.labelName === undefined ? undefined : `"${plainInline(ctx.labelName)}"`;
+    const watched = threadId === undefined
+      ? `received ${label ? `with the Gmail label ${label}` : "in the Gmail inbox"}`
+      : `received in Gmail thread ${threadId}${label ? ` with the label ${label}` : ""}`;
+    await ctx.approvalQueue.bindHook(controller, hook, {
+      title: "Watch for new Gmail messages",
+      description: `Call this hook with each new message ${watched}, letting it read that message ` +
+        "and queue replies and changes for approval.",
+    });
   }
 
   async applyAction(actionId: number, _cache: RpcStub<GitCache>): Promise<void> {

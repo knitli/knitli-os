@@ -1,19 +1,26 @@
-import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
+import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint, restore } from "cloudflare:workers";
 import { GmailForwardSnapshotStore } from "../../src/gmail-state";
 import { GmailGatekeeperImpl, type GmailGatekeeperImplProps } from "../../src/gmail";
 import { GoogleChatGatekeeperImpl, type GoogleChatGatekeeperImplProps } from "../../src/chat";
 import { UserAccount, GoogleVerifier } from "../../src/google";
-import type { ActionKind, ResourceDescription } from "@gadgets/workshop-shared/gatekeeper";
+import type {
+  ActionKind, HookController, ResourceDescription,
+} from "@gadgets/workshop-shared/gatekeeper";
 import {TestGitCache} from "../test-git-cache";
 import type {
-  GmailComposeOptions, GmailDraftInput, GmailDraftPatch, GmailMessage, GmailReplyOptions,
-  GmailSession,
+  GmailComposeOptions, GmailDraftInput, GmailDraftPatch, GmailMessage, GmailMessageEntry,
+  GmailMessageInfo, GmailReplyOptions, GmailScopedSession, GmailSession, GmailThread,
 } from "../../src/types";
 import type {
-  ChatListMessagesOptions, ChatMessageInfo, ChatSession, ChatSpace, ChatThread,
+  ChatListMessagesOptions, ChatMessageInfo, ChatNewMessageEntry, ChatSession, ChatSpace, ChatThread,
 } from "../../src/chat-types";
+import type { ChatMessageRaw } from "../../src/chat-api";
+import type { ChatHookParams } from "../../src/chat-hooks";
+import type { GmailHookParams } from "../../src/gmail-hooks";
 
 export { default } from "../../src/google";
+export { ChatHookController, ChatHookDriver } from "../../src/chat-hooks";
+export { GmailHookController, GmailHookDriver } from "../../src/gmail-hooks";
 export { GmailGatekeeperImpl, GoogleChatGatekeeperImpl, UserAccount, GoogleVerifier };
 
 type StorageOperation =
@@ -25,6 +32,8 @@ type TestGmail = GmailGatekeeperImpl & {
   readTestStorage(): Array<[string, unknown]>;
   captureTestSnapshot(bytes: Uint8Array): Promise<unknown>;
   runTestOperation(queue: unknown, operation: string, args: unknown[]): Promise<unknown>;
+  testGmailDeliver(params: GmailHookParams, callback: unknown, queue: unknown, messageId: string): Promise<void>;
+  testGmailRestoreThrough(hooks: string, facet: GmailFacet): void;
 };
 
 async function withMessage<T>(
@@ -126,7 +135,7 @@ class TestApprovalQueue extends RpcTarget {
     return {submissions: [...this.#submissions], observations: [...this.#observations]};
   }
 
-  async bindHook(): Promise<never> {
+  async bindHook(_controller: unknown): Promise<void> {
     throw new Error("Hooks are not used by these tests.");
   }
 
@@ -172,6 +181,110 @@ class TestApprovalQueue extends RpcTarget {
   }
 
   [Symbol.dispose](): void {}
+}
+
+/** Keeps the controller a subscription binds, where the Overseer would store it. */
+class HookBindingQueue extends TestApprovalQueue {
+  constructor(private readonly storage: DurableObjectStorage) {
+    super();
+  }
+
+  override async bindHook(controller: unknown): Promise<void> {
+    this.storage.kv.put("hookController", controller);
+  }
+}
+
+type HookState = {
+  received: ChatMessageInfo[]; reply?: string; post?: string; failures: number; admissionFailures?: number;
+};
+
+/** A gadget's message hook: records each entry, optionally failing first, replying or posting. */
+class RecordingHook extends RpcTarget {
+  constructor(private readonly state: HookState) {
+    super();
+  }
+
+  async receiveMessage(entry: ChatNewMessageEntry): Promise<void> {
+    try {
+      if (this.state.failures > 0) {
+        this.state.failures--;
+        throw new Error("The test hook failed.");
+      }
+      this.state.received.push(entry.info);
+      if (this.state.reply !== undefined) await entry.message.reply(this.state.reply);
+      if (this.state.post !== undefined) await entry.conversation.post(this.state.post);
+    } finally {
+      disposeRpc(entry.message);
+      disposeRpc(entry.conversation);
+    }
+  }
+}
+
+type GmailHookState = { received: GmailMessageInfo[]; reply?: string; failures: number };
+
+/** A gadget's Gmail hook: records each entry, optionally failing first or replying. */
+class GmailRecordingHook extends RpcTarget {
+  constructor(private readonly state: GmailHookState) {
+    super();
+  }
+
+  async receiveMessage(entry: GmailMessageEntry): Promise<void> {
+    try {
+      if (this.state.failures > 0) {
+        this.state.failures--;
+        throw new Error("The test hook failed.");
+      }
+      this.state.received.push(entry.info);
+      if (this.state.reply !== undefined) await entry.message.reply(this.state.reply);
+    } finally {
+      disposeRpc(entry.message);
+    }
+  }
+}
+
+type ChatFacet = { facetName: string; id: string; props: GoogleChatGatekeeperImplProps };
+type TestHookDeliveryProps = { hooks: string; facet: ChatFacet; params: ChatHookParams };
+type GmailFacet = { facetName: string; id: string; props: GmailGatekeeperImplProps };
+type TestGmailHookDeliveryProps = { hooks: string; facet: GmailFacet; params: GmailHookParams };
+
+/** This worker's loopback exports, which the gatekeeper's generated `Cloudflare.Exports` omits. */
+type TestExports = {
+  TestHooks: DurableObjectNamespace<TestHooks>;
+  TestHookInitiator(options: { props: { hooks: string } }): Fetcher<TestHookInitiator>;
+  TestHookDelivery(options: { props: TestHookDeliveryProps }): Fetcher<TestHookDelivery>;
+  TestGmailHookDelivery(options: { props: TestGmailHookDeliveryProps }): Fetcher<TestGmailHookDelivery>;
+};
+
+function testHooks(exports: Cloudflare.Exports, id: string) {
+  const { TestHooks } = exports as unknown as TestExports;
+  return TestHooks.get(TestHooks.idFromString(id));
+}
+
+/** The Overseer's HookInitiator: each firing reaches the TestHooks object that enabled the hook. */
+export class TestHookInitiator extends WorkerEntrypoint<Cloudflare.Env, { hooks: string }> {
+  startHook() {
+    return testHooks(this.ctx.exports, this.ctx.props.hooks).startHook();
+  }
+}
+
+/**
+ * Stands in for the stub the facet mints with ctx.restore(), which this pool cannot do (its
+ * Durable Object wrappers don't forward `[restore]`): it reaches the facet's real `[restore]`
+ * target through TestHooks.
+ */
+export class TestHookDelivery extends WorkerEntrypoint<Cloudflare.Env, TestHookDeliveryProps> {
+  deliver(callback: RpcStub<RpcTarget>, approvalQueue: RpcStub<RpcTarget>, message: ChatMessageRaw) {
+    const { hooks, facet, params } = this.ctx.props;
+    return testHooks(this.ctx.exports, hooks).chatDeliver(facet, params, callback, approvalQueue, message);
+  }
+}
+
+/** TestHookDelivery's counterpart for a Gmail facet's `[restore]` target. */
+export class TestGmailHookDelivery extends WorkerEntrypoint<Cloudflare.Env, TestGmailHookDeliveryProps> {
+  deliver(callback: RpcStub<RpcTarget>, approvalQueue: RpcStub<RpcTarget>, messageId: string) {
+    const { hooks, facet, params } = this.ctx.props;
+    return testHooks(this.ctx.exports, hooks).gmailDeliver(facet, params, callback, approvalQueue, messageId);
+  }
 }
 
 /** Test-only hook that creates and drives the props-bearing Gmail facet. */
@@ -429,6 +542,108 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     if (!queue) throw new Error(`Unknown test approval queue: ${queueId}`);
     queue.failNextObservation(title);
   }
+
+  // ── Google Chat and Gmail hooks, with these hooks standing in for the Overseer ──
+
+  #hookQueue = new TestApprovalQueue();
+  #hook: HookState = { received: [], failures: 0 };
+  #gmailHook: GmailHookState = { received: [], failures: 0 };
+  /** Which gatekeeper bound the hook, and so which recording hook its firings get. */
+  #hookKind: "chat" | "gmail" = "chat";
+
+  /** Subscribe through the facet's own subscribeNewMessages(), keeping the controller it binds. */
+  async chatSubscribe(facet: ChatFacet): Promise<void> {
+    const chat = this.#chat(facet.facetName, facet.id, facet.props) as unknown as TestChat;
+    await chat.testRestoreThrough(this.ctx.id.toString(), facet);
+    using queue = new RpcStub(new HookBindingQueue(this.ctx.storage));
+    using capability = await chat.startSession(queue as never) as (ChatSpace | ChatThread) & Disposable;
+    await capability.subscribeNewMessages(new RpcStub(new RecordingHook(this.#hook)));
+    this.#hookKind = "chat";
+  }
+
+  /** Subscribe a Gmail binding, or one of its threads, keeping the controller it binds. */
+  async gmailSubscribe(facet: GmailFacet, threadId?: string): Promise<void> {
+    const gmail = this.#gatekeeper(facet.facetName, facet.id, facet.props) as unknown as TestGmail;
+    await gmail.testGmailRestoreThrough(this.ctx.id.toString(), facet);
+    using queue = new RpcStub(new HookBindingQueue(this.ctx.storage));
+    using session = await gmail.startSession(queue as never) as GmailScopedSession & Disposable;
+    using hook = new RpcStub(new GmailRecordingHook(this.#gmailHook));
+    if (threadId === undefined) {
+      await session.subscribeNewMessages(hook as never);
+    } else {
+      using thread = await session.getThread(threadId) as GmailThread & Disposable;
+      await thread.subscribeNewMessages(hook as never);
+    }
+    this.#hookKind = "gmail";
+  }
+
+  async gmailDeliver(
+      { facetName, id, props }: GmailFacet, params: GmailHookParams,
+      callback: RpcStub<RpcTarget>, approvalQueue: RpcStub<RpcTarget>, messageId: string,
+  ): Promise<void> {
+    await (this.#gatekeeper(facetName, id, props) as unknown as TestGmail)
+      .testGmailDeliver(params, callback, approvalQueue, messageId);
+  }
+
+  async chatDeliver(
+      { facetName, id, props }: ChatFacet, params: ChatHookParams,
+      callback: RpcStub<RpcTarget>, approvalQueue: RpcStub<RpcTarget>, message: ChatMessageRaw,
+  ): Promise<void> {
+    await (this.#chat(facetName, id, props) as unknown as TestChat)
+      .testDeliver(params, callback, approvalQueue, message);
+  }
+
+  async chatEnableHook(): Promise<void> {
+    await this.#hookController().enable(
+      (this.ctx.exports as unknown as TestExports).TestHookInitiator({ props: { hooks: this.ctx.id.toString() } }),
+      { workspaceId: "test-workspace" });
+  }
+
+  async chatDisableHook(): Promise<void> {
+    await this.#hookController().disable();
+  }
+
+  #hookController(): HookController<RpcTarget> {
+    const controller = this.ctx.storage.kv.get<HookController<RpcTarget>>("hookController");
+    if (!controller) throw new Error("No hook has been bound.");
+    return controller;
+  }
+
+  startHook() {
+    if (this.#hook.admissionFailures) {
+      this.#hook.admissionFailures--;
+      throw new Error("The test Workshop failed to start the firing.");
+    }
+    const callback = this.#hookKind === "gmail"
+      ? new GmailRecordingHook(this.#gmailHook)
+      : new RecordingHook(this.#hook);
+    return { callback, approvalQueue: new RpcStub(this.#hookQueue) };
+  }
+
+  setHookBehavior(behavior: Partial<Omit<HookState, "received">>): void {
+    Object.assign(this.#hook, behavior);
+  }
+
+  /** What the hook received, how many of its failures remain, and what it queued. */
+  readHook(): { received: ChatMessageInfo[]; failures: number; submissions: Array<{ actionId: number }> } {
+    return { received: this.#hook.received, failures: this.#hook.failures, ...this.#hookQueue.read() };
+  }
+
+  setGmailHookBehavior(behavior: Partial<Omit<GmailHookState, "received">>): void {
+    Object.assign(this.#gmailHook, behavior);
+  }
+
+  /** What the Gmail hook received, how many of its failures remain, and what it queued. */
+  readGmailHook(): {
+    received: GmailMessageInfo[]; failures: number; submissions: Array<{ actionId: number }>;
+    observations: Array<{ title: string }>;
+  } {
+    const { submissions, observations } = this.#hookQueue.read();
+    return {
+      received: this.#gmailHook.received, failures: this.#gmailHook.failures, submissions,
+      observations: observations as Array<{ title: string }>,
+    };
+  }
 }
 
 const testGmailPrototype = GmailGatekeeperImpl.prototype as TestGmail;
@@ -455,6 +670,19 @@ testGmailPrototype.readTestStorage = function(): Array<[string, unknown]> {
 
 testGmailPrototype.captureTestSnapshot = function(bytes: Uint8Array) {
   return new GmailForwardSnapshotStore(testStorage(this)).capture(bytes);
+};
+
+/** Deliver through the target the facet's `[restore]()` returns for a hook's delivery stub. */
+testGmailPrototype.testGmailDeliver = function(params, callback, queue, messageId) {
+  return this[restore](params).deliver(callback as never, queue as never, messageId);
+};
+
+/** As testChatPrototype.testRestoreThrough, for a Gmail facet. */
+testGmailPrototype.testGmailRestoreThrough = function(hooks, facet) {
+  const { ctx } = this as unknown as { ctx: DurableObjectState };
+  const exports = ctx.exports as unknown as TestExports;
+  ctx.restore = async (params: GmailHookParams) => Object.assign(
+    exports.TestGmailHookDelivery({ props: { hooks, facet, params } }), { [Symbol.dispose]() {} });
 };
 
 testGmailPrototype.runTestOperation = async function(
@@ -867,9 +1095,27 @@ testGmailPrototype.runTestOperation = async function(
 
 type TestChat = GoogleChatGatekeeperImpl & {
   runChatTestOperation(queue: unknown, operation: string, args: unknown[]): Promise<unknown>;
+  testDeliver(params: ChatHookParams, callback: unknown, queue: unknown, message: ChatMessageRaw): Promise<void>;
+  testRestoreThrough(hooks: string, facet: ChatFacet): void;
 };
 
 const testChatPrototype = GoogleChatGatekeeperImpl.prototype as TestChat;
+
+/** Deliver through the target the facet's `[restore]()` returns for a hook's delivery stub. */
+testChatPrototype.testDeliver = function(params, callback, queue, message) {
+  return this[restore](params).deliver(callback as never, queue as never, message);
+};
+
+/**
+ * Make this facet's ctx.restore() mint TestHookDelivery stubs that route back to `[restore]`,
+ * disposable as a restored stub is.
+ */
+testChatPrototype.testRestoreThrough = function(hooks, facet) {
+  const { ctx } = this as unknown as { ctx: DurableObjectState };
+  const exports = ctx.exports as unknown as TestExports;
+  ctx.restore = async (params: ChatHookParams) => Object.assign(
+    exports.TestHookDelivery({ props: { hooks, facet, params } }), { [Symbol.dispose]() {} });
+};
 
 testChatPrototype.runChatTestOperation = async function(
     queue: unknown, operation: string, args: unknown[],

@@ -1,6 +1,6 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelReasoningInfo, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, VoiceOptions, VoicePreferences } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ConnectInitiator, type ResolveRequestedResourceResult } from "@gadgets/workshop-shared/gatekeeper";
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelReasoningInfo, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, UserNotification, VoiceOptions, VoicePreferences } from '@gadgets/workshop-shared/api';
+import { ActionDescription, Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ConnectInitiator, type ResolveRequestedResourceResult } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -15,11 +15,13 @@ import { getGatewayModels, type GatewayModels } from "./ai-gateway.js";
 import { modelReasoningForConfig } from "./fork/reasoning-levels.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import type { AdminSettings } from "./admin-settings.js";
+import { deleteBlueprintContent } from "./blueprint-archive.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./storage-schema/blueprints-kv.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { offeredVoiceModels, validateVoicePreferences } from "./voice-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken, PENDING_HANDOFF_LIFETIME_MS } from "./connect-handoff.js";
+import { deliver, registerDevice } from "./notification-service.js";
 
 const logger = createWorkshopLogger("workshop.user");
 
@@ -51,6 +53,7 @@ export type ProvidedAccountInfo = {
 // usable directly, the way the runtime stub actually behaves.
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
 type ResourceResolverStub = Required<Pick<GatekeeperVendor, "resolveResourceUrl">>;
+type ResourceCreatorStub = Required<Pick<GatekeeperVendor, "createResource">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
@@ -191,6 +194,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
   private vendors: Map<string, Service<GatekeeperVendor>>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
+  #notificationSubscribers = new Map<object, RpcStub<NotificationSubscriber>>();
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -345,6 +349,54 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** Whether this account has a password set (false for gatekeeper sign-in accounts). */
   async hasPasswordLogin(): Promise<boolean> {
     return this.storage.passwordHashHash.get() !== null;
+  }
+
+  /** Exchange the native app's one-time device registration for that device's push subscription. */
+  async registerNotificationDevice(deviceRegistrationId: string): Promise<void> {
+    let { deviceKey, subscriptionId } = await registerDevice(this.env, deviceRegistrationId);
+    this.storage.notificationSubscriptions.put(
+        { ...this.storage.notificationSubscriptions.get(), [deviceKey]: subscriptionId });
+  }
+
+  /** Subscribe a visible authenticated client to live user notifications. */
+  async subscribeToNotifications(
+      subscriber: RpcStub<NotificationSubscriber>): Promise<RpcStub<{}>> {
+    subscriber = subscriber.dup();
+    let token = {};
+    this.#notificationSubscribers.set(token, subscriber);
+    let unsubscribe = () => {
+      let existing = this.#notificationSubscribers.get(token);
+      if (!existing) return;
+      this.#notificationSubscribers.delete(token);
+      existing[Symbol.dispose]();
+    };
+    subscriber.onRpcBroken(unsubscribe);
+    return new RpcStub<{}>({ [Symbol.dispose]: unsubscribe });
+  }
+
+  /**
+   * Offer a notification to visible clients; push it to every registered device unless one
+   * acknowledges within 3s.
+   */
+  async publishNotification(notification: UserNotification): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let acknowledged = await Promise.race([
+      Promise.any([...this.#notificationSubscribers.values()]
+          .map(subscriber => subscriber.notify(notification))).then(() => true, () => false),
+      new Promise<boolean>(resolve => { timeout = setTimeout(() => resolve(false), 3_000); }),
+    ]).finally(() => clearTimeout(timeout));
+    if (acknowledged) return;
+    let subscriptions = Object.entries(this.storage.notificationSubscriptions.get());
+    let results = await Promise.allSettled(subscriptions.map(async ([deviceKey, subscriptionId]) => {
+      if (await deliver(this.env, subscriptionId, notification)) return;
+      // This subscription is dead; the device gets a new one when its app next opens. Keep one it
+      // registered while this delivery was in flight.
+      let { [deviceKey]: current, ...others } = this.storage.notificationSubscriptions.get();
+      if (current === subscriptionId) this.storage.notificationSubscriptions.put(others);
+    }));
+    for (let result of results) {
+      if (result.status === "rejected") throw result.reason;
+    }
   }
 
   async changePassword(oldHash: Uint8Array, newHash: Uint8Array): Promise<void> {
@@ -529,7 +581,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     // capnweb-validate lets through properties that RedactedAiModelConfig omits, and these are a
     // deployment's to set on its own models.
-    let {reasoning, compactionInputBudget, behavesLike, ...own} = config;
+    let {reasoning, compactionInputBudget, behavesLike, capabilities, ...own} = config;
 
     profile.type = "agent";
     this.storage.aiModels.put({profile, config: own});
@@ -1018,9 +1070,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
 
       // Delete all R2 objects with the blueprint ID prefix.
-      for (let v = 1; v <= kvRecord.metadata.version; v++) {
-        await this.env.BLUEPRINT_CONTENT.delete(`${id}/${v}`);
-      }
+      await deleteBlueprintContent(this.env, id);
       await this.env.BLUEPRINT_CONTENT.delete(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${id}`);
 
       // Delete from KV.
@@ -1944,15 +1994,56 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
-
+    await this.#assertResourceEnabled(account.vendorId, resource);
     await this.#enforceGatekeeperResourcePolicy(account.vendorId, resource, account.autoProvisioned === true);
     return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
   }
 
   /**
+   * Mint a gatekeeper class simulating a new resource of a creatable type (see
+   * GatekeeperVendor.createResource()). It belongs to no account; the returned `action` is the
+   * creation to queue.
+   */
+  async createResourceGatekeeper(vendorId: string, resourceUrlPattern: string, title: string)
+      : Promise<{class: DurableObjectClass<Gatekeeper<any>>, typeUrlPattern: string,
+                  action: ActionDescription}> {
+    let vendor = this.vendors.get(vendorId);
+    if (!vendor) throw new Error(`Unknown vendor "${vendorId}".`);
+    let {class: cls, resource, action} = await (vendor as unknown as ResourceCreatorStub)
+        .createResource(resourceUrlPattern, title);
+    if (!resource.creatable) {
+      throw new Error(`"${resource.title}" resources can't be created. ` +
+          "listConnectableResources marks the types that can.");
+    }
+    await this.#assertResourceEnabled(vendorId, resource);
+    return {class: cls, typeUrlPattern: resource.urlPattern, action};
+  }
+
+  // Block whole gatekeepers + disabled resources at the core-side chokepoints where a gatekeeper
+  // class is minted (reached only via the user/UI-facing Overseer.newGatekeeper, blueprint
+  // instantiation, and the agent's createExternalResource -- never from gadget code). An ambient
+  // gatekeeper an admin set to "disabled" is blocked here too. Blocking here prevents minting a
+  // capability to a disabled resource even if the request bypasses the (separately filtered)
+  // picker/agent listings.
+  async #assertResourceEnabled(vendorId: string, resource: SupportedResource) {
+    let config = await readAdminConfig(this.env);
+    let normalized = vendorId.toLowerCase();
+    if (config.disabledGatekeepers.includes(normalized) ||
+        ambientGatekeeperMode(config, normalized) === "disabled") {
+      throw new Error(
+          `The "${vendorId}" gatekeeper is disabled on this deployment by an administrator.`);
+    }
+    if (isResourceDisabled(config, normalized, resource.urlPattern)) {
+      throw new Error(
+          `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
+    }
+  }
+
+  /**
    * Mint a verifier from one of THIS user's connected accounts, identified by accountId. The
    * overseer passes the returned verifier to a gatekeeper's `addObserver()` so the gatekeeper can
-   * check whether this user is allowed to observe the data read through it. Returns null if the
+   * check whether this user is allowed to observe the data read through it, or to its
+   * `applyCreation()` to create the resource in this account. Returns null if the
    * account no longer exists (or never existed). Throws if the account belongs to a different
    * vendor (not a legitimate UI state — only reachable by bypassing client-side filtering).
    *

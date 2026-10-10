@@ -1,8 +1,8 @@
 import {
   COMPACTION_TRIGGER_RATIO, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT, type AiChatMessage,
-  type AiModelConfig,
+  type AiModelConfig, type ChatGadgetPinRecord,
 } from "@gadgets/workshop-shared/api";
-import {composeCodeChange, type CodeChange} from "@gadgets/workshop-shared/code-change";
+import {composeEpochChanges, type CodeChange} from "@gadgets/workshop-shared/code-change";
 import type {Api, Message, Model} from "@earendil-works/pi-ai";
 import type {ChatBindingEntry, CompactionCheckpoint} from "./storage-schema/overseer-storage";
 import {zeroUsage} from "./ai-invoke";
@@ -78,8 +78,7 @@ export function isCompactionTurn(messages: AiChatMessage[]): boolean {
 /**
  * A message that begins an agent turn: the user or a gadget prompted, a callback or nudge arrived,
  * or an accepted connection resumed the agent. Each produces a `user` model message, so cutting
- * here keeps the retained messages from opening mid-turn. protectRetainedReverts may still lower
- * the cut past one of these; the summary then stands in for the turn's opening.
+ * here keeps the retained messages from opening mid-turn.
  */
 export function startsAgentTurn(message: AiChatMessage): boolean {
   switch (message.type) {
@@ -92,9 +91,10 @@ export function startsAgentTurn(message: AiChatMessage): boolean {
 
 /**
  * One batch of code changes, addressed by the chat sequence that recorded it. `change` is absent
- * for a batch that records only gadget creations or binding additions.
+ * for a batch that records only gadget creations or binding additions. `pins` are the batch's
+ * declarations, each of which re-roots its gadget (see ChatGadgetPinRecord).
  */
-export type ChangeBatch = {sequence: number, change?: CodeChange};
+export type ChangeBatch = {sequence: number, change?: CodeChange, pins?: ChatGadgetPinRecord[]};
 
 /**
  * Folds `merge` and `revert` over a chat log. A merge accepts through `mergeThrough` inclusively; a
@@ -114,7 +114,7 @@ export function foldProposedChanges(
       // must not make a read-only migrated chat show proposed changes. A boundary *with* a change
       // is an ordinary proposed batch.
       if (!message.conversionBoundary || message.change !== undefined) {
-        proposed.push({sequence: message.sequence, change: message.change});
+        proposed.push({sequence: message.sequence, change: message.change, pins: message.pins});
       }
     } else if (message.type === "merge") {
       while (proposed.length > 0 && proposed[0].sequence <= message.mergeThrough) {
@@ -309,28 +309,6 @@ export function findCompactionBoundary(
 }
 
 /**
- * Keep a retained revert together with the changes whose IDs it reports, so replay can still
- * resolve them. Lowering the cut can retain an earlier revert, which may lower it again, but
- * walking newest-first settles that in one pass: lowering requires `sequence >= cut`, and sequences
- * only decrease as the walk proceeds, so once a revert is skipped for sitting below the cut no
- * later one can lower the cut past it. `rollbackChatCompaction` guarantees every revert in a tail
- * has `revertFrom >= compactedTo`, which is what makes refusing below that safe rather than a hole.
- */
-export function protectRetainedReverts(
-    boundary: number | undefined, messages: AiChatMessage[], compactedTo = 0)
-    : number | undefined {
-  if (boundary === undefined) return;
-  let cut = boundary;
-  for (let i = messages.length - 1; i >= 0; --i) {
-    let message = messages[i];
-    if (message.type === "revert" && message.sequence >= cut && message.revertFrom < cut) {
-      cut = message.revertFrom;
-    }
-  }
-  return cut > compactedTo ? cut : undefined;
-}
-
-/**
  * Fold state before `compactedTo` into a new checkpoint. `initialBindings` is the chat's frozen seed
  * layer, which `previous` already contains once a chat has compacted before.
  */
@@ -357,6 +335,9 @@ export function buildCompactionState(
         } else if (call.toolName === "createWorktree" && call.output !== undefined) {
           chatBindings.set(call.input.bindingName,
               {type: "workpiece", id: call.output.worktreeId});
+        } else if (call.toolName === "createExternalResource" && call.output !== undefined) {
+          chatBindings.set(call.input.bindingName,
+              {type: "workpiece", id: call.output.gatekeeperId});
         }
       }
     } else if (message.type === "agentCallback") {
@@ -385,13 +366,30 @@ export function buildCompactionState(
     }
   }
 
+  return {
+    chatBindings: [...chatBindings],
+    nextChangeId,
+    ...foldCompactedCode(messages, compactedTo, previous),
+  };
+}
+
+/**
+ * The part of a checkpoint that merges and reverts decide: the pins active at `compactedTo`, the
+ * epoch it lies in, and the changes still proposed before it. `messages` start at `previous`'s
+ * boundary and may run past `compactedTo`, so a revert recorded after the boundary still drops the
+ * changes before it. That is how a revert refolds a checkpoint without touching its summary.
+ */
+export function foldCompactedCode(
+    messages: AiChatMessage[], compactedTo: number, previous: CompactionCheckpoint | undefined)
+    : Pick<CompactionCheckpoint, "pins" | "epoch" | "proposedChange"> {
+  let compacted = messages.filter(message => message.sequence < compactedTo);
+
   // Pins active at the boundary, and the epoch it lies in: seeded from the previous checkpoint
   // and folded over the compacted span -- an epoch boundary (an epochBoundary merge, or a
   // migrated chat's conversionBoundary changes message) resets both, and a surviving "changes"
-  // message's declarations accumulate. Statuses are computed over the compacted span alone,
-  // which is sound because rollbackChatCompaction guarantees no revert in the tail reaches
-  // below the boundary.
-  let statuses = chatChangeStatuses(compacted);
+  // message's declarations accumulate. Statuses come from every message given, so a declaration
+  // that a later revert discarded is dropped.
+  let statuses = chatChangeStatuses(messages);
   let pins = new Map((previous?.pins ?? []).map(pin => [pin.gadgetId, pin] as const));
   let epoch = previous?.epoch;
   for (let message of compacted) {
@@ -419,21 +417,17 @@ export function buildCompactionState(
   // messages. A carried-forward prefix is addressed below every message in this span: the
   // previous checkpoint already folded it, so nothing here can accept or revert part of it.
   // Composition is bounded by content size, not edit count, so `proposedChange` can't grow with
-  // history the way merged CRDT updates could.
-  let proposed = foldProposedChanges(
+  // history the way merged CRDT updates could. A declaration in the span re-roots its gadget,
+  // dropping that gadget's part of what came before it, the carried-forward prefix included.
+  // A later merge is not applied here, since replay applies it to the whole checkpoint, but a
+  // later revert is: replay can't take back part of a composed change.
+  let proposedChange = composeEpochChanges(foldProposedChanges(
       compacted,
       previous?.proposedChange !== undefined
-          ? [{sequence: -1, change: previous.proposedChange}] : []);
-  let proposedChange: CodeChange | undefined;
-  for (let batch of proposed) {
-    if (batch.change === undefined) continue;
-    proposedChange = proposedChange === undefined
-        ? batch.change : composeCodeChange(proposedChange, batch.change);
-  }
+          ? [{sequence: -1, change: previous.proposedChange}] : [])
+      .filter(batch => statuses.get(batch.sequence) !== "reverted"));
 
   return {
-    chatBindings: [...chatBindings],
-    nextChangeId,
     pins: pins.size === 0 ? undefined : [...pins.values()],
     epoch,
     proposedChange,

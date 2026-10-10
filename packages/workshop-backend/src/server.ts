@@ -6,7 +6,7 @@ import { handleOpenApiPublisher } from "./openapi-publisher";
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, ModelReasoningInfo, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, ModelReasoningInfo, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, NotificationSubscriber } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -24,7 +24,7 @@ import { GatekeeperUiFrame, type ConnectInitiator } from "@gadgets/workshop-shar
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getGatewayModels } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
-import { buildBlueprintArchiveStream, sanitizeBlueprintOutput, parseBlueprintArchive, randomBlueprintId, readBlueprintContent } from "./blueprint-archive.js";
+import { blueprintContentKey, buildBlueprintArchiveStream, sanitizeBlueprintOutput, parseBlueprintArchive, randomBlueprintId } from "./blueprint-archive.js";
 import { BlueprintKvRecord, listFeaturedBlueprintsFromKv, readBlueprintKvRecord } from "./storage-schema/blueprints-kv.js";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback } from "./overseer";
@@ -215,6 +215,15 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
   getQuickModel(): Promise<null | string> {
     return retryOnDoReset(() => this.#user.getQuickModel());
+  }
+
+  registerNotificationDevice(deviceRegistrationId: string): Promise<void> {
+    return this.#user.registerNotificationDevice(deviceRegistrationId);
+  }
+
+  subscribeToNotifications(
+      subscriber: RpcStub<NotificationSubscriber>): Promise<RpcStub<{}>> {
+    return this.#user.subscribeToNotifications(subscriber);
   }
 
   getPreferredModel(): Promise<string | null> {
@@ -490,7 +499,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let { metadata, contentLength, content } = await parseBlueprintArchive(archive);
     delete metadata.screenshot;
     let blueprintId = randomBlueprintId();
-    let r2Key = `${blueprintId}/${metadata.version}`;
+    let r2Key = blueprintContentKey(blueprintId, metadata);
 
     try {
       let fixedLengthStream = new FixedLengthStream(contentLength);
@@ -533,22 +542,19 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
     if (!kvRecord) throw new Error("Blueprint not found.");
 
-    // 2. Read gzip-compressed Yjs doc from R2 and decompress.
-    let codeBytes = await readBlueprintContent(this.env, blueprintId, kvRecord.metadata.version);
-    if (!codeBytes) throw new Error("Blueprint content not found in R2.");
-
-    // 3. Create new Overseer DO (same as newGadget()).
+    // 2. Create new Overseer DO (same as newGadget()).
     let id = this.overseers.newUniqueId().toString();
     await this.#user.newGadget(id, kvRecord.metadata.title);
     let overseerResult = await this.#openGadgetInternal(id);
 
-    // 4. Initialize from blueprint code.
+    // 3. Initialize from the blueprint's code. The Overseer reads it for itself, as the version
+    //    this metadata describes, so that it is the code the bindings assigned below belong to.
     let overseerDo = this.overseers.get(this.overseers.idFromString(id));
-    await overseerDo.initializeFromBlueprint(codeBytes, kvRecord.metadata.title,
+    await overseerDo.initializeFromBlueprint(blueprintId, kvRecord.metadata,
         deploymentOutputForBlueprint(await readAdminConfig(this.env), blueprintId,
             sanitizeBlueprintOutput(kvRecord.metadata.output)));
 
-    // 5. Create gatekeepers from assignments and bind them into the workspace's (only) gadget.
+    // 4. Create gatekeepers from assignments and bind them into the workspace's (only) gadget.
     let metadata = await overseerResult.getMetadata();
     using gadget = await overseerResult.getGadget(metadata.defaultGadgetId!);
 
@@ -900,7 +906,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     let kvRecord = await readBlueprintKvRecord(this.env, id);
     if (!kvRecord) throw new Error("Blueprint not found.");
 
-    let r2Object = await this.env.BLUEPRINT_CONTENT.get(`${id}/${kvRecord.metadata.version}`);
+    let r2Object = await this.env.BLUEPRINT_CONTENT.get(blueprintContentKey(id, kvRecord.metadata));
     if (!r2Object) throw new Error("Blueprint content not found in R2.");
 
     let metadata = { ...kvRecord.metadata };

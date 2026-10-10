@@ -9,9 +9,9 @@ vi.mock('@cloudflare/kumo', async (importOriginal) => {
   return { ...actual, useKumoToastManager: () => toasts }
 })
 
-import { act } from 'react'
+import { act, useState } from 'react'
 import type { RpcStub } from 'capnweb'
-import type { Overseer } from '@gadgets/workshop-shared/api'
+import type { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
 import { makeTestRoot } from './action-test-harness'
 import { useResolveAction } from './useResolveAction'
 
@@ -19,10 +19,11 @@ const fail = () => Promise.reject(new Error('Gatekeeper facet was reset'))
 
 describe('useResolveAction', () => {
   const view = makeTestRoot()
-  let resolve: ReturnType<typeof useResolveAction>
+  let resolveAction: (action: ActionLogEntry, decision: 'approve' | 'deny') => Promise<void>
 
   function Probe({ overseer }: { overseer: RpcStub<Overseer> }) {
-    resolve = useResolveAction(overseer, () => {})
+    const [, setProcessing] = useState(() => new Set<number>())
+    ;({ resolveAction } = useResolveAction(overseer, setProcessing, () => {}))
     return null
   }
 
@@ -37,7 +38,7 @@ describe('useResolveAction', () => {
     const overseer = { approveAction: fail, rejectAction: fail } as unknown as RpcStub<Overseer>
     await view.render(<Probe overseer={overseer} />)
 
-    await act(() => resolve(1, decision))
+    await act(() => resolveAction({ id: 1, type: 'action' } as ActionLogEntry, decision))
 
     expect(toasts.add).toHaveBeenCalledWith({
       title: `Failed to ${decision} action`,

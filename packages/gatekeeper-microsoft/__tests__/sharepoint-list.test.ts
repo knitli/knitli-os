@@ -758,6 +758,9 @@ describe("validateFields", () => {
     expect(() => validateFields({ Due: "2026-09-15T23:30:00-05:00" }, dateOnly))
         .toThrow(/calendar date like "2026-09-15"/);
     expect(() => validateFields({ Due: "2026-02-30" }, dateOnly)).toThrow(/calendar date/);
+    // A Date is an instant whose calendar day depends on a time zone it does not carry.
+    expect(() => validateFields({ Due: new Date("2026-09-14T23:30:00Z") }, dateOnly))
+        .toThrow(/calendar date like "2026-09-15"/);
   });
 
   it("holds a number to its column's bounds", () => {

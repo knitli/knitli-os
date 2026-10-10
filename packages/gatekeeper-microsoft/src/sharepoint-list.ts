@@ -253,7 +253,9 @@ function validateDateTime(column: ColumnDefinition, value: unknown): string {
   // A date-only column has no time zone, so an instant would land on whichever day its offset
   // converts to. It takes a plain calendar date, and nothing else.
   if (column.dateOnly) {
-    let plain = value instanceof Date ? value.toISOString().slice(0, 10) : value;
+    // Only a string: a Date is an instant, and its calendar day depends on a time zone it does not
+    // carry.
+    let plain = value;
     if (typeof plain !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(plain) || !parseIsoDate(plain)) {
       throw new Error(
           `Column "${column.name}" holds a date with no time, so its value must be a calendar date ` +

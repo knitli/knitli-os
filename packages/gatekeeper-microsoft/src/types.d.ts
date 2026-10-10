@@ -202,7 +202,7 @@ export interface OutlookMessage {
 
   /**
    * Create a draft reply to the sender (to `replyTo` when the message names one), with `body` above
-   * the quoted original.
+   * the quoted original. `body` must not be empty.
    *
    * Queued for approval, and nothing is ever sent: once approved, the draft appears in the
    * mailbox's Drafts folder for the user to review and send. The draft is not readable from this

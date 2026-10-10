@@ -642,6 +642,9 @@ describe("queued mutations", () => {
     const message = await firstMessage(session);
 
     await expect(message.createReplyDraft("x".repeat(64 * 1024 + 1))).rejects.toThrow(/at most/);
+    // A blank reply could not be recognised on a retry, so it is not queued at all.
+    await expect(message.createReplyDraft("   \n")).rejects.toThrow(/must not be empty/);
+    await expect(message.createReplyAllDraft("")).rejects.toThrow(/must not be empty/);
     expect(approvals.actions).toHaveLength(0);
   });
 

@@ -464,6 +464,11 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
   }
 
   async #submitReplyDraft(body: string, replyAll: boolean): Promise<void> {
+    // A blank reply could not be recognised if its first attempt landed and was retried, and would
+    // leave two drafts; a reply with nothing to say has nothing to queue.
+    if (typeof body !== "string" || body.trim() === "") {
+      throw new Error("Reply body must not be empty.");
+    }
     if (new TextEncoder().encode(body).byteLength > MAX_REPLY_BODY_BYTES) {
       throw new Error(`Reply body must be at most ${MAX_REPLY_BODY_BYTES} bytes.`);
     }

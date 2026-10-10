@@ -42,6 +42,12 @@
       "new_sqlite_classes": [
         "TeamsGatekeeperImpl"
       ]
+    },
+    {
+      "tag": "v1-sharepoint-list",
+      "new_sqlite_classes": [
+        "SharePointListGatekeeperImpl"
+      ]
     }
   ]
 }

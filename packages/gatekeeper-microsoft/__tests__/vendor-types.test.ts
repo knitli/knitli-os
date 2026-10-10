@@ -6,8 +6,9 @@
 // at compile time. This parses what the vendor actually serves.
 //
 // The files are read from disk rather than imported: under vitest a `.txt` import resolves to a
-// module reference, not the file's contents. `types.txt` and `teams-types.txt`, which the vendor imports, are symlinks to the `.d.ts` files read
-// here, so this is the same text — but the join is reproduced here rather than called, so it has to be kept
+// module reference, not the file's contents. `types.txt`, `teams-types.txt` and
+// `sharepoint-types.txt`, which the vendor imports, are symlinks to the `.d.ts` files read here, so
+// this is the same text — but the join is reproduced here rather than called, so it has to be kept
 // in step with the vendor's.
 
 import { readFileSync } from "node:fs";
@@ -17,7 +18,7 @@ import { describe, expect, it } from "vitest";
 // ships version metadata only and no parser API.
 import ts from "typescript6";
 
-const SOURCES = ["types.d.ts", "teams-types.d.ts"];
+const SOURCES = ["types.d.ts", "teams-types.d.ts", "sharepoint-types.d.ts"];
 
 function read(name: string): string {
   return readFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), "utf8");
@@ -94,13 +95,15 @@ describe("vendor TypeScript types", () => {
     }
     expect(read("types.d.ts")).toContain("export interface OutlookMailSession");
     expect(read("teams-types.d.ts")).toContain("export interface TeamsSession");
+    expect(read("sharepoint-types.d.ts")).toContain("export interface SharePointListSession");
   });
 
   it("gives each resource its own cursor type and never a bare Cursor", () => {
     // The Teams and SharePoint types name their own cursor interface. A bare `Cursor<…>` there
     // would only resolve because the mail types happen to be concatenated in front of them, and
     // would not resolve at all when that file is served on its own.
-    for (const [file, cursor] of [["teams-types.d.ts", "TeamsCursor"]]) {
+    for (const [file, cursor] of [["teams-types.d.ts", "TeamsCursor"],
+                                  ["sharepoint-types.d.ts", "SharePointCursor"]]) {
       expect(code(read(file))).not.toMatch(/(?<![\w$.])Cursor</);
       expect(read(file)).toContain(`export interface ${cursor}<T> {`);
     }
@@ -110,5 +113,6 @@ describe("vendor TypeScript types", () => {
     // `ResourceDescription.tsType` must be an export of the served types.
     expect(joined).toContain("export interface OutlookMailSession");
     expect(joined).toContain("export interface TeamsSession");
+    expect(joined).toContain("export interface SharePointListSession");
   });
 });

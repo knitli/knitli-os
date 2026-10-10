@@ -14,4 +14,5 @@ export const wrangler = DEFAULT_GATEKEEPER_WRANGLER;
 export const migrations: DurableObjectMigration[] = [
   { tag: "v0", new_sqlite_classes: ["UserAccount", "OutlookMailGatekeeperImpl"] },
   { tag: "v1", new_sqlite_classes: ["TeamsGatekeeperImpl"] },
+  { tag: "v1-sharepoint-list", new_sqlite_classes: ["SharePointListGatekeeperImpl"] },
 ];

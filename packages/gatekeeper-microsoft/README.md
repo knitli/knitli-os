@@ -14,6 +14,9 @@ Microsoft Entra ID (Azure AD) integration for Gadgets. It serves two purposes:
     read the teams, channels, chats, members, and messages the user can already see. Nothing in
     this resource writes: there is no method that posts, edits, deletes, marks read, joins, or
     leaves.
+  - **SharePoint List** at `https://*.sharepoint.com/*` — `Sites.ReadWrite.All`, so a gadget can
+    read one list's columns and items and create new items in it, each creation approved by a
+    person. See [SharePoint List](#sharepoint-list).
 
 A single Entra app registration is used for both, and it is pinned to **one tenant** — the worker
 needs `CLIENT_ID`, `CLIENT_SECRET`, and `TENANT_ID` before it will answer anything.
@@ -70,6 +73,139 @@ knowing before enabling it, because none of them is a setting a deployment can c
   bulk `getAllMessages` / `/delta` feeds are application permissions — neither fits a delegated,
   on-demand gatekeeper. An agent therefore sees what it looks at, when it looks.
 
+## SharePoint List
+
+One connection is **one list**. A user introduces it by pasting the list's address; the gadget gets
+a `SharePointListSession` with four methods — `getColumns()`, `getItems()`, `getItem()`,
+`createItem()`. There is no update, no delete, no schema change, and no file or document-library
+access: the intended shape is a form gadget that appends rows to a list somebody already maintains.
+
+Every request runs on the connecting user's own delegated token, so the connection can only reach
+what that user can already open in SharePoint.
+
+### Introducing a list
+
+Paste the address of the list page itself (the `AllItems.aspx` view is fine). The query string and
+fragment are ignored — they are view state, not identity. All three site shapes resolve:
+
+```
+https://contoso.sharepoint.com/sites/HR/Lists/Requests/AllItems.aspx     → site /sites/HR
+https://contoso.sharepoint.com/teams/HR/sub/Lists/Requests/AllItems.aspx → site /teams/HR/sub
+https://contoso.sharepoint.com/Lists/Requests/AllItems.aspx              → the tenant root site
+```
+
+The "Copy link" button's share form (`https://contoso.sharepoint.com/:l:/r/sites/HR/Lists/Requests`)
+is accepted too; its other share modes (`/:l:/s/…`, `/:l:/g/…`) name a share rather than a path and
+are refused with a hint to copy the URL from the browser's address bar instead.
+
+The list is matched on the URL name after `/Lists/` (not the display name, which anyone who can edit
+the list may change). Site and list **ids** are resolved once, at introduction, so the binding keeps
+working after a rename. The binding's title is the list's display name.
+
+Three failures are worth recognizing:
+
+- `<what is wrong>. Expected a SharePoint list URL like https://<tenant>.sharepoint.com/…` — the
+  address is on a SharePoint host but does not name a list: no `/Lists/` segment, no list name after
+  it, `http` instead of `https`, or a share mode that carries no path. The first sentence says which.
+  No Graph call was made.
+- `The Microsoft gatekeeper cannot connect this URL: …` — the address is not on a SharePoint host at
+  all, so it is not one this gatekeeper connects. No Graph call was made.
+- `Could not open that SharePoint list: … Check the URL and that your account can open it.` — the
+  address parsed, but Graph would not resolve the site or the list for this account. The middle part
+  is Microsoft's own reason.
+
+### Columns a gadget can read and write
+
+`getColumns()` reports each column's **internal name** (the key `createItem()`, `select`, and
+`where` all use), display name, type, `required`, `readOnly`, a `choices` list for choice columns,
+`multiline` for a text column that takes more than one line, and `multiple` for a person or lookup
+column that holds more than one value. Hidden, system, and computed columns are not reported at all
+— except `Title`, which some lists mark read-only in a view while still requiring it on create.
+
+| Type | Read | Write |
+| --- | --- | --- |
+| `text` (incl. multiline), `number`, `boolean`, `dateTime`, `choice` | yes | yes |
+| `person`, `lookup` | yes | **no** — a numeric directory/list id this cannot look up |
+| `unsupported` (currency, calculated, hyperlink, managed metadata, geolocation, …) | yes | **no** |
+
+`createItem()` validates against the list's own schema **before** anything is submitted, so a bad
+call fails immediately instead of sitting in the approval queue. It refuses: an argument that is not
+an object; an unknown column name; a missing (or explicitly `null`) required column; a value of the
+wrong type; a `choice` outside the column's options; and any `person`, `lookup`, or `unsupported`
+column. Dates are normalized to an ISO timestamp, so neither the caller's formatting nor its time
+zone reaches SharePoint.
+
+Reads: `getItems()` returns a cursor — 25 items per page by default, 200 at most, at most 40 pages
+per cursor. Filters are structured (`{column, op, value}`, at most five clauses, combined with
+`and`); there is no way to pass a raw OData string. Every read is recorded as an observation in the
+workspace's activity, and nothing a read does can change the list.
+
+### Approval
+
+Every `createItem()` lands in the approval queue with a fenced key/value description of the values,
+and a build collaborator approves it before the row is written. Nothing is auto-approvable: the
+source fork's "Create list items" auto-approval rule (which covered every gadget bound to the list
+in a workspace) is deliberately not ported. A binding holds at most **100** pending actions; the
+101st submission is refused with "Too many pending SharePoint list actions. Resolve existing
+actions before adding more."
+
+A create whose Graph write failed **stays pending**, so an approver can approve it again (a retry,
+for a throttle) or reject it from the workspace's **Activity** panel. Collaborators with the **use**
+role get the minimal UI and cannot see it, so a workspace shared for use needs at least one build
+collaborator who watches Activity.
+
+### Sharing a gadget
+
+A collaborator is admitted as an observer only if **their own** Microsoft account can open the list;
+the check runs on their token, not the owner's. A collaborator without site access gets "You do not
+have access to this SharePoint list." If Microsoft cannot be reached to answer the question, they
+get "Could not verify SharePoint access right now." and can be retried later.
+
+### Known limits
+
+- **Duplicate window after a crash.** If the worker dies between SharePoint accepting the row and
+  the gatekeeper forgetting the pending action, the row exists while the action still looks
+  pending — approving it again creates a second row. The source fork closed most of this window
+  with a durable outcome record; this port dropped that together with the auto-apply machinery it
+  existed for. Before re-approving an action that failed without a clear reason, look at the list.
+- **`createItem()` reports nothing about the outcome**, as the mailbox's writes do: it returns once
+  the action is queued, and returns no item id. The row appears in later reads only after approval.
+- **A column added in SharePoint is not picked up while the connection is warm.** The list's schema
+  is cached in memory per Durable Object instance, and the only thing that invalidates it is a Graph
+  4xx at apply time. Since `createItem()` validates against the cached schema *before* submitting, a
+  newly added column never reaches that path — it is refused with `Unknown column "X". Use internal
+  column names from getColumns().`, and `getColumns()` keeps returning the old schema, until the
+  instance goes idle. After adding a column, leave the workspace alone for a few minutes before
+  writing to it.
+- **Reads have their own throttling ceiling.** A read waits out a SharePoint `Retry-After` for at
+  most 10 s (writes get 60 s, since an approval queue rather than a caller is waiting). Past it
+  `getColumns()`, `getItems()` and `getItem()` fail with `SharePoint is throttling this connection
+  and asked to be left alone for N seconds. Try again after that.` Nothing is lost — retry after the
+  stated wait.
+- **Multi-select choice columns look single-valued.** Graph's column definition exposes no
+  multi-select flag, so such a column is described as an ordinary `choice` and only accepts one
+  string. A multi-value write is expected to be refused by SharePoint — untested, because no list
+  with such a column has been tried yet. Avoid those columns until one has.
+- **Large lists.** SharePoint's 5000-item list view threshold applies to `getItems()`: past it,
+  filtering or sorting on a column that has no index fails, and Microsoft's own sentence comes back
+  as `SharePoint rejected the request: Field 'X' cannot be referenced in filter or orderby as it is
+  not indexed`. The fix is on the SharePoint side — add an index for that column in list settings.
+- **Not yet verified against a real tenant** (check these on the first live list; they are
+  assumptions the code makes): the percent-encoded `$expand=fields($select=…)` form, quoted
+  `dateTime` literals in filters, the `$top` ceiling of 200, and root-site resolution for a
+  tenant-root list.
+
+### Rollback
+
+Withdrawing SharePoint is the same procedure every resource here uses — withdraw it in code, never
+touch the migration: see
+[Durable Object migrations, and how to back out a resource](#durable-object-migrations-and-how-to-back-out-a-resource).
+The class to keep exported is `SharePointListGatekeeperImpl` and the tag to keep is
+`v1-sharepoint-list`.
+
+De-consenting `Sites.ReadWrite.All` is a separate action in Entra (API permissions on the app
+registration) and affects nothing in this repo.
+
 ## Setting up the Entra app registration
 
 ### Step 1: Register the application
@@ -106,6 +242,7 @@ add:
 | `TeamMember.Read.All` | **yes** | read a team's roster |
 | `ChannelMessage.Read.All` | **yes** | read channel messages and their replies |
 | `Chat.Read` | no* | read the user's chats, their members, and their messages |
+| `Sites.ReadWrite.All` | **yes** | SharePoint List: read a list's columns and items, and create items |
 
 Then click **Grant admin consent for &lt;tenant&gt;** and confirm every permission reads
 **Granted**. Many tenants block user consent; without admin consent those users hit `AADSTS65001`
@@ -115,6 +252,11 @@ When a resource is added in a later release, add its permissions to the registra
 admin consent again; re-granting does not disturb the grants already in use, and no redeploy is
 needed for the consent itself. Because each resource connects on its own, nothing needs to be
 consented before a release ships — only before someone connects that resource.
+
+`Sites.ReadWrite.All` is broad by necessity: Graph's per-site permission (`Sites.Selected`) is
+application-only, so a *delegated* connection cannot be scoped to one site. Every request still runs
+as the signed-in user, so the connection reaches nothing that user could not already open — and a
+gadget only ever sees the single list its binding names.
 
 **Consent all of a resource's permissions or none.** A resource counts as granted only when the
 grant covers *every* one of its scopes, so a resource left unconsented is unavailable rather than
@@ -273,6 +415,37 @@ identifies the cause, and guessing without it wastes a round trip.
       read shows up as an observation, and nothing in Teams changes.
 - [ ] **Single-user.** Share a gadget bound to Teams with a colleague → opening it is refused.
 
+### SharePoint list (via a gadget)
+
+Run this against a real list you are allowed to write to — every item it creates is a real row that
+the site's members can see.
+
+- [ ] **Consent is in place.** On the app registration this deployment uses, `Sites.ReadWrite.All`
+      (delegated) reads **Granted**. Each environment with its own registration needs its own grant,
+      before the build that requests the scope is deployed there.
+- [ ] **Connect on its own.** Connections → Microsoft → the picker offers "SharePoint List" → the frame asks
+      for a list URL, and **Connect** stays disabled until the address is plausible. Paste a
+      `/sites/…/Lists/…` URL → a binding appears, titled with the list's display name.
+- [ ] **Other site shapes resolve.** Repeat with a `/teams/…` list and with a list on the tenant
+      root site (no `/sites/` or `/teams/` segment). Both must bind.
+- [ ] **A bad address fails cleanly.** Paste a non-list URL → a readable error, no binding, and
+      nothing left half-connected.
+- [ ] **Schema is visible.** Ask the agent to describe the binding and call `getColumns()` → types,
+      required flags, and a choice column's options are all shown; hidden system columns are not.
+- [ ] **Writes queue.** Submit from a gadget → the action waits in **Activity** with a readable,
+      fenced description of the values and the gadget gets no item id; approve → the row is created.
+- [ ] **Validation happens before the queue.** Submit with a required field missing → refused
+      immediately, naming the column, with nothing left in the approval queue.
+- [ ] **Types round-trip.** Write a choice, a number, a boolean, and a date → each is stored with
+      the right type in SharePoint (a date lands as the moment you meant, not a day out).
+- [ ] **Sharing respects SharePoint's own access.** Share the gadget with a colleague who has site
+      access → they can use the form. Share it with someone who does not → they are refused with
+      "You do not have access to this SharePoint list."
+- [ ] **Filtering works on a real list.** `getItems()` with a `where` clause on an indexed column
+      and `top` of 200 → pages correctly. Record the largest `top` Graph actually honoured; on a
+      list past the 5000-item threshold, filtering an unindexed column is expected to fail with
+      Microsoft's "not indexed" sentence.
+
 ### Password-auth coexistence
 
 Password accounts key on the address exactly as typed, while Microsoft sign-in lowercases it. The
@@ -342,7 +515,7 @@ pnpm --filter @gadgets/microsoft-gatekeeper build
 
 Each resource type has its own Durable Object class, and every class is registered by a `migrations`
 tag in the `migrations` export of `cloudflare.config.ts` — `v0` for `UserAccount` and
-`OutlookMailGatekeeperImpl`, `v1` for `TeamsGatekeeperImpl`. `wrangler.jsonc` is generated from it (`pnpm configs:generate`). Tags are appended,
+`OutlookMailGatekeeperImpl`, `v1` for `TeamsGatekeeperImpl`, `v1-sharepoint-list` for `SharePointListGatekeeperImpl`. `wrangler.jsonc` is generated from it (`pnpm configs:generate`). Tags are appended,
 never edited: rewriting an applied tag makes the next deploy disagree with the migration history the
 account already holds.
 

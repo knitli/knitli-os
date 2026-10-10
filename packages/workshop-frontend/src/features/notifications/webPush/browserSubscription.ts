@@ -4,10 +4,10 @@ import { applicationServerKey, currentPushEnvironment, pushAvailability, subscri
 
 // A browser's push subscription is one per origin, not one per account, so a browser reused after
 // sign-out would still hold the previous user's. Remember whose it is and let go of it for anyone else.
+//
+// One user per browser at a time is assumed: the auth token is shared by every tab through
+// localStorage, so tabs signed in as different users are unsupported and not guarded against here.
 const OWNER_KEY = 'gadgets.webPush.owner'
-// The subscription this tab registered for its session. Unlike the owner it is per tab
-// (sessionStorage), so sign-out can tell its own subscription from one another tab replaced it with.
-const ENDPOINT_KEY = 'gadgets.webPush.endpoint'
 const SIGN_OUT_TIMEOUT_MS = 3000
 /** The message `public/sw.js` answers by unsubscribing this browser from push. */
 const RELEASE_PUSH_MESSAGE = 'release-push-subscription'
@@ -29,34 +29,8 @@ const writeOwner = (owner: string | null) => {
   }
 }
 
-const readEndpoint = () => {
-  try {
-    return sessionStorage.getItem(ENDPOINT_KEY)
-  } catch {
-    return null
-  }
-}
-
-/** Records the endpoint of the subscription this tab registered with the server (null forgets it). */
-export const rememberBrowserEndpoint = (endpoint: string | null) => {
-  try {
-    if (endpoint === null) sessionStorage.removeItem(ENDPOINT_KEY)
-    else sessionStorage.setItem(ENDPOINT_KEY, endpoint)
-  } catch {
-    // Without it sign-out has nothing it can prove is its own, and leaves the subscription to the next sign-in.
-  }
-}
-
 /** Whether this browser's subscription was made for `owner`, the signed-in user's id. */
 export const ownsBrowserSubscription = (owner: string) => readOwner() === owner
-
-/**
- * Forgets `owner` as the owner, unless another tab has since recorded someone else: the marker is
- * shared by every tab, and what a stale continuation last saw may no longer be true.
- */
-export const forgetBrowserSubscription = (owner: string | null) => {
-  if (readOwner() === owner) writeOwner(null)
-}
 
 /** Records `owner` (the signed-in user's id; null forgets it) as the owner of this browser's subscription. */
 export const claimBrowserSubscription = (owner: string | null) => writeOwner(owner)
@@ -73,37 +47,21 @@ export const findPushManager = async (): Promise<PushManager | undefined> =>
 /**
  * Removes this browser's subscription from the browser and the server, and forgets its owner. The
  * browser side goes first and does not depend on the server: if the server call fails or stalls,
- * the endpoint is already dead (the server prunes it on its next 404/410) and nobody else's
- * notifications can reach this browser. `owner`, when known, limits the release to that user's
- * subscription. `signal` abandons the release, checked after every await
- * that precedes a mutation, for a caller that stopped waiting and whose session may have been
- * replaced by one that has claimed a new subscription.
+ * the endpoint is already dead (the server prunes it on its next 404/410).
  */
-export const releaseBrowserSubscription = async (
-  api: RpcStub<AuthenticatedApi>, pushManager: PushManager, signal?: AbortSignal, owner?: string,
-  endpoint?: string,
-) => {
+export const releaseBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, pushManager: PushManager) => {
   const subscription = await pushManager.getSubscription()
-  if (signal?.aborted) return
-  // The subscription is shared by every tab: leave one another user has since claimed alone.
-  const claimedBy = readOwner()
-  if (owner && claimedBy && claimedBy !== owner) return
   if (!subscription) return writeOwner(null)
-  // Only the subscription the caller means: another tab may have replaced it with its own.
-  if (endpoint && subscription.endpoint !== endpoint) return
   await subscription.unsubscribe()
-  if (signal?.aborted) return
-  forgetBrowserSubscription(claimedBy)
-  if (readEndpoint() === subscription.endpoint) rememberBrowserEndpoint(null)
+  writeOwner(null)
   await api.removeWebPushSubscription(subscription.endpoint)
 }
 
 /**
  * Brings this browser's subscription in line with the signed-in user at app start: someone else's
  * is dropped, and the user's own is registered again, since the browser may have refreshed it
- * (new endpoint and keys) and the server forgets one its push service reported gone. Every step
- * after an await checks `signal`, because the browser's subscription is shared state that a newer
- * session may already have claimed.
+ * (new endpoint and keys) and the server forgets one its push service reported gone. `signal`
+ * stops a run whose session has been replaced.
  */
 export const syncBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, signal: AbortSignal) => {
   if (pushAvailability(currentPushEnvironment()) !== 'supported' || Notification.permission !== 'granted') return
@@ -117,23 +75,21 @@ export const syncBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, si
   if (signal.aborted) return
   if (!subscription) {
     const key = await api.getWebPushPublicKey()
-    if (key && !signal.aborted && ownsBrowserSubscription(id)) await subscribeAnew(api, pushManager, key, signal, id)
+    if (key && !signal.aborted && ownsBrowserSubscription(id)) await subscribeAnew(api, pushManager, key)
     return
   }
   if (!ownsBrowserSubscription(id)) {
-    const foreign = readOwner()
     await subscription.unsubscribe()
-    if (!signal.aborted) forgetBrowserSubscription(foreign)
+    writeOwner(null)
     return
   }
   const key = await api.getWebPushPublicKey()
   if (signal.aborted || !key) return
   if (!subscribedWithKey(subscription, key)) {
-    await resubscribe(api, pushManager, subscription, key, signal, id)
+    await resubscribe(api, pushManager, subscription, key)
     return
   }
   await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
-  if (!signal.aborted) rememberBrowserEndpoint(subscription.endpoint)
 }
 
 /**
@@ -142,14 +98,11 @@ export const syncBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, si
  * subscribing needs a tap (iOS) the owner is cleared and Settings offers Turn on.
  */
 const resubscribe = async (
-  api: RpcStub<AuthenticatedApi>, pushManager: PushManager, stale: PushSubscription, key: string, signal: AbortSignal,
-  owner: string,
+  api: RpcStub<AuthenticatedApi>, pushManager: PushManager, stale: PushSubscription, key: string,
 ) => {
   await stale.unsubscribe()
-  if (signal.aborted) return
   await api.removeWebPushSubscription(stale.endpoint).catch(() => {})
-  if (signal.aborted) return
-  await subscribeAnew(api, pushManager, key, signal, owner)
+  await subscribeAnew(api, pushManager, key)
 }
 
 /**
@@ -157,29 +110,17 @@ const resubscribe = async (
  * (iOS) turns the device off for Settings to offer Turn on; any other failure throws, so the
  * caller's retry runs, and the owner marker left behind tells the next run to try again.
  */
-const subscribeAnew = async (
-  api: RpcStub<AuthenticatedApi>, pushManager: PushManager, key: string, signal: AbortSignal, owner: string,
-) => {
+const subscribeAnew = async (api: RpcStub<AuthenticatedApi>, pushManager: PushManager, key: string) => {
   let fresh: PushSubscription
   try {
     fresh = await pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationServerKey(key) })
   } catch (error) {
-    if (error instanceof DOMException && error.name === 'NotAllowedError') return forgetBrowserSubscription(owner)
+    if (error instanceof DOMException && error.name === 'NotAllowedError') return writeOwner(null)
     throw error
   }
-  if (signal.aborted) return
   await api.addWebPushSubscription(toSubscriptionInfo(fresh.toJSON()))
-  if (!signal.aborted) rememberBrowserEndpoint(fresh.endpoint)
 }
 
-/**
- * Signing out: stops this browser receiving the user's notifications. Best effort, and bounded.
- * It releases whatever subscription the browser holds without asking the server who the user is,
- * so a dropped connection cannot leave it behind: sign-in already dropped any subscription that was
- * not the user's, so what remains is theirs, unless another tab has signed in as someone else since:
- * `owner`, the id this tab was signed in as, guards that. Both it and the endpoint this tab
- * registered are optional guards; without a registered endpoint nothing is released.
- */
 /**
  * Whether a service worker controls the page and so can finish sign-out cleanup after the page is
  * gone. Without one (Safari's declarative push can outlive its registration) the page itself must
@@ -187,33 +128,23 @@ const subscribeAnew = async (
  */
 export const hasSignOutWorkerHandoff = () => !!navigator.serviceWorker?.controller
 
-export const releaseOnSignOut = async (api: RpcStub<AuthenticatedApi>, owner?: string) => {
+/**
+ * Signing out: stops this browser receiving the user's notifications, whatever subscription it
+ * holds (sign-in already dropped any that was not the user's). Best effort, and bounded.
+ */
+export const releaseOnSignOut = async (api: RpcStub<AuthenticatedApi>) => {
   if (pushAvailability(currentPushEnvironment()) !== 'supported') return
   // Before any await, so it is sent even if the page is navigated away at once (the Cloudflare Access
   // sign-out redirects immediately): the service worker outlives the document and unsubscribes.
-  // Only what this tab itself registered: with no endpoint it has nothing of its own to release, and
-  // a subscription found anyway is another session's (the next sign-in drops a foreign one).
-  const endpoint = readEndpoint()
-  if (!endpoint) return
-  const claimedBy = readOwner()
-  if (!owner || !claimedBy || claimedBy === owner) {
-    navigator.serviceWorker.controller?.postMessage({ type: RELEASE_PUSH_MESSAGE, endpoint })
-  }
-  const stopped = new AbortController()
+  navigator.serviceWorker.controller?.postMessage({ type: RELEASE_PUSH_MESSAGE })
   let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<void>((resolve) => {
-    timer = setTimeout(() => {
-      stopped.abort()
-      resolve()
-    }, SIGN_OUT_TIMEOUT_MS)
-  })
   try {
     await Promise.race([
       (async () => {
         const pushManager = await findPushManager()
-        if (pushManager && !stopped.signal.aborted) await releaseBrowserSubscription(api, pushManager, stopped.signal, owner, endpoint)
+        if (pushManager) await releaseBrowserSubscription(api, pushManager)
       })(),
-      timeout,
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, SIGN_OUT_TIMEOUT_MS) }),
     ])
   } catch (error) {
     console.error('Failed to release push notifications on sign-out:', error)

@@ -14,7 +14,7 @@ import { hasSignOutWorkerHandoff, releaseOnSignOut } from './features/notificati
 vi.mock('./features/notifications/webPush/WebPushSync', () => ({ WebPushSync: () => null }))
 vi.mock('./features/notifications/webPush/browserSubscription', () => ({
   // Push cleanup that never finishes, as when the browser or server stalls.
-  releaseOnSignOut: vi.fn<(api: unknown, owner?: string) => Promise<void>>(() => new Promise(() => {})),
+  releaseOnSignOut: vi.fn<(api: unknown) => Promise<void>>(() => new Promise(() => {})),
   hasSignOutWorkerHandoff: vi.fn<() => boolean>(() => true),
 }))
 
@@ -48,7 +48,7 @@ describe('AuthProvider logout', () => {
     await act(async () => root.unmount())
   })
 
-  it('signs out at once, without waiting for push cleanup, which learns who is signing out', async () => {
+  it('signs out at once, without waiting for push cleanup, when a service worker can finish it', async () => {
     const api = {
       whoami: async () => ({ type: 'user', id: 'me@example.com', name: 'Me' }),
       amIAdmin: async () => false,
@@ -64,7 +64,7 @@ describe('AuthProvider logout', () => {
 
     act(() => logout())
     expect(onLogout).toHaveBeenCalledTimes(1)
-    expect(releaseOnSignOut).toHaveBeenCalledWith(api, 'me@example.com')
+    expect(releaseOnSignOut).toHaveBeenCalledWith(api)
     await act(async () => root.unmount())
   })
 })

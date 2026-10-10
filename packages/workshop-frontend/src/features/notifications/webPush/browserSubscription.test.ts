@@ -21,8 +21,6 @@ function install(subscribed = true, getSubscription?: () => Promise<unknown>) {
   Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { getRegistration: async () => registration } })
   vi.stubGlobal('PushManager', function PushManager() {})
   vi.stubGlobal('Notification', { permission: 'granted' })
-  // This tab registered it, as sign-in's sync or Turn on would have.
-  sessionStorage.setItem('gadgets.webPush.endpoint', subscription.endpoint)
   return { registration, subscription }
 }
 
@@ -38,7 +36,6 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   localStorage.clear()
-  sessionStorage.clear()
   delete (navigator as { serviceWorker?: unknown }).serviceWorker
 })
 
@@ -63,7 +60,7 @@ describe('syncBrowserSubscription', () => {
       expect(api.addWebPushSubscription).not.toHaveBeenCalled()
     })
 
-  it('abandons a stale synchronization instead of dropping a subscription a newer session claimed', async () => {
+  it('stops once its session is replaced, instead of dropping a subscription for a stale identity', async () => {
     const api = fakeApi()
     const { subscription } = install()
     const stale = new AbortController()
@@ -72,11 +69,9 @@ describe('syncBrowserSubscription', () => {
     const done = syncBrowserSubscription(asStub(api), stale.signal)
     await vi.waitFor(() => expect(api.whoami).toHaveBeenCalled())
     stale.abort()
-    localStorage.setItem(OWNER_KEY, 'next@example.com')
     finishIdentity({ id: 'me@example.com' })
     await done
     expect(subscription.unsubscribe).not.toHaveBeenCalled()
-    expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
   })
 
   describe('after the deployment rotated its VAPID key', () => {
@@ -166,21 +161,6 @@ describe('releaseOnSignOut', () => {
     expect(localStorage.getItem(OWNER_KEY)).toBeNull()
   })
 
-  it('leaves a subscription alone that only turns up after the sign-out gave up waiting', async () => {
-    vi.useFakeTimers()
-    const api = fakeApi()
-    let lookUp!: () => void
-    const { subscription } = install(true, () => new Promise((resolve) => { lookUp = () => resolve(subscription) }))
-    localStorage.setItem(OWNER_KEY, 'next@example.com')
-    const done = releaseOnSignOut(asStub(api))
-    await vi.advanceTimersByTimeAsync(3000)
-    await done
-    lookUp()
-    await vi.advanceTimersByTimeAsync(0)
-    expect(subscription.unsubscribe).not.toHaveBeenCalled()
-    expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
-  })
-
   it('releases a declarative Safari subscription that outlived its service worker registration', async () => {
     const api = fakeApi()
     const { subscription } = install()
@@ -193,86 +173,14 @@ describe('releaseOnSignOut', () => {
     expect(localStorage.getItem(OWNER_KEY)).toBeNull()
   })
 
-  it('does not clear a replacement’s owner or call the server once abandoned while unsubscribing', async () => {
-    vi.useFakeTimers()
-    const api = fakeApi()
-    const { subscription } = install()
-    let finishUnsubscribe!: () => void
-    subscription.unsubscribe.mockReturnValue(new Promise((resolve) => { finishUnsubscribe = () => resolve(true) }))
-    localStorage.setItem(OWNER_KEY, 'me@example.com')
-    const done = releaseOnSignOut(asStub(api))
-    await vi.advanceTimersByTimeAsync(3000)
-    await done
-    localStorage.setItem(OWNER_KEY, 'next@example.com')
-    finishUnsubscribe()
-    await vi.advanceTimersByTimeAsync(0)
-    expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
-    expect(api.removeWebPushSubscription).not.toHaveBeenCalled()
-  })
-
   it('asks the service worker to unsubscribe before anything is awaited, for an immediate redirect', () => {
     const api = fakeApi()
     install()
     const postMessage = vi.fn<(message: unknown) => void>()
     Object.assign(navigator.serviceWorker, { controller: { postMessage } })
     localStorage.setItem(OWNER_KEY, 'me@example.com')
-    void releaseOnSignOut(asStub(api), 'me@example.com')
-    expect(postMessage).toHaveBeenCalledWith({
-      type: 'release-push-subscription', endpoint: 'https://web.push.apple.com/refreshed',
-    })
-  })
-
-  it('releases nothing, and sends nothing to the worker, when this tab registered no subscription itself', async () => {
-    const api = fakeApi()
-    const { subscription } = install()
-    sessionStorage.clear()
-    const postMessage = vi.fn<(message: unknown) => void>()
-    Object.assign(navigator.serviceWorker, { controller: { postMessage } })
-    localStorage.setItem(OWNER_KEY, 'next@example.com')
-    await releaseOnSignOut(asStub(api))
-    expect(postMessage).not.toHaveBeenCalled()
-    expect(subscription.unsubscribe).not.toHaveBeenCalled()
-  })
-
-  it('leaves alone a replacement another tab made, even without knowing who is signing out', async () => {
-    const api = fakeApi()
-    const { subscription } = install()
-    sessionStorage.setItem('gadgets.webPush.endpoint', 'https://web.push.apple.com/old')
-    await releaseOnSignOut(asStub(api))
-    expect(subscription.unsubscribe).not.toHaveBeenCalled()
-  })
-
-  it('does not ask the service worker to drop a subscription another tab claimed for someone else', () => {
-    const api = fakeApi()
-    install()
-    const postMessage = vi.fn<(message: unknown) => void>()
-    Object.assign(navigator.serviceWorker, { controller: { postMessage } })
-    localStorage.setItem(OWNER_KEY, 'next@example.com')
-    void releaseOnSignOut(asStub(api), 'me@example.com')
-    expect(postMessage).not.toHaveBeenCalled()
-  })
-
-  it('leaves alone a subscription another tab has since claimed for someone else', async () => {
-    const api = fakeApi()
-    const { subscription } = install()
-    localStorage.setItem(OWNER_KEY, 'next@example.com')
-    await releaseOnSignOut(asStub(api), 'me@example.com')
-    expect(subscription.unsubscribe).not.toHaveBeenCalled()
-    expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
-  })
-
-  it('keeps the owner another tab recorded while this one was still unsubscribing', async () => {
-    const api = fakeApi()
-    const { subscription } = install()
-    let finishUnsubscribe!: () => void
-    subscription.unsubscribe.mockReturnValue(new Promise((resolve) => { finishUnsubscribe = () => resolve(true) }))
-    localStorage.setItem(OWNER_KEY, 'me@example.com')
-    const done = releaseOnSignOut(asStub(api), 'me@example.com')
-    await vi.waitFor(() => expect(subscription.unsubscribe).toHaveBeenCalled())
-    localStorage.setItem(OWNER_KEY, 'next@example.com')
-    finishUnsubscribe()
-    await done
-    expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
+    void releaseOnSignOut(asStub(api))
+    expect(postMessage).toHaveBeenCalledWith({ type: 'release-push-subscription' })
   })
 
   it('never blocks or fails the sign-out when the server is unreachable', async () => {

@@ -204,30 +204,6 @@ describe('NotificationsSetting', () => {
     expect(api.addWebPushSubscription).toHaveBeenCalledTimes(1)
   })
 
-  it('does not touch the subscription once its session is gone before the browser answers', async () => {
-    const browser = installBrowser({ permission: 'granted', subscribed: true })
-    localStorage.setItem('gadgets.webPush.owner', 'next@example.com')
-    let answer!: (subscription: typeof browser.subscription) => void
-    browser.pushManager.getSubscription.mockReturnValueOnce(new Promise((resolve) => { answer = resolve }))
-    await render(fakeApi())
-    await act(async () => root!.unmount())
-    root = undefined
-    await act(async () => answer(browser.subscription))
-    expect(browser.subscription.unsubscribe).not.toHaveBeenCalled()
-  })
-
-  it('turns off only the account it shows, not one another tab signed in as', async () => {
-    const browser = installBrowser({ permission: 'granted', subscribed: true })
-    localStorage.setItem('gadgets.webPush.owner', 'me@example.com')
-    const api = fakeApi()
-    const container = await render(api)
-    localStorage.setItem('gadgets.webPush.owner', 'next@example.com')
-
-    await act(async () => button(container, 'Turn off')!.click())
-    expect(browser.subscription.unsubscribe).not.toHaveBeenCalled()
-    expect(localStorage.getItem('gadgets.webPush.owner')).toBe('next@example.com')
-  })
-
   it('stays on, with Turn off, when registering fails and the rollback cannot unsubscribe either', async () => {
     const api = fakeApi()
     api.addWebPushSubscription.mockRejectedValue(new Error('offline'))

@@ -54,7 +54,7 @@ export function AuthProvider({ children, authenticatedApi, onLogout }: AuthProvi
       // Sign out first, as push cleanup is best effort and must not hold the session open if the page
       // goes: a service worker finishes it. Without one the page has to (bounded), or the redirect
       // could cut it off.
-      const cleanup = releaseOnSignOut(authenticatedApi, currentUser?.id)
+      const cleanup = releaseOnSignOut(authenticatedApi)
       if (hasSignOutWorkerHandoff()) onLogout()
       else void cleanup.finally(onLogout)
     }, currentUser, isAdmin }}>

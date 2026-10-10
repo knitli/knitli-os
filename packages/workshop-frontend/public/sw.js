@@ -30,14 +30,13 @@ self.addEventListener('push', (event) => {
   })())
 })
 
-// Sent by the page on sign-out, naming the subscription to drop. The page may be navigated away before it can unsubscribe itself,
+// Sent by the page on sign-out. The page may be navigated away before it can unsubscribe itself,
 // and this worker survives it.
 self.addEventListener('message', (event) => {
-  if (!event.data || event.data.type !== 'release-push-subscription' || !event.data.endpoint) return
+  if (!event.data || event.data.type !== 'release-push-subscription') return
   event.waitUntil(
     self.registration.pushManager.getSubscription()
-      // Only the subscription the page named: another tab may have replaced it meanwhile.
-      .then((subscription) => subscription && subscription.endpoint === event.data.endpoint && subscription.unsubscribe())
+      .then((subscription) => subscription && subscription.unsubscribe())
       .catch(() => {}),
   )
 })

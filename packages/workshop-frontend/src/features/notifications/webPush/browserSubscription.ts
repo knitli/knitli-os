@@ -27,6 +27,14 @@ const writeOwner = (owner: string | null) => {
 /** Whether this browser's subscription was made for `owner`, the signed-in user's id. */
 export const ownsBrowserSubscription = (owner: string) => readOwner() === owner
 
+/**
+ * Forgets `owner` as the owner, unless another tab has since recorded someone else: the marker is
+ * shared by every tab, and what a stale continuation last saw may no longer be true.
+ */
+export const forgetBrowserSubscription = (owner: string | null) => {
+  if (readOwner() === owner) writeOwner(null)
+}
+
 /** Records `owner` (the signed-in user's id; null forgets it) as the owner of this browser's subscription. */
 export const claimBrowserSubscription = (owner: string | null) => writeOwner(owner)
 
@@ -59,7 +67,7 @@ export const releaseBrowserSubscription = async (
   if (!subscription) return writeOwner(null)
   await subscription.unsubscribe()
   if (signal?.aborted) return
-  writeOwner(null)
+  forgetBrowserSubscription(claimedBy)
   await api.removeWebPushSubscription(subscription.endpoint)
 }
 
@@ -78,14 +86,15 @@ export const syncBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, si
   const { id } = await api.whoami()
   if (signal.aborted) return
   if (!ownsBrowserSubscription(id)) {
+    const foreign = readOwner()
     await subscription.unsubscribe()
-    if (!signal.aborted) writeOwner(null)
+    if (!signal.aborted) forgetBrowserSubscription(foreign)
     return
   }
   const key = await api.getWebPushPublicKey()
   if (signal.aborted || !key) return
   if (!subscribedWithKey(subscription, key)) {
-    await resubscribe(api, pushManager, subscription, key, signal)
+    await resubscribe(api, pushManager, subscription, key, signal, id)
     return
   }
   await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
@@ -98,6 +107,7 @@ export const syncBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, si
  */
 const resubscribe = async (
   api: RpcStub<AuthenticatedApi>, pushManager: PushManager, stale: PushSubscription, key: string, signal: AbortSignal,
+  owner: string,
 ) => {
   await stale.unsubscribe()
   if (signal.aborted) return
@@ -106,7 +116,7 @@ const resubscribe = async (
   const fresh = await pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationServerKey(key) })
     .catch(() => null)
   if (signal.aborted) return
-  if (!fresh) return writeOwner(null)
+  if (!fresh) return forgetBrowserSubscription(owner)
   await api.addWebPushSubscription(toSubscriptionInfo(fresh.toJSON()))
 }
 

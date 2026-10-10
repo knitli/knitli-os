@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { claimBrowserSubscription, ownsBrowserSubscription, releaseBrowserSubscription } from './browserSubscription'
+import { claimBrowserSubscription, forgetBrowserSubscription, ownsBrowserSubscription, releaseBrowserSubscription } from './browserSubscription'
 import {
   applicationServerKey,
   currentPushEnvironment,
@@ -145,9 +145,15 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
       try {
         await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
       } catch (error) {
-        // Not registered, so not on: don't leave a subscription the UI reports as off.
-        await subscription.unsubscribe().catch(() => {})
-        claimBrowserSubscription(null)
+        // Not confirmed registered, so not on: don't leave a subscription the UI reports as off. If
+        // it can't be dropped it may well be registered, so it stays on with Turn off offered.
+        try {
+          await subscription.unsubscribe()
+          forgetBrowserSubscription(owner)
+        } catch {
+          setReady({ ...ready, existing: subscription })
+          setStatus('on')
+        }
         throw error
       }
       setReady({ ...ready, existing: subscription })
@@ -162,7 +168,8 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
     setBusy(true)
     try {
       try {
-        await releaseBrowserSubscription(api, ready.registration.pushManager)
+        // Scoped to the account this page shows: another tab may have signed in as someone else.
+        await releaseBrowserSubscription(api, ready.registration.pushManager, undefined, ready.owner)
       } catch (error) {
         // A server failure leaves the device off; a browser failure leaves it on, with Turn off still offered.
         if (!(await ready.registration.pushManager.getSubscription())) {

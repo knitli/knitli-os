@@ -191,6 +191,20 @@ describe('releaseOnSignOut', () => {
     expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
   })
 
+  it('keeps the owner another tab recorded while this one was still unsubscribing', async () => {
+    const api = fakeApi()
+    const { subscription } = install()
+    let finishUnsubscribe!: () => void
+    subscription.unsubscribe.mockReturnValue(new Promise((resolve) => { finishUnsubscribe = () => resolve(true) }))
+    localStorage.setItem(OWNER_KEY, 'me@example.com')
+    const done = releaseOnSignOut(asStub(api), 'me@example.com')
+    await vi.waitFor(() => expect(subscription.unsubscribe).toHaveBeenCalled())
+    localStorage.setItem(OWNER_KEY, 'next@example.com')
+    finishUnsubscribe()
+    await done
+    expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
+  })
+
   it('never blocks or fails the sign-out when the server is unreachable', async () => {
     const api = fakeApi()
     api.removeWebPushSubscription.mockRejectedValue(new Error('offline'))

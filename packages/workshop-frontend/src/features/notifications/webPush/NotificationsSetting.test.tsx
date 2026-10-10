@@ -187,6 +187,32 @@ describe('NotificationsSetting', () => {
     expect(document.activeElement).toBe(control)
   })
 
+  it('turns off only the account it shows, not one another tab signed in as', async () => {
+    const browser = installBrowser({ permission: 'granted', subscribed: true })
+    localStorage.setItem('gadgets.webPush.owner', 'me@example.com')
+    const api = fakeApi()
+    const container = await render(api)
+    localStorage.setItem('gadgets.webPush.owner', 'next@example.com')
+
+    await act(async () => button(container, 'Turn off')!.click())
+    expect(browser.subscription.unsubscribe).not.toHaveBeenCalled()
+    expect(localStorage.getItem('gadgets.webPush.owner')).toBe('next@example.com')
+  })
+
+  it('stays on, with Turn off, when registering fails and the rollback cannot unsubscribe either', async () => {
+    const api = fakeApi()
+    api.addWebPushSubscription.mockRejectedValue(new Error('offline'))
+    const browser = installBrowser({ permission: 'default', subscribed: false })
+    browser.subscription.unsubscribe.mockRejectedValue(new Error('refused'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const container = await render(api)
+
+    await act(async () => button(container, 'Turn on')!.click())
+    expect(container.textContent).toContain('On for this device')
+    expect(button(container, 'Turn off')).toBeDefined()
+    expect(localStorage.getItem('gadgets.webPush.owner')).toBe('me@example.com')
+  })
+
   it('keeps Turn off available when re-registering an existing subscription fails', async () => {
     const api = fakeApi()
     api.addWebPushSubscription.mockRejectedValue(new Error('offline'))

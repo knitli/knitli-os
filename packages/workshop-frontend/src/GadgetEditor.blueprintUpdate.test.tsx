@@ -55,7 +55,7 @@ const mocks = vi.hoisted(() => {
       cancelObserverConfig: () => {},
       updateTitle: () => {},
     },
-    authenticatedApi: { whoami: async () => ({ type: 'user', id: 'dev', name: 'Dev' }) },
+    authenticatedApi: { whoami: async () => ({ type: 'user', id: 'dev', name: 'Dev' }), listLibraryBlueprints: async () => [], getModelReasoning: async () => null },
   }
 })
 
@@ -63,6 +63,7 @@ vi.mock('@tanstack/react-router', () => ({
   useParams: () => ({ id: 'workspace' }),
   useNavigate: () => mocks.navigate,
   useSearch: () => mocks.search,
+  useLocation: () => ({ state: {} }),
   Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
 }))
 

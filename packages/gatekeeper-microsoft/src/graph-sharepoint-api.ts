@@ -80,6 +80,17 @@ const SYSTEM_COLUMN_NAMES = new Set([
   "LinkTitle", "LinkTitleNoMenu", "LinkTitle2",
 ]);
 
+/**
+ * The columns read when nothing is selected. Graph refuses a request that expands more than 12
+ * person or lookup fields, so a list with more returns the first 12 of them; `select` picks others.
+ */
+function defaultSelection(columns: ColumnDefinition[]): string[] {
+  let lookups = 0;
+  return columns
+      .filter(column => !isLookupBacked(column) || ++lookups <= MAX_LOOKUP_FIELDS)
+      .map(column => column.name);
+}
+
 function isLookupBacked(column: ColumnDefinition): boolean {
   return column.type === "person" || column.type === "lookup";
 }
@@ -707,10 +718,17 @@ export class GraphSharePointApi {
     return await this.#itemPage(assertGraphUrl(nextLink));
   }
 
-  /** One item, with every field expanded. */
-  async getItem(siteId: string, listId: string, itemId: string): Promise<ListItem> {
+  /**
+   * One item, with the fields of `columns` expanded (and no others, so a hidden or bookkeeping
+   * column cannot be read through here when `getColumns()` and `getItems()` never offer it).
+   */
+  async getItem(siteId: string, listId: string, itemId: string, columns: ColumnDefinition[])
+      : Promise<ListItem> {
+    let selected = defaultSelection(columns);
     return listItemFrom(await this.#fetchJsonCapped<GraphListItem>(
-        graphUrl(["sites", siteId, "lists", listId, "items", itemId], { $expand: "fields" })));
+        graphUrl(["sites", siteId, "lists", listId, "items", itemId], {
+          $expand: selected.length > 0 ? `fields($select=${selected.join(",")})` : "fields",
+        })));
   }
 
   /**
@@ -762,14 +780,7 @@ export class GraphSharePointApi {
 
   /** The internal names to expand, defaulting to every column the list has. */
   #selectedFields(opts: ListItemsOptions): string[] {
-    if (!opts.select) {
-      // Graph refuses a request that expands more than 12 person or lookup fields, so a list with
-      // more returns the first 12 of them by default; `select` picks others.
-      let lookups = 0;
-      return opts.columns
-          .filter(column => !isLookupBacked(column) || ++lookups <= MAX_LOOKUP_FIELDS)
-          .map(column => column.name);
-    }
+    if (!opts.select) return defaultSelection(opts.columns);
     // An empty selection must not fall through to "expand every field", which discloses the whole
     // row; it names nothing, so it is refused.
     if (opts.select.length === 0) {

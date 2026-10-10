@@ -146,7 +146,7 @@ describe("request headers", () => {
     const api = newApi();
 
     await api.listItems("site-1", "list-1", { columns: SCHEMA });
-    await api.getItem("site-1", "list-1", "42");
+    await api.getItem("site-1", "list-1", "42", SCHEMA);
     await api.createItem("site-1", "list-1", { Title: "New laptop" });
 
     expect(calls).toHaveLength(3);
@@ -428,13 +428,14 @@ describe("listItems", () => {
 });
 
 describe("getItem and createItem", () => {
-  it("reads one item with its fields expanded", async () => {
+  it("reads one item with only the schema's fields expanded", async () => {
     const calls = stubFetch(() => jsonResponse(ITEM));
 
-    const item = await newApi().getItem("site-1", "list-1", "42");
+    const item = await newApi().getItem("site-1", "list-1", "42", SCHEMA);
 
-    expect(calls[0].url).toBe(
-      "https://graph.microsoft.com/v1.0/sites/site-1/lists/list-1/items/42?$expand=fields");
+    // Never the unfiltered expansion, which would also return hidden and bookkeeping columns.
+    const expand = new URL(calls[0].url).searchParams.get("$expand")!;
+    expect(expand).toBe(`fields($select=${SCHEMA.map(column => column.name).join(",")})`);
     expect(item.id).toBe("42");
     expect(item.fields).toEqual({ Title: "New laptop", Qty: 2 });
   });
@@ -442,10 +443,10 @@ describe("getItem and createItem", () => {
   it("keeps an item id inside one path segment", async () => {
     const calls = stubFetch(() => jsonResponse(ITEM));
 
-    await expect(newApi().getItem("site-1", "list-1", "..")).rejects.toThrow(/empty or relative/);
+    await expect(newApi().getItem("site-1", "list-1", "..", SCHEMA)).rejects.toThrow(/empty or relative/);
     expect(calls).toHaveLength(0);
 
-    await newApi().getItem("site-1", "list-1", "../../drives/victim");
+    await newApi().getItem("site-1", "list-1", "../../drives/victim", SCHEMA);
     expect(new URL(calls[0].url).pathname.split("/")).toHaveLength(8);
   });
 
@@ -593,7 +594,7 @@ describe("error mapping", () => {
   it("explains a 404 as gone or invisible to this account", async () => {
     stubFetch(() => jsonResponse({ error: { code: "itemNotFound", message: "gone" } }, 404));
 
-    await expect(newApi().getItem("site-1", "list-1", "42"))
+    await expect(newApi().getItem("site-1", "list-1", "42", SCHEMA))
       .rejects.toThrow(/no longer exists, or this account cannot see it/);
   });
 });

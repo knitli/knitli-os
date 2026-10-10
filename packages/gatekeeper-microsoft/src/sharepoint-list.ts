@@ -484,7 +484,8 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
     // Fetched before the observation is authorized: an item that does not exist reveals no row, and
     // authorizing first would latch the restricted flag and close the gadget to new collaborators
     // for a read that returned nothing. Nothing is returned until the authorization succeeds.
-    let item = await this.#ctx.api.getItem(this.#ctx.siteId, this.#ctx.listId, id);
+    let item = await this.#ctx.api.getItem(
+        this.#ctx.siteId, this.#ctx.listId, id, await this.#ctx.columns());
 
     await this.#ctx.authorizeRows({
       title: sanitizeApprovalTitle(`Read item ${echoName(id)} from ${this.#ctx.listName()}`),

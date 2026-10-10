@@ -512,6 +512,10 @@ the site's members can see.
 - [ ] **Sharing respects SharePoint's own access.** Share the gadget with a colleague who has site
       access → they can use the form. Share it with someone who does not → they are refused with
       "You do not have access to this SharePoint list."
+- [ ] **A filter on two columns.** `getItems({where: [{column: A, …}, {column: B, …}]})` on a real
+      list → record whether Graph accepts it, and whether it needs both columns indexed. Microsoft
+      documents limits on filtering several list fields in one request; this gatekeeper sends the
+      clauses together and does not reject them up front.
 - [ ] **Filtering works on a real list.** `getItems()` with a `where` clause on an indexed column
       and `top` of 200 → pages correctly. Record the largest `top` Graph actually honoured; on a
       list past the 5000-item threshold, filtering an unindexed column is expected to fail with

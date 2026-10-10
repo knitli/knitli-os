@@ -601,6 +601,20 @@ describe("applyAction", () => {
     expect(context.storage.kv.get("pending:action:1")).toBeDefined();
   });
 
+  it("asks for only the schema's fields when reading one item", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+
+    await session.getItem("7");
+
+    const read = calls.find(call => new URL(call.url).pathname.endsWith("/items/7"))!;
+    const expand = new URL(read.url).searchParams.get("$expand")!;
+    expect(expand).toMatch(/^fields\(\$select=Title,/);
+    // The hidden and bookkeeping columns the schema leaves out are never requested.
+    expect(expand).not.toContain("GadgetsActionId");
+    expect(expand).not.toContain("Created");
+  });
+
   it("keeps the marker out of everything the caller sees", async () => {
     const withMarker = [...GRAPH_COLUMNS, { name: "GadgetsActionId", displayName: "x", text: {} }];
     stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)

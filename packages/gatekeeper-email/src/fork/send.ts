@@ -128,6 +128,7 @@ function messageIds(field: string, value: string | undefined, max: number): stri
 function singleLine(field: string, value: string, max: number): string {
   if (typeof value !== "string") throw new Error(`${field} must be a string.`);
   if (/[\r\n]/.test(value)) throw new Error(`${field} must not contain line breaks.`);
+  if (CONTROL.test(value)) throw new Error(`${field} must not contain control characters.`);
   if (value.length > max) throw new Error(`${field} is longer than ${max} characters.`);
   return value;
 }
@@ -302,6 +303,14 @@ export function refundSendQuota(kv: Kv, entry: QuotaEntry, now = Date.now()): vo
   kv.put(QUOTA_KEY, recent);
 }
 
+// Codes the email service documents as "try again later" / "temporarily unavailable".
+const TRANSIENT = ["E_RATE_LIMIT_EXCEEDED", "E_DAILY_LIMIT_EXCEEDED", "E_INTERNAL_SERVER_ERROR"];
+
+function isTransient(error: unknown): boolean {
+  let code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && TRANSIENT.includes(code);
+}
+
 async function deliver(payload: SendEmailPayload, host: SendEmailHost): Promise<void> {
   if (!host.sender) {
     throw new ActionApplyError(
@@ -342,6 +351,8 @@ async function deliver(payload: SendEmailPayload, host: SendEmailHost): Promise<
     // The binding rejects before handing the message off (unverified destination, sender not
     // allowed, malformed message), so a thrown send is known not to have been delivered.
     refundSendQuota(host.kv, charge);
+    // Retryable rather than terminal: the service says to try again, and nothing was sent.
+    if (isTransient(error)) throw error;
     throw new ActionApplyError(
         `Sending failed: ${error instanceof Error ? error.message : String(error)}`);
   }

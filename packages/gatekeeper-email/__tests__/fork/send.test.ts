@@ -111,6 +111,19 @@ describe("sending email", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it("keeps a transient binding failure retryable, and refunds its allowance", async () => {
+    let attempts = 0;
+    const { sent, actions, submit, kv } = setup(async () => {
+      if (attempts++ === 0) throw Object.assign(new Error("slow down"), { code: "E_RATE_LIMIT_EXCEEDED" });
+      return { messageId: "<m@x.com>" };
+    });
+    const id = await submit({ to: ["alice@example.com"], subject: "Hi", text: "x" });
+    await expect(actions.apply(id)).rejects.toThrow(/slow down/);
+    expect(kv.get<unknown[]>("email-send:quota")).toEqual([]);
+    await actions.apply(id);
+    expect(sent).toHaveLength(1);
+  });
+
   it("never sends a rejected message", async () => {
     const { sent, actions, submit } = setup(ok);
     const id = await submit({ to: ["alice@example.com"], subject: "Hi", text: "x" });
@@ -242,6 +255,7 @@ describe("prepareSend", () => {
     ["control character in address", { ...base, to: ["al\u0000ice@example.com"] }, /not a plain email/],
     ["consecutive dots in address", { ...base, to: ["a..b@example.com"] }, /not a plain email/],
     ["header injection in subject", { ...base, subject: "Hi\r\nBcc: x@evil.com" }, /line breaks/],
+    ["control character in subject", { ...base, subject: "Hi\u0000there" }, /control characters/],
     ["header injection in name", { ...base, fromName: "A\nBcc: x@evil.com" }, /line breaks/],
     ["address-like display name", { ...base, fromName: "ceo@bank.com" }, /fromName must not/],
     ["header injection in filename", attach("a\r\nX: y.txt", "text/plain"), /line breaks/],

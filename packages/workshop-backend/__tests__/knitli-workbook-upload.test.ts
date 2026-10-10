@@ -1,7 +1,7 @@
 // Staging a spreadsheet upload (src/fork/workbook-upload.ts): what is refused at the door, what is
 // stored, and that the stored rows go wherever the attachment goes.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import * as XLSX from "@e965/xlsx";
@@ -119,5 +119,47 @@ describe("stageWorkbookUpload", () => {
     expect(impl.storage.chatAttachmentContent.get(handle.id)).toBeUndefined();
     expect(impl.storage.chatWorkbooks.get(handle.id)).toBeUndefined();
     expect(rowCount(impl)).toBe(0);
+  }));
+});
+
+describe("staging failures", () => {
+  it("leaves nothing behind when the first write after the parse fails", () =>
+      withImpl(async impl => {
+    let put = vi.spyOn(impl.storage.chatWorkbooks, "put").mockImplementationOnce(() => {
+      throw new Error("record too large");
+    });
+
+    await expect(stageWorkbookUpload(impl, upload())).rejects.toThrow("record too large");
+
+    expect([...impl.storage.chatAttachmentContent.list()]).toEqual([]);
+    expect(rowCount(impl)).toBe(0);
+    put.mockRestore();
+    await stageWorkbookUpload(impl, upload());
+    expect(rowCount(impl)).toBe(1);
+  }));
+});
+
+describe("legacy compaction checkpoints", () => {
+  it("reads the request names back from the compacted prefix, once", () => withImpl(async impl => {
+    const CHAT = 1;
+    impl.storage.chatMeta.put({ id: CHAT, title: "C", started: new Date(0), lastActive: new Date(0), compactedTo: 2 });
+    let author = { type: "agent", id: "m", name: "A" };
+    impl.storage.chats.put({
+      chatId: CHAT, sequence: 0, timestamp: new Date(0), author, type: "connectionRequest",
+      requestId: "1:0", vendorId: "v", vendorName: "V", reason: "r", state: "denied",
+      bindingName: "big_xlsx",
+    });
+    impl.storage.chats.put({
+      chatId: CHAT, sequence: 3, timestamp: new Date(3), author, type: "connectionRequest",
+      requestId: "1:3", vendorId: "v", vendorName: "V", reason: "r", state: "denied",
+      bindingName: "after",
+    });
+    impl.storage.chatCompactions.put({
+      chatId: CHAT, compactedTo: 2, summary: "s", chatBindings: [], nextChangeId: 0, pins: [],
+    });
+
+    expect(impl.getActiveChatCompaction(CHAT).requestedNames).toEqual(["big_xlsx"]);
+    // Persisted: the stored checkpoint now carries it.
+    expect([...impl.storage.chatCompactions.list()][0].requestedNames).toEqual(["big_xlsx"]);
   }));
 });

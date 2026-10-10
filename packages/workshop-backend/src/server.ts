@@ -391,18 +391,19 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     try {
       result = await overseer.open(userId, profileId, notifyClosed, shareKey, configureObservers);
     } catch (err) {
+      // Fork: a failed open releases its count, unless the lease notification already did (an open
+      // parked on the observer dialog or a share-key redemption ended by an expired lease, which
+      // also parked the browser rather than letting it redial into the same wait). Before the
+      // fallible cleanup below, so a rejection there cannot leak the count.
+      if (!closed) {
+        closed = true;
+        --this.#liveOpens;
+      }
       // A denial proves this user's listing for the workspace is stale: revocation tries to drop it
       // (refreshAffectedCollaboratorListings), but that push is best-effort. Only catches entries
       // they click; others stay frozen at revocation, as a disconnected collaborator gets no pushes.
       if (getOpenGadgetErrorCode(err) === OPEN_GADGET_ERROR_CODES.workspaceAccessDenied) {
         await this.#user.forgetSharedGadget(id);
-      }
-      // Fork: a failed open releases its count, unless the lease notification already did (an open
-      // parked on the observer dialog or a share-key redemption ended by an expired lease, which
-      // also parked the browser rather than letting it redial into the same wait).
-      if (!closed) {
-        closed = true;
-        --this.#liveOpens;
       }
       throw err;
     }

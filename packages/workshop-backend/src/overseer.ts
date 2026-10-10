@@ -9981,10 +9981,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
              notifyClosed: NativeRpcStub<(reason?: "idle") => void>,
              shareKey?: string,
              configureObservers?: RpcStub<ObserverConfigCallback>): Promise<Overseer> {
-    // Fork: arm/renew the client-activity lease. Registered ahead of every await so an open parked
-    // on a step the client controls (observer-config dialog, share-key redemption) is told when
-    // the lease expires. `using` releases it on return; the returned interface registers its own.
-    this.impl.clientActivity();
+    // Fork: registered ahead of every await so an open parked on a step the client controls
+    // (observer-config dialog, share-key redemption) is told when the lease expires. `using`
+    // releases it on return; the returned interface registers its own. The lease itself is armed
+    // only once the caller is established as owner or authorized collaborator (below), so a denied
+    // open cannot keep someone else's workspace resident.
     using _idleWatch = this.impl.idleLease.addNotifier(async () => { await notifyClosed("idle"); });
 
     let firstOpen = !this.impl.ownerId;
@@ -10021,6 +10022,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // Cache the owner's profileId in memory when the owner opens.
     if (isOwner) {
       this.impl.ownerProfileId = profileId;
+      this.impl.clientActivity();  // Fork: arm/renew the client-activity lease
     }
 
     // Make singleton gatekeepers (e.g. the Context Library) available to the agent as unnamed
@@ -10091,6 +10093,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
       }
       role = effectiveRole;
+      this.impl.clientActivity();  // Fork: arm/renew the client-activity lease
 
       // Snapshot metadata for collaborator bookkeeping after the final handoff guard.
       let title = this.impl.storage.title.get();

@@ -272,6 +272,21 @@ describe("workspace client-activity lease", () => {
     expect(loggedEvents(logs, "overseer.session.lease.expired")).toHaveLength(1);
   });
 
+  it("does not arm the lease for a caller who has no access to the workspace", async () => {
+    const owner = await signIn();
+    const workspace = await owner.authenticated.newGadget();
+    const metadata = await workspace.getMetadata();
+    workspace[Symbol.dispose]();
+    advanceBeyondTheLease();
+    await runAlarm(metadata.id);
+    expect(await scheduledAlarm(metadata.id)).toBe(null);
+
+    // A fresh incarnation, opened by a stranger: denied, and nothing is left armed.
+    const stranger = await signIn();
+    await expect(stranger.authenticated.openGadget(metadata.id)).rejects.toThrow();
+    expect(await scheduledAlarm(metadata.id)).toBe(null);
+  });
+
   it("does not let a failed open leak a count that would stop the idle close", async () => {
     const { session, authenticated } = await signIn();
     using workspace = await authenticated.newGadget();

@@ -18,15 +18,29 @@ notice. The lease is that alarm.
 - On expiry the Overseer tells each live client interface and each open still in progress, flushes
   storage and aborts. The front Worker closes the socket with close code 4001 once no workspace
   open remains on that session; the browser parks (stage 2) rather than redialling.
+- The lease arms only once the caller is the owner or an authorized collaborator; a denied `open()`
+  never renews it. An open parked before that point (a collaborator in a share-key redemption or
+  observer dialog) is ended by the lease only if a prior owner or collaborator call armed it.
 - Calls arriving after the decision is committed fail with `WorkspaceSessionExpiredError`; the
   client reconnects. The abort happens in the same continuation as the flush, so no write follows it.
 - The lease is **opt-in**: it enforces only while the KV key `.sessionLease` in the `BLUEPRINTS`
   namespace holds `on`. Absent, any other value, or a failed KV read means disabled (checks are
   skipped and re-armed). It ends sessions with a close code only the idle-pause UI understands, so
-  enable it once that UI is deployed; flipping the key needs no deploy and takes effect within a
-  minute (the read is cached for 60 seconds).
+  enable it once that UI is deployed; flipping the key needs no deploy. A workspace picks the
+  change up at its next lease check: immediately for a freshly woken one, but up to one lease (10
+  minutes) later for one already resident, since a disabled check re-arms a full lease out and the
+  KV read (cached 60 seconds) only happens when the alarm runs.
 - The reap runs even when another alarm concern fails; the failure is rethrown afterwards so the
   platform still retries it.
+
+## Known limitation
+
+A client that disposes the workspace interface but keeps capabilities it minted (gadget,
+gatekeeper, facet, subscription) keeps renewing the lease through them, and the session's open has
+already been released by the interface's disposal. If those later go idle, the Overseer ends
+itself but the socket is not closed with the idle code, so the browser finds its retained
+capabilities broken instead of parking. The shipped client disposes the interface only on
+navigation, which drops what it minted too.
 
 ## What expiry costs
 

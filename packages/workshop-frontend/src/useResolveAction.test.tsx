@@ -14,6 +14,7 @@ import type { RpcStub } from 'capnweb'
 import type { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
 import { makeTestRoot } from './action-test-harness'
 import { useResolveAction } from './useResolveAction'
+import { installDropSocketHandler, isConnectionPaused, pauseConnection } from './connectionPause'
 
 const fail = () => Promise.reject(new Error('Gatekeeper facet was reset'))
 
@@ -31,6 +32,17 @@ describe('useResolveAction', () => {
     view.cleanup()
     toasts.add.mockReset()
     vi.restoreAllMocks()
+  })
+
+  it('wakes a paused workspace before opening the creation account chooser', async () => {
+    installDropSocketHandler(() => {})
+    pauseConnection()
+    await view.render(<Probe overseer={{} as RpcStub<Overseer>} />)
+
+    await act(() => resolveAction(
+      { id: 1, type: 'action', creation: true, gatekeeperId: 1 } as unknown as ActionLogEntry, 'approve'))
+
+    expect(isConnectionPaused()).toBe(false)
   })
 
   it.each(['approve', 'deny'] as const)('shows the error message when %s fails', async (decision) => {

@@ -67,3 +67,35 @@ plus the alarm latency. Savings are therefore proportional to the number of work
 a gone client. To measure: compare `overseer.session.lease.expired` log counts (`durationMs` is the
 idle time at expiry) with the Durable Object duration metric for the Overseer namespace before and
 after enabling, using the kill switch for the baseline.
+
+## Client
+
+- `useWorkspaceIdle` (mounted by `GadgetEditor`) pauses the connection after 5 minutes hidden or 10
+  minutes visible without input (pointer, key, touch, wheel, scroll; mouse movement does not count).
+  Input inside the sandboxed gadget iframe is forwarded to the parent as an `activity` message, at
+  most one per 10 seconds. No pause while the selected chat is streaming.
+- A pause (or a `4001` close from the server) drops the socket and parks `main.tsx`'s reconnect
+  loop; nothing dials until a deliberate request: sending from the composer, approving or denying
+  an action or connection request, the "Paused — click to reconnect" chip, or leaving the
+  workspace. Calls made while paused queue on the placeholder stub and flush on resume, so chat
+  history, the composer draft and the gadget iframe survive.
+- An unanswered observer-config dialog does not defer a pause: the dialog is cancelled and the tab
+  parks on the chip; resuming re-opens the workspace, which asks again.
+- The 30-second workspace heartbeat skips while paused, since it is itself a client call that
+  would queue and, on resume, renew the lease.
+- A visible tab's heartbeat renews the lease every 30 seconds, so the server lease expires only for
+  sessions whose page can no longer run (frozen, killed, offline); a live idle tab pauses itself.
+- Gadget activity is best-effort: the gadget frame and its code share an origin, so a gadget that
+  posts the `activity` message itself can keep a tab from pausing (and its facet calls renew the
+  lease anyway). The bootstrap ignores synthetic (untrusted) input events, which stops accidental
+  keep-alives, not a deliberately misbehaving gadget. The bound targets abandoned sessions, not a
+  hostile gadget the user has open.
+- A modal that locks itself while its RPC runs would also cover the Paused chip, so a click anywhere
+  inside an open modal (`role="dialog"`, `alertdialog` or `aria-modal`) resumes the connection.
+  That is the one choke point for every dialog-then-RPC flow; the per-site `resumeConnection()`
+  calls added earlier are redundant with it but harmless. Remaining non-modal actions issued while
+  paused (a button in a page, a gadget call) still queue until a deliberate wake, with the chip
+  visible; they are not individually listed. Wiring resume into the stub itself is deliberately not
+  done: background calls (heartbeat, subscriptions, the re-issued `openGadget`) would wake it, and
+  the pause exists to prevent exactly that. A click in a modal also wakes for Cancel, which is the
+  accepted cost.

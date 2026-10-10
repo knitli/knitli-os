@@ -24,6 +24,7 @@ import type {
   SlashCommandRequest,
 } from "@gadgets/workshop-shared/api";
 import { isTransientRpcError } from "../../../rpcErrors";
+import { resumeConnection } from "../../../connectionPause";
 import { slashCommandTokenKey } from "./slash-commands/slashCommandInput";
 import {
   ComposerMirror, composerTextareaClass, type ComposerMirrorHandle, type MirrorToken,
@@ -537,7 +538,10 @@ export const ChatComposer = ({
   const handleSend = async () => {
     if (isDictating) return;
     if (conversationDraft) {
-      if (conversationDraft.canSend && !conversationDraft.readOnly) conversationDraft.onSend();
+      if (conversationDraft.canSend && !conversationDraft.readOnly) {
+        resumeConnection();
+        conversationDraft.onSend();
+      }
       return;
     }
     if (sendInFlightRef.current || isSending || isBlocked) return;
@@ -551,6 +555,7 @@ export const ChatComposer = ({
 
     if (!inputValue.trim() && !selectedSlashCommand && readyAttachments.length === 0) return;
     if (hasUploadingAttachment) {
+      resumeConnection();  // the upload is waiting on the same parked connection
       toasts.add({ title: "Please wait for attachment uploads to finish", variant: "error" });
       return;
     }
@@ -575,6 +580,8 @@ export const ChatComposer = ({
         toasts.add({ title: "Slash commands cannot include resources or attachments", variant: "error" });
         return;
       }
+      // A send that passed every local check is the deliberate request that wakes a paused workspace.
+      resumeConnection();
       const { message, capsules: capsuleSpecifiers, formats: formatRefs } =
         submissionResult.submission;
 

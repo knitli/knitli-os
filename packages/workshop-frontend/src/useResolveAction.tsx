@@ -3,6 +3,7 @@ import { useKumoToastManager } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { ActionLogEntry, ActionState, Overseer } from '@gadgets/workshop-shared/api'
 import { CreationAccountModal } from './components/CreationAccountModal'
+import { resumeConnection } from './connectionPause'
 
 type ActionDecision = 'approve' | 'deny'
 
@@ -23,6 +24,7 @@ export function useResolveAction(
   const resolve = useCallback(async (
     actionId: number, decision: ActionDecision, accountId?: number,
   ) => {
+    resumeConnection()  // deciding an action wakes a paused workspace
     setProcessing(previous => new Set(previous).add(actionId))
     try {
       if (decision === 'approve') await overseer.approveAction(actionId, accountId)
@@ -45,6 +47,7 @@ export function useResolveAction(
   }, [overseer, setProcessing, toasts])
 
   const resolveAction = useCallback(async (action: ActionLogEntry, decision: ActionDecision) => {
+    resumeConnection()  // the creation chooser below talks to the workspace before resolve() runs
     if (decision === 'approve' && action.type === 'action' && action.creation) setCreation(action)
     else await resolve(action.id, decision)
   }, [resolve])

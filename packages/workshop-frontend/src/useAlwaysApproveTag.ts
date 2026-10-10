@@ -3,6 +3,7 @@ import { useKumoToastManager } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { Overseer } from '@gadgets/workshop-shared/api'
 import { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
+import { resumeConnection } from './connectionPause'
 
 /**
  * Enables an auto-approval rule for the action's (gatekeeperId, actionKind.tag), and tracks
@@ -23,6 +24,7 @@ export function useAlwaysApproveTag(
   const alwaysApproveTag = useCallback(
       async (actionId: number, gatekeeperId: number,
              actionKind: ActionKind): Promise<boolean> => {
+    resumeConnection()  // deciding an action wakes a paused workspace
     setProcessingActions(prev => new Set(prev).add(actionId))
     try {
       await overseer.setAutoApprovedActionKind(gatekeeperId, actionKind)

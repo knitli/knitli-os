@@ -35,8 +35,8 @@ How Cloudflare handles alarms:
   revocation cleanup, Google hook renewal) are covered by the flood detector, and their tests
   pin the immediate behavior.
 - **`guardedAlarmFor(ctx, env, key, run)`.** The one-line seam our handlers call: `guardedAlarm` with the kill switch read from `env` and `deferWhenOpen` on.
-- **Coverage test.** `scripts/fork/alarm-guard-coverage.test.ts` fails when a source file defining
-  `async alarm(` does not reference the guard. It checks per file, not per class.
+- **Coverage test.** `scripts/fork/alarm-guard-coverage.test.ts` fails when any `alarm()`
+  method, `async` or not, does not call the guard in its own body. Comments and strings do not count.
 
 ## Handlers
 
@@ -111,7 +111,7 @@ the kill-switch bullet above).
 
 ## Rules for new alarm code
 
-1. Every `async alarm(` starts with the kill switch: `haltIfAlarmsDisabled(this.ctx, this.env, key)`,
+1. Every `alarm()` handler starts with the kill switch: `haltIfAlarmsDisabled(this.ctx, this.env, key)`,
    or `guardedAlarm(..., { disabled: alarmsDisabled(this.env) })`. The coverage test enforces this
    per file.
 2. A handler that re-arms itself uses `guardedAlarm` (with `deferWhenOpen` when stopping would

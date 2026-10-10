@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
  * docs/alarm-audit.md): a runaway alarm has no hard spend cap behind it on Cloudflare, so the
  * emergency stop has to work everywhere, including handlers that arrive in an upstream sync.
  *
- * The body of each `async alarm(` method must itself call the alarm guard (`haltIfAlarmsDisabled`,
+ * The body of each `alarm(` method, `async` or not, must itself call the alarm guard (`haltIfAlarmsDisabled`,
  * `guardedAlarm`, `guardedAlarmFor`, or `alarmsDisabled`), so a file with several handlers needs the
  * guard in each. Adding a handler without it fails here instead of shipping unstoppable.
  */
@@ -40,14 +40,17 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-/** The text from `async alarm(` through the brace that closes the method. */
+// A method definition `alarm(...)` with an optional return type, whether or not it is `async`
+// (a handler may return `void`). A call (`this.alarm()`, `instance.alarm();`) is not followed by `{`.
+const ALARM_METHOD = /(?<![.\w#$])alarm\s*\([^()]*\)\s*(?::[^{;=]+)?\{/g;
+
+/** The text from the opening brace of each `alarm()` method through the brace that closes it. */
 function alarmBodies(text: string): string[] {
   const bodies: string[] = [];
-  for (const match of text.matchAll(/\basync\s+alarm\s*\(/g)) {
-    // Skip the parameter list, which may contain a type with braces, then match braces.
-    let i = text.indexOf("{", text.indexOf(")", match.index));
+  for (const match of text.matchAll(ALARM_METHOD)) {
+    const start = match.index + match[0].length - 1;
+    let i = start;
     let depth = 0;
-    const start = i;
     for (; i < text.length; i++) {
       if (text[i] === "{") depth++;
       else if (text[i] === "}" && --depth === 0) break;
@@ -64,6 +67,17 @@ describe("Durable Object alarm kill switch", () => {
     const bodies = alarmBodies(stripNonCode(`${unguarded}\n${guarded}`));
     assert.equal(bodies.length, 2);
     assert.deepEqual(bodies.map(body => GUARD.test(body)), [false, true]);
+  });
+
+  it("finds a handler that is not async, and ignores calls to alarm()", () => {
+    const source = [
+      "class A { alarm(): void { this.ctx.storage.deleteAll(); } }",
+      "class B { public override alarm(info?: AlarmInvocationInfo): Promise<void> { return go(); } }",
+      "class C { async run() { await this.alarm(); instance.alarm(); if (alarm()) { go(); } } }",
+    ].join("\n");
+    const bodies = alarmBodies(stripNonCode(source));
+    assert.equal(bodies.length, 2);
+    assert.deepEqual(bodies.map(body => GUARD.test(body)), [false, false]);
   });
 
   it("does not accept a guard name that is only mentioned in a comment or string", () => {

@@ -525,6 +525,21 @@ describe("queued mutations", () => {
     });
   });
 
+  it("records no observation for the reads that only describe a queued action", async () => {
+    // Nothing read to prepare the approval text is returned to the caller, so it must not put the
+    // workspace in restricted mode.
+    stubFetch();
+    const session = await startSession();
+    const message = await session.getMessage(MESSAGE.id);
+
+    await message.markRead();
+    await message.moveToFolder("folder-archive");
+    await message.createReplyDraft("Noted.");
+
+    expect(approvals.actions).toHaveLength(3);
+    expect(approvals.observations).toHaveLength(0);
+  });
+
   it("queues a reply draft with the body the approver will see", async () => {
     const calls = stubFetch();
     const session = await startSession();

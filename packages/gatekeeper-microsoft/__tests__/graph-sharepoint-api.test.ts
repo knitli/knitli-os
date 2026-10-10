@@ -220,7 +220,7 @@ describe("resolveListByUrl", () => {
 
     await expect(newApi().resolveListByUrl("site-1", "Requests"))
       .rejects.toThrow(/more lists than this can search/);
-    expect(calls).toHaveLength(10);
+    expect(calls).toHaveLength(25);
   });
 });
 
@@ -278,7 +278,8 @@ describe("listColumns", () => {
       },
       { name: "Qty", displayName: "Quantity", type: "number", required: false, readOnly: false },
       { name: "Done", displayName: "Done", type: "boolean", required: false, readOnly: false },
-      { name: "Due", displayName: "Due date", type: "dateTime", required: false, readOnly: false },
+      { name: "Due", displayName: "Due date", type: "dateTime", required: false, readOnly: false,
+        dateOnly: true },
       {
         name: "Status", displayName: "Status", type: "choice", required: true, readOnly: false,
         choices: ["New", "Open"],
@@ -312,6 +313,38 @@ describe("listColumns", () => {
 });
 
 describe("listItems", () => {
+  /** A list with `count` person columns after the ordinary ones. */
+  function peopleSchema(count: number): ColumnDefinition[] {
+    return [
+      ...SCHEMA.filter(column => column.type === "text"),
+      ...Array.from({ length: count }, (_unused, index): ColumnDefinition => ({
+        name: `Person${index}`, displayName: `Person ${index}`, type: "person", required: false,
+        readOnly: false,
+      })),
+    ];
+  }
+
+  it("expands at most 12 person or lookup columns when nothing is selected", async () => {
+    const calls = stubFetch(() => jsonResponse({ value: [] }));
+
+    await newApi().listItems("site-1", "list-1", { columns: peopleSchema(15) });
+
+    const selected = param(calls[0], "$expand")!;
+    expect(selected.match(/Person\d+/g)).toHaveLength(12);
+    expect(selected).toContain("Person0");
+    expect(selected).not.toContain("Person12");
+  });
+
+  it("refuses to select more than 12 person or lookup columns, saying so", async () => {
+    const calls = stubFetch(() => jsonResponse({ value: [] }));
+    const columns = peopleSchema(15);
+
+    await expect(newApi().listItems("site-1", "list-1", {
+      columns, select: columns.map(column => column.name),
+    })).rejects.toThrow(/at most 12 person or lookup columns/);
+    expect(calls).toHaveLength(0);
+  });
+
   it("refuses an empty selection instead of expanding every field", async () => {
     const calls = stubFetch(() => jsonResponse({ value: [] }));
 

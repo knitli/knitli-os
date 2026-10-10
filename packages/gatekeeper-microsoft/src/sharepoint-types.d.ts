@@ -45,6 +45,8 @@ export type ColumnDefinition = {
   choices?: string[];
   /** A `choice` column that also accepts values outside `choices`. */
   allowTextEntry?: boolean;
+  /** A date column that holds a calendar date with no time of day; write it as `2026-09-15`. */
+  dateOnly?: boolean;
   /** Smallest value a `number` column accepts. Absent when the column sets none. */
   minimum?: number;
   /** Largest value a `number` column accepts. Absent when the column sets none. */
@@ -106,7 +108,11 @@ export interface SharePointListSession {
   /** The list's columns: their internal names, types, choices and required flags. */
   getColumns(): Promise<ColumnDefinition[]>;
 
-  /** A cursor over the list's items, optionally filtered and narrowed. */
+  /**
+   * A cursor over the list's items, optionally filtered and narrowed. Without `select`, a list with
+   * more than 12 person or lookup columns returns the first 12 of them; name the ones you want to
+   * get others (at most 12 of that kind per request).
+   */
   getItems(options?: GetItemsOptions): Promise<SharePointCursor<ListItem>>;
 
   /** One item by id. Item ids are positive whole numbers, as returned by `getItems()`. */

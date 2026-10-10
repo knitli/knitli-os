@@ -389,7 +389,7 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
   }
 
   async #submitReadState(read: boolean): Promise<void> {
-    let info = await this.#readInfoForAction(read ? "mark read" : "mark unread");
+    let info = await this.#readInfoForAction();
     await submitOutlookAction(
         this.#ctx,
         { type: "setRead", messageId: this.#messageId, read },
@@ -410,13 +410,9 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
    */
   async moveToFolder(folderId: string): Promise<void> {
     if (!folderId) throw new Error("moveToFolder() requires a folder id.");
-    let info = await this.#readInfoForAction("move");
+    let info = await this.#readInfoForAction();
     // Reading the destination is what turns an opaque id into something a human can approve.
     let folder = await this.#ctx.api.getFolder(folderId);
-    await authorizeRestricted(this.#ctx.approvalQueue, {
-      title: sanitizeApprovalTitle(`Read destination folder: ${folder.name}`),
-      description: "Read the destination folder's name to describe a pending move.",
-    });
 
     await submitOutlookAction(
         this.#ctx,
@@ -452,7 +448,7 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
     if (new TextEncoder().encode(body).byteLength > MAX_REPLY_BODY_BYTES) {
       throw new Error(`Reply body must be at most ${MAX_REPLY_BODY_BYTES} bytes.`);
     }
-    let info = await this.#readInfoForAction("draft a reply to");
+    let info = await this.#readInfoForAction();
     // Graph addresses a reply to the Reply-To addresses when the message has any, and to the sender
     // otherwise, so the approver is shown the same.
     let replyTarget = info.replyTo?.map(entry => entry.address)
@@ -479,15 +475,15 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
         });
   }
 
-  /** Read the message so the approval prompt can describe what is being acted on. */
-  async #readInfoForAction(what: string): Promise<OutlookMessageInfo> {
-    let info = await this.#ensureInfo();
-    await authorizeRestricted(this.#ctx.approvalQueue, {
-      title: sanitizeApprovalTitle(`Read message before ${what}: ${info.subject}`),
-      description: `Read the message details needed to describe this pending action.\n\n` +
-          describeMessage(info),
-    });
-    return info;
+  /**
+   * Read the message so the approval prompt can describe what is being acted on.
+   *
+   * Not an observation: nothing read here is returned to the caller, and the action description the
+   * approver sees already carries every detail. Recording one would put the workspace in restricted
+   * mode for a call that revealed nothing.
+   */
+  async #readInfoForAction(): Promise<OutlookMessageInfo> {
+    return await this.#ensureInfo();
   }
 }
 

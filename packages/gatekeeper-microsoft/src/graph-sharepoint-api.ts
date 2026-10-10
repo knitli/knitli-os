@@ -47,7 +47,10 @@ const MAX_ITEM_PAGE_SIZE = 200;
 const MAX_ITEM_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 /** Pages of `/lists` walked while looking for the list a pasted URL names. */
-const MAX_LIST_PAGES = 10;
+const MAX_LIST_PAGES = 25;
+
+/** Most person and lookup columns Graph will expand in one request. */
+const MAX_LOOKUP_FIELDS = 12;
 const LIST_PAGE_SIZE = 100;
 
 /** Clauses a single `$filter` may carry. Past this, the caller wants a view, not a query. */
@@ -76,6 +79,24 @@ const SYSTEM_COLUMN_NAMES = new Set([
   // The rendered-link twins of `Title`.
   "LinkTitle", "LinkTitleNoMenu", "LinkTitle2",
 ]);
+
+function isLookupBacked(column: ColumnDefinition): boolean {
+  return column.type === "person" || column.type === "lookup";
+}
+
+/**
+ * Why `column`, found under the marker's name, cannot be the marker, or null when it can be: it
+ * must be a single line of text that is not required and holds a 36-character id. A list's own
+ * column that happens to share the name must never be written to.
+ */
+export function markerColumnProblem(column: ColumnDefinition): string | null {
+  let fits = column.type === "text" && !column.multiline && !column.required && !column.readOnly &&
+      (column.maxLength === undefined || column.maxLength >= 36);
+  return fits ? null
+      : `The list already has a column named ${MARKER_COLUMN} that is not a single line of ` +
+        "optional text long enough for an id, so it cannot be used to recognise retried creates. " +
+        "Rename or remove it.";
+}
 
 /**
  * The column every create stamps with its own id. A retried create (the response was lost, or the
@@ -112,6 +133,8 @@ export type ColumnDefinition = {
   type: ColumnType;
   required: boolean;
   readOnly: boolean;
+  /** A `dateTime` column that holds a calendar date with no time or time zone. */
+  dateOnly?: boolean;
   /** A required column that SharePoint fills in itself when a create leaves it out. */
   hasDefault?: boolean;
   /** Allowed values, for `choice` columns. */
@@ -185,7 +208,7 @@ type GraphColumnDefinition = {
   text?: { allowMultipleLines?: boolean; maxLength?: number };
   number?: { minimum?: number; maximum?: number };
   boolean?: unknown;
-  dateTime?: unknown;
+  dateTime?: { format?: string };
   choice?: { choices?: string[]; allowTextEntry?: boolean };
   personOrGroup?: { allowMultipleSelection?: boolean };
   lookup?: { allowMultipleValues?: boolean };
@@ -289,6 +312,7 @@ function normalizeColumn(column: GraphColumnDefinition): ColumnDefinition | null
     readOnly: column.readOnly === true,
     ...(type === "choice" ? { choices: Array.isArray(choices) ? choices.filter(
         (choice): choice is string => typeof choice === "string") : [] } : {}),
+    ...(type === "dateTime" && column.dateTime?.format === "dateOnly" ? { dateOnly: true } : {}),
     ...(column.defaultValue && (column.defaultValue.value || column.defaultValue.formula)
         ? { hasDefault: true } : {}),
     ...(type === "choice" && column.choice?.allowTextEntry === true ? { allowTextEntry: true } : {}),
@@ -738,21 +762,34 @@ export class GraphSharePointApi {
 
   /** The internal names to expand, defaulting to every column the list has. */
   #selectedFields(opts: ListItemsOptions): string[] {
-    if (!opts.select) return opts.columns.map(column => column.name);
+    if (!opts.select) {
+      // Graph refuses a request that expands more than 12 person or lookup fields, so a list with
+      // more returns the first 12 of them by default; `select` picks others.
+      let lookups = 0;
+      return opts.columns
+          .filter(column => !isLookupBacked(column) || ++lookups <= MAX_LOOKUP_FIELDS)
+          .map(column => column.name);
+    }
     // An empty selection must not fall through to "expand every field", which discloses the whole
     // row; it names nothing, so it is refused.
     if (opts.select.length === 0) {
       throw new Error("`select` names no columns. Omit it to read every column, or name some.");
     }
-    return opts.select.map(name => {
+    let chosen = opts.select.map(name => {
       let column = opts.columns.find(candidate => candidate.name === name);
       if (!column) {
         throw new Error(
             `Unknown column "${truncate(String(name), MAX_NAME_ECHO_CHARS)}". Use internal column ` +
             "names from getColumns().");
       }
-      return column.name;
+      return column;
     });
+    if (chosen.filter(isLookupBacked).length > MAX_LOOKUP_FIELDS) {
+      throw new Error(
+          `A request can include at most ${MAX_LOOKUP_FIELDS} person or lookup columns. Select ` +
+          "fewer of them.");
+    }
+    return chosen.map(column => column.name);
   }
 
   async #itemPage(url: string): Promise<GraphPage<ListItem>> {

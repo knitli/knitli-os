@@ -573,6 +573,20 @@ describe("applyAction", () => {
     expect(JSON.parse(String(creates(calls)[0].init.body)).fields.GadgetsActionId).toBe(marker);
   });
 
+  it("will not write into a column of the list's own that shares the marker's name", async () => {
+    const calls = stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        && (call.init.method ?? "GET") === "GET"
+      ? jsonResponse({ value: [...GRAPH_COLUMNS,
+        { name: "GadgetsActionId", displayName: "Notes", text: { allowMultipleLines: true } }] })
+      : defaultRoute(call));
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+
+    await expect(applyApprovedAction(1)).rejects.toThrow(/cannot be used to recognise retried creates/);
+
+    expect(creates(calls)).toHaveLength(0);
+  });
+
   it("tells the user how to add the column by hand when the connection may not", async () => {
     const calls = stubFetch(call => (call.init.method ?? "GET") === "POST"
         && new URL(call.url).pathname.endsWith("/columns")
@@ -663,7 +677,8 @@ describe("approval prompt", () => {
     await session.createItem({ Title: "x" });
 
     const fields = approvals.actions[0].description.fields as { label: string }[];
-    expect(fields.map(field => field.label)).toEqual(["Title"]);
+    // Nothing to approve beyond the row, apart from the note that it is stamped.
+    expect(fields.map(field => field.label)).toEqual(["Title", "Bookkeeping"]);
   });
 
   it("shows submitted values as literal fields, never in the prompt's prose", async () => {
@@ -716,6 +731,19 @@ describe("validateFields", () => {
         .toEqual({ Title: "x", Tag: "something new" });
     expect(() => validateFields({ Title: "x", Status: "Closed" }, SCHEMA))
         .toThrow(/does not offer the choice "Closed"/);
+  });
+
+  it("writes a date-only column only a calendar date, never an instant", () => {
+    const dateOnly: ColumnDefinition[] = [
+      { name: "Due", displayName: "Due", type: "dateTime", required: false, readOnly: false,
+        dateOnly: true },
+    ];
+
+    expect(validateFields({ Due: "2026-09-15" }, dateOnly).Due).toBe("2026-09-15T00:00:00.000Z");
+    // An offset timestamp would be converted to UTC and could land on the neighbouring day.
+    expect(() => validateFields({ Due: "2026-09-15T23:30:00-05:00" }, dateOnly))
+        .toThrow(/calendar date like "2026-09-15"/);
+    expect(() => validateFields({ Due: "2026-02-30" }, dateOnly)).toThrow(/calendar date/);
   });
 
   it("holds a number to its column's bounds", () => {

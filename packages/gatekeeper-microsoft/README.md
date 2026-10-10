@@ -174,8 +174,12 @@ else treats it as invisible: it is left out of `getColumns()`, out of the values
 
 If the connection is not permitted to add columns, the action fails with a message naming the
 column: add a single line of text column with the internal name `GadgetsActionId` yourself, then
-retry the action. Creating columns is a schema operation, and whether the permission this connection
-holds covers it is checked on the first live create (see the verification checklist).
+retry the action. Microsoft documents `Sites.Manage.All` for adding a column to a list, and this connection requests
+only `Sites.ReadWrite.All`, so expect the first create on a list to fail this way unless the column
+is added by hand beforehand (a column of the list's own that shares the name, and is not an
+optional single line of text long enough for an id, is refused rather than written into). Whether
+`Sites.ReadWrite.All` is enough is checked on the first live create (see the verification
+checklist); granting `Sites.Manage.All` instead is a decision for whoever runs the deployment.
 
 The same retry problem exists for Outlook reply drafts, which Graph creates anew on every call.
 There the first attempt is recorded before the draft is made, and a retry first looks in Drafts for

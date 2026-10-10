@@ -99,6 +99,16 @@ describe("authorization request", () => {
     expect(location.searchParams.has("prompt")).toBe(false);
   });
 
+  it("asks for the account picker on a reconnect, which must be the original account", async () => {
+    await account.prepareReconnect(INITIATION_NONCE, IDENTITY_SCOPES);
+
+    const response = await worker.fetch(
+      get(`/${DO_ID}/${INITIATION_NONCE}`), env as never, executionContext as never);
+
+    expect(new URL(response.headers.get("Location")!).searchParams.get("prompt"))
+      .toBe("select_account");
+  });
+
   it("asks Microsoft for the account picker on a sign-in-only flow", async () => {
     await account.setCallback({} as never, INITIATION_NONCE, AUTH_SCOPES, true);
 

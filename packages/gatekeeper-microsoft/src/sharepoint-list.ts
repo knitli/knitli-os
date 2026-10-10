@@ -26,8 +26,8 @@ import { formatApprovalField, sanitizeApprovalTitle } from "./approval-text";
 import { AccessTokenCache, AccessTokenRequest, RetryAfterPolicy } from "./auth-retry";
 import { GraphApiError, truncate } from "./graph-api";
 import {
-  ColumnDefinition, GraphSharePointApi, ListItem, MARKER_COLUMN, buildItemsFilter, parseIsoDate,
-  sharePointThrottled,
+  ColumnDefinition, GraphSharePointApi, ListItem, MARKER_COLUMN, buildItemsFilter,
+  markerColumnProblem, parseIsoDate, sharePointThrottled,
 } from "./graph-sharepoint-api";
 import { MAX_PENDING_ACTIONS, PendingActionStore } from "./pending-actions";
 import type { GetItemsOptions, SharePointListSession } from "./sharepoint-types";
@@ -114,7 +114,12 @@ function describeCreateItem(
     builder.inline("Schema change",
         `Adds a column named ${MARKER_COLUMN} (single line of text, indexed) to this list, if it ` +
         "is not there yet. Every item created through this connection is stamped with its own " +
-        "action id there, so a retried create finds its earlier row instead of adding a second.");
+        "action id there, so a retried create finds its earlier row instead of adding a second. " +
+        "If this connection is not permitted to add columns, the action fails until someone adds " +
+        "that column by hand.");
+  } else {
+    builder.inline("Bookkeeping",
+        `Also sets the ${MARKER_COLUMN} column to an id of this action, for recognising a retry.`);
   }
   return builder.finish();
 }
@@ -245,6 +250,18 @@ function validateValue(column: ColumnDefinition, value: unknown): unknown {
 }
 
 function validateDateTime(column: ColumnDefinition, value: unknown): string {
+  // A date-only column has no time zone, so an instant would land on whichever day its offset
+  // converts to. It takes a plain calendar date, and nothing else.
+  if (column.dateOnly) {
+    let plain = value instanceof Date ? value.toISOString().slice(0, 10) : value;
+    if (typeof plain !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(plain) || !parseIsoDate(plain)) {
+      throw new Error(
+          `Column "${column.name}" holds a date with no time, so its value must be a calendar date ` +
+          `like "2026-09-15", but got ${describeType(value)}.`);
+    }
+    return `${plain}T00:00:00.000Z`;
+  }
+
   // A Date survives the RPC boundary, and a form is far likelier to send a string; both end up as
   // the ISO timestamp Graph documents, so neither the caller's formatting nor its time zone
   // shorthand reaches SharePoint.
@@ -654,9 +671,14 @@ export class SharePointListGatekeeperImpl
       // The marker column is added here, on the approval that described it. Anything outside the
       // create (listing, adding the column, looking the marker up) is safe to repeat.
       let columns = await api.listColumns(siteId, listId);
-      if (!columns.some(column => column.name === MARKER_COLUMN)) {
+      let existing = columns.find(column => column.name === MARKER_COLUMN);
+      if (!existing) {
         await this.#addMarkerColumn(api);
         this.#columnCache = undefined;
+      } else {
+        // A column of the list's own that shares the name is not ours to write into.
+        let problem = markerColumnProblem(existing);
+        if (problem) throw new Error(problem);
       }
       // An earlier attempt may have created the row and lost its answer, or died before recording
       // it; that row carries this action's marker.

@@ -386,7 +386,9 @@ export default {
       // Entra would silently re-issue a code for the same account and a signed-out user would land
       // straight back in. The account picker makes sign-in a deliberate choice again. Persistent
       // connections skip it: the user is already signed in and is linking that same account.
-      if (begun.authOnly) newUrl.searchParams.set("prompt", "select_account");
+      // A reconnect gets it too: it must be the original account, and with another account signed in
+      // Entra would pick that one silently, fail the identity check, and pick it again next time.
+      if (begun.authOnly || begun.reconnect) newUrl.searchParams.set("prompt", "select_account");
 
       return Response.redirect(newUrl.toString(), 302);
     } else if (relPath === "/oauth") {
@@ -676,7 +678,8 @@ export class UserAccount extends DurableObject<Env> {
    * flow is sign-in only. Returns null if the nonce is invalid or expired.
    */
   async beginOAuthFlow(initiationNonce: string):
-      Promise<{oauthNonce: string, scopes: string[], authOnly: boolean} | null> {
+      Promise<{oauthNonce: string, scopes: string[], authOnly: boolean, reconnect: boolean}
+              | null> {
     let stored = this.#takeNonce(initiationNonce, "initiation");
     if (!stored) return null;
 
@@ -692,7 +695,7 @@ export class UserAccount extends DurableObject<Env> {
     });
     let scopes = stored.scopes ?? IDENTITY_SCOPES;
     let authOnly = this.ctx.storage.kv.get<boolean>("authOnly") ?? false;
-    return {oauthNonce, scopes, authOnly};
+    return {oauthNonce, scopes, authOnly, reconnect: stored.reconnect === true};
   }
 
   /**

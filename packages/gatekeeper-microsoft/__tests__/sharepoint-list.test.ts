@@ -421,7 +421,7 @@ describe("createItem", () => {
   });
 
   it("does not latch the row observation for an item that does not exist", async () => {
-    stubFetch(call => /\/items\/404$/.test(new URL(call.url).pathname)
+    stubFetch(call => new URL(call.url).pathname.endsWith("/items/404")
       ? jsonResponse({ error: { code: "itemNotFound", message: "gone" } }, 404)
       : defaultRoute(call));
     const session = await startSession();

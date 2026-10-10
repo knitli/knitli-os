@@ -225,7 +225,8 @@ describe("routing", () => {
 describe("requested scopes", () => {
   /** A vendor whose UserAccount namespace mints one id and records what setCallback received. */
   function newVendor() {
-    const setCallback = vi.fn(async () => {});
+    const setCallback = vi.fn(async (
+        _callback: unknown, _nonce: string, _scopes: string[], _authOnly?: boolean) => {});
     const vendorContext = {
       exports: {
         UserAccount: {

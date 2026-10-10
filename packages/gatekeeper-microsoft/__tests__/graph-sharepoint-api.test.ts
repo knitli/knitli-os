@@ -77,6 +77,12 @@ const ITEM = {
   fields: { "@odata.etag": "\"1\"", Title: "New laptop", Qty: 2 },
 };
 
+/** The GraphApiError a rejected call failed with; anything else fails the test. */
+function rejection(error: unknown): GraphApiError {
+  if (error instanceof GraphApiError) return error;
+  throw error;
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -456,7 +462,7 @@ describe("error mapping", () => {
 
     const failure = await newApi().listItems("site-1", "list-1", {
       columns: SCHEMA, where: [{ column: "Qty", op: "lt", value: 600 }],
-    }).catch((error: unknown) => error as GraphApiError);
+    }).then(() => { throw new Error("expected a rejection"); }, rejection);
 
     expect(failure).toBeInstanceOf(GraphApiError);
     expect(failure.status).toBe(400);
@@ -471,7 +477,7 @@ describe("error mapping", () => {
 
     const failure = await newApi({ onCredentialsRejected: rejected })
       .describeList("site-1", "list-1")
-      .catch((error: unknown) => error as GraphApiError);
+      .then(() => { throw new Error("expected a rejection"); }, rejection);
 
     expect(rejected).toHaveBeenCalledOnce();
     expect(failure.credentialsRejected).toBe(true);
@@ -500,7 +506,7 @@ describe("throttling", () => {
     }));
 
     const failure = await newApi().listItems("site-1", "list-1", { columns: SCHEMA })
-      .catch((error: unknown) => error as GraphApiError);
+      .then(() => { throw new Error("expected a rejection"); }, rejection);
 
     // One attempt, then the wait is reported rather than served: replaying early would land back in
     // the same throttle and spend another request on it.

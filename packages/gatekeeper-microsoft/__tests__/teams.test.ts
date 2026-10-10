@@ -1,6 +1,7 @@
 import { RpcStub } from "capnweb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { Gatekeeper } from "@gadgets/workshop-shared/gatekeeper";
 import { TeamsGatekeeperImpl } from "../src/teams";
 import type { TeamsSession } from "../src/teams-types";
 
@@ -590,7 +591,8 @@ describe("no action surface", () => {
     // The overseer passes a git cache stub; the implementation never touches it, but the RPC
     // argument validator is derived from the Gatekeeper interface and rejects a call without one.
     const cache = new RpcStub({});
-    await expect(gatekeeper.applyAction(1, cache as never))
+    const rpc: Gatekeeper<TeamsSession> = gatekeeper;
+    await expect(rpc.applyAction(1, cache as never))
       .rejects.toThrow(/Unknown pending Teams action/);
     await expect(gatekeeper.rejectAction(1)).rejects.toThrow(/Unknown pending Teams action/);
     await expect(gatekeeper.revertAction(1)).rejects.toThrow(/revert is not implemented/);

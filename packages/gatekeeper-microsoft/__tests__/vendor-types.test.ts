@@ -12,6 +12,7 @@
 // in step with the vendor's.
 
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 // The JS-based compiler the repo's scripts use. The workspace `typescript` is 7.x (tsgo), which
@@ -21,7 +22,7 @@ import ts from "typescript6";
 const SOURCES = ["types.d.ts", "teams-types.d.ts", "sharepoint-types.d.ts"];
 
 function read(name: string): string {
-  return readFileSync(fileURLToPath(new URL(`../src/${name}`, import.meta.url)), "utf8");
+  return readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", name), "utf8");
 }
 
 /** The same sources, in the same order, joined the same way `GatekeeperVendor` joins them. */

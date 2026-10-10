@@ -744,6 +744,9 @@ importers:
       '@gadgets/scripts':
         specifier: workspace:*
         version: link:../../scripts
+      '@types/node':
+        specifier: 26.1.0
+        version: 26.1.0
       typescript:
         specifier: 'catalog:'
         version: 7.0.2

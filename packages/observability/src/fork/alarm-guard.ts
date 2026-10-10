@@ -35,7 +35,6 @@ export interface AlarmGuardState {
     readonly kv: {
       get<T>(key: string): T | undefined;
       put<T>(key: string, value: T): void;
-      delete(key: string): boolean;
     };
   };
 }
@@ -135,11 +134,6 @@ export function alarmBackoffMs(
   return Math.min(base * 2 ** Math.max(failures - 1, 0), Math.max(maxMs, base));
 }
 
-// This instance's view of each guarded alarm's counters. A loop keeps its Durable Object in
-// memory, so the hourly count is exact without a write per run; storage takes over (see
-// guardedAlarm) once a run fails or the count gets anywhere near the cap.
-const seen = new WeakMap<AlarmGuardState, Map<string, AlarmGuardRecord>>();
-
 /**
  * Wraps an `alarm()` body so it cannot loop:
  *
@@ -155,12 +149,11 @@ const seen = new WeakMap<AlarmGuardState, Map<string, AlarmGuardRecord>>();
  *    (`alarm.gave_up`). Only an outside re-arm, such as an RPC, runs it again, and the first
  *    success resets it.
  *
- * Cost: one KV read and at most one KV write per run. The counters live in one key
- * (`alarm-guard:<key>`), which is written only while the alarm is failing or has used more than
- * half its hourly budget, and is removed once neither holds. A healthy alarm therefore writes
- * nothing, and the guard stays invisible to code that lists or clears the object's own storage.
- * Counters are updated after `run`, so a run the runtime kills outright (CPU limit, eviction) is
- * not counted; the platform's own bounded retry covers that case.
+ * Cost: one KV read and one KV write per run. The counters live in one small key
+ * (`alarm-guard:<key>`), overwritten in place, and are always persisted rather than held in
+ * memory, because a Durable Object that is evicted mid-hour would otherwise restart its count and
+ * exceed the cap. Counters are updated after `run`, so a run the runtime kills outright (CPU
+ * limit, eviction) is not counted; the platform's own bounded retry covers that case.
  */
 export async function guardedAlarm(
   state: AlarmGuardState,
@@ -174,16 +167,9 @@ export async function guardedAlarm(
   const storageKey = ALARM_GUARD_KEY_PREFIX + key;
   const bucket = Math.floor(now() / HOUR_MS);
   const stored = storage.kv.get<AlarmGuardRecord>(storageKey);
-  let memory = seen.get(state);
-  if (!memory) seen.set(state, memory = new Map());
-  const remembered = memory.get(key);
-  const previous = Math.max(
-    stored?.bucket === bucket ? stored.count : 0,
-    remembered?.bucket === bucket ? remembered.count : 0,
-  );
+  const previous = stored?.bucket === bucket ? stored.count : 0;
   const failures = stored?.failures ?? 0;
   const count = previous + 1;
-  memory.set(key, { bucket, count, failures });
 
   if (count > maxPerHour) {
     if (previous <= maxPerHour) {
@@ -214,10 +200,7 @@ export async function guardedAlarm(
       });
     }
   }
-  const record: AlarmGuardRecord = { bucket, count, failures: nextFailures };
-  memory.set(key, record);
-  if (nextFailures > 0 || count > maxPerHour / 2) storage.kv.put(storageKey, record);
-  else if (stored) storage.kv.delete(storageKey);
+  storage.kv.put<AlarmGuardRecord>(storageKey, { bucket, count, failures: nextFailures });
 }
 
 /**

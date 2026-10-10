@@ -114,25 +114,25 @@ describe("alarm guard", () => {
     expect(state.writes).toBe(0);
   });
 
-  it("happy path runs the body, leaves its alarm alone, and writes nothing", async () => {
+  it("happy path runs the body, leaves its alarm alone, and writes one counter key per run", async () => {
     const run = vi.fn(async () => {
       await state.storage.setAlarm(T0 + 60_000);
     });
-    for (let i = 0; i < 60; i++) expect(await state.fire({}, run)).toBe(0);
+    for (let i = 0; i < 60; i++) expect(await state.fire({}, run)).toBe(1);
     expect(run).toHaveBeenCalledTimes(60);
     expect(state.alarm).toBe(T0 + 60_000);
-    expect(state.map.size).toBe(0);
+    expect(state.map.size).toBe(1);
   });
 
-  it("persists the hourly count past half the budget, so eviction does not reset it", async () => {
+  it("persists the hourly count from the first run, so eviction at any point does not reset it", async () => {
     const run = vi.fn(ok);
-    for (let i = 0; i < 5; i++) await state.fire({ maxPerHour: 10 }, run);
-    expect(state.map.size).toBe(0);
     await state.fire({ maxPerHour: 10 }, run);
-    expect(state.record("test")).toEqual({ bucket: T0 / HOUR, count: 6, failures: 0 });
+    expect(state.record("test")).toEqual({ bucket: T0 / HOUR, count: 1, failures: 0 });
+    for (let i = 0; i < 2; i++) await state.fire({ maxPerHour: 10 }, run);
 
+    // Evicted well under half the budget: the new instance carries on from 3, not from 0.
     const fresh = state.evicted();
-    for (let i = 0; i < 6; i++) await fresh.fire({ maxPerHour: 10 }, run);
+    for (let i = 0; i < 8; i++) await fresh.fire({ maxPerHour: 10 }, run);
     expect(run).toHaveBeenCalledTimes(10);
     expect(fresh.record("test")!.count).toBe(11);
   });
@@ -225,7 +225,7 @@ describe("alarm guard", () => {
     }));
   });
 
-  it("a success resets the failure count and removes the key", async () => {
+  it("a success resets the failure count", async () => {
     await state.fire({}, boom);
     await state.fire({}, boom);
     expect(state.record("test")!.failures).toBe(2);
@@ -234,7 +234,7 @@ describe("alarm guard", () => {
     await fresh.fire({}, boom);
     expect(fresh.alarm).toBe(fresh.clock + 120_000);
     await fresh.fire({}, ok);
-    expect(fresh.map.size).toBe(0);
+    expect(fresh.record("test")!.failures).toBe(0);
     await fresh.fire({}, boom);
     expect(fresh.alarm).toBe(fresh.clock + 30_000);
   });
@@ -247,7 +247,7 @@ describe("alarm guard", () => {
       await state.fire({ disabled: true }, ok),
     ];
     for (let i = 0; i < 4; i++) counts.push(await state.fire({ maxPerHour: 4 }, boom));
-    expect(counts).toEqual([0, 1, 1, 0, 1, 1, 0, 0]);
+    expect(counts).toEqual([1, 1, 1, 0, 1, 1, 0, 0]);
     expect(state.map.size).toBeLessThanOrEqual(1);
   });
 
@@ -255,6 +255,6 @@ describe("alarm guard", () => {
     await state.fire({ key: "a" }, boom);
     await state.fire({ key: "b" }, ok);
     expect(state.record("a")!.failures).toBe(1);
-    expect(state.record("b")).toBeUndefined();
+    expect(state.record("b")!.failures).toBe(0);
   });
 });

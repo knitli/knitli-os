@@ -180,7 +180,7 @@ describe("ScheduleDriver", () => {
     );
 
     const keys = await runInDurableObject(driver, (_instance, state) =>
-      [...state.storage.kv.list()].map(([key]) => key).toSorted(),
+      [...state.storage.kv.list()].map(([key]) => key).filter(key => !key.startsWith("alarm-guard:")).toSorted(),
     );
     expect(keys).toContain("schedule:workspace-a:schedule-a");
     expect(keys).toContain("caps:workspace-a:schedule-a");
@@ -327,7 +327,7 @@ describe("ScheduleDriver", () => {
 
     await driver.disable("workspace-a", "schedule-a");
     const keys = await runInDurableObject(driver, (_instance, state) =>
-      [...state.storage.kv.list()].map(([key]) => key),
+      [...state.storage.kv.list()].map(([key]) => key).filter(key => !key.startsWith("alarm-guard:")),
     );
     expect(keys).toEqual(["metadata"]);
     expect(await driver.getSchedule("workspace-a", "schedule-a")).toBeUndefined();
@@ -973,7 +973,7 @@ describe("ScheduleDriver", () => {
       } catch (error) {
         message = error instanceof Error ? error.message : String(error);
       }
-      return { message, keys: [...state.storage.kv.list()].map(([key]) => key) };
+      return { message, keys: [...state.storage.kv.list()].map(([key]) => key).filter(key => !key.startsWith("alarm-guard:")) };
     });
     expect(enableResult).toEqual({ message: "alarm unavailable", keys: [] });
 
@@ -1250,7 +1250,7 @@ describe("ScheduleDriver", () => {
     let keys: string[] = [];
     await vi.waitFor(async () => {
       keys = await runInDurableObject(driver, (_instance, state) =>
-        [...state.storage.kv.list()].map(([key]) => key),
+        [...state.storage.kv.list()].map(([key]) => key).filter(key => !key.startsWith("alarm-guard:")),
       );
       expect(keys).toEqual(["metadata"]);
     });

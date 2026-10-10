@@ -30,7 +30,7 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
 /** The text from `async alarm(` through the brace that closes the method. */
 function alarmBodies(text: string): string[] {
   const bodies: string[] = [];
-  for (const match of text.matchAll(/\basync alarm\(/g)) {
+  for (const match of text.matchAll(/\basync\s+alarm\s*\(/g)) {
     // Skip the parameter list, which may contain a type with braces, then match braces.
     let i = text.indexOf("{", text.indexOf(")", match.index));
     let depth = 0;
@@ -45,6 +45,14 @@ function alarmBodies(text: string): string[] {
 }
 
 describe("Durable Object alarm kill switch", () => {
+  it("finds a handler however it is spaced, and tells guarded from unguarded", () => {
+    const unguarded = "class A {\n  async\n    alarm ()\n  : Promise<void> {\n    await go();\n  }\n}";
+    const guarded = "class B {\n  async  alarm (\n  ) {\n    await haltIfAlarmsDisabled(this.ctx, this.env, \"b\");\n  }\n}";
+    const bodies = alarmBodies(`${unguarded}\n${guarded}`);
+    assert.equal(bodies.length, 2);
+    assert.deepEqual(bodies.map(body => GUARD.test(body)), [false, true]);
+  });
+
   it("is called by every alarm() handler", () => {
     const packagesDir = join(repoRoot, "packages");
     const unguarded: string[] = [];

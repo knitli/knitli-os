@@ -950,12 +950,13 @@ ids are facet-local, not Activity ids.
 
 - **Where:** `packages/observability/src/fork/alarm-guard.ts` (Tier 1), re-exported to gatekeepers
   by `packages/gatekeeper-kit/src/fork/alarm-guard.ts` (Tier 1); a one-line seam plus one import in
-  each of the 20 upstream `alarm()` handlers; `docs/alarm-audit.md` lists them.
+  each of the 20 upstream `alarm()` handlers; `docs/alarm-audit.md` lists them; one row in the
+  `packages/gatekeeper-kit/README.md` module inventory (Tier 2).
 - **What:** every `alarm()` starts with `haltIfAlarmsDisabled(this.ctx, this.env, key)`, which
   deletes the alarm when the Worker var `ALARMS_DISABLED` is `"true"`. The four handlers that
   re-arm (`OverseerDurableObject`, `ScheduleDriver`, Google `ChatHookDriver` and `GmailHookDriver`)
   call
-  `guardedAlarmFor(ctx, env, key, run)` instead: at most 120 runs per hour, and a throwing run is
+  `guardedAlarmFor(ctx, env, key, run)` instead: at most 120 runs per hour (the count is persisted on every run, so eviction cannot reset it), and a throwing run is
   replaced by an exponential-backoff alarm instead of being rethrown to the platform. The
   scheduler's "reports and rethrows alarm infrastructure failures" test now asserts the backoff
   alarm instead.

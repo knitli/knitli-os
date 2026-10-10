@@ -1,4 +1,4 @@
-import { guardedAlarmFor } from "@gadgets/observability/fork/alarm-guard";
+import { ALARM_GUARD_KEY_PREFIX, guardedAlarmFor } from "@gadgets/observability/fork/alarm-guard";
 import { DurableObject } from "cloudflare:workers";
 import type { RpcStub, RpcTarget } from "cloudflare:workers";
 import { reportIssue } from "@gadgets/observability/error-reporting";
@@ -578,8 +578,9 @@ export class ScheduleDriver extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       for (const [key] of cleanup) this.ctx.storage.kv.delete(key);
     });
-    const remains = [...this.ctx.storage.kv.list({ limit: 2 })].some(
-      ([key]) => key !== METADATA_KEY,
+    // The alarm guard rewrites its counter after every run, so it never counts as remaining data.
+    const remains = [...this.ctx.storage.kv.list({ limit: 3 })].some(
+      ([key]) => key !== METADATA_KEY && !key.startsWith(ALARM_GUARD_KEY_PREFIX),
     );
     if (remains) await this.ctx.storage.setAlarm(Date.now());
     else await this.ctx.storage.deleteAlarm();

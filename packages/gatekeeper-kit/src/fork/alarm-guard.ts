@@ -6,6 +6,7 @@
  */
 export {
   ALARM_FLOOR_MS,
+  ALARM_RUNS_PER_HOUR,
   alarmBackoffMs,
   alarmsDisabled,
   guardedAlarm,

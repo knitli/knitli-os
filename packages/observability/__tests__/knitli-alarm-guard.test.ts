@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import {
   ALARM_GUARD_KEY_PREFIX,
+  ALARM_RUNS_PER_HOUR,
   alarmBackoffMs,
   alarmsDisabled,
   guardedAlarm,
@@ -172,6 +173,13 @@ describe("alarm guard", () => {
     state.alarm = T0 + 5;
     await guardedAlarmFor(state, { ALARMS_DISABLED: "true" }, "k", run);
     expect(state.alarm).toBeNull();
+  });
+
+  it("guardedAlarmFor uses the listed cap for a key, and a listed cap exceeds the default", async () => {
+    const run = vi.fn(ok);
+    expect(ALARM_RUNS_PER_HOUR["scheduler"]).toBeGreaterThan(120);
+    for (let i = 0; i < 200; i++) await guardedAlarmFor(state, {}, "scheduler", run);
+    expect(run).toHaveBeenCalledTimes(200);
   });
 
   it("deferWhenOpen re-arms for the next hour, never sooner", async () => {

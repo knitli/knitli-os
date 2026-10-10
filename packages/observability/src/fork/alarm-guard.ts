@@ -204,17 +204,33 @@ export async function guardedAlarm(
 }
 
 /**
+ * Runs per clock hour that {@link guardedAlarmFor} allows each guarded alarm, by key. An entry is
+ * the alarm's legitimate worst case with headroom, so only a loop reaches it; derivations are in
+ * `docs/alarm-audit.md`. A key not listed gets the {@link guardedAlarm} default of 120.
+ */
+export const ALARM_RUNS_PER_HOUR: Readonly<Record<string, number>> = {
+  // One run per workspace turn or response; a turn is an LLM call, so over 1 per second is a loop.
+  overseer: 3_600,
+  // 500 schedules at the 60 s minimum, staggered so each firing is its own run, plus 20%.
+  scheduler: 36_000,
+  // At most about one push a second (Gmail's documented notification limit; Chat is assumed
+  // alike) plus an equal allowance for retry, backlog (20 deliveries per run) and renewal runs.
+  "google.chat-hooks": 7_200,
+  "google.gmail-hooks": 7_200,
+};
+
+/**
  * The seam upstream `alarm()` handlers call: {@link guardedAlarm} with the `ALARMS_DISABLED` kill
- * switch read from `env` and `deferWhenOpen` on, so a tripped breaker pauses the alarm for the hour
- * rather than dropping the work. `key` and `maxPerHour` are as in {@link GuardedAlarmOptions}; raise
- * `maxPerHour` for an alarm whose legitimate workload exceeds the default of 120 runs per hour.
+ * switch read from `env`, `deferWhenOpen` on, and the cap {@link ALARM_RUNS_PER_HOUR} lists for
+ * `key`, so a tripped breaker pauses the alarm for the hour rather than dropping the work.
+ * `maxPerHour` overrides the cap.
  */
 export function guardedAlarmFor(
   state: AlarmGuardState,
   env: object,
   key: string,
   run: () => Promise<void>,
-  { maxPerHour }: Pick<GuardedAlarmOptions, "maxPerHour"> = {},
+  { maxPerHour = ALARM_RUNS_PER_HOUR[key] }: Pick<GuardedAlarmOptions, "maxPerHour"> = {},
 ): Promise<void> {
   return guardedAlarm(
     state, { key, disabled: alarmsDisabled(env), deferWhenOpen: true, maxPerHour }, run);

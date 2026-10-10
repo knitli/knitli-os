@@ -30,9 +30,6 @@ const logger = obsContext.createLogger({
 const ALARM_BATCH_SIZE = 20;
 const DELIVERY_CONCURRENCY = 4;
 const REVOCATION_CLEANUP_BATCH_SIZE = 100;
-// Legitimate peak: every enabled schedule at the one-minute minimum interval, staggered so each
-// firing is its own pass, plus headroom. Only a tight loop gets near it.
-const ALARM_PASSES_PER_HOUR_CAP = 36_000;
 const RECOVERY_DELAY_MS = 5 * 60_000;
 const MAX_ENABLED_SCHEDULES_PER_ACCOUNT = 500;
 const MAX_ENABLED_SCHEDULES_PER_WORKSPACE = 100;
@@ -239,8 +236,7 @@ export class ScheduleDriver extends DurableObject {
   }
 
   async alarm(): Promise<void> {
-    await guardedAlarmFor(this.ctx, this.env, "scheduler", () => this.#alarmBody(),
-      { maxPerHour: ALARM_PASSES_PER_HOUR_CAP });
+    await guardedAlarmFor(this.ctx, this.env, "scheduler", () => this.#alarmBody());
   }
 
   async #alarmBody(): Promise<void> {

@@ -22,7 +22,7 @@ How Cloudflare handles alarms:
   checks it first, via `haltIfAlarmsDisabled` or `guardedAlarmFor`. For a one-shot cleanup handler
   this means the cleanup does not run until the account re-arms it; an abandoned connect attempt
   keeps its storage until then.
-- **`guardedAlarm`.** Wraps a re-arming handler: at most 120 runs per clock hour (then
+- **`guardedAlarm`.** Wraps a re-arming handler: at most `maxPerHour` runs per clock hour, 120 unless the handler's cap below applies (then
   `alarm.circuit.open`), and a throwing run is swallowed and replaced by an exponential-backoff
   alarm (30 s doubling to 1 h, `alarm.failed`), giving up after 8 consecutive failures
   (`alarm.gave_up`). A guarded handler therefore no longer rethrows to the platform. All of ours
@@ -69,10 +69,27 @@ not connected. A completed connect or `revoke()` deletes it. When it fires the h
 |---|---|---|---|---|
 | `workshop-backend` `PendingLogin` (`auth/login-flow.ts`) | none; one alarm at the result's expiry | deletes one key | kill switch | SAFE |
 | `workshop-backend` `UserDurableObject` handoff sweep (`user.ts`) | `#armHandoffSweep` re-arms for the next pending expiry | each run deletes the records that are due, so the next time is in the future; an unlistable record re-arms a full lifetime ahead | kill switch | SAFE |
-| `workshop-backend` `OverseerDurableObject` (`overseer.ts`, `runAlarmTasks`) | `#updateAlarm` re-arms at `now` while an external-message response is ready, and at the agent keep-alive time | a response that can never be delivered, or a drain that keeps failing, re-arms at `now` and rethrows: a tight loop | `guardedAlarm` key `overseer`, `deferWhenOpen` | GUARDED. The breaker bounds the loop; it does not remove the undeliverable record. |
-| `gatekeeper-scheduler` `ScheduleDriver` | recovery alarm before each pass, then the earliest schedule time; `now` while a revoked account still has storage | a schedule whose firing fails permanently re-runs forever | `guardedAlarm` key `scheduler`, `deferWhenOpen`, cap raised to 36,000 passes an hour (500 schedules at the one-minute minimum, staggered) | GUARDED. The guard's counter key is ignored when revocation cleanup checks for remaining data. A large revoked account's cleanup is one pass per alarm, well inside the cap. |
-| `gatekeeper-google` `ChatHookDriver` (`chat-hooks.ts`) | `#reschedule` to the earliest of queue retry, subscription renewal or expiry | failures are caught per message and renewal and write a later time first | `guardedAlarm` key `google.chat-hooks`, `deferWhenOpen` | GUARDED |
-| `gatekeeper-google` `GmailHookDriver` (`gmail-hooks.ts`) | `#reschedule`; `syncAt` and `watch.renewAt` default to `now` when unset | a sync or watch step that throws leaves them at `now` | `guardedAlarm` key `google.gmail-hooks`, `deferWhenOpen` | GUARDED |
+| `workshop-backend` `OverseerDurableObject` (`overseer.ts`, `runAlarmTasks`) | `#updateAlarm` re-arms at `now` while an external-message response is ready, and at the agent keep-alive time | a response that can never be delivered, or a drain that keeps failing, re-arms at `now` and rethrows: a tight loop | `guardedAlarmFor` key `overseer` (cap 3,600/h) | GUARDED. The breaker bounds the loop; it does not remove the undeliverable record. |
+| `gatekeeper-scheduler` `ScheduleDriver` | recovery alarm before each pass, then the earliest schedule time; `now` while a revoked account still has storage | a schedule whose firing fails permanently re-runs forever | `guardedAlarmFor` key `scheduler` (cap 36,000/h) | GUARDED. The guard's counter key is ignored when revocation cleanup checks for remaining data. A large revoked account's cleanup is one pass per alarm, well inside the cap. |
+| `gatekeeper-google` `ChatHookDriver` (`chat-hooks.ts`) | `#reschedule` to the earliest of queue retry, subscription renewal or expiry | failures are caught per message and renewal and write a later time first | `guardedAlarmFor` key `google.chat-hooks` (cap 7,200/h) | GUARDED |
+| `gatekeeper-google` `GmailHookDriver` (`gmail-hooks.ts`) | `#reschedule`; `syncAt` and `watch.renewAt` default to `now` when unset | a sync or watch step that throws leaves them at `now` | `guardedAlarmFor` key `google.gmail-hooks` (cap 7,200/h) | GUARDED |
+
+## Hourly caps
+
+The cap is `ALARM_RUNS_PER_HOUR` in `observability/src/fork/alarm-guard.ts`, looked up by key. Each
+is the handler's legitimate worst case with headroom, so only a loop reaches it. A run is one
+`alarm()` invocation. A tight loop re-arming at `now` makes thousands of runs a minute, so every
+cap below still stops one within seconds.
+
+| Key | Cap/h | Derivation |
+|---|---|---|
+| `scheduler` | 36,000 | An account holds at most 500 enabled schedules (`MAX_ENABLED_SCHEDULES_PER_ACCOUNT`), each at least 60 s apart (`MIN_INTERVAL_MS`): 500 x 60 = 30,000 firings an hour. A run delivers up to 20 due schedules, so runs never exceed firings when they are staggered. Plus 20% for recovery and replan runs. |
+| `overseer` | 3,600 | Runs come from the 60 s agent keep-alive (60/h) and from each external response becoming ready. Each response ends an agent turn, which is a model call, so one per second per workspace is far above real traffic. Passes inside a run loop within the run and do not count. |
+| `google.gmail-hooks` | 7,200 | A push wakes the driver at once. Gmail limits notifications to about one a second per mailbox, so 3,600 pushes an hour. An equal 3,600 covers retry runs (backoff from 1 min), backlog runs (a run starts at most 20 deliveries, `MAX_DELIVERIES_PER_RUN`), history paging (10 pages a sync) and watch renewal. |
+| `google.chat-hooks` | 7,200 | Same shape: one run per Workspace Events push (assumed capped near one a second per subscription), plus an equal allowance for retries, 20-delivery backlog runs and subscription renewals (every 3 h). |
+| connect timeouts, `PendingLogin`, handoff sweep | none | They never re-arm in a loop; the kill switch is their only guard. |
+
+A workload that stays above its cap is not a loop: raise the entry and its row together.
 
 ## Rules for new alarm code
 

@@ -12,6 +12,7 @@
 //
 // Every nonce is single-use, time-bounded, and compared in constant time; see `connect-nonce.ts`.
 
+import { haltIfAlarmsDisabled } from "@gadgets/observability/fork/alarm-guard";
 import { DurableObject } from "cloudflare:workers";
 import type { ConnectHandoff, ConnectInitiator, GatekeeperConnectCallback, GatekeeperUser }
   from "@gadgets/workshop-shared/gatekeeper";
@@ -1110,6 +1111,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
 
 
   async alarm(): Promise<void> {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "mcp.connect-timeout")) return;
     // Armed only for a first connect, so reaching here means one never finished. The test is whether
     // the account was ever handed to the Workshop, not whether an endpoint was recorded: a connect
     // that chose an endpoint and then failed -- a rejected authorization, a server that stopped

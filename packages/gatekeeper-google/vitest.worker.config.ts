@@ -37,6 +37,7 @@ export default defineConfig({
       "__tests__/workerd/gmail-actions.test.ts",
       "__tests__/workerd/gmail-hooks.test.ts",
       "__tests__/workerd/gmail-state.test.ts",
+      "__tests__/workerd/knitli-hook-alarm-idle.test.ts",
     ],
     setupFiles: ["@gadgets/scripts/assert-workerd"],
   },

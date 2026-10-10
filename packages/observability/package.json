@@ -8,6 +8,10 @@
       "types": "./src/access.ts",
       "import": "./src/access.ts"
     },
+    "./fork/alarm-guard": {
+      "types": "./src/fork/alarm-guard.ts",
+      "import": "./src/fork/alarm-guard.ts"
+    },
     "./fork/connect-initiator": {
       "types": "./src/fork/connect-initiator.ts",
       "import": "./src/fork/connect-initiator.ts"

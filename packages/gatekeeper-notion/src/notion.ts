@@ -13,6 +13,7 @@
 //  6. Simulation — reads overlay pending (submitted-but-unapplied) actions so a Gadget sees its own
 //     writes immediately. List simulation has documented limitations (see types.d.ts).
 
+import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
@@ -480,6 +481,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm() {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "notion.connect-timeout")) return;
     if (!this.ctx.storage.kv.get<string>("accessToken")) {
       this.ctx.storage.deleteAll();
     }

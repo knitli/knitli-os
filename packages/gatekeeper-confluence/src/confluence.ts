@@ -14,6 +14,7 @@
 //  6. Simulation — reads overlay pending actions so a Gadget sees its own writes immediately.
 //  7. Observer verification — all bindings track independently restricted spaces and content.
 
+import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
@@ -425,6 +426,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm() {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "confluence.connect-timeout")) return;
     if (!this.ctx.storage.kv.get<StoredGrant>("grant")) this.ctx.storage.deleteAll();
   }
 

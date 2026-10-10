@@ -1,3 +1,4 @@
+import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
@@ -359,6 +360,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm(alarmInfo?: AlarmInvocationInfo): Promise<void> {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "email.connect-timeout")) return;
     // Timed out without completion -- clean up.
     this.ctx.storage.deleteAll();
   }

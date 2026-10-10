@@ -1,3 +1,4 @@
+import { clearAlarmGuard, guardedAlarmFor } from "@gadgets/observability/fork/alarm-guard";
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { capExecuteCodeOutput } from "./fork/turn-guards";
 import { chatWorkbook, describeWorkbookBinding, dropWorkbook, isChatWorkbook, isSpreadsheetUpload, openWorkbookSession, readWorkbookRange, stageWorkbookUpload, workbookRefFields } from "./fork/workbook-upload";
@@ -984,6 +985,7 @@ class OverseerImpl implements AgentHooks {
       this.ctx.storage.setAlarm(Math.min(...times));
     } else {
       this.ctx.storage.deleteAlarm();
+      clearAlarmGuard(this.ctx, "overseer");
     }
   }
 
@@ -9940,7 +9942,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * See OverseerImpl.runAlarmTasks for how the concerns are run together.
    */
   async alarm() {
-    await this.impl.runAlarmTasks();
+    await guardedAlarmFor(this.ctx, this.env, "overseer", () => this.impl.runAlarmTasks());
   }
 
   // Initialize a brand-new workspace's storage. (Before git-backed code storage this also wrote

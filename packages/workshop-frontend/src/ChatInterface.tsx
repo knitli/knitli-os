@@ -115,7 +115,7 @@ import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
 import { formatFullTimestamp } from "./utils/formatTimestamp";
 import { copyToClipboard } from "./clipboard";
 import { isImeComposing } from "./keyboardEvent";
-import { formatAttachmentSize } from "./features/chat/attachmentFormatting";
+import { attachmentDownloadName, formatAttachmentSize } from "./features/chat/attachmentFormatting";
 import { ChatComposer } from "./features/chat/composer/ChatComposer";
 import type { PromptPresetOption } from "./features/chat/controls/ComposerPromptSelector";
 import { composerDraftStorageKey } from "./features/chat/composer/draft/composerDraft";
@@ -3214,7 +3214,6 @@ function ChatInterface({
     try {
       let bytes = attachment.content;
       const mimeType = attachment.mimeType;
-      const name = attachment.name;
       if (!bytes) {
         bytes = await overseer.getChatAttachmentContent(chatId, attachment.id);
       }
@@ -3223,7 +3222,7 @@ function ChatInterface({
       try {
         const a = document.createElement("a");
         a.href = url;
-        a.download = name ?? "attachment";
+        a.download = attachmentDownloadName(attachment);
         a.click();
       } finally {
         setTimeout(() => URL.revokeObjectURL(url), 0);

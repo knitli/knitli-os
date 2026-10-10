@@ -29,7 +29,10 @@ Rules for every port:
 - **Port the idea, not the diff.** The forks branched at different upstream points. Several have
   since moved config to `cloudflare.config.ts` (#597) and renamed things, so read their code as a
   reference and write against our tree.
-- **Land each port as its own branch.** One PR per port, with kernel and UI split.
+- **Land each port as its own branch.** One PR per port. A port that spans the kernel
+  (`workshop-backend`, `workshop-shared` API) and the frontend is split into a kernel PR and a UI
+  follow-up, so reviewers can read the kernel lines apart from the UI (Web Push and the idle lease
+  are the two cases here).
 - **Keep the fork's tests.** Port their tests with the code; they are the best spec we have.
 
 ## Ports
@@ -51,8 +54,12 @@ About 45 source files and 13 test files. Provides:
 Plan:
 
 1. Copy the package in untouched, then adapt it to our tree: add `cloudflare.config.ts` using the
-   shared factory, regenerate `wrangler.jsonc`, add the router `GATEKEEPER_MICROSOFT` binding, and
-   regenerate the release manifest golden file.
+   shared factory, regenerate `wrangler.jsonc`, and regenerate the release manifest golden file. Do not add a
+   static router binding: the router discovers installed gatekeepers from the release manifest, so
+   a static `GATEKEEPER_MICROSOFT` would make the optional gatekeeper a dependency of every
+   deployment. Verify the generated install binding instead. Add a `deploy-inputs.json` with
+   `CLIENT_ID`, `CLIENT_SECRET` and `TENANT_ID` so the deploy wizard can supply the tenant, and
+   map `TENANT_ID` for local development.
 2. Compare it against `gatekeeper-kit` and `write-gatekeeper` conventions and swap hand-rolled
    pieces for kit helpers (connect handoff, credential stage, action builders).
 3. Land in stages, each its own PR: sign-in plus Outlook, then Teams, then SharePoint.
@@ -108,6 +115,10 @@ after, and only land it if the saving is real.
 Stops a turn visibly after repeated failing calls or at the step cap, caps `executeCode` output,
 caps Workers AI reasoning at low, and decides the guards before the step barrier.
 
+Decision: the reasoning cap is not ported. It would override the user's `setChatEffort()` choice,
+because the overseer passes the chat's stored `reasoningEffort` to every model request. If we want
+a downgrade, it should be a defined recovery state after the guard trips, not a blanket cap.
+
 Plan: small and mostly in `agent.ts`. Port the guards and the output cap, add tests, and add an eval
 to `workshop-evals` that checks a looping agent stops. Check for overlap with `step-transactionality`
 before starting.
@@ -142,9 +153,18 @@ Plan:
 
 1. Read `docs/notifications.md` and decide where the web channel plugs into the same
    "approval waits" and "turn ended" events.
-2. Add VAPID key storage as an admin or deployment setting, not hard-coded.
-3. Port `web-push.ts` with its tests, then the frontend pieces.
-4. Check the PWA manifest and service worker against the router's asset serving.
+2. Store the VAPID private key as a deployment secret, never in `AdminConfig`: admin config is
+   mutable from an admin session and mirrored as plain JSON in KV, and the repo keeps
+   authentication credentials out of it. Only non-secret enablement state and the public key may
+   be exposed through admin settings.
+3. Reuse the existing visible-client path. When a workspace is visible the User Durable Object
+   already offers the event to the browser subscriber and waits for an acknowledgement before
+   falling back to a push, so route Web Push through that post-acknowledgement fallback and omit
+   the fork's separate `useReportInView` suppression. A second presence mechanism would let an
+   acknowledgement suppress native delivery while an independent VAPID send still notifies,
+   producing duplicates.
+4. Port `web-push.ts` with its tests as the kernel PR, then the frontend pieces as a UI PR.
+5. Check the PWA manifest and service worker against the router's asset serving.
 
 Open questions: where subscriptions live (the User Durable Object, as upstream does for its device
 keys), and how a deployment without VAPID keys degrades (no-op).

@@ -16,6 +16,7 @@
   "dependencies": {
     "@cloudflare/codemode": "0.5.2",
     "@cloudflare/puppeteer": "^1.4.0",
+    "@e965/xlsx": "0.20.3",
     "@earendil-works/pi-agent-core": "0.99.1",
     "@earendil-works/pi-ai": "0.99.1",
     "@gadgets/error-reporting": "workspace:*",
@@ -29,6 +30,7 @@
     "capnweb-validate": "catalog:",
     "diff": "catalog:",
     "diff3": "0.0.3",
+    "fflate": "0.8.3",
     "isomorphic-git": "^1.42.2",
     "jose": "^6.2.12",
     "pako": "^3.0.2",

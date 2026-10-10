@@ -1,5 +1,8 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { capExecuteCodeOutput } from "./fork/turn-guards";
+import { chatWorkbook, describeWorkbookBinding, dropWorkbook, isChatWorkbook, isSpreadsheetUpload, openWorkbookSession, readWorkbookRange, stageWorkbookUpload, workbookRefFields } from "./fork/workbook-upload";
+import { deriveWorkbookBindings } from "./fork/workbook-names";
+import { withRequestedNames } from "./fork/workbook-checkpoint";
 import { isReasoningLevel } from "./fork/reasoning-levels";
 import { IdleLease, clientActivityOf, ownedByClient, reapIdleSession, renewOnClientCalls, renewOnStubCalls } from "./fork/idle-lease";
 import { ActionApplyContextImpl, attestWorkspaceAudience, beginAdmission, forgetBuildAdmission,
@@ -2580,6 +2583,11 @@ class OverseerImpl implements AgentHooks {
           env[name] = stored.args;
           break;
         }
+        case "attachment":
+          if (isChatWorkbook(this.storage, chatId, entry.id)) {
+            env[name] = this.makeBindingLoopback({type: "workbook", id: entry.id}, caller);
+          }
+          break;
         default:
           entry satisfies never;
       }
@@ -5106,6 +5114,9 @@ class OverseerImpl implements AgentHooks {
             new WorktreeSessionImpl(this, target.id, turn.access, async () => initiator));
       }
 
+      case "workbook":
+        return Promise.resolve(openWorkbookSession(this.storage, caller, target.id));
+
       case "git":
         return Promise.resolve(new GitImpl(this, () => this.#gitAuthorFor(caller)));
 
@@ -5336,6 +5347,7 @@ class OverseerImpl implements AgentHooks {
         mimeType: content.state.mimeType,
         name: content.state.name,
         size: content.data.byteLength,
+        ...workbookRefFields(this.storage, id),
       });
     }
     if (total > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
@@ -5364,6 +5376,7 @@ class OverseerImpl implements AgentHooks {
     this.ctx.storage.transactionSync(() => {
       for (let content of Array.from(this.storage.chatAttachmentContent.stagedByUploadedAt.list({end: cutoff}))) {
         this.storage.chatAttachmentContent.delete(content.fileId);
+        dropWorkbook(this.storage, content.fileId);
       }
     });
   }
@@ -6631,6 +6644,16 @@ class OverseerImpl implements AgentHooks {
         `\`\`\`\n`;
   }
 
+  // AgentHooks: describe / read the spreadsheet behind a chat's attachment binding (fork/workbook-upload.ts).
+  async describeAttachmentBinding(chatId: number, envName: string, id: string): Promise<string> {
+    return describeWorkbookBinding(chatWorkbook(this.storage, chatId, id, envName), envName);
+  }
+
+  async readWorkbookRange(chatId: number, envName: string, id: string, sheet: string,
+                          range: string | undefined): Promise<string> {
+    return readWorkbookRange(this.storage, chatId, envName, id, sheet, range);
+  }
+
   async describeGatekeeper(name: string, gatekeeper: GatekeeperRecord): Promise<string> {
     let facet = await this.getGatekeeperFacet(gatekeeper.id);
 
@@ -6669,8 +6692,9 @@ class OverseerImpl implements AgentHooks {
   // Returns the checkpoint named by `chatMeta.compactedTo`.
   getActiveChatCompaction(chatId: number): CompactionCheckpoint | undefined {
     let compactedTo = this.storage.chatMeta.get(chatId)?.compactedTo;
-    return compactedTo === undefined
+    let checkpoint = compactedTo === undefined
         ? undefined : this.storage.chatCompactions.get(chatKey(chatId, compactedTo));
+    return checkpoint && withRequestedNames(this.storage, checkpoint);
   }
 
   // Returns the newest checkpoint whose boundary is strictly below `sequence`, for paging history
@@ -7400,11 +7424,16 @@ class OverseerImpl implements AgentHooks {
       taken = new Set(Object.keys(this.defaultBindingList()));
     }
     taken.add(GIT_BINDING_NAME);
+    // Every connection request's name, denied or not: see requestedNames in agent.ts.
+    let requestedNames = new Set<string>();
     for (let msg of chatMessages ?? this.storage.chats.list({prefix: chatKeyPrefix(chatId)})) {
       if (msg.type === "message") {
         for (let capsule of msg.capsules ?? []) {
           if (capsule.bindingName !== undefined) taken.add(capsule.bindingName);
         }
+        // Derived at replay rather than stamped on the message (see agent.ts), so repeated here.
+        for (let {name} of deriveWorkbookBindings(
+            msg.attachments, new Set([...taken, ...requestedNames]))) taken.add(name);
         for (let call of msg.toolCalls ?? []) {
           if ((call.toolName === "createGadget" || call.toolName === "createWorktree" ||
                call.toolName === "createExternalResource") &&
@@ -7413,6 +7442,7 @@ class OverseerImpl implements AgentHooks {
           }
         }
       } else if (msg.type === "connectionRequest") {
+        if (msg.bindingName !== undefined) requestedNames.add(msg.bindingName);
         if (msg.bindingName !== undefined && msg.state !== "denied") {
           taken.add(msg.bindingName);
         }
@@ -7612,6 +7642,7 @@ class OverseerImpl implements AgentHooks {
     }
     let namingLog = chatMessages;
     let anythingToName = false;
+    let requestedNames = new Set(this.getActiveChatCompaction(chatId)?.requestedNames);  // see agent.ts
     for (let msg of namingLog) {
       if (msg.type === "message") {
         for (let capsule of msg.capsules ?? []) {
@@ -7624,6 +7655,9 @@ class OverseerImpl implements AgentHooks {
             anythingToName = true;
           }
         }
+        // As in chatScopeNames: workbook names are derived, not stamped.
+        for (let {name} of deriveWorkbookBindings(
+            msg.attachments, new Set([...taken, ...requestedNames]))) taken.add(name);
         for (let call of msg.toolCalls ?? []) {
           if (call.toolName === "createGadget") {
             taken.add(call.input.bindingName);
@@ -7644,6 +7678,7 @@ class OverseerImpl implements AgentHooks {
         }
       } else if (msg.type === "connectionRequest") {
         if (msg.bindingName !== undefined) {
+          requestedNames.add(msg.bindingName);
           if (msg.state !== "denied") taken.add(msg.bindingName);
           if (msg.gatekeeperId !== undefined && !nameByTarget.has(msg.gatekeeperId)) {
             nameByTarget.set(msg.gatekeeperId, msg.bindingName);
@@ -10630,6 +10665,10 @@ type BindingLoopbackTarget = {
   // of coming back to life against a later execution's turn.
   executionId: string;
 } | {
+  // A spreadsheet attached to a chat (see fork/workbook-session.ts).
+  type: "workbook";
+  id: string;
+} | {
   // The `env.GIT` binding (see git-binding.ts).
   type: "git";
 };
@@ -11791,7 +11830,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let chatId = Number(requestId.slice(0, colonIdx));
     if (!Number.isFinite(chatId)) throw new Error(`Malformed connection request id: ${requestId}`);
 
-    for (let msg of this.impl.storage.chats.list({prefix: chatKeyPrefix(chatId)})) {
+    for (let msg of Array.from(this.impl.storage.chats.list({prefix: chatKeyPrefix(chatId)}))) {
       if (msg.type === "connectionRequest" && msg.requestId === requestId) {
         return msg as AiChatMessage & {type: "connectionRequest"};
       }
@@ -11997,6 +12036,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     attachment: ChatAttachmentUpload,
     modelId: string | null,
   ): Promise<ChatAttachmentHandle> {
+    // Spreadsheets are parsed, not stored as sent (fork/workbook-upload.ts).
+    if (isSpreadsheetUpload(attachment)) return stageWorkbookUpload(this.impl, attachment);
     let provider: AiModelConfig["provider"] | undefined;
     if (modelId !== null) {
       provider = (await retryOnDoReset(
@@ -12039,6 +12080,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let content = this.impl.storage.chatAttachmentContent.get(id);
     if (content?.state.type === "staged") {
       this.impl.storage.chatAttachmentContent.delete(id);
+      dropWorkbook(this.impl.storage, id);
     }
   }
 
@@ -12307,12 +12349,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Delete the chat's messages and the attachment content referenced by them. Attachment metadata
     // is canonical in each message's ChatAttachmentRef, so no separate attachment index is needed.
     this.impl.ctx.storage.transactionSync(() => {
-      for (let msg of this.impl.storage.chats.list({prefix: chatKeyPrefix(chatId)})) {
+      // Buffered: dropWorkbook() lists too, and typed-storage supports one active list().
+      for (let msg of Array.from(this.impl.storage.chats.list({prefix: chatKeyPrefix(chatId)}))) {
         if (msg.type === "message") {
           for (let attachment of msg.attachments ?? []) {
             let content = this.impl.storage.chatAttachmentContent.get(attachment.id);
             if (content?.state.type === "committed" && content.state.chatId === chatId) {
               this.impl.storage.chatAttachmentContent.delete(attachment.id);
+              dropWorkbook(this.impl.storage, attachment.id);
             }
           }
         }

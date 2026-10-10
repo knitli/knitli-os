@@ -1,0 +1,5 @@
+// Type-checks the email gatekeeper tests separately from the production source check.
+{
+  "extends": "./tsconfig.json",
+  "include": ["src", "__tests__"]
+}

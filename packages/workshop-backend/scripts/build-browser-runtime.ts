@@ -38,6 +38,8 @@ const sanitizerResult = await build({
 writeIfChanged(runtimeOutputFile, runtimeResult.outputFiles[0].contents);
 writeIfChanged(sanitizerOutputFile, sanitizerResult.outputFiles[0].contents);
 writeIfChanged(pageOutputFile, pageResult.outputFiles[0].contents);
+// The spreadsheet parser worker (fork-owned; see scripts/fork/build-workbook-runtime.ts).
+await import("./fork/build-workbook-runtime.ts");
 
 function writeIfChanged(outputFile: string, bytes: Uint8Array) {
   const contents = new TextDecoder().decode(bytes);

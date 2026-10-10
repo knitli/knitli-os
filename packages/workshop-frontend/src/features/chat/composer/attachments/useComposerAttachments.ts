@@ -7,8 +7,13 @@ import {
   MAX_CHAT_ATTACHMENT_TOTAL_BYTES,
   prepareChatAttachment,
 } from "./prepareChatAttachment";
+import { isSpreadsheetMimeType } from "./spreadsheetTypes";
 
 export const MAX_COMPOSER_ATTACHMENTS = 5;
+
+// The server counts what it stores toward the message total, and a spreadsheet stores only a
+// small summary of itself, so its raw size does not count.
+const storedBytes = (mimeType: string, size: number) => isSpreadsheetMimeType(mimeType) ? 0 : size;
 
 export type ComposerAttachment = {
   id: string;
@@ -135,10 +140,10 @@ export const useComposerAttachments = ({
         continue;
       }
       const totalBytes = attachmentsRef.current.reduce(
-        (sum, attachment) => sum + attachment.blob.size,
+        (sum, attachment) => sum + storedBytes(attachment.mimeType, attachment.blob.size),
         0,
       );
-      if (totalBytes + blob.size > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
+      if (totalBytes + storedBytes(mimeType, blob.size) > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
         onErrorRef.current(
           `Attached files must total ${formatAttachmentSize(MAX_CHAT_ATTACHMENT_TOTAL_BYTES)} or less`,
         );

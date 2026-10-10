@@ -168,15 +168,22 @@ class OutlookMessageCursorImpl extends RpcTarget implements Cursor<OutlookMessag
   #pages = 0;
   #tail: Promise<void> = Promise.resolve();
   #describeScope: string;
+  #folderName: string | undefined;
 
+  /**
+   * `describeScope` is literal prose written here. A folder's name is text anyone who can rename it
+   * controls, so it is passed apart as `folderName` and shown as a fenced field, never spliced in.
+   */
   constructor(
       ctx: OutlookMailSessionContext,
       describeScope: string,
-      firstPage: () => Promise<{ items: OutlookMessageInfo[]; nextLink?: string }>) {
+      firstPage: () => Promise<{ items: OutlookMessageInfo[]; nextLink?: string }>,
+      folderName?: string) {
     super();
     this.#ctx = ctx;
     this.#firstPage = firstPage;
     this.#describeScope = describeScope;
+    this.#folderName = folderName;
   }
 
   next(): Promise<OutlookMessageEntry[] | null> {
@@ -250,6 +257,8 @@ class OutlookMessageCursorImpl extends RpcTarget implements Cursor<OutlookMessag
       title: `Read ${entries.length} Outlook messages`,
       description:
           `Fetch the next page of messages from ${this.#describeScope}.\n\n` +
+          (this.#folderName === undefined
+              ? "" : `${formatApprovalField("Folder", this.#folderName)}\n\n`) +
           formatApprovalField("Subjects", entries.map(entry => entry.info.subject).join("\n")),
     });
 
@@ -292,15 +301,16 @@ class OutlookFolderStub extends RpcTarget implements OutlookFolder {
 
   async listMessages(): Promise<Cursor<OutlookMessageEntry>> {
     let info = this.#cachedInfo;
-    let scope = info ? `the "${info.name}" folder` : "the selected mail folder";
+    let scope = info ? "the folder named below" : "the selected mail folder";
 
     await authorizeCursorOpen(this.#ctx.approvalQueue, {
       title: "List Outlook messages in a folder",
-      description: `Create a cursor over the most recent messages in ${scope}.`,
+      description: `Create a cursor over the most recent messages in ${scope}.` +
+          (info ? `\n\n${formatApprovalField("Folder", info.name)}` : ""),
     });
 
     return new OutlookMessageCursorImpl(this.#ctx, scope,
-        () => this.#ctx.api.listMessages({ folderId: this.#folderId }));
+        () => this.#ctx.api.listMessages({ folderId: this.#folderId }), info?.name);
   }
 }
 

@@ -1994,8 +1994,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
-    await this.#assertResourceEnabled(account.vendorId, resource);
-    await this.#enforceGatekeeperResourcePolicy(account.vendorId, resource, account.autoProvisioned === true);
+    // Fork: thread the account's ambient flag through the upstream assert. Under the fork's
+    // opt-in resource policy an unlisted vendor reads as disabled, so without this every
+    // ambient-vendor mint throws, while upstream's opt-out check passes it.
+    let ambient = account.autoProvisioned === true;
+    await this.#assertResourceEnabled(account.vendorId, resource, ambient);
+    await this.#enforceGatekeeperResourcePolicy(account.vendorId, resource, ambient);
     return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
   }
 
@@ -2015,7 +2019,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error(`"${resource.title}" resources can't be created. ` +
           "listConnectableResources marks the types that can.");
     }
-    await this.#assertResourceEnabled(vendorId, resource);
+    // Fork: a creation names no account, so derive ambience from the vendor, as
+    // listGatekeeperVendors does. Ambient vendors have no resource toggles; without this the
+    // fork's opt-in check below rejects every ambient-vendor creation.
+    let ambient = (await vendor.describe()).autoProvisionsAccount === true;
+    await this.#assertResourceEnabled(vendorId, resource, ambient);
     return {class: cls, typeUrlPattern: resource.urlPattern, action};
   }
 
@@ -2025,7 +2033,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // gatekeeper an admin set to "disabled" is blocked here too. Blocking here prevents minting a
   // capability to a disabled resource even if the request bypasses the (separately filtered)
   // picker/agent listings.
-  async #assertResourceEnabled(vendorId: string, resource: SupportedResource) {
+  async #assertResourceEnabled(vendorId: string, resource: SupportedResource, ambient = false) {
     let config = await readAdminConfig(this.env);
     let normalized = vendorId.toLowerCase();
     if (config.disabledGatekeepers.includes(normalized) ||
@@ -2033,7 +2041,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error(
           `The "${vendorId}" gatekeeper is disabled on this deployment by an administrator.`);
     }
-    if (isResourceDisabled(config, normalized, resource.urlPattern)) {
+    // Fork: `ambient` bypasses the resource check (ambient vendors have no resource toggles),
+    // but never the gatekeeper/mode block above.
+    if (isResourceDisabled(config, normalized, resource.urlPattern, ambient)) {
       throw new Error(
           `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
     }

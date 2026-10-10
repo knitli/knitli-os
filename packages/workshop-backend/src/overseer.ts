@@ -9191,6 +9191,11 @@ class OverseerImpl implements AgentHooks {
   // admission -- one collaborator's pending re-open never gates another user's reads.
   async assertGatekeeperObserverReadiness(gatekeeperId: number): Promise<void> {
     this.assertNoRevocationPending();
+    // Fork: a removed connection reports upstream's message. This gate runs before the restore
+    // step that throws it, so without this the readiness check's "No such gatekeeper." wins.
+    if (!this.storage.gatekeepers.get(gatekeeperId)) {
+      throw new Error("This connection has been removed from the workspace.");
+    }
     let record = this.#readyGatekeeperRecord(gatekeeperId);
     if (!observerVendorId(record)) return;
   }

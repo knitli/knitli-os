@@ -139,6 +139,7 @@ function fakeHooks(): AgentHooks {
     commitAgentStep: async () => false,
     getChatModelData: () => undefined,
     emitChatStreamEvent: () => {},
+    getPromptCacheSalt: () => "",
   } as unknown as AgentHooks;
 }
 

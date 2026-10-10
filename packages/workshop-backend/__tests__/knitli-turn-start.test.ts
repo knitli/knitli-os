@@ -63,6 +63,7 @@ async function withTurn(
       whoami: async () => USER,
       getChatContext: async () => ({ profile: USER }),
       setGadgetLastActive: async () => {},
+      publishNotification: async () => {},
     };
     impl.users = { idFromString: (id: string) => id, get: () => userStub };
     impl.ensureAmbientCapsules = async () => {};

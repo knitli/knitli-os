@@ -108,21 +108,24 @@ it("enforces deployment gatekeeper policy through the admin API", async () => {
     await expect(workspace.newGatekeeper(
         connectedAccount.id, "https://gadgets-test.example/things/after")).rejects.toThrow(
         'The "Test Thing" resource is disabled on this deployment by an administrator.');
+    // Fork: a creation names no account, so ambience comes from the vendor, and ambient
+    // vendors have no resource toggles (mode governs them). Upstream expects the disabled
+    // pattern to refuse the creation; the fork instead pins that it still queues — the
+    // toggle above bites only regular accounts, as asserted for newGatekeeper.
     const model = models.script([
       { toolCall: { id: "create-thing", name: "createExternalResource", arguments: {
         vendorId: TEST_VENDOR_ID, resourceUrlPattern: "https://gadgets-test.example/things/*",
-        title: "Blocked", bindingName: "BLOCKED",
+        title: "Queued", bindingName: "QUEUED",
       } } },
-      { text: "The creation was refused." },
+      { text: "The creation is queued." },
     ]);
     await using creator = await openAgentSession(harness.url, {
       modelId: SCRIPTED_MODEL_ID, userModel: model.userModel, usernamePrefix: "creator",
     });
     await creator.runTurn("Create a test thing.");
-    expect(model.requests[1]).toMatchObject({ messages: expect.arrayContaining([
-      expect.objectContaining({ role: "tool", tool_call_id: "create-thing", content:
-          expect.stringContaining('The "Test Thing" resource is disabled on this deployment') }),
-    ]) });
+    const { entries } = await creator.listActions({ filter: "pending" });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ type: "action", creation: true });
   } finally {
     try {
       await admin.setGatekeeperMode(TEST_VENDOR_ID, "optional");

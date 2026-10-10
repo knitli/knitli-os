@@ -1827,7 +1827,7 @@ describe("thin-pack gatekeeper isolation", () => {
       expect(await t.cache.readForGatekeeper(G1, oid)).toBeNull();
       let before = t.storage.gitObjectMetadata.get(oid);
       await expect(t.cache.consumePackFromGatekeeper(G1,
-        await streamOf([await copyOnlyThinPack(oid, payload.length)])))
+        byteStream(await copyOnlyThinPack(oid, payload.length))))
         .rejects.toThrow(/delta base .* unavailable/);
       expect(await t.cache.readForGatekeeper(G1, oid)).toBeNull();
       expect(t.storage.gitObjectMetadata.get(oid)).toStrictEqual(before);
@@ -1844,7 +1844,7 @@ describe("thin-pack gatekeeper isolation", () => {
     }
     expect(await t.cache.readForGatekeeper(G1, oid)).toStrictEqual({ type: "blob", payload });
     await expect(t.cache.consumePackFromGatekeeper(G1,
-      await streamOf([await copyOnlyThinPack(oid, payload.length)]))).resolves.toStrictEqual([oid]);
+      byteStream(await copyOnlyThinPack(oid, payload.length)))).resolves.toStrictEqual([oid]);
     expect(await t.cache.readForGatekeeper(G1, oid)).toStrictEqual({ type: "blob", payload });
   });
 });

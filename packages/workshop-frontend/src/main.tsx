@@ -17,6 +17,7 @@ import {
   installDropSocketHandler,
   isConnectionPaused,
   noteSocketClosed,
+  installResumeOnModalInteraction,
   noteSocketOpened,
   waitWhilePaused,
 } from './connectionPause'
@@ -200,6 +201,7 @@ installWorkshopErrorReporting()
 let currentStub = startConnection();
 // Disposal fires onRpcBroken -> handleBroken, the path probeOnWake uses; during an outage the
 // placeholder is already published and the parked loop is all that is needed.
+installResumeOnModalInteraction();
 installDropSocketHandler(() => {
   if (!isConnectionLost) disposeQuietly(currentStub);
   // Mid-outage the live socket is the reconnect probe, not the placeholder.

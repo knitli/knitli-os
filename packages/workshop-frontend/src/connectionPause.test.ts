@@ -1,7 +1,9 @@
+// @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SESSION_IDLE_CLOSE_CODE } from '@gadgets/workshop-shared/api'
 import {
   installDropSocketHandler,
+  installResumeOnModalInteraction,
   isConnectionPaused,
   noteSocketClosed,
   noteSocketOpened,
@@ -44,5 +46,27 @@ describe('connectionPause', () => {
 
     noteSocketClosed(live, SESSION_IDLE_CLOSE_CODE)
     expect(isConnectionPaused()).toBe(true)
+  })
+
+  it('resumes on a click inside an open modal, and only there', () => {
+    installDropSocketHandler(() => {})
+    const uninstall = installResumeOnModalInteraction()
+    const modal = document.createElement('div')
+    modal.setAttribute('role', 'dialog')
+    const inside = document.createElement('button')
+    modal.append(inside)
+    const outside = document.createElement('button')
+    document.body.append(modal, outside)
+    try {
+      pauseConnection()
+      outside.click()
+      expect(isConnectionPaused()).toBe(true)
+      inside.click()
+      expect(isConnectionPaused()).toBe(false)
+    } finally {
+      uninstall()
+      modal.remove()
+      outside.remove()
+    }
   })
 })

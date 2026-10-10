@@ -90,3 +90,12 @@ after enabling, using the kill switch for the baseline.
   lease anyway). The bootstrap ignores synthetic (untrusted) input events, which stops accidental
   keep-alives, not a deliberately misbehaving gadget. The bound targets abandoned sessions, not a
   hostile gadget the user has open.
+- A modal that locks itself while its RPC runs would also cover the Paused chip, so a click anywhere
+  inside an open modal (`role="dialog"`, `alertdialog` or `aria-modal`) resumes the connection.
+  That is the one choke point for every dialog-then-RPC flow; the per-site `resumeConnection()`
+  calls added earlier are redundant with it but harmless. Remaining non-modal actions issued while
+  paused (a button in a page, a gadget call) still queue until a deliberate wake, with the chip
+  visible; they are not individually listed. Wiring resume into the stub itself is deliberately not
+  done: background calls (heartbeat, subscriptions, the re-issued `openGadget`) would wake it, and
+  the pause exists to prevent exactly that. A click in a modal also wakes for Cancel, which is the
+  accepted cost.

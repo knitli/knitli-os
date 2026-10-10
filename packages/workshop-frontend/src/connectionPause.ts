@@ -65,6 +65,25 @@ export function resumeConnection(): void {
   notifyListeners()
 }
 
+const MODAL_SELECTOR = '[role="dialog"], [role="alertdialog"], [aria-modal="true"]'
+
+/**
+ * Resumes when the user clicks inside an open modal. A modal that issues an RPC and locks itself
+ * while it runs ("Deleting...", "Updating...") also covers the Paused chip, so a pause that landed
+ * under it would strand the user on a queued call. Interacting with a modal is a deliberate
+ * request, and this one choke point covers every such dialog without each call site resuming.
+ * Idempotent; returns the uninstall function.
+ */
+export function installResumeOnModalInteraction(): () => void {
+  const onClick = (event: Event) => {
+    if (paused && event.target instanceof Element && event.target.closest(MODAL_SELECTOR)) {
+      resumeConnection()
+    }
+  }
+  document.addEventListener('click', onClick, { capture: true })
+  return () => document.removeEventListener('click', onClick, { capture: true })
+}
+
 /** Hears every pause and resume, so UI can mirror the flag; returns the unsubscribe. */
 export function subscribeConnectionPause(listener: () => void): () => void {
   listeners.add(listener)

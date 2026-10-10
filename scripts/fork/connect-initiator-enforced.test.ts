@@ -1,7 +1,7 @@
 // Each gatekeeper that hand-rolls its own account Durable Object AND is used by this installation
 // must check the connect link's initiator before it advances the flow (fork; knitli-site plan 6a).
-// Four of the twelve are in that set; the other eight are named in OUT_OF_SCOPE below, and the
-// last test here fails if a thirteenth appears in neither list.
+// Four of the thirteen are in that set; the other nine are named in OUT_OF_SCOPE below, and the
+// last test here fails if a fourteenth appears in neither list.
 //
 // This is a STRUCTURAL guard, not a behavioural one: it reads source, so it proves the call is
 // written, not that it works. github, linear and cloudflare each have a workerd suite that proves
@@ -64,6 +64,7 @@ for (const { file, guarded } of HAND_ROLLED) {
  */
 const OUT_OF_SCOPE: Record<string, string> = {
   "packages/gatekeeper-confluence/src/confluence.ts": "not used by this installation (owner decision, 2026-09-12)",
+  "packages/gatekeeper-gitlab/src/gitlab.ts": "not used by this installation (no GATEKEEPER_GITLAB binding in the deployment config; same basis as the 2026-09-12 owner decision)",
   "packages/gatekeeper-google/src/google.ts": "not used by this installation (owner decision, 2026-09-12)",
   "packages/gatekeeper-homeassistant/src/homeassistant.ts": "not used by this installation (owner decision, 2026-09-12)",
   "packages/gatekeeper-notion/src/notion.ts": "not used by this installation (owner decision, 2026-09-12)",

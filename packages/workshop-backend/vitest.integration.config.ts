@@ -234,6 +234,11 @@ export default defineConfig({
       if (error.message?.includes("abortAllDurableObjects")) return false;
       // Same, for the test that aborts only the user DO (state.abort with this reason).
       if (error.message?.includes("user-DO reset injected by test")) return false;
+      // A workspace whose client-activity lease expires aborts itself and closes the session; both
+      // the Durable Object's abort reason and the session error carry this text, and the client
+      // capability refusal between the decision and the abort is reported independently of its call.
+      if (error.message?.includes("idle session lease expired")) return false;
+      if (error.name === "WorkspaceSessionExpiredError") return false;
     },
   },
 });

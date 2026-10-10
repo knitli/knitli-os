@@ -44,7 +44,8 @@ Rules for every port:
 | Microsoft gatekeeper | Draft PR #66, waiting on the live-tenant checklist |
 | Web Push | Kernel PR #67, UI PR #68 (stacked on #67) |
 | Email `send` | PR #69 |
-| Spreadsheet attachments, idle lease | Not started |
+| Spreadsheet attachments | Not started |
+| Idle lease | Backend stage in progress (branch port/idle-lease); frontend stage pending |
 
 ## Ports
 

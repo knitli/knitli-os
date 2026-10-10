@@ -971,3 +971,30 @@ ids are facet-local, not Activity ids.
   `ai-models.ts` here already maps reasoning levels per model.
 - **Test:** `__tests__/knitli-turn-guards.test.ts` (Tier 1).
 - **At sync:** Tier 2. Upstream has no step cap; if it adds one, fold it into `TurnBudget`.
+
+### Workspace client-activity lease (ported from twinprime19/cloudflare-os)
+
+- **What:** the Overseer ends its own incarnation (`ctx.abort`, after `storage.sync()`) once 10
+  minutes pass with no browser call, no finished agent turn and no outstanding agent work. The
+  front Worker then closes the socket with `SESSION_IDLE_CLOSE_CODE` (4001) so the browser can
+  park instead of redialling. Behaviour, races and billing: `docs/workspace-idle-lease.md`. A KV
+  key `.sessionLease` = `off` in `BLUEPRINTS` disables enforcement without a deploy.
+- **Where:** state, decision, reap and the call wrapper are in the fork-owned
+  `src/fork/idle-lease.ts` (Tier 1). Upstream seams in `overseer.ts`: the `idleLease` /
+  `clientActivity` fields; `#hasAgentWork()` extracted from `#updateAlarm` (plus two lines adding
+  the lease deadline); `noteWorkEnded()` in `#unregisterRunningAgent`; `alarm()` also calls
+  `reapIdleSession()`; `open()` takes `notifyClosed(reason?: "idle")`, arms the lease and
+  registers a notifier with a `using`; both client interfaces register/release a notifier;
+  browser mints wrap their capability in `ownedByClient(...)`; `getGadgetFacet` takes an optional
+  `activity` callback; five `renewOnClientCalls(Class)` lines. `server.ts`: per-open counting,
+  `IdleSessionError`, and the idle close code in the abort listener. `blueprints-kv.ts`: the
+  reserved key. `workshop-shared/src/api.ts`: `SESSION_IDLE_CLOSE_CODE`.
+  `vitest.integration.config.ts` and `__tests__/fixtures.ts` gain the expected-abort filter and
+  two fake impl members.
+- **Source:** fork commits cec0f237, 7256a6a6 (backend half), 571da329, 260801e6, 053c0622;
+  Apache-2.0. Not ported: the in-flight call accounting (removed upstream of the final design),
+  the `workspace.session.*` / `session.closed` diagnostic logging and its observability fields.
+- **Tests:** `__tests__/knitli-idle-lease.test.ts`, `__integration__/knitli-session-lease.test.ts`
+  (Tier 1).
+- **At sync:** Tier 2. Re-check that new browser-facing capability mints are wrapped in
+  `ownedByClient`, or their calls will not renew the lease.

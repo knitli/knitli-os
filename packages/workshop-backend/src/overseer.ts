@@ -1,6 +1,7 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { capExecuteCodeOutput } from "./fork/turn-guards";
 import { isReasoningLevel } from "./fork/reasoning-levels";
+import { IdleLease, clientActivityOf, ownedByClient, reapIdleSession, renewOnClientCalls } from "./fork/idle-lease";
 import { ActionApplyContextImpl, attestWorkspaceAudience, beginAdmission, forgetBuildAdmission,
   forgetContractedAdmissions } from "./fork/workspace-audience";
 import type { WorkspaceAudience } from "@gadgets/workshop-shared/gatekeeper";
@@ -754,6 +755,11 @@ class OverseerImpl implements AgentHooks {
   // True while alarm() runs (see runAlarmTasks); #updateAlarm defers to its end.
   #inAlarmHandler = false;
 
+  // Fork: the client-activity lease (src/fork/idle-lease.ts). `clientActivity` is what a
+  // browser-owned capability calls on every client call.
+  readonly idleLease = new IdleLease();
+  readonly clientActivity = () => { if (this.idleLease.touch()) this.#updateAlarm(); };
+
   // Drains of pending agent calls currently in flight, by chat (see drainPendingAgentCalls).
   #pendingCallDrains = new Map<number, Promise<void>>();
 
@@ -932,6 +938,7 @@ class OverseerImpl implements AgentHooks {
   #unregisterRunningAgent(chatId: number) {
     this.#runningAgents.delete(chatId);
     this.storage.activeAgents.delete(chatId);
+    this.idleLease.noteWorkEnded();
     this.#updateAlarm();
     if (this.#runningAgents.size === 0) {
       // One -> zero running agents: wake any `alarm()` waiter.
@@ -940,6 +947,28 @@ class OverseerImpl implements AgentHooks {
       }
       this.#allAgentsIdleWaiters = [];
     }
+  }
+
+  // Whether agent work is outstanding: a running turn, or a recorded call to a callable agent not
+  // yet appended to its chat (see `pendingAgentCalls`).
+  #hasAgentWork(): boolean {
+    return this.#runningAgents.size > 0 ||
+        Array.from(this.storage.pendingAgentCalls.list({ limit: 1 })).length > 0;
+  }
+
+  // Fork: end this incarnation if the client-activity lease has expired.
+  reapIdleSession(): Promise<void> {
+    return reapIdleSession({
+      lease: this.idleLease,
+      kv: this.env.BLUEPRINTS,
+      hasAgentWork: () => this.#hasAgentWork(),
+      rearm: () => this.#updateAlarm(),
+      flushAndAbort: async reason => {
+        // ctx.abort() does not respect the output gate, so flush explicitly.
+        await this.ctx.storage.sync();
+        this.ctx.abort(reason, { retryAlarm: false });
+      },
+    });
   }
 
   // This DO has one alarm, and this is its only writer: the alarm is the earliest of the times at
@@ -955,8 +984,7 @@ class OverseerImpl implements AgentHooks {
     let times: number[] = [];
 
     // Outstanding agent work: see #agentKeepAliveTime for why it is set once and held.
-    let hasAgentWork = this.#runningAgents.size > 0 ||
-        Array.from(this.storage.pendingAgentCalls.list({ limit: 1 })).length > 0;
+    let hasAgentWork = this.#hasAgentWork();
     if (!hasAgentWork) {
       this.#agentKeepAliveTime = undefined;
     } else {
@@ -976,6 +1004,9 @@ class OverseerImpl implements AgentHooks {
     if (nextDeliveredRecord?.status === "delivered") {
       times.push(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
     }
+
+    let leaseTime = this.idleLease.alarmTime();
+    if (leaseTime !== undefined) times.push(leaseTime);
 
     if (times.length > 0) {
       this.ctx.storage.setAlarm(Math.min(...times));
@@ -4531,9 +4562,14 @@ class OverseerImpl implements AgentHooks {
   // mints; omitted for the owner's and for internal callers (binding loopbacks already live
   // inside a counted session).
   //
+  // Fork: `activity` renews the client-activity lease on every call through the returned stub; the
+  // browser-facing connectToGadget mints pass it, since a user working inside a gadget UI may
+  // touch nothing else for a long time.
+  //
   // Since facet stubs currently can't be sent over RPC, the stub is wrapped in a Proxy to make it
   // look like an RpcTarget instead.
-  async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind)
+  async getGadgetFacet(gadgetId: WorkpieceId, chatId?: number, joinAs?: SessionKind,
+                       activity?: () => void)
       : Promise<RpcStub<any>> {
     let facet = await this.getGadgetFacetFetcher(gadgetId, chatId);
     let leaveSession = joinAs ? this.joinSession(joinAs) : undefined;
@@ -4571,6 +4607,7 @@ class OverseerImpl implements AgentHooks {
         //   possibly a runtime bug which needs investigation.
         // TODO: Fix exception reporting it tail workers so we can remove this hack.
         return (...args: any[]) => {
+          activity?.();
           let result: Promise<any> = Reflect.apply(method, target, args);
           return result.catch((err: any) => {
             let msg = err;
@@ -9906,6 +9943,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async alarm() {
     await this.impl.runAlarmTasks();
+    await this.impl.reapIdleSession();
   }
 
   // Initialize a brand-new workspace's storage. (Before git-backed code storage this also wrote
@@ -9931,12 +9969,19 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
   /**
    * `notifyClosed` should be invoked when the return `Overseer` stub is disposed, which is used
-   * by AuthenticatedApiImpl.#openGadgetInternal() to detect Durable Object disconnects.
+   * by AuthenticatedApiImpl.#openGadgetInternal() to detect Durable Object disconnects. It is also
+   * invoked with `"idle"` when the client-activity lease expires (see src/fork/idle-lease.ts).
    */
   async open(userId: string, profileId: string,
-             notifyClosed: NativeRpcStub<() => void>,
+             notifyClosed: NativeRpcStub<(reason?: "idle") => void>,
              shareKey?: string,
              configureObservers?: RpcStub<ObserverConfigCallback>): Promise<Overseer> {
+    // Fork: arm/renew the client-activity lease. Registered ahead of every await so an open parked
+    // on a step the client controls (observer-config dialog, share-key redemption) is told when
+    // the lease expires. `using` releases it on return; the returned interface registers its own.
+    this.impl.clientActivity();
+    using _idleWatch = this.impl.idleLease.addNotifier(async () => { await notifyClosed("idle"); });
+
     let firstOpen = !this.impl.ownerId;
     if (firstOpen) {
       // This Overseer hasn't been initialized yet.
@@ -10093,13 +10138,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     if (role === "use") {
       // "use" collaborators get a restricted capability exposing only the gadget UI.
-      return new UseOverseerInterface(
-          this.impl, profileId, userId, notifyClosed.dup());
+      return ownedByClient(new UseOverseerInterface(
+          this.impl, profileId, userId, notifyClosed.dup()), this.impl.clientActivity);
     }
 
-    return new OverseerClientInterface(
+    return ownedByClient(new OverseerClientInterface(
         this.impl, profileId, userId, isOwner, notifyClosed.dup(),
-        ensureCapsules);
+        ensureCapsules), this.impl.clientActivity);
   }
 
   #getExternalChat(externalChatKey: string): ExternalChatRecord | undefined {
@@ -10846,7 +10891,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
               private clientProfileId: string,
               private clientUserId: string,
               private isOwner: boolean,
-              private notifyClosed: NativeRpcStub<() => void>,
+              private notifyClosed: NativeRpcStub<(reason?: "idle") => void>,
               // Ambient capsule reconciliation started during open(); listSlashCommands() waits for
               // this so ambient providers are attached when possible.
                private slashCommandsReady: Promise<void>) {
@@ -10855,6 +10900,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.#leavePresence = joinSessionPresence(
         this.impl, this.clientProfileId, "build", () => this.#getClientProfile());
     this.#leaveOutputsFanout = this.impl.joinOutputsFanout(this.clientUserId);
+    this.#idleWatch = this.impl.idleLease.addNotifier(async () => { await this.notifyClosed("idle"); });
   }
 
   // We create a new stub for every call so that we don't have to worry about detecting when a
@@ -10873,11 +10919,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   #leaveSession: () => void;
   #leavePresence: () => void;
   #leaveOutputsFanout: () => void;
+  #idleWatch: Disposable;
 
   [Symbol.dispose]() {
     this.#leaveSession();
     this.#leavePresence();
     this.#leaveOutputsFanout();
+    this.#idleWatch[Symbol.dispose]();
     this.notifyClosed();
     this.notifyClosed[Symbol.dispose]();
   }
@@ -11123,15 +11171,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     }
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
-    return new GadgetClientImpl(this.impl, record.id, this.clientUserId,
-        this.#mintedCapabilityKind());
+    return ownedByClient(new GadgetClientImpl(this.impl, record.id, this.clientUserId,
+        this.#mintedCapabilityKind()), this.impl.clientActivity);
   }
 
   async getGadget(id: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     this.impl.getGadgetRecord(id);  // validate it exists
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
-    return new GadgetClientImpl(this.impl, id, this.clientUserId, this.#mintedCapabilityKind());
+    return ownedByClient(new GadgetClientImpl(this.impl, id, this.clientUserId,
+        this.#mintedCapabilityKind()), this.impl.clientActivity);
   }
 
   async deleteSelf(): Promise<void> {
@@ -11221,7 +11270,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // A connection published moments before a scope-widening restart is not usable by the
     // sessions that restart is about to sever (see #gatekeepersPendingRestart).
     this.impl.assertGatekeeperUsable(id);
-    return new GatekeeperClientImpl(this.impl, id, this.clientUserId, this.#mintedCapabilityKind());
+    return ownedByClient(new GatekeeperClientImpl(this.impl, id, this.clientUserId,
+        this.#mintedCapabilityKind()), this.impl.clientActivity);
   }
 
   async ambientVendorStatus(vendorId: string): Promise<AmbientVendorStatus> {
@@ -12636,6 +12686,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 }
 
+// Fork: browser calls renew the client-activity lease (src/fork/idle-lease.ts).
+renewOnClientCalls(OverseerClientInterface);
+
 // Restricted capability handed to "use"-role collaborators. It implements the full `Overseer`
 // interface but permits only the handful of methods needed to render and interact with the
 // gadgets' deployed UIs: getMetadata() (restricted to id/title/owner), a restricted
@@ -12657,13 +12710,14 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,
               private clientUserId: string,
-              private notifyClosed: NativeRpcStub<() => void>) {
+              private notifyClosed: NativeRpcStub<(reason?: "idle") => void>) {
     super();
     this.#leaveSession = this.impl.joinSession("use");
     this.#leavePresence = joinSessionPresence(
         this.impl, this.clientProfileId, "use",
         () => retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger));
     this.#leaveOutputsFanout = this.impl.joinOutputsFanout(this.clientUserId);
+    this.#idleWatch = this.impl.idleLease.addNotifier(async () => { await this.notifyClosed("idle"); });
   }
 
   // Fresh stub per call; see OverseerClientInterface.#clientUser.
@@ -12681,11 +12735,13 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   #leaveSession: () => void;
   #leavePresence: () => void;
   #leaveOutputsFanout: () => void;
+  #idleWatch: Disposable;
 
   [Symbol.dispose]() {
     this.#leaveSession();
     this.#leavePresence();
     this.#leaveOutputsFanout();
+    this.#idleWatch[Symbol.dispose]();
     this.notifyClosed();
     this.notifyClosed[Symbol.dispose]();
   }
@@ -12783,7 +12839,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     }
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
-    return new UseGadgetClientInterface(this.impl, id, this.clientUserId);
+    return ownedByClient(new UseGadgetClientInterface(this.impl, id, this.clientUserId),
+        this.impl.clientActivity);
   }
 
   // --- Denied methods (build-only) ---
@@ -12939,6 +12996,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async previewRevokeShareLink(_linkId: string): Promise<AffectedCollaborator[]> { this.#deny(); }
 }
 
+renewOnClientCalls(UseOverseerInterface);
+
 // Capability representing one gadget workpiece, handed to "build"-role sessions via
 // Overseer.createGadget()/getGadget().
 //
@@ -12998,7 +13057,7 @@ export class GadgetClientImpl extends RpcTarget implements GadgetClient {
     });
     // The facet stub counts exactly as this capability does (joinedAs): it can outlive this
     // object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, chatId, this.joinedAs);
+    return this.impl.getGadgetFacet(this.id, chatId, this.joinedAs, clientActivityOf(this));
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
@@ -13031,7 +13090,9 @@ export class GadgetClientImpl extends RpcTarget implements GadgetClient {
     let edge = record.bindings[name];
     if (!edge || edge.pending || !this.impl.storage.gatekeepers.get(edge.target)) return null;
     // The child capability counts exactly as this one does: it can outlive this object.
-    return new GatekeeperClientImpl(this.impl, edge.target, this.clientUserId, this.joinedAs);
+    return ownedByClient(
+        new GatekeeperClientImpl(this.impl, edge.target, this.clientUserId, this.joinedAs),
+        clientActivityOf(this));
   }
 
   async bind(name: string, target: WorkpieceId, chatId?: number): Promise<void> {
@@ -13216,6 +13277,8 @@ export class GadgetClientImpl extends RpcTarget implements GadgetClient {
   }
 }
 
+renewOnClientCalls(GadgetClientImpl);
+
 // Restricted GadgetClient handed to "use"-role collaborators: it permits only what is needed to
 // render and interact with the gadget's deployed UI, mainline-only. Like UseOverseerInterface,
 // `implements GadgetClient` enforces default-deny at compile time: any new GadgetClient method
@@ -13276,7 +13339,7 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     });
     // The facet stub counts as a "use" session for its own lifetime, like this interface: it can
     // outlive this object, and it is the very stub a hook-enable widening's data flows through.
-    return this.impl.getGadgetFacet(this.id, undefined, "use");
+    return this.impl.getGadgetFacet(this.id, undefined, "use", clientActivityOf(this));
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
@@ -13314,6 +13377,8 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
     this.#deny();
   }
 }
+
+renewOnClientCalls(UseGadgetClientInterface);
 
 @validateRpc()
 class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
@@ -13394,6 +13459,8 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
     return record.creationSpec;
   }
 }
+
+renewOnClientCalls(GatekeeperClientImpl);
 
 // ObservationAuthorizer handed to a slash-command provider. Scoped to one Gatekeeper; observations
 // only (no actions or hooks).

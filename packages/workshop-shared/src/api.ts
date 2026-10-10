@@ -196,6 +196,21 @@ export type UserNotification = {
   chatTitle: string;
 };
 
+/**
+ * A browser's Web Push subscription, as `PushSubscription.toJSON()` gives it but flattened (see
+ * `AuthenticatedApi.addWebPushSubscription()`).
+ */
+export type WebPushSubscriptionInfo = {
+  /** The push service URL notifications are delivered to. */
+  endpoint: string;
+
+  /** The browser's P-256 public key (`keys.p256dh`), base64url. */
+  p256dh: string;
+
+  /** The browser's authentication secret (`keys.auth`), base64url. */
+  auth: string;
+};
+
 /** Callback used by `AuthenticatedApi.subscribeToNotifications()`. */
 export interface NotificationSubscriber extends RpcTarget {
   /**
@@ -710,6 +725,22 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   subscribeToNotifications(
       subscriber: RpcStub<NotificationSubscriber>): Promise<RpcStub<{}>>;
+
+  /**
+   * The key browsers subscribe to Web Push against (VAPID, base64url, for `applicationServerKey`),
+   * or null when the deployment has not enabled Web Push.
+   */
+  getWebPushPublicKey(): Promise<string | null>;
+
+  /**
+   * Also send this user's notifications to this browser's Web Push subscription, whenever no
+   * visible tab shows them. Rejects an endpoint that is not a known push service. Adding an
+   * endpoint again replaces its keys.
+   */
+  addWebPushSubscription(subscription: WebPushSubscriptionInfo): Promise<void>;
+
+  /** Stop sending notifications to the Web Push subscription with this endpoint. */
+  removeWebPushSubscription(endpoint: string): Promise<void>;
 
   /**
    * List the user's configured AI models.

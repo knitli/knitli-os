@@ -928,22 +928,19 @@ describe("ScheduleDriver", () => {
     );
   });
 
-  it("reports and rethrows alarm infrastructure failures", async () => {
+  it("reports alarm infrastructure failures and re-arms with backoff instead of rethrowing", async () => {
     const driver = testEnv.SCHEDULE_DRIVER.getByName("alarm-failure");
     await runInDurableObject(driver, (_instance, state) =>
       state.storage.kv.put("metadata", { schemaVersion: 999, revoked: false }),
     );
 
-    const failure = await runInDurableObject(driver, async (instance) => {
-      try {
-        await instance.alarm();
-        return "did not reject";
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
+    // The alarm guard owns retries: it swallows the failure and arms a backoff alarm.
+    const armed = await runInDurableObject(driver, async (instance, state) => {
+      await instance.alarm();
+      return state.storage.getAlarm();
     });
 
-    expect(failure).toContain("Unsupported scheduler driver metadata");
+    expect(armed).toBeGreaterThan(Date.now());
     expect(reportIssue).toHaveBeenCalledWith(
       "scheduler.alarm",
       expect.any(Error),

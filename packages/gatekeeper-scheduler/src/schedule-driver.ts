@@ -1,3 +1,4 @@
+import { guardedAlarmFor } from "@gadgets/observability/fork/alarm-guard";
 import { DurableObject } from "cloudflare:workers";
 import type { RpcStub, RpcTarget } from "cloudflare:workers";
 import { reportIssue } from "@gadgets/observability/error-reporting";
@@ -235,6 +236,10 @@ export class ScheduleDriver extends DurableObject {
   }
 
   async alarm(): Promise<void> {
+    await guardedAlarmFor(this.ctx, this.env, "scheduler", () => this.#alarmBody());
+  }
+
+  async #alarmBody(): Promise<void> {
     await obsContext.with({ accountId: this.ctx.id.toString(), operation: "alarm" }, async () => {
       const startedAt = Date.now();
       try {

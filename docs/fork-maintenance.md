@@ -945,3 +945,27 @@ ids are facet-local, not Activity ids.
   `ai-models.ts` here already maps reasoning levels per model.
 - **Test:** `__tests__/knitli-turn-guards.test.ts` (Tier 1).
 - **At sync:** Tier 2. Upstream has no step cap; if it adds one, fold it into `TurnBudget`.
+
+### Alarm guards (`ALARMS_DISABLED` kill switch, circuit breaker)
+
+- **Where:** `packages/observability/src/fork/alarm-guard.ts` (Tier 1), re-exported to gatekeepers
+  by `packages/gatekeeper-kit/src/fork/alarm-guard.ts` (Tier 1); a one-line seam plus one import in
+  each of the 20 upstream `alarm()` handlers; `docs/alarm-audit.md` lists them.
+- **What:** every `alarm()` starts with `haltIfAlarmsDisabled(this.ctx, this.env, key)`, which
+  deletes the alarm when the Worker var `ALARMS_DISABLED` is `"true"`. The four handlers that
+  re-arm (`OverseerDurableObject`, `ScheduleDriver`, Google `ChatHookDriver` and `GmailHookDriver`)
+  call
+  `guardedAlarmFor(ctx, env, key, run)` instead: at most 120 runs per hour, and a throwing run is
+  replaced by an exponential-backoff alarm instead of being rethrown to the platform. The
+  scheduler's "reports and rethrows alarm infrastructure failures" test now asserts the backoff
+  alarm instead.
+- **Why:** Cloudflare has no spend cap, and a self-re-arming failing alarm is an unbounded bill.
+  Ported from XcityUS/xct-os (Apache-2.0), commits bca8a50221 (guard module), 7967b00e33 and
+  23b2cf894a (handler wiring), 4aa392421e (coverage test).
+- **Test:** `packages/observability/__tests__/knitli-alarm-guard.test.ts` (guard behavior) and
+  `scripts/fork/alarm-guard-coverage.test.ts` (each `async alarm(` method body must call the
+  guard; checked per method, and fails if the guard is removed from any one). Exceptions: `schedule-driver.test.ts` is an upstream test edited for the backoff.
+- **At sync:** Tier 2 for each seam. A new upstream `alarm()` fails the coverage test until it gets
+  the one-line check and a row in `docs/alarm-audit.md`. If upstream adds its own alarm guard, drop
+  ours. The overseer breaker only bounds an undeliverable external-response loop (see the audit);
+  it does not delete the record.

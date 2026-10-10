@@ -363,6 +363,22 @@
     {
       "path": "packages/workshop-frontend/src/hooks/useVoicePreview.ts",
       "reason": "Fork-owned voice preview hook; hooks/ is shared with upstream so this stays file-scoped."
+    },
+    {
+      "path": "packages/gatekeeper-kit/src/fork/alarm-guard.ts",
+      "reason": "Gatekeeper-facing re-export of the fork-owned alarm guard (observability/src/fork/alarm-guard.ts); exact path because gatekeeper-kit has no src/fork tree."
+    },
+    {
+      "path": "packages/observability/__tests__/knitli-alarm-guard.test.ts",
+      "reason": "Unit tests for the fork-owned alarm guard; exact path because this package's vitest include is non-recursive."
+    },
+    {
+      "path": "scripts/fork/alarm-guard-coverage.test.ts",
+      "reason": "Fails the build when a source file defines an alarm() without the ALARMS_DISABLED kill switch."
+    },
+    {
+      "path": "docs/alarm-audit.md",
+      "reason": "Audit of every Durable Object alarm() handler and the rules for new ones; upstream has no such file."
     }
   ],
   "removedUpstreamPaths": {

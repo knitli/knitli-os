@@ -34,6 +34,7 @@
 // user and account the sign-in produced (`link`), outliving the login result, so expiry notices and
 // reconnects for the account reach its user DO.
 
+import { haltIfAlarmsDisabled } from "@gadgets/observability/fork/alarm-guard";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { ConnectHandoff, GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "../observability";
@@ -170,6 +171,7 @@ export class PendingLogin extends DurableObject<Cloudflare.Env> {
   }
 
   async alarm(): Promise<void> {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "pending-login.result-expiry")) return;
     this.ctx.storage.kv.delete(RESULT_KEY);
   }
 }

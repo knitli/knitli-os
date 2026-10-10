@@ -1,3 +1,4 @@
+import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
@@ -536,6 +537,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "homeassistant.connect-timeout")) return;
     if (!this.ctx.storage.kv.get<StoredCredentials>("credentials")) {
       await this.ctx.storage.deleteAll();
     }

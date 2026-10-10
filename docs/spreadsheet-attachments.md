@@ -32,7 +32,8 @@ own line breaks become spaces, and a run of more than 8 adjacent numbers collaps
 row bands (6 KiB or less), or heading only, whichever the workbook's 48 KiB budget allows; every
 sheet's heading is reserved first so a large sheet never hides a later sheet's name.
 
-The text is replayed under an untrusted-data notice (`UNTRUSTED_SPREADSHEET_NOTICE`), followed by
+The text is replayed under an untrusted-data notice (`UNTRUSTED_SPREADSHEET_NOTICE`) that also
+covers the file name (shown as a code span, since its author chose it), followed by
 the names of the two ways to the full data. `readSheet` results carry the same notice. A cell is
 data to report on, never an instruction; the tool description says so too.
 

@@ -2215,7 +2215,7 @@ async function runAgentPass(
                   let workbookName = workbookNames.get(attachment.id);
                   if (workbookName !== undefined) {
                     return [{type: "text", text: workbookReplayText(
-                        filename, new TextDecoder().decode(data), workbookName)}];
+                        attachment.name, new TextDecoder().decode(data), workbookName)}];
                   }
                   return [{
                     type: "text",

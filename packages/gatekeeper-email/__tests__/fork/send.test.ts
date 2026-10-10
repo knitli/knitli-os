@@ -136,7 +136,7 @@ describe("sending email", () => {
     let attempts = 0;
     const { actions, submit } = setup(async () => {
       attempts++;
-      throw new Error("destination address not verified");
+      throw Object.assign(new Error("destination address not verified"), { code: "E_RECIPIENT_NOT_ALLOWED" });
     });
     const id = await submit({ to: ["alice@example.com"], subject: "Hi", text: "x" });
     await actions.apply(id).catch(() => {});
@@ -199,10 +199,43 @@ describe("hourly send cap", () => {
     expect(sent).toHaveLength(2);
   });
 
+  it.each([
+    ["a timeout", new Error("RPC timed out")],
+    ["a service error", Object.assign(new Error("unavailable"), { code: "E_INTERNAL_SERVER_ERROR" })],
+    ["a delivery failure", Object.assign(new Error("smtp"), { code: "E_DELIVERY_FAILED" })],
+  ])("treats %s as an unknown outcome: keeps the charge and never replays", async (_n, failure) => {
+    let attempts = 0;
+    const { actions, submit, kv } = setup(async () => {
+      attempts++;
+      throw failure;
+    });
+    const id = await submit({ to: ["alice@example.com"], subject: "Hi", text: "x" });
+    await expect(actions.apply(id)).rejects.toThrow(/may have been sent/);
+    await actions.apply(id).catch(() => {});
+    expect(attempts).toBe(1);
+    expect(kv.get<unknown[]>("email-send:quota")).toHaveLength(1);
+  });
+
+  it("keeps an action blocked by the cap pending, so it can go out once the hour rolls over", async () => {
+    const { sent, actions, submit, kv } = setup(ok);
+    const first = await submit({ to: manyRecipients(60, "a").slice(0, 50), subject: "1", text: "x" });
+    const second = await submit({ to: manyRecipients(50, "b"), subject: "2", text: "x" });
+    const blocked = await submit({ to: ["late@example.com"], subject: "3", text: "x" });
+    await actions.apply(first);
+    await actions.apply(second);
+    await expect(actions.apply(blocked)).rejects.toThrow(/per hour/);
+    // The hour passes: the earlier sends age out of the ledger.
+    kv.put("email-send:quota", []);
+    await actions.apply(blocked);
+    expect(sent).toHaveLength(3);
+  });
+
   it("refunds the allowance when the binding rejects the message", async () => {
     let reject = true;
     const { sent, actions, submit } = setup(async () => {
-      if (reject) throw new Error("destination address not verified");
+      if (reject) {
+        throw Object.assign(new Error("destination address not verified"), { code: "E_RECIPIENT_NOT_ALLOWED" });
+      }
       return { messageId: "<m@x.com>" };
     });
     const bad1 = await submit({ to: manyRecipients(50, "a"), subject: "1", text: "x" });
@@ -252,6 +285,7 @@ describe("prepareSend", () => {
   it.each<[string, OutgoingEmail, RegExp]>([
     ["no recipients", { ...base, to: [] }, /at least one of to, cc, or bcc/i],
     ["display-name address", { ...base, to: ["Alice <alice@example.com>"] }, /not a plain email/],
+    ["over-long DNS label", { ...base, to: [`a@${"x".repeat(64)}.com`] }, /not a plain email/],
     ["control character in address", { ...base, to: ["al\u0000ice@example.com"] }, /not a plain email/],
     ["consecutive dots in address", { ...base, to: ["a..b@example.com"] }, /not a plain email/],
     ["header injection in subject", { ...base, subject: "Hi\r\nBcc: x@evil.com" }, /line breaks/],

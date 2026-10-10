@@ -5,6 +5,7 @@
 
 import {
   ActionApplyError,
+  ActionOutcomeUnknownError,
   ActionJournal,
   defineActions,
   type ActionSubmitter,
@@ -99,7 +100,8 @@ const encoder = new TextEncoder();
 function isAddress(value: string): boolean {
   let at = value.lastIndexOf("@");
   return at > 0 && at <= 64 && value.length <= 254 &&
-      LOCAL_PART.test(value.slice(0, at)) && DOMAIN.test(value.slice(at + 1));
+      LOCAL_PART.test(value.slice(0, at)) && DOMAIN.test(value.slice(at + 1)) &&
+      value.slice(at + 1).split(".").every(label => label.length <= 63);
 }
 
 function addresses(field: string, value: string[] | undefined): string[] {
@@ -286,7 +288,8 @@ export function checkSendQuota(
   let recent = recentSends(kv, now);
   let used = recent.reduce((sum, entry) => sum + entry.recipients, 0);
   if (used + recipients > MAX_RECIPIENTS_PER_HOUR) {
-    throw new ActionApplyError(`Sending is limited to ${MAX_RECIPIENTS_PER_HOUR} recipients per ` +
+    // Not ActionApplyError: that is terminal, and the allowance frees up as the hour rolls over.
+    throw new Error(`Sending is limited to ${MAX_RECIPIENTS_PER_HOUR} recipients per ` +
         `hour from one mailbox (${used} used). Try again later.`);
   }
   if (!charge) return undefined;
@@ -303,12 +306,20 @@ export function refundSendQuota(kv: Kv, entry: QuotaEntry, now = Date.now()): vo
   kv.put(QUOTA_KEY, recent);
 }
 
-// Codes the email service documents as "try again later" / "temporarily unavailable".
-const TRANSIENT = ["E_RATE_LIMIT_EXCEEDED", "E_DAILY_LIMIT_EXCEEDED", "E_INTERNAL_SERVER_ERROR"];
+// Documented rejections the service raises before accepting a message, so nothing was sent.
+// "Try again later" ones stay retryable; the rest cannot succeed unchanged.
+const RETRYABLE_REJECTIONS = ["E_RATE_LIMIT_EXCEEDED", "E_DAILY_LIMIT_EXCEEDED"];
+const TERMINAL_REJECTIONS = [
+  "E_VALIDATION_ERROR", "E_FIELD_MISSING", "E_TOO_MANY_RECIPIENTS", "E_TOO_MANY_ATTACHMENTS",
+  "E_SENDER_NOT_VERIFIED", "E_RECIPIENT_NOT_ALLOWED", "E_RECIPIENT_SUPPRESSED",
+  "E_SENDER_DOMAIN_NOT_AVAILABLE", "E_CONTENT_TOO_LARGE", "E_HEADER_NOT_ALLOWED",
+  "E_HEADER_USE_API_FIELD", "E_HEADER_VALUE_INVALID", "E_HEADER_VALUE_TOO_LONG",
+  "E_HEADER_NAME_INVALID", "E_HEADERS_TOO_LARGE", "E_HEADERS_TOO_MANY",
+];
 
-function isTransient(error: unknown): boolean {
+function errorCode(error: unknown): string | undefined {
   let code = (error as { code?: unknown } | null)?.code;
-  return typeof code === "string" && TRANSIENT.includes(code);
+  return typeof code === "string" ? code : undefined;
 }
 
 async function deliver(payload: SendEmailPayload, host: SendEmailHost): Promise<void> {
@@ -348,13 +359,20 @@ async function deliver(payload: SendEmailPayload, host: SendEmailHost): Promise<
   try {
     await host.sender.send(message);
   } catch (error) {
-    // The binding rejects before handing the message off (unverified destination, sender not
-    // allowed, malformed message), so a thrown send is known not to have been delivered.
-    refundSendQuota(host.kv, charge);
-    // Retryable rather than terminal: the service says to try again, and nothing was sent.
-    if (isTransient(error)) throw error;
-    throw new ActionApplyError(
-        `Sending failed: ${error instanceof Error ? error.message : String(error)}`);
+    let reason = error instanceof Error ? error.message : String(error);
+    let code = errorCode(error);
+    if (code !== undefined && RETRYABLE_REJECTIONS.includes(code)) {
+      refundSendQuota(host.kv, charge);
+      throw error;
+    }
+    if (code !== undefined && TERMINAL_REJECTIONS.includes(code)) {
+      refundSendQuota(host.kv, charge);
+      throw new ActionApplyError(`Sending failed: ${reason}`);
+    }
+    // Anything else (a timeout or disconnect, E_INTERNAL_SERVER_ERROR, E_DELIVERY_FAILED, an
+    // unknown code) may have come after the service accepted the message. Keep the charge and
+    // never offer a replay: that could send it twice.
+    throw new ActionOutcomeUnknownError(`Sending failed, and the message may have been sent: ${reason}`);
   }
 }
 

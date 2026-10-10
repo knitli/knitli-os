@@ -372,9 +372,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       if (closed) return;
       closed = true;
       idle = reason === "idle";
-      // A notification that beats open()'s return belongs to an open that has not started; it is
-      // settled below.
-      if (started) this.#openReleased(id, idle);
+      this.#openReleased(id, idle);
     };
     (notifyClosed as any)[Symbol.dispose] = () => {
       if (started && !closed) {
@@ -386,6 +384,9 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       }
     }
 
+    // Fork: counted from here, not from open()'s return, so an open parked on a step the client
+    // controls is not invisible to another workspace's idle release on the same socket.
+    ++this.#liveOpens;
     let result;
     try {
       result = await overseer.open(userId, profileId, notifyClosed, shareKey, configureObservers);
@@ -396,16 +397,16 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       if (getOpenGadgetErrorCode(err) === OPEN_GADGET_ERROR_CODES.workspaceAccessDenied) {
         await this.#user.forgetSharedGadget(id);
       }
-      // Fork: an open parked on a step the client controls (observer-config dialog, share-key
-      // redemption) was ended by an expired lease; the browser must park, not redial into the
-      // same wait.
-      if (idle && this.#liveOpens === 0) this.abortSession(new IdleSessionError(id));
+      // Fork: a failed open releases its count, unless the lease notification already did (an open
+      // parked on the observer dialog or a share-key redemption ended by an expired lease, which
+      // also parked the browser rather than letting it redial into the same wait).
+      if (!closed) {
+        closed = true;
+        --this.#liveOpens;
+      }
       throw err;
     }
     started = true;
-    ++this.#liveOpens;
-    // The lease can also expire between open() producing its result and this continuation.
-    if (closed) this.#openReleased(id, idle);
     return result;
   }
 

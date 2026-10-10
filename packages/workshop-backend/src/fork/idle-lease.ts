@@ -15,12 +15,13 @@ const logger = createWorkshopLogger("workshop.idle-lease");
 export const SESSION_LEASE_MS = 10 * 60_000;
 
 /**
- * Reserved key in the BLUEPRINTS KV namespace switching the lease off (value `off`); any other
- * value, or no key, leaves it on. Flippable without a deploy.
+ * Reserved key in the BLUEPRINTS KV namespace enabling the lease (value `on`). Any other value, or
+ * no key, leaves it disabled: the lease ends sessions with a close code only the idle-pause UI
+ * understands, so it is opt-in until that UI is deployed. Flippable without a deploy.
  */
 export const SESSION_LEASE_KEY = ".sessionLease";
 
-const SESSION_LEASE_OFF = "off";
+const SESSION_LEASE_ON = "on";
 
 // A notification that never lands costs the client one reconnect (the socket closes without the
 // idle code and the browser redials), which beats a workspace nothing can end.
@@ -98,10 +99,10 @@ export class IdleLease {
    * Decide, synchronously, whether to end the incarnation. "ended" commits the expiry. "none"
    * means unarmed; "deferred" means leave it alone and re-arm.
    */
-  decide(hasAgentWork: boolean, switchedOff: boolean): "none" | "deferred" | "ended" {
+  decide(hasAgentWork: boolean, disabled: boolean): "none" | "deferred" | "ended" {
     if (this.#committed || this.#lastClientAt === undefined) return "none";
     let now = this.now();
-    if (switchedOff || hasAgentWork || now < this.#deadline()) {
+    if (disabled || hasAgentWork || now < this.#deadline()) {
       // Restart the window only when the deadline really has passed; moving it on an early check
       // would grant an unused workspace nearly a second lease, since the alarm is armed once.
       if (now >= this.#deadline()) this.#lastCheckAt = now;
@@ -143,16 +144,17 @@ export type LeaseHost = {
 /**
  * End the incarnation if the lease has expired. Called by alarm() after every other alarm concern
  * has finished and re-armed, so an expiry never drops scheduled work. The decision is made in one
- * synchronous step after a single await (the kill switch): a client call renews the lease on
+ * synchronous step after a single await (the enable-flag read): a client call renews the lease on
  * entry, so one younger than a lease is already inside the deadline, and a call landing after the
  * decision is refused rather than accepted and thrown away.
  */
 export async function reapIdleSession(host: LeaseHost): Promise<void> {
   let { lease } = host;
-  // A read failure leaves the lease enforced: KV is not the authority on whether anyone is here.
-  let switchedOff = false;
+  // A read failure leaves the lease disabled: enforcing is the opt-in, and a flaky read must not
+  // end sessions.
+  let disabled = true;
   try {
-    switchedOff = await host.kv.get(SESSION_LEASE_KEY, { cacheTtl: 60 }) === SESSION_LEASE_OFF;
+    disabled = await host.kv.get(SESSION_LEASE_KEY, { cacheTtl: 60 }) !== SESSION_LEASE_ON;
   } catch (error) {
     logger.warn("failed to read the session lease switch", {
       event: "overseer.session.lease.switch.failed", error,
@@ -160,11 +162,11 @@ export async function reapIdleSession(host: LeaseHost): Promise<void> {
   }
 
   let idleMs = lease.idleMs();
-  let outcome = lease.decide(host.hasAgentWork(), switchedOff);
+  let outcome = lease.decide(host.hasAgentWork(), disabled);
   if (outcome === "none") return;
   if (outcome === "deferred") {
-    if (switchedOff) {
-      logger.info("session lease check skipped by the kill switch", {
+    if (disabled) {
+      logger.debug("session lease check skipped: lease not enabled", {
         event: "overseer.session.lease.skipped", durationMs: idleMs,
       });
     }

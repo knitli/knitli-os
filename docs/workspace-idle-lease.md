@@ -20,8 +20,13 @@ notice. The lease is that alarm.
   open remains on that session; the browser parks (stage 2) rather than redialling.
 - Calls arriving after the decision is committed fail with `WorkspaceSessionExpiredError`; the
   client reconnects. The abort happens in the same continuation as the flush, so no write follows it.
-- A KV key `.sessionLease` with value `off` in the `BLUEPRINTS` namespace disables enforcement
-  (checks are skipped and re-armed). A KV read failure leaves it enforced.
+- The lease is **opt-in**: it enforces only while the KV key `.sessionLease` in the `BLUEPRINTS`
+  namespace holds `on`. Absent, any other value, or a failed KV read means disabled (checks are
+  skipped and re-armed). It ends sessions with a close code only the idle-pause UI understands, so
+  enable it once that UI is deployed; flipping the key needs no deploy and takes effect within a
+  minute (the read is cached for 60 seconds).
+- The reap runs even when another alarm concern fails; the failure is rethrown afterwards so the
+  platform still retries it.
 
 ## What expiry costs
 

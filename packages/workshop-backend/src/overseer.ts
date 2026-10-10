@@ -9942,8 +9942,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * See OverseerImpl.runAlarmTasks for how the concerns are run together.
    */
   async alarm() {
-    await this.impl.runAlarmTasks();
-    await this.impl.reapIdleSession();
+    // Fork: the reap runs even when another concern failed (that failure is rethrown after, so the
+    // platform still retries it), or a failing delivery would keep an expired workspace resident.
+    try {
+      await this.impl.runAlarmTasks();
+    } finally {
+      await this.impl.reapIdleSession();
+    }
   }
 
   // Initialize a brand-new workspace's storage. (Before git-backed code storage this also wrote
@@ -11316,7 +11321,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let result = await this.impl.addGatekeeper(
         cls, creationSpec, this.clientUserId, this.#mintedCapabilityKind());
     await this.recordConnectionCreated(result, "gatekeeper", vendorId);
-    return result;
+    return ownedByClient(result, this.impl.clientActivity);
   }
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
@@ -11340,7 +11345,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         this.impl.ctx.exports.LanguageModelGatekeeper({props}), creationSpec,
         this.clientUserId, this.#mintedCapabilityKind());
     await this.recordConnectionCreated(result, "ai_model");
-    return result;
+    return ownedByClient(result, this.impl.clientActivity);
   }
 
   async newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>> {
@@ -11395,7 +11400,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         this.impl.ctx.exports.AgentSpawnerGatekeeper({props}), creationSpec,
         this.clientUserId, this.#mintedCapabilityKind());
     await this.recordConnectionCreated(result, "agent_spawner");
-    return result;
+    return ownedByClient(result, this.impl.clientActivity);
   }
 
   async listActions(options?: {beforeId?: number, filter?: ActionHistoryFilter})

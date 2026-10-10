@@ -130,7 +130,7 @@ describe("reapIdleSession", () => {
   }
 
   it("notifies, re-arms without the lease, then aborts, in that order", async () => {
-    let { c, lease, h, events } = host();
+    let { c, lease, h, events } = host({ kv: "on" });
     lease.touch();
     lease.addNotifier(async () => { events.push("notify"); });
     c.advance(SESSION_LEASE_MS);
@@ -145,29 +145,25 @@ describe("reapIdleSession", () => {
   });
 
   it("never aborts over running agent work", async () => {
-    let { c, lease, h, events } = host({ agentWork: true });
+    let { c, lease, h, events } = host({ kv: "on", agentWork: true });
     lease.touch();
     c.advance(SESSION_LEASE_MS * 3);
     await reapIdleSession(h);
     expect(events).toEqual(["rearm"]);
   });
 
-  it("honours the kill switch but stays enforced when KV fails", async () => {
-    let off = host({ kv: "off" });
-    off.lease.touch();
-    off.c.advance(SESSION_LEASE_MS);
-    await reapIdleSession(off.h);
-    expect(off.events).toEqual(["rearm"]);
-
-    let broken = host({ kv: new Error("kv down") });
-    broken.lease.touch();
-    broken.c.advance(SESSION_LEASE_MS);
-    await reapIdleSession(broken.h);
-    expect(broken.events).toEqual(["rearm", "abort:idle session lease expired"]);
+  it("enforces only when enabled, and a KV failure leaves it disabled", async () => {
+    for (let kv of [null, "off", new Error("kv down")]) {
+      let disabled = host({ kv });
+      disabled.lease.touch();
+      disabled.c.advance(SESSION_LEASE_MS);
+      await reapIdleSession(disabled.h);
+      expect(disabled.events).toEqual(["rearm"]);
+    }
   });
 
   it("a released notifier is not told", async () => {
-    let { c, lease, h, events } = host();
+    let { c, lease, h, events } = host({ kv: "on" });
     lease.touch();
     let watch = lease.addNotifier(async () => { events.push("notify"); });
     watch[Symbol.dispose]();

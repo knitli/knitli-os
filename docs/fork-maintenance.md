@@ -977,8 +977,8 @@ ids are facet-local, not Activity ids.
 - **What:** the Overseer ends its own incarnation (`ctx.abort`, after `storage.sync()`) once 10
   minutes pass with no browser call, no finished agent turn and no outstanding agent work. The
   front Worker then closes the socket with `SESSION_IDLE_CLOSE_CODE` (4001) so the browser can
-  park instead of redialling. Behaviour, races and billing: `docs/workspace-idle-lease.md`. A KV
-  key `.sessionLease` = `off` in `BLUEPRINTS` disables enforcement without a deploy.
+  park instead of redialling. Behaviour, races and billing: `docs/workspace-idle-lease.md`. The lease is
+  opt-in: it enforces only while KV key `.sessionLease` = `on` in `BLUEPRINTS` (no deploy needed).
 - **Where:** state, decision, reap and the call wrapper are in the fork-owned
   `src/fork/idle-lease.ts` (Tier 1). Upstream seams in `overseer.ts`: the `idleLease` /
   `clientActivity` fields; `#hasAgentWork()` extracted from `#updateAlarm` (plus two lines adding

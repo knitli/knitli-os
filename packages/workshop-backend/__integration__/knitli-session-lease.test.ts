@@ -91,10 +91,15 @@ async function runAlarm(id: string): Promise<{ ran: boolean; aborted: boolean }>
 }
 
 describe("workspace client-activity lease", () => {
-  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); });
-  afterEach(() => {
+  beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // The lease is opt-in (see SESSION_LEASE_KEY); every case but the default-off one enables it.
+    await env.BLUEPRINTS.put(SESSION_LEASE_KEY, "on");
+  });
+  afterEach(async () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    await env.BLUEPRINTS.delete(SESSION_LEASE_KEY);
   });
 
   it("ends a workspace nothing has touched for a lease, and tells the browser why", async () => {
@@ -233,26 +238,51 @@ describe("workspace client-activity lease", () => {
     expect(await scheduledAlarm(metadata.id)).toBe(deliveredAt + DELIVERY_RETENTION_MS);
   });
 
-  it("enforces nothing while the kill switch is off", async () => {
-    const logs = spyOnLogs();
-    await env.BLUEPRINTS.put(SESSION_LEASE_KEY, "off");
-    try {
-      const { session, authenticated } = await signIn();
-      using workspace = await authenticated.newGadget();
-      const metadata = await workspace.getMetadata();
+  // The kernel can land before the UI that understands the idle close code, so unless a deployment
+  // opts in the lease must not end anything.
+  it.each([["absent", null], ["off", "off"]])("enforces nothing unless enabled (%s)", async (_label, value) => {
+    await env.BLUEPRINTS.delete(SESSION_LEASE_KEY);
+    if (value !== null) await env.BLUEPRINTS.put(SESSION_LEASE_KEY, value);
+    const { session, authenticated } = await signIn();
+    using workspace = await authenticated.newGadget();
+    const metadata = await workspace.getMetadata();
 
-      advanceBeyondTheLease();
-      const checkedAt = Date.now();
-      expect(await runAlarm(metadata.id)).toEqual({ ran: true, aborted: false });
-      expect(loggedEvents(logs, "overseer.session.lease.skipped")).toHaveLength(1);
-      expect(loggedEvents(logs, "overseer.session.lease.expired")).toEqual([]);
-      expect(session.closes).toEqual([]);
-      const alarm = await scheduledAlarm(metadata.id);
-      expect(alarm! - checkedAt).toBeGreaterThan(SESSION_LEASE_MS - 10_000);
-      expect(alarm! - checkedAt).toBeLessThanOrEqual(SESSION_LEASE_MS);
-    } finally {
-      await env.BLUEPRINTS.delete(SESSION_LEASE_KEY);
-    }
+    advanceBeyondTheLease();
+    const checkedAt = Date.now();
+    expect(await runAlarm(metadata.id)).toEqual({ ran: true, aborted: false });
+    expect(session.closes).toEqual([]);
+    // Still armed one lease out, so enabling the flag takes effect at the next check.
+    const alarm = await scheduledAlarm(metadata.id);
+    expect(alarm! - checkedAt).toBeGreaterThan(SESSION_LEASE_MS - 10_000);
+    expect(alarm! - checkedAt).toBeLessThanOrEqual(SESSION_LEASE_MS);
+  });
+
+  it("reaps an expired workspace even when another alarm concern fails, and still reports the failure",
+      async () => {
+    const logs = spyOnLogs();
+    const { authenticated } = await signIn();
+    using workspace = await authenticated.newGadget();
+    const metadata = await workspace.getMetadata();
+    await runInDurableObject(overseerStub(metadata.id), instance => {
+      asImpl(instance).runAlarmTasks = async () => { throw new Error("delivery failed"); };
+    });
+
+    advanceBeyondTheLease();
+    await runAlarm(metadata.id);
+    expect(loggedEvents(logs, "overseer.session.lease.expired")).toHaveLength(1);
+  });
+
+  it("does not let a failed open leak a count that would stop the idle close", async () => {
+    const { session, authenticated } = await signIn();
+    using workspace = await authenticated.newGadget();
+    const metadata = await workspace.getMetadata();
+    await expect(authenticated.openGadget(exports.OverseerDurableObject.newUniqueId().toString()))
+        .rejects.toThrow();
+
+    advanceBeyondTheLease();
+    await runAlarm(metadata.id);
+    expect(await waitFor("the idle close", () => session.closes[0]))
+        .toEqual({ code: SESSION_IDLE_CLOSE_CODE, reason: "idle" });
   });
 });
 
@@ -260,6 +290,7 @@ describe("workspace client-activity lease", () => {
 // visibility escape for the cases the alarm cannot stage on its own.
 type OverseerImplForTest = {
   reapIdleSession(): Promise<void>;
+  runAlarmTasks(): Promise<void>;
   storage: {
     pendingAgentCalls: { put(record: object): void; delete(key: string): void };
     gadgetResponseDeliveries: { put(record: object): void };

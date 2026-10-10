@@ -74,7 +74,7 @@ window.addEventListener('keydown', (event) => {
 // working inside the gadget. Throttled: the parent only compares timestamps every 30 seconds.
 {
   let lastActivitySent = 0;
-  for (let type of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
+  for (let type of ['pointerdown', 'keydown', 'wheel', 'touchstart', 'click']) {
     window.addEventListener(type, (event) => {
       // Synthetic events (dispatchEvent) are not a person. This cannot stop a gadget that posts the
       // message itself: the frame and its code share an origin, so activity is best-effort.

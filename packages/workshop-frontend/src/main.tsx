@@ -79,6 +79,8 @@ const notifySubscribers = () => subscribers.forEach(cb => cb());
 let isConnectionLost = false;
 let probing = false;
 let lastProvenAt = Date.now();
+// The reconnect loop's candidate while its probe is in flight, so a pause can drop it at once.
+let probeCandidate: RpcStub<PublicApi> | null = null;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -128,12 +130,15 @@ async function reconnect(): Promise<RpcStub<PublicApi>> {
     if (isConnectionPaused()) continue;
 
     const candidate = startConnection();
+    probeCandidate = candidate;
     try {
       await withTimeout(candidate.ping(), RECONNECT_PROBE_TIMEOUT_MS);
     } catch (probeError) {
       console.debug('Reconnect attempt failed:', probeError);
       disposeQuietly(candidate);
       continue;
+    } finally {
+      if (probeCandidate === candidate) probeCandidate = null;
     }
 
     // A pause that landed while this probe was in flight must not end with a live socket.
@@ -195,7 +200,11 @@ installWorkshopErrorReporting()
 let currentStub = startConnection();
 // Disposal fires onRpcBroken -> handleBroken, the path probeOnWake uses; during an outage the
 // placeholder is already published and the parked loop is all that is needed.
-installDropSocketHandler(() => { if (!isConnectionLost) disposeQuietly(currentStub); });
+installDropSocketHandler(() => {
+  if (!isConnectionLost) disposeQuietly(currentStub);
+  // Mid-outage the live socket is the reconnect probe, not the placeholder.
+  else if (probeCandidate) disposeQuietly(probeCandidate);
+});
 
 const router = createRouter()
 applyStoredThemeMode()

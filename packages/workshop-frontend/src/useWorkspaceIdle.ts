@@ -9,7 +9,9 @@ export const VISIBLE_IDLE_PAUSE_MS = 10 * 60_000
 export const IDLE_TICK_MS = 30_000
 
 // Mousemove is deliberately absent: a hand resting on a trackpad would keep a tab awake for hours.
-const ACTIVITY_EVENTS = ['pointerdown', 'keydown', 'touchstart', 'wheel', 'scroll'] as const
+// `click` is there for assistive technology (switch control, voice control, screen-reader
+// activation), which can click without a preceding pointerdown or keydown.
+const ACTIVITY_EVENTS = ['pointerdown', 'keydown', 'touchstart', 'wheel', 'scroll', 'click'] as const
 
 // Module scope: the sandboxed gadget iframe reports its input through `noteWorkspaceActivity()`
 // rather than this window's listeners. The effect re-stamps it on mount.

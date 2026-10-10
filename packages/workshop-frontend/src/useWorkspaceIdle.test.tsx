@@ -46,6 +46,14 @@ describe('useWorkspaceIdle', () => {
     expect(isConnectionPaused()).toBe(true)
   })
 
+  it('counts a click that has no preceding pointer or key event', () => {
+    mount()
+    elapse(VISIBLE_IDLE_PAUSE_MS - IDLE_TICK_MS)
+    act(() => { window.dispatchEvent(new Event('click')) })
+    elapse(VISIBLE_IDLE_PAUSE_MS - IDLE_TICK_MS)
+    expect(isConnectionPaused()).toBe(false)
+  })
+
   it('counts input forwarded from the gadget iframe', () => {
     mount()
     elapse(VISIBLE_IDLE_PAUSE_MS - IDLE_TICK_MS)

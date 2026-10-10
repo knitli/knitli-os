@@ -4469,6 +4469,7 @@ function ChatInterface({
   const handleUpdateFromMainline = async () => {
     if (staleAcceptChatId === null) return;
     const chatId = staleAcceptChatId;
+    resumeConnection();  // the dialog locks while updating, so a parked connection would strand it
     setIsUpdatingFromMainline(true);
     try {
       const { conflictPaths } = await overseer.updateChatFromMainline(chatId);

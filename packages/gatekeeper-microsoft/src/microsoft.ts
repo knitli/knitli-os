@@ -93,6 +93,11 @@ type StagedGrant = {
 type StoredMintFailure = {
   message: string;
   at: number;
+  /**
+   * Set when Graph rejected the token for a policy claim. The token endpoint keeps minting in that
+   * case, so a later successful mint says nothing about it having been fixed.
+   */
+  claims?: true;
 };
 
 type CachedVerifiedDomains = {
@@ -871,7 +876,8 @@ export class UserAccount extends DurableObject<Env> {
 
     // Serialized so a burst of concurrent 401s collapses into one token exchange. The re-check
     // inside the lock is what does the collapsing — the lock alone would just queue the mints.
-    return this.#updateCredentials(async () => {
+    let recovered = false;
+    let token = await this.#updateCredentials(async () => {
       let fresh = this.ctx.storage.kv.get<EntraAccessToken>("accessToken");
       if (this.#tokenSatisfies(fresh, opts)) {
         return fresh;
@@ -928,9 +934,26 @@ export class UserAccount extends DurableObject<Env> {
       }
 
       this.#storeGrant(result.grant);
+      // A refused token request that now succeeds (a rotated client secret, a restored consent) is
+      // credentials coming back without a browser, which the Workshop has to be told about.
+      recovered = recorded !== undefined && recorded.claims !== true;
       this.ctx.storage.kv.delete("mintFailure");
       clearCredentialExpiryLatch(this.ctx.storage.kv);
       return result.grant.accessToken;
+    });
+    // After the mutex is released: the callback is an outbound RPC that can re-enter this object.
+    if (recovered) this.#notifyCredentialsRestored();
+    return token;
+  }
+
+  // Tell the Workshop credentials are working again, so it stops offering a reconnect. Best effort,
+  // like the expiry notice: a failure to deliver must not fail the call that was just served.
+  #notifyCredentialsRestored(): void {
+    let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+    callback?.credentialsRestored().catch(err => {
+      logger.warn("failed to notify credential restoration", {
+        event: "credentials.restored.notify.failed", error: err,
+      });
     });
   }
 
@@ -959,16 +982,16 @@ export class UserAccount extends DurableObject<Env> {
         codes: [],
         message: "Microsoft requires this account to sign in again" +
             (detail ? ` (${detail})` : "") + ". Please reconnect the account.",
-      });
+      }, true);
     });
   }
 
   // Record a permanent failure and, the first time an account dies, tell the Workshop. Transient
   // failures are not recorded: the next caller should be free to try again immediately.
-  #recordMintFailure(failure: TokenFailure): void {
+  #recordMintFailure(failure: TokenFailure, claims = false): void {
     if (!failure.permanent) return;
     this.ctx.storage.kv.put<StoredMintFailure>("mintFailure", {
-      message: failure.message, at: Date.now(),
+      message: failure.message, at: Date.now(), ...(claims ? { claims: true as const } : {}),
     });
     this.#notifyCredentialsDead();
   }

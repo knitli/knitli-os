@@ -5,6 +5,20 @@ import { SharePointUrlError, parseSharePointListUrl } from "../src/sharepoint-ur
 /** Every shape a user can realistically paste, and what the list's identity is inside it. */
 const ACCEPTED: { name: string; url: string; hostname: string; sitePath: string; list: string }[] = [
   {
+    name: "a site whose own path contains a Lists segment",
+    url: "https://contoso.sharepoint.com/sites/Lists/Lists/Requests/AllItems.aspx",
+    hostname: "contoso.sharepoint.com",
+    sitePath: "/sites/Lists",
+    list: "Requests",
+  },
+  {
+    name: "a list that is itself named Lists",
+    url: "https://contoso.sharepoint.com/sites/HR/Lists/Lists/AllItems.aspx",
+    hostname: "contoso.sharepoint.com",
+    sitePath: "/sites/HR",
+    list: "Lists",
+  },
+  {
     name: "a site list's default view",
     url: "https://contoso.sharepoint.com/sites/HR/Lists/Requests/AllItems.aspx",
     hostname: "contoso.sharepoint.com",

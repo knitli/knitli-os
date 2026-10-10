@@ -58,6 +58,7 @@ function fakeCallback() {
   return {
     complete: vi.fn(async () => HANDOFF),
     credentialsExpired: vi.fn(async () => {}),
+    credentialsRestored: vi.fn(async () => {}),
     reconnectComplete: vi.fn(async (_stageId: string) => RECONNECT_HANDOFF),
   };
 }
@@ -629,6 +630,67 @@ describe("mint failure taxonomy", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("tells the Workshop when a refused token request starts succeeding again", async () => {
+    // For example an administrator rotates the expired client secret: nothing reconnects in a
+    // browser, so the Workshop would otherwise go on offering a reconnect for a working account.
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    let broken = true;
+    fetchMock.mockImplementation(async () => broken
+      ? jsonResponse({
+        error: "invalid_client", error_codes: [7000222],
+        error_description: "AADSTS7000222: The provided client secret keys are expired.",
+      }, 400)
+      : jsonResponse({
+        access_token: "access-2", expires_in: 3600, refresh_token: "refresh-new",
+        scope: "openid profile email https://graph.microsoft.com/User.Read offline_access",
+      }));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(account.getAccessToken()).rejects.toThrow();
+    expect(callback.credentialsRestored).not.toHaveBeenCalled();
+
+    broken = false;
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 5 * 60 * 1000 });
+    try {
+      await expect(account.getAccessToken()).resolves.toMatchObject({ token: "access-2" });
+      expect(callback.credentialsRestored).toHaveBeenCalledTimes(1);
+
+      // An ordinary mint afterwards says nothing.
+      vi.setSystemTime(Date.now() + 2 * 60 * 60 * 1000);
+      await account.getAccessToken();
+      expect(callback.credentialsRestored).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not call a claims rejection restored just because the token endpoint still answers", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    context.storage.kv.put("accessToken", {
+      token: "access-live", expires: new Date(Date.now() + 30 * 60 * 1000),
+    });
+    await account.reportCredentialsRejected("conditional access policy", "access-live");
+    fetchMock.mockImplementation(async () => jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-new",
+      scope: "openid profile email https://graph.microsoft.com/User.Read offline_access",
+    }));
+
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 5 * 60 * 1000 });
+    try {
+      await account.getAccessToken();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Graph rejected the claims, not the token request, so a token request succeeding fixes nothing.
+    expect(callback.credentialsRestored).not.toHaveBeenCalled();
   });
 
   it("keeps retrying a transient rejection and leaves the account alive", async () => {

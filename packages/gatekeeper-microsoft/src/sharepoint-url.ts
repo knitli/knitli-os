@@ -19,6 +19,9 @@
 const SHAREPOINT_HOST_SUFFIX = ".sharepoint.com";
 
 /** The path segment that separates a site's path from a list's name. */
+/** A view or form page (`AllItems.aspx`), which follows a list name and is never one. */
+const VIEW_PAGE = /\.aspx$/i;
+
 const LISTS_SEGMENT = "lists";
 
 /** A share link's leading type segment, as "Copy link" writes it: `:l:`, `:f:`, `:w:`, `:x:`. */
@@ -114,12 +117,16 @@ export function parseSharePointListUrl(url: string): SharePointListUrl {
     raw = raw.slice(2);
   }
 
-  let listsAt = raw.findIndex(segment => segment.toLowerCase() === LISTS_SEGMENT);
-  if (listsAt === -1) {
+  let isLists = (segment: string) => segment.toLowerCase() === LISTS_SEGMENT;
+  if (!raw.some(isLists)) {
     throw new SharePointUrlError("That URL has no /Lists/ segment, so it does not name a list.");
   }
-
-  let listSegment = decodeSegment(raw[listsAt + 1] ?? "");
+  // The delimiter is the last `Lists` that a list name follows. A site path can itself contain a
+  // segment called Lists (`/sites/Lists/Lists/Requests`), and a list can be named Lists
+  // (`/Lists/Lists/AllItems.aspx`), where the page after it is a view, not a name.
+  let listsAt = raw.findLastIndex((segment, index) =>
+      isLists(segment) && raw[index + 1] !== undefined && !VIEW_PAGE.test(raw[index + 1]));
+  let listSegment = listsAt === -1 ? "" : decodeSegment(raw[listsAt + 1]);
   if (!listSegment) {
     throw new SharePointUrlError("That URL has no list name after /Lists/.");
   }

@@ -545,8 +545,6 @@ export const ChatComposer = ({
       return;
     }
     if (sendInFlightRef.current || isSending || isBlocked) return;
-    // A send is the deliberate request that wakes a paused workspace.
-    resumeConnection();
     setSendHiccup(null);
     const attachmentsSnapshot = pendingAttachments;
     const readyAttachments = attachmentsSnapshot
@@ -557,6 +555,7 @@ export const ChatComposer = ({
 
     if (!inputValue.trim() && !selectedSlashCommand && readyAttachments.length === 0) return;
     if (hasUploadingAttachment) {
+      resumeConnection();  // the upload is waiting on the same parked connection
       toasts.add({ title: "Please wait for attachment uploads to finish", variant: "error" });
       return;
     }
@@ -569,6 +568,8 @@ export const ChatComposer = ({
       return;
     }
 
+    // A send that passed local validation is the deliberate request that wakes a paused workspace.
+    resumeConnection();
     sendInFlightRef.current = true;
     setIsSending(true);
     const draftSend = beginDraftSend();

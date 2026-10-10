@@ -66,6 +66,7 @@ import { useActionEntries, useActions } from './useActions'
 import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
 import ConnectionChip from './components/ConnectionChip'
 import { useWorkspaceIdle } from './useWorkspaceIdle'
+import { resumeConnection } from './connectionPause'
 import WorkspaceOpenErrorPage from './components/WorkspaceOpenErrorPage'
 import { useWorkspaceOpen } from './useWorkspaceOpen'
 import { reportIssue } from './errorReporting'
@@ -1424,6 +1425,7 @@ export default function GadgetEditor() {
 
   const handleDeleteConfirm = async () => {
     if (!overseer) return
+    resumeConnection()  // the dialog locks while deleting, so a parked connection would strand it
     setIsDeleting(true)
     try {
       await overseer.stub.deleteSelf()
@@ -2076,6 +2078,10 @@ export default function GadgetEditor() {
                     Press <kbd className="rounded border border-kumo-line bg-kumo-elevated px-1.5 py-0.5 text-[11px] font-medium">Esc</kbd> to exit full screen
                   </div>
                 </div>
+              )}
+              {/* The fullscreen overlay covers the top bar, which is where the chip normally lives. */}
+              {isGadgetFullscreen && (
+                <div className="absolute right-4 top-4 z-10"><ConnectionChip lost={showReconnecting} /></div>
               )}
             </div>
 

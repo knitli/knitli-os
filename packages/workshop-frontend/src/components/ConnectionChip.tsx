@@ -1,4 +1,5 @@
 import ReconnectingChip from './ReconnectingChip'
+import { WorkshopButton } from './WorkshopControls'
 import { resumeConnection } from '../connectionPause'
 import { useConnectionPaused } from '../useConnectionPaused'
 
@@ -18,13 +19,13 @@ export default function ConnectionChip({ lost }: { lost: boolean }) {
     return (
       <>
         {announcement}
-        <button
+        <WorkshopButton
           type="button"
           onClick={resumeConnection}
-          className="cursor-pointer text-xs text-kumo-warning px-2 py-0.5 rounded-full bg-kumo-warning-tint border border-kumo-warning/20"
+          className="!h-6 !rounded-full !px-2 !text-xs !text-kumo-warning !bg-kumo-warning-tint !border-kumo-warning/20"
         >
           Paused — click to reconnect
-        </button>
+        </WorkshopButton>
       </>
     )
   }

@@ -11763,7 +11763,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let chatId = Number(requestId.slice(0, colonIdx));
     if (!Number.isFinite(chatId)) throw new Error(`Malformed connection request id: ${requestId}`);
 
-    for (let msg of this.impl.storage.chats.list({prefix: chatKeyPrefix(chatId)})) {
+    for (let msg of Array.from(this.impl.storage.chats.list({prefix: chatKeyPrefix(chatId)}))) {
       if (msg.type === "connectionRequest" && msg.requestId === requestId) {
         return msg as AiChatMessage & {type: "connectionRequest"};
       }
@@ -12282,7 +12282,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Delete the chat's messages and the attachment content referenced by them. Attachment metadata
     // is canonical in each message's ChatAttachmentRef, so no separate attachment index is needed.
     this.impl.ctx.storage.transactionSync(() => {
-      for (let msg of this.impl.storage.chats.list({prefix: chatKeyPrefix(chatId)})) {
+      // Buffered: dropWorkbook() lists too, and typed-storage supports one active list().
+      for (let msg of Array.from(this.impl.storage.chats.list({prefix: chatKeyPrefix(chatId)}))) {
         if (msg.type === "message") {
           for (let attachment of msg.attachments ?? []) {
             let content = this.impl.storage.chatAttachmentContent.get(attachment.id);

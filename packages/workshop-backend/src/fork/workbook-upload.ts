@@ -182,7 +182,8 @@ export function readWorkbookChunk(
 // Render a filename chosen outside this workspace as a Markdown code span, so it renders verbatim
 // and cannot forge the sentence around it. The delimiter is a backtick run longer than any run in
 // the name; a name that starts or ends with a backtick is padded.
-function fenceUntrustedFileName(name: string): string {
+/** A name chosen outside this workspace as a code span; see the comment above. */
+export function fenceUntrustedFileName(name: string): string {
   let fence = "`";
   while (name.includes(fence)) fence += "`";
   let pad = name.startsWith("`") || name.endsWith("`") ? " " : "";

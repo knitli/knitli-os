@@ -50,7 +50,8 @@ export function deriveWorkbookBindings(
         !SPREADSHEET_MIME_TYPES.has(attachment.convertedFrom)) {
       continue;
     }
-    reserved ??= new Set(taken);
+    // GIT is the automatic env.GIT (GIT_BINDING_NAME in agent.ts); a workbook must not shadow it.
+    reserved ??= new Set([...taken, "GIT"]);
     let name = workbookBindingName(attachment.name, reserved);
     reserved.add(name);
     bindings.push({ name, attachmentId: attachment.id });

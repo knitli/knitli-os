@@ -10,6 +10,7 @@ import type {
   VoicePreferences, WorkpieceId,
 } from "@gadgets/workshop-shared/api";
 import type { AccountDescription, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
+import type { WebPushSubscriptions } from "../fork/web-push.js";
 
 export type ConnectedAccountRecord = {
   id: number;
@@ -182,6 +183,9 @@ export function makeUserStorage(storage: DurableObjectStorage) {
       // device that registers again replaces its own subscription. Only this installation's signing
       // key can deliver to them.
       notificationSubscriptions: <Record<string, string>>{},
+
+      // Fork: browsers subscribed to Web Push, by push service endpoint (src/fork/web-push.ts).
+      webPushSubscriptions: <WebPushSubscriptions>{},
 
       // Set once the user's pre-existing workspaces have been asked to populate the outputs index
       // (see #backfillOutputs()). Workspaces created since push on their own.

@@ -1137,6 +1137,9 @@ importers:
       '@cloudflare/puppeteer':
         specifier: ^1.4.0
         version: 1.4.0(supports-color@10.2.2)
+      '@e965/xlsx':
+        specifier: 0.20.3
+        version: 0.20.3
       '@earendil-works/pi-agent-core':
         specifier: 0.99.1
         version: 0.99.1(@aws-sdk/credential-provider-node@3.972.83)(@modelcontextprotocol/sdk@1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.5))(@smithy/signature-v4@5.6.12)(supports-color@10.2.2)(undici@7.29.1)(ws@8.21.3)(zod@4.6.5)
@@ -1176,6 +1179,9 @@ importers:
       diff3:
         specifier: 0.0.3
         version: 0.0.3
+      fflate:
+        specifier: 0.8.3
+        version: 0.8.3
       isomorphic-git:
         specifier: ^1.42.2
         version: 1.42.2
@@ -1967,6 +1973,11 @@ packages:
 
   '@date-fns/tz@1.5.0':
     resolution: {integrity: sha512-lwYN/vDPeNRULcepoE/LO2Pgx+7/RV+S9ARfbc9lr2DtGkOD7pAiruHvbR1RX3Qyf6ja47EWJDMsNK5vK08DJg==}
+
+  '@e965/xlsx@0.20.3':
+    resolution: {integrity: sha512-703RN/3OdsRD5mtse2HBX7Um7xwaP9tlswEG6svOtjqokXoX7rJdQj7DyabD2I+xk22RgaIIU+R6BHgkpZGB/w==}
+    engines: {node: '>=0.8'}
+    hasBin: true
 
   '@earendil-works/chord@0.99.1':
     resolution: {integrity: sha512-4xyn0IBzJ+Xu/iOGi2hjXJGAR61QEhEWZsIqTDqr+GmItdquYwBO5jYFnqGiBaTqlY12/EpM7QHoEKSHbyvOug==}
@@ -7199,6 +7210,8 @@ snapshots:
   '@csstools/css-tokenizer@3.0.4': {}
 
   '@date-fns/tz@1.5.0': {}
+
+  '@e965/xlsx@0.20.3': {}
 
   '@earendil-works/chord@0.99.1':
     dependencies:

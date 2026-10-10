@@ -73,6 +73,46 @@
       "reason": "Fork-owned web app manifest, needed for Home Screen installs that iOS requires for push."
     },
     {
+      "path": "packages/workshop-backend/scripts/fork/",
+      "reason": "Fork-owned build step that bundles the sandboxed spreadsheet parser worker; build-browser-runtime.ts calls it with one import."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-workbook-names.test.ts",
+      "reason": "Regression test for the workbook binding-name derivation."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-workbook-parse.test.ts",
+      "reason": "Regression test for the spreadsheet parser, summary rendering and parse ceilings (src/fork/workbook-parse.ts)."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-workbook-parser-isolate.test.ts",
+      "reason": "Regression test for the sandboxed dynamic-worker spreadsheet parser, including memory and CPU exhaustion."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-workbook-session.test.ts",
+      "reason": "Regression test for the workbook binding, readSheet text and describeBinding over real Overseer storage."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-workbook-compaction.test.ts",
+      "reason": "Regression test for carrying workbook bindings through agent compaction."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-workbook-agent.test.ts",
+      "reason": "Regression test for spreadsheet attachments through the real agent loop (replay, readSheet, tool offer)."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-workbook-upload.test.ts",
+      "reason": "Regression test for staging a spreadsheet upload, its refusals, ref marking and sweep."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-repeated-cells-ods.ts",
+      "reason": "Fixture for the parser isolate test: a small ODS that declares millions of repeated cells."
+    },
+    {
+      "path": "docs/spreadsheet-attachments.md",
+      "reason": "Documents the fork-owned spreadsheet attachment feature; upstream has no such page."
+    },
+    {
       "path": "packages/workshop-backend/__tests__/knitli-turn-guards.test.ts",
       "reason": "Regression test for the fork-owned agent turn guards and executeCode output cap."
     },

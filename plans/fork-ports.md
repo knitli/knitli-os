@@ -20,6 +20,12 @@ Rules for every port:
   dependencies, and stop on anything proprietary, undocumented or copyleft so we can decide. Under
   Apache-2.0 section 4 we keep existing notices and mark files we change, and every port commit
   records the source fork and commit.
+- **Stay inside the fork boundary.** Follow `docs/fork-maintenance.md` sections 1, 3 and 4. New
+  code goes in fork-owned Tier-1 paths (`packages/*/src/fork/`, `scripts/fork/`, new packages),
+  tests in fork-owned files (`knitli-*.test.ts` or `__tests__/fork/`), and an upstream file gets at
+  most a one-line seam. Register each new path in `scripts/fork/fork-boundary.json`, record each
+  divergence in the inventory in `docs/fork-maintenance.md`, and run `pnpm fork:audit`. If a port
+  turns up existing fork code that breaks this contract, fix it or report it.
 - **Port the idea, not the diff.** The forks branched at different upstream points. Several have
   since moved config to `cloudflare.config.ts` (#597) and renamed things, so read their code as a
   reference and write against our tree.

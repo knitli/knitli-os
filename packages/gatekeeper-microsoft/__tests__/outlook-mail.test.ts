@@ -675,29 +675,16 @@ describe("credential death", () => {
 });
 
 describe("agent catalog", () => {
-  it("lists folders with their message counts", async () => {
-    stubFetch();
+  it("names no folder and asks Graph for nothing", async () => {
+    // The catalog enters the agent's prompt with no approval in the way, and the mailbox refuses
+    // every observer, so folder names and counts must not appear in it.
+    const calls = stubFetch(() => { throw new Error("the catalog must not call Graph"); });
 
     const catalog = await gatekeeper.getAgentCatalog();
 
-    expect(catalog!.entries.map(entry => entry.title)).toEqual(["Inbox", "Archive"]);
-    expect(catalog!.entries[0].description).toContain("3 unread");
-  });
-
-  it("caps a large mailbox at 25 folders and flags the catalog truncated", async () => {
-    const manyFolders = Array.from({ length: 30 }, (_unused, index) => ({
-      id: `folder-${index}`,
-      displayName: `Folder ${index}`,
-      totalItemCount: index,
-      unreadItemCount: 0,
-    }));
-    stubFetch(() => jsonResponse({ value: manyFolders }));
-
-    const catalog = await gatekeeper.getAgentCatalog();
-
-    expect(catalog!.entries).toHaveLength(25);
-    expect(catalog!.truncated).toBe(true);
-    expect(catalog!.entries[0].title).toBe("Folder 0");
+    expect(calls).toHaveLength(0);
+    expect(catalog!.entries.map(entry => entry.id)).toEqual(["folders"]);
+    expect(JSON.stringify(catalog)).not.toContain("Inbox");
   });
 });
 

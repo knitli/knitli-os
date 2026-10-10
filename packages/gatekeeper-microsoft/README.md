@@ -43,9 +43,9 @@ Entra reported as actually granted, so a refresh never asks for a permission nob
 The mailbox and Teams refuse every observer (nothing here can show a collaborator has the same
 access), so each read of them is marked `containsRestrictedData`: once an agent has read a message
 or a chat, the workspace is in restricted mode — no public web fetches, and every action needs
-manual approval — and a gadget bound to either stays single-user. The Teams agent catalog is
-static for the same reason: it names no team or chat, because the catalog is loaded into every
-prompt without any observation. Message bodies over 256 KiB are cut off and flagged; a message too
+manual approval — and a gadget bound to either stays single-user. The Outlook and Teams agent
+catalogs are static for the same reason: they name no folder, team or chat, because the catalog is
+loaded into every prompt without any observation. Message bodies over 256 KiB are cut off and flagged; a message too
 large to fetch under the byte cap is refused.
 
 ## Connect links are bound to the initiator

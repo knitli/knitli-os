@@ -7,8 +7,8 @@
 // Approval model:
 //   submitAction (requires approval): markRead, markUnread, moveToFolder, createReplyDraft,
 //                                     createReplyAllDraft
-//   authorizeObservation (audit-only): all session reads; the agent catalog is not one of them,
-//                                      see getAgentCatalog
+//   authorizeObservation (audit-only): all session reads; the agent catalog reads nothing, see
+//                                      getAgentCatalog
 //
 // Mutations return `void` and nothing is written to the mailbox before approval — no draft is
 // created, no id is minted, and no later read reflects a queued action. Simulating pending state
@@ -23,7 +23,7 @@ import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import {
   ActionKind, AgentCatalog, ApprovalQueue, Cursor, Gatekeeper,
-  GatekeeperUserVerifier, ResourceDescription, boundAgentCatalog,
+  GatekeeperUserVerifier, ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   type ActionDescriptionBuilder, buildDescription, type RenderedDescription,
@@ -45,13 +45,6 @@ export const OUTLOOK_MAIL_URL = "https://outlook.office.com/mail/";
 
 /** Ceiling on pages a single cursor will pull, so an agent cannot walk an entire mailbox. */
 const MAX_CURSOR_PAGES = 40;
-
-/**
- * Ceiling on folders offered to the agent catalog. Folders are the one item class here that grows
- * with the mailbox, so they are bounded well under the shared AGENT_CATALOG_MAX_ENTRIES ceiling;
- * folders past the cap stay reachable through the session's listFolders().
- */
-const MAX_CATALOG_FOLDERS = 25;
 
 // ── Action types ────────────────────────────────────────────────────
 //
@@ -623,27 +616,23 @@ export class OutlookMailGatekeeperImpl
   }
 
   /**
-   * Folder names, so an agent can discover where mail lives (and where it could be moved) without
-   * paging the session API. The Workshop loads this into every chat's prompt on every turn, with no
-   * approval in the way; folder names are the account owner's own text, unlike the message content
-   * every read here is authorized for.
+   * Static discovery label, naming no folder.
+   *
+   * The Workshop loads the catalog into every chat's prompt on every turn with no approval in the
+   * way, and it must hold nothing that needs observer verification. Folder names and counts are
+   * mailbox content this resource refuses to show anyone but its owner, and reading them would be
+   * an observation that puts the workspace in restricted mode, which a catalog read cannot do. So
+   * the catalog only says where to look; the folders come from `listFolders()`, which is audited.
+   * It also makes no Graph request.
    */
   async getAgentCatalog(): Promise<AgentCatalog | null> {
-    let folders = await this.#api().listFolders();
-    let entries = folders
-        .slice(0, MAX_CATALOG_FOLDERS)
-        .map(folder => ({
-          id: folder.id,
-          title: folder.name,
-          description:
-              `Outlook mail folder with ${folder.totalItemCount} message(s), ` +
-              `${folder.unreadItemCount} unread.`,
-        }));
-    let catalog = boundAgentCatalog(entries);
-    // A mailbox can hold more folders than the catalog advertises; boundAgentCatalog only flags its
-    // own shared ceiling, so the drop at MAX_CATALOG_FOLDERS is reported here.
-    if (folders.length > MAX_CATALOG_FOLDERS) catalog.truncated = true;
-    return catalog;
+    return {
+      entries: [{
+        id: "folders",
+        title: "Outlook mail folders",
+        description: "The mailbox's folders, and where mail could be moved. List them with listFolders().",
+      }],
+    };
   }
 
   // ---------------------------------------------------------------------------

@@ -508,7 +508,7 @@ After completing the sign-in flow, verify success in two places:
 ## Build
 
 ```
-pnpm --filter @gadgets/microsoft-gatekeeper build
+vp run -F @gadgets/microsoft-gatekeeper build
 ```
 
 ## Durable Object migrations, and how to back out a resource

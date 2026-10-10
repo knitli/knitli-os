@@ -2,6 +2,7 @@ import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSu
 import { capExecuteCodeOutput } from "./fork/turn-guards";
 import { chatWorkbook, describeWorkbookBinding, dropWorkbook, isChatWorkbook, isSpreadsheetUpload, openWorkbookSession, readWorkbookRange, stageWorkbookUpload, workbookRefFields } from "./fork/workbook-upload";
 import { deriveWorkbookBindings } from "./fork/workbook-names";
+import { withRequestedNames } from "./fork/workbook-checkpoint";
 import { isReasoningLevel } from "./fork/reasoning-levels";
 import { ActionApplyContextImpl, attestWorkspaceAudience, beginAdmission, forgetBuildAdmission,
   forgetContractedAdmissions } from "./fork/workspace-audience";
@@ -6654,8 +6655,9 @@ class OverseerImpl implements AgentHooks {
   // Returns the checkpoint named by `chatMeta.compactedTo`.
   getActiveChatCompaction(chatId: number): CompactionCheckpoint | undefined {
     let compactedTo = this.storage.chatMeta.get(chatId)?.compactedTo;
-    return compactedTo === undefined
+    let checkpoint = compactedTo === undefined
         ? undefined : this.storage.chatCompactions.get(chatKey(chatId, compactedTo));
+    return checkpoint && withRequestedNames(this.storage, checkpoint);
   }
 
   // Returns the newest checkpoint whose boundary is strictly below `sequence`, for paging history

@@ -7,6 +7,7 @@ import {
   MAX_WORKBOOK_CHUNK_BYTES,
   MAX_WORKBOOK_PROMPT_BYTES,
   MAX_WORKBOOK_ROW_BYTES,
+  MAX_WORKBOOK_SHEETS,
   MAX_WORKBOOK_UNCOMPRESSED_BYTES,
   MAX_WORKBOOK_ZIP_ENTRIES,
   chunkSheetRows,
@@ -250,6 +251,18 @@ describe("parseWorkbookAttachment", () => {
   it("flattens every Unicode line terminator, so a cell cannot forge another row", () => {
     let line = renderAddressedRow(0, ["foo\u20282 B=999\u2029x\u0085y\vz\fw\r\nv"], { collapse: false });
     expect(line).toBe('1 A="foo 2 B=999 x y z w v"');
+  });
+
+  it("quotes text holding any whitespace, so a tab cannot pass for a column separator", () => {
+    expect(renderAddressedRow(0, ["foo\tB=999", "a\u00a0b", "plain"], { collapse: false }))
+      .toBe('1 A="foo\tB=999" B="a\u00a0b" C=plain');
+  });
+
+  it("refuses a workbook with more sheets than its index may hold", () => {
+    let rows = Array.from({ length: MAX_WORKBOOK_SHEETS + 1 }, (_, index) =>
+      ({ name: `s${index}`, rows: [["x"]] }));
+    expect(() => parseWorkbookAttachment(buildWorkbook(rows, "xlsx"), XLSX_MIME_TYPE, "many.xlsx"))
+      .toThrow(TOO_LARGE_MESSAGE);
   });
 
   it("reads every accepted spreadsheet format to the same rows", () => {

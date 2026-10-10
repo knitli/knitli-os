@@ -15,6 +15,8 @@ import {
   MAX_WORKBOOK_ROWS,
   MAX_WORKBOOK_ROW_BYTES,
   MAX_WORKBOOK_UNCOMPRESSED_BYTES,
+  MAX_WORKBOOK_SHEETS,
+  MAX_WORKBOOK_SHEET_NAME_CHARS,
   MAX_WORKBOOK_ZIP_ENTRIES,
   WORKBOOK_EMPTY_MESSAGE,
   WORKBOOK_TOO_LARGE_MESSAGE,
@@ -264,6 +266,12 @@ export function parseWorkbookAttachment(
   // One budget for the whole workbook: the rows of every sheet land in the same storage and the
   // same isolate, so they are spent against the same total.
   let rowBytes = { remaining: MAX_WORKBOOK_ROW_BYTES };
+
+  if (workbook.SheetNames.length > MAX_WORKBOOK_SHEETS ||
+      workbook.SheetNames.reduce((total, sheetName) => total + sheetName.length, 0) >
+          MAX_WORKBOOK_SHEET_NAME_CHARS) {
+    throw new Error(WORKBOOK_TOO_LARGE_MESSAGE);
+  }
 
   for (let sheetName of workbook.SheetNames) {
     let sheet = workbook.Sheets[sheetName];

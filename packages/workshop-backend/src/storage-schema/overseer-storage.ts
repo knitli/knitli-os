@@ -665,7 +665,8 @@ export type CompactionCheckpoint = {
   /**
    * Names of every connection request before the boundary, whatever became of it. Workbook binding
    * names are derived at replay clear of these, and a denied request is no longer in the retained
-   * log to say so (see fork/workbook-names.ts). Absent on checkpoints written before workbooks.
+   * log to say so (see fork/workbook-names.ts). Filled in from the stored prefix on first use for checkpoints written
+   * before workbooks (fork/workbook-checkpoint.ts).
    */
   requestedNames?: string[];
 

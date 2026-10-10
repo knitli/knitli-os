@@ -256,6 +256,11 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **UI:** `packages/workshop-frontend/src/features/notifications/webPush/` (settings switch and
   subscription hook), `public/sw.js` (push-only worker, no `fetch` handler so the WebSocket and
   sign-in redirects are never intercepted) and `public/manifest.webmanifest`, all Tier 1. Upstream
+  The subscription is per browser, not per account, so the hook records the owning user in
+  `localStorage`: `WebPushSync` (mounted in `AuthContext.tsx`) drops a subscription that is not the
+  signed-in user's and re-registers the user's own at every app start (this also heals a refreshed
+  endpoint; `sw.js` has no `pushsubscriptionchange` handler because it holds no credentials), and
+  sign-out releases the subscription first.
   seams: a manifest link in `index.html` (with `crossorigin="use-credentials"` for Cloudflare
   Access) and the Notifications section in `SettingsPage.tsx`. Both files are served from the
   router's static assets at the origin root, which gives the worker scope `/`; no router change.

@@ -1,6 +1,8 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { WebPushSync } from './features/notifications/webPush/WebPushSync'
+import { releaseOnSignOut } from './features/notifications/webPush/browserSubscription'
 
 interface AuthContextType {
   authenticatedApi: RpcStub<AuthenticatedApi>
@@ -48,7 +50,8 @@ export function AuthProvider({ children, authenticatedApi, onLogout }: AuthProvi
   const isAdmin = isAdminResult?.authenticatedApi === authenticatedApi ? isAdminResult.value : false
 
   return (
-    <AuthContext.Provider value={{ authenticatedApi, logout: onLogout, currentUser, isAdmin }}>
+    <AuthContext.Provider value={{ authenticatedApi, logout: () => void releaseOnSignOut(authenticatedApi).finally(onLogout), currentUser, isAdmin }}>
+      <WebPushSync />
       {children}
     </AuthContext.Provider>
   )

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { claimBrowserSubscription, ownsBrowserSubscription, releaseBrowserSubscription } from './browserSubscription'
 import {
   applicationServerKey,
   currentPushEnvironment,
@@ -53,7 +54,8 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
       setReady({ registration, key })
       if (Notification.permission === 'denied') {
         setStatus('blocked')
-      } else if (subscription && Notification.permission === 'granted' && subscribedWithKey(subscription, key)) {
+      } else if (subscription && Notification.permission === 'granted' && subscribedWithKey(subscription, key)
+        && await ownsBrowserSubscription(api)) {
         // Re-register on every visit: the server forgets a device the push service reported gone,
         // and this heals a device that is back.
         await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
@@ -79,7 +81,8 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
       }
       const { registration, key } = ready
       let subscription = await registration.pushManager.getSubscription()
-      if (subscription && !subscribedWithKey(subscription, key)) {
+      // Another user's subscription (or one made with an old key) is replaced, never shared.
+      if (subscription && (!subscribedWithKey(subscription, key) || !(await ownsBrowserSubscription(api)))) {
         await subscription.unsubscribe()
         subscription = null
       }
@@ -88,6 +91,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
         applicationServerKey: applicationServerKey(key),
       })
       await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
+      await claimBrowserSubscription(api)
       setStatus('on')
     } finally {
       setBusy(false)
@@ -98,11 +102,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
     if (!ready) return
     setBusy(true)
     try {
-      const subscription = await ready.registration.pushManager.getSubscription()
-      if (subscription) {
-        await api.removeWebPushSubscription(subscription.endpoint)
-        await subscription.unsubscribe()
-      }
+      await releaseBrowserSubscription(api, ready.registration)
       setStatus('off')
     } finally {
       setBusy(false)

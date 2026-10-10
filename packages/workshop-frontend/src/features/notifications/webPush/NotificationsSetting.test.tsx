@@ -53,6 +53,7 @@ function fakeApi() {
   return {
     getWebPushPublicKey: vi.fn<() => Promise<string | null>>(async () => KEY),
     addWebPushSubscription: vi.fn<(subscription: WebPushSubscriptionInfo) => Promise<void>>(async () => {}),
+    whoami: vi.fn<() => Promise<{ id: string }>>(async () => ({ id: 'me@example.com' })),
     removeWebPushSubscription: vi.fn<(endpoint: string) => Promise<void>>(async () => {}),
   }
 }
@@ -63,6 +64,7 @@ describe('NotificationsSetting', () => {
   afterEach(async () => {
     await act(async () => root?.unmount())
     document.body.replaceChildren()
+    localStorage.clear()
     vi.unstubAllGlobals()
     delete (navigator as { serviceWorker?: unknown }).serviceWorker
   })
@@ -98,6 +100,7 @@ describe('NotificationsSetting', () => {
   it('shows an existing subscription as on, re-registers it, and turns it off', async () => {
     const api = fakeApi()
     const browser = installBrowser({ permission: 'granted', subscribed: true })
+    localStorage.setItem('gadgets.webPush.owner', 'me@example.com')
     const container = await render(api)
     expect(container.textContent).toContain('On for this device')
     expect(api.addWebPushSubscription).toHaveBeenCalledTimes(1)
@@ -106,6 +109,20 @@ describe('NotificationsSetting', () => {
     expect(api.removeWebPushSubscription).toHaveBeenCalledWith(SUBSCRIPTION_JSON.endpoint)
     expect(browser.subscription.unsubscribe).toHaveBeenCalled()
     expect(button(container, 'Turn on')).toBeDefined()
+  })
+
+  it('does not adopt a subscription left by another user: shows it off and replaces it on turn-on', async () => {
+    const api = fakeApi()
+    const browser = installBrowser({ permission: 'granted', subscribed: true })
+    localStorage.setItem('gadgets.webPush.owner', 'someone-else@example.com')
+    const container = await render(api)
+    expect(api.addWebPushSubscription).not.toHaveBeenCalled()
+    expect(container.textContent).not.toContain('On for this device')
+
+    await act(async () => button(container, 'Turn on')!.click())
+    expect(browser.subscription.unsubscribe).toHaveBeenCalled()
+    expect(browser.pushManager.subscribe).toHaveBeenCalled()
+    expect(localStorage.getItem('gadgets.webPush.owner')).toBe('me@example.com')
   })
 
   it('says so, and registers no service worker, when the deployment has no push key', async () => {

@@ -569,8 +569,9 @@ export class ScheduleDriver extends DurableObject {
 
   async #cleanupRevokedAccount(): Promise<void> {
     const entries = [...this.ctx.storage.kv.list({ limit: REVOCATION_CLEANUP_BATCH_SIZE + 1 })];
+    // The alarm guard's counter is kept: deleting it mid-run would restart its flood count each pass.
     const cleanup = entries
-      .filter(([key]) => key !== METADATA_KEY)
+      .filter(([key]) => key !== METADATA_KEY && !key.startsWith(ALARM_GUARD_KEY_PREFIX))
       .slice(0, REVOCATION_CLEANUP_BATCH_SIZE);
     for (const [key, value] of cleanup) {
       if (key.startsWith(CAPABILITIES_PREFIX)) disposeCapabilities(value as StoredCapabilities);
@@ -578,7 +579,7 @@ export class ScheduleDriver extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       for (const [key] of cleanup) this.ctx.storage.kv.delete(key);
     });
-    // The alarm guard rewrites its counter after every run, so it never counts as remaining data.
+    // The guard's counter is never remaining data.
     const remains = [...this.ctx.storage.kv.list({ limit: 3 })].some(
       ([key]) => key !== METADATA_KEY && !key.startsWith(ALARM_GUARD_KEY_PREFIX),
     );

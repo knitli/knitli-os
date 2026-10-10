@@ -1256,6 +1256,23 @@ describe("ScheduleDriver", () => {
     });
     expect(keys).toEqual(["metadata"]);
   });
+
+  it("keeps the alarm guard's counter across revocation cleanup passes", async () => {
+    const driver = testEnv.SCHEDULE_DRIVER.getByName("revocation-guard-counter");
+    await runInDurableObject(driver, (_instance, state) => {
+      for (let index = 0; index < 250; index++) state.storage.kv.put(`junk:${index}`, index);
+    });
+    await driver.revoke();
+    const counts = await runInDurableObject(driver, async (instance, state) => {
+      await state.storage.deleteAlarm(); // take over from the real alarm so the passes are ours
+      const read = () => state.storage.kv.get<{ count: number }>("alarm-guard:scheduler")?.count;
+      await instance.alarm();
+      const first = read();
+      await instance.alarm();
+      return [first, read()];
+    });
+    expect(counts[1]).toBeGreaterThan(counts[0]!);
+  });
 });
 
 async function rejectedMessage(run: () => Promise<unknown>): Promise<string> {

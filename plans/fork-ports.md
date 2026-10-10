@@ -12,8 +12,14 @@ small, doc-comment every exported member, and split kernel PRs from UI PRs.
 
 Rules for every port:
 
-- **Check the licence first.** Confirm each source fork carries a licence that permits reuse before
-  copying code. If it does not, reimplement from the behaviour described here.
+- **Licences are checked (2026-10-10).** The root `LICENSE` of `twinprime19/cloudflare-os`,
+  `XcityUS/xct-os`, `michielappelman/cloudflare-os`, `Intelligent-Tyms/cloudflare-os`,
+  `totango/odie-os` and `boisejosh/cloudflare-os` is byte-identical to upstream's Apache-2.0, and
+  none sets a different `license` in its root `package.json`. That is repo-level only. Before each
+  port, grep the specific files for per-file headers, vendored third-party code and new
+  dependencies, and stop on anything proprietary, undocumented or copyleft so we can decide. Under
+  Apache-2.0 section 4 we keep existing notices and mark files we change, and every port commit
+  records the source fork and commit.
 - **Port the idea, not the diff.** The forks branched at different upstream points. Several have
   since moved config to `cloudflare.config.ts` (#597) and renamed things, so read their code as a
   reference and write against our tree.

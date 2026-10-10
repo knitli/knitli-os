@@ -10,6 +10,10 @@ Microsoft Entra ID (Azure AD) integration for Gadgets. It serves two purposes:
   requested (plus `offline_access`):
   - **Outlook mailbox** at `https://outlook.office.com/mail/` — `Mail.ReadWrite`, so gadgets can
     read, organize, and draft replies to mail on the user's behalf.
+  - **Microsoft Teams** at `https://teams.microsoft.com/` — five read-only scopes, so gadgets can
+    read the teams, channels, chats, members, and messages the user can already see. Nothing in
+    this resource writes: there is no method that posts, edits, deletes, marks read, joins, or
+    leaves.
 
 A single Entra app registration is used for both, and it is pinned to **one tenant** — the worker
 needs `CLIENT_ID`, `CLIENT_SECRET`, and `TENANT_ID` before it will answer anything.
@@ -45,6 +49,27 @@ belongs to the person signing in. The address is lowercased and becomes the acco
 in with Microsoft resolves to the same Workshop account as any other gatekeeper that verifies the
 same address.
 
+## Microsoft Teams: the limits of this version
+
+What the Teams resource serves is the read side of the account's own membership: joined teams, their
+channels and rosters, channel messages and replies, the user's chats with their members and
+messages, and a search across them with on-demand hydration of a hit. Three limits are worth
+knowing before enabling it, because none of them is a setting a deployment can change.
+
+- **A Teams-bound gadget is single-user.** A connection covers every team, channel, and private chat
+  the connected account takes part in, and no second user can be shown to have access to all of
+  that — so `addObserver` throws, and the gadget is observable only by the account that connected
+  it. Sharing would mean verifying each observer against their own Teams membership through their
+  own delegated token and serving only the channels they belong to (private chats could never be
+  shared). That is a later change, not a configuration.
+- **A grant cannot be narrowed afterwards.** Reconnecting an account re-requests what it already
+  holds, so there is no "keep the mailbox, drop Teams". Shedding Teams means disconnecting the
+  Microsoft account altogether and connecting again naming only the mailbox.
+- **Nothing is live.** Reads happen when a gadget asks for them; no arriving message wakes anything.
+  Change notifications would need a public subscription endpoint renewed every few days, and the
+  bulk `getAllMessages` / `/delta` feeds are application permissions — neither fits a delegated,
+  on-demand gatekeeper. An agent therefore sees what it looks at, when it looks.
+
 ## Setting up the Entra app registration
 
 ### Step 1: Register the application
@@ -76,6 +101,11 @@ add:
 | `offline_access` | no | refresh tokens, so a connected mailbox survives past the first hour |
 | `User.Read` | no | the signed-in user's profile, and the tenant's verified domain list |
 | `Mail.ReadWrite` | no | read messages and folders, flip read state, move messages, draft replies |
+| `Team.ReadBasic.All` | no | list the teams the user has joined, and read a team's name |
+| `Channel.ReadBasic.All` | no | list and read the channels of those teams |
+| `TeamMember.Read.All` | **yes** | read a team's roster |
+| `ChannelMessage.Read.All` | **yes** | read channel messages and their replies |
+| `Chat.Read` | no* | read the user's chats, their members, and their messages |
 
 Then click **Grant admin consent for &lt;tenant&gt;** and confirm every permission reads
 **Granted**. Many tenants block user consent; without admin consent those users hit `AADSTS65001`
@@ -88,20 +118,20 @@ consented before a release ships — only before someone connects that resource.
 
 **Consent all of a resource's permissions or none.** A resource counts as granted only when the
 grant covers *every* one of its scopes, so a resource left unconsented is unavailable rather than
-partly working. The worker
+partly working — and the symptom is a connect flow that keeps offering a reconnect link. The worker
 logs the shortfall at `warn` with `event: "microsoft.consent.resource.ungranted"`, naming the
 resource and the missing scopes; check the logs before re-running the consent. A grant records what
 it covered at the moment it was issued, so **an account that connected before the permission was
 added stays without that resource until it connects Microsoft again** — fixing the consent alone
 changes nothing for accounts already connected.
 
-**The "admin consent" column is Microsoft's static classification of the permission, not a
+**\*The "admin consent" column is Microsoft's static classification of the permission, not a
 prediction about this tenant.** Under "Secure by Default" (message center post `MC1163922`) it is
 the tenant's **consent policy** that decides what a user may agree to, and the default policy
 withholds permissions that read other people's data. A "no" row can therefore still stop at a
-prompt only an administrator can complete — `Mail.ReadWrite` among them, since a mailbox is
-private data. Granting admin consent for the whole table once makes the distinction moot, which is
-why the step above is not optional. **Record this tenant's actual posture here**
+prompt only an administrator can complete — `Chat.Read` most of all, since chat messages are by
+definition other people's. Granting admin consent for the whole table once makes the distinction
+moot, which is why the step above is not optional. **Record this tenant's actual posture here**
 when the permissions are added: one line saying whether a user could consent unaided, or the
 administrator had to.
 
@@ -232,6 +262,17 @@ identifies the cause, and guessing without it wastes a round trip.
       the text still cannot execute in the approval UI, but say so here and escape it at the API
       layer before this ships to anyone but you.
 
+### Teams connection and behavior (via a gadget)
+
+- [ ] **Consent is in place.** `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `TeamMember.Read.All`,
+      `ChannelMessage.Read.All` and `Chat.Read` (delegated) read **Granted** on the registration.
+- [ ] **Connect on its own.** Connections → Microsoft → "Microsoft Teams" → Connect. Only the five
+      Teams permissions are requested (no `Mail.ReadWrite` on the consent screen), and a mailbox
+      that was already connected keeps working.
+- [ ] **Reads produce observations.** List teams, channels and chats, and read a few messages; each
+      read shows up as an observation, and nothing in Teams changes.
+- [ ] **Single-user.** Share a gadget bound to Teams with a colleague → opening it is refused.
+
 ### Password-auth coexistence
 
 Password accounts key on the address exactly as typed, while Microsoft sign-in lowercases it. The
@@ -273,7 +314,7 @@ answers `401` with `WWW-Authenticate: Bearer … error="insufficient_claims"`. M
 help, since the refresh token produces a token with the same claims, so the gatekeeper does not
 retry: it reports the credentials as dead, which is what raises the reconnect prompt. The user
 reconnects and satisfies whatever the policy now asks for (MFA, a compliant device). This is one
-shared request path, so every resource behaves the same way.
+shared request path, so Teams behaves exactly as mail does here.
 
 ### Sign-in is refused for a user who exists in the directory
 
@@ -301,7 +342,7 @@ pnpm --filter @gadgets/microsoft-gatekeeper build
 
 Each resource type has its own Durable Object class, and every class is registered by a `migrations`
 tag in the `migrations` export of `cloudflare.config.ts` — `v0` for `UserAccount` and
-`OutlookMailGatekeeperImpl`. `wrangler.jsonc` is generated from it (`pnpm configs:generate`). Tags are appended,
+`OutlookMailGatekeeperImpl`, `v1` for `TeamsGatekeeperImpl`. `wrangler.jsonc` is generated from it (`pnpm configs:generate`). Tags are appended,
 never edited: rewriting an applied tag makes the next deploy disagree with the migration history the
 account already holds.
 

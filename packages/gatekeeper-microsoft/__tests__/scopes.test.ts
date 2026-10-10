@@ -52,6 +52,7 @@ describe("grantCoversScopes", () => {
 
 const DO_ID = "a".repeat(64);
 const MAIL_PATTERN = "https://outlook.office.com/mail/*";
+const TEAMS_PATTERN = "https://teams.microsoft.com/*";
 
 const IDENTITY_SCOPES = ["openid", "profile", "email", "User.Read", "offline_access"];
 const MAIL_SCOPES = ["Mail.ReadWrite"];
@@ -117,6 +118,13 @@ function accountWithGrant(grantedScopes: string[]): UserAccount {
 }
 
 describe("resourceUrlPatternsToOAuthScopes", () => {
+  it("requests exactly the Teams scopes for a Teams-only connection", async () => {
+    const scopes = await scopesFor({ resourceUrlPatterns: [TEAMS_PATTERN] });
+
+    expect(scopes.toSorted()).toEqual([...IDENTITY_SCOPES, ...TEAMS_SCOPES].toSorted());
+    expect(scopes).not.toContain("Mail.ReadWrite");
+  });
+
   it("requests exactly the mail scope for a mail-only connection", async () => {
     const scopes = await scopesFor({ resourceUrlPatterns: [MAIL_PATTERN] });
 
@@ -154,10 +162,24 @@ describe("resourceUrlPatternsToOAuthScopes", () => {
 
 describe("grantedResourcesFromScopes", () => {
   it("accepts the resource-qualified, differently cased form Entra actually returns", async () => {
-    const qualified = MAIL_SCOPES.map(scope => `https://graph.microsoft.com/${scope.toLowerCase()}`);
+    const qualified = [...MAIL_SCOPES, ...TEAMS_SCOPES].map(scope => `https://graph.microsoft.com/${scope.toLowerCase()}`);
 
     await expect(accountWithGrant(qualified).getGrantedResourceUrlPatterns())
-      .resolves.toEqual([MAIL_PATTERN]);
+      .resolves.toEqual([MAIL_PATTERN, TEAMS_PATTERN]);
+  });
+
+  it("detects a Teams-only grant", async () => {
+    await expect(accountWithGrant([...IDENTITY_SCOPES, ...TEAMS_SCOPES])
+      .getGrantedResourceUrlPatterns()).resolves.toEqual([TEAMS_PATTERN]);
+  });
+
+  it("treats a partly consented Teams grant as not granted at all", async () => {
+    // Detection is all-or-nothing: one permission an administrator declined leaves the whole
+    // resource unavailable, which is why the shortfall is logged when the grant lands.
+    const partial = TEAMS_SCOPES.filter(scope => scope !== "ChannelMessage.Read.All");
+
+    await expect(accountWithGrant([...IDENTITY_SCOPES, ...partial])
+      .getGrantedResourceUrlPatterns()).resolves.toEqual([]);
   });
 
   it("detects a mail-only grant", async () => {

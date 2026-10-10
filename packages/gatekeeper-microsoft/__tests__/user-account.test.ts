@@ -10,6 +10,10 @@ const AUTH_SCOPES = ["openid", "profile", "email", "User.Read"];
 const IDENTITY_SCOPES = [...AUTH_SCOPES, "offline_access"];
 // The resource scopes a connection asks for per grantable resource, mirroring the vendor's table.
 const MAIL_SCOPES = ["Mail.ReadWrite"];
+const TEAMS_SCOPES = [
+  "Team.ReadBasic.All", "Channel.ReadBasic.All", "TeamMember.Read.All",
+  "ChannelMessage.Read.All", "Chat.Read",
+];
 
 const env = {
   CLIENT_ID: "client-id",
@@ -311,6 +315,56 @@ describe("consent coverage", () => {
       resource: "https://outlook.office.com/mail/*",
       missingScopes: ["Mail.ReadWrite"],
     });
+  });
+
+  it("names the scopes a partly consented resource came back without", async () => {
+    // A resource is usable only when every one of its scopes is granted, so a declined permission
+    // leaves it unavailable with nothing else in the system saying which one is missing.
+    const warnings = captureWarnings();
+    const { account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1",
+      expires_in: 3600,
+      refresh_token: "refresh-1",
+      // The administrator consented to the team and channel reads and declined the message ones.
+      scope: "openid profile email https://graph.microsoft.com/User.Read " +
+          "https://graph.microsoft.com/Team.ReadBasic.All " +
+          "https://graph.microsoft.com/Channel.ReadBasic.All " +
+          "https://graph.microsoft.com/TeamMember.Read.All",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await expect(connect(account, fakeCallback(), {
+      scopes: [...IDENTITY_SCOPES, ...TEAMS_SCOPES],
+    })).resolves.toEqual(HANDOFF);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({
+      event: "microsoft.consent.resource.ungranted",
+      resource: "https://teams.microsoft.com/*",
+      missingScopes: ["ChannelMessage.Read.All", "Chat.Read"],
+    });
+  });
+
+  it("records the consented part of a partly consented resource and leaves the rest out", async () => {
+    // The Teams permissions the administrator declined must not come back on the next refresh.
+    const { account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1",
+      expires_in: 3600,
+      refresh_token: "refresh-1",
+      scope: "openid profile email https://graph.microsoft.com/User.Read " +
+          "https://graph.microsoft.com/Mail.ReadWrite " +
+          "https://graph.microsoft.com/Team.ReadBasic.All",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await connect(account, fakeCallback(), {
+      scopes: [...IDENTITY_SCOPES, ...MAIL_SCOPES, ...TEAMS_SCOPES],
+    });
+
+    expect(await account.getGrantScopes()).toEqual(
+      [...IDENTITY_SCOPES, ...MAIL_SCOPES, "Team.ReadBasic.All"]);
   });
 
   it("records only the scopes the grant covers, so a refresh never re-asks for a declined one", async () => {

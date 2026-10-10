@@ -22,15 +22,20 @@ import {
   fetchVerifiedDomains, grantCoversScopes, normalizeScope, refreshAccessToken, resolveVerifiedEmail,
 } from "./microsoft-api";
 import type { OutlookMailGatekeeperImplProps } from "./outlook-mail";
+import type { TeamsGatekeeperImplProps } from "./teams";
 import type {
   OutlookMailConfiguratorRpc,
 } from "./configurator/outlook-mail-configurator-types";
+import type { TeamsConfiguratorRpc } from "./configurator/teams-configurator-types";
 import MICROSOFT_LOGO_SVG from "./microsoft-logo.svg";
 import OUTLOOK_MAIL_CONFIGURATOR_HTML from "./generated/outlook-mail-configurator-ui.txt";
+import TEAMS_CONFIGURATOR_HTML from "./generated/teams-configurator-ui.txt";
 import TYPES_CODE from "./types.txt";
+import TEAMS_TYPES_CODE from "./teams-types.txt";
 import { obsContext } from "./observability.js";
 
 export { OutlookMailGatekeeperImpl } from "./outlook-mail";
+export { TeamsGatekeeperImpl } from "./teams";
 
 // Vendor id = GATEKEEPER_<NAME> binding suffix (lowercased).
 const VENDOR_ID = "microsoft";
@@ -176,11 +181,30 @@ const OUTLOOK_MAIL_RESOURCE: SupportedResource = {
   grantable: true,
 };
 
+const TEAMS_RESOURCE: SupportedResource = {
+  urlPattern: "https://teams.microsoft.com/*",
+  title: "Microsoft Teams",
+  description: "Read teams, channels, chats, and messages. Read-only.",
+  grantable: true,
+};
+
 // `Mail.ReadWrite` covers reading messages and folders, flipping read state, moving messages, and
 // creating drafts. `Mail.Send` is deliberately absent: this gatekeeper never sends mail, it leaves
 // drafts for the user.
+//
+// The Teams scopes are all `Read`/`ReadBasic`: there is no Teams permission here that can write, so
+// the read-only promise of that resource holds at the grant as well as in the code. Several of them
+// require a tenant administrator's consent, which is why a partly consented grant is logged (see
+// `logUngrantedResources`) instead of quietly leaving the resource unavailable.
 const RESOURCE_SCOPES: {resource: SupportedResource, scopes: string[]}[] = [
   { resource: OUTLOOK_MAIL_RESOURCE, scopes: ["Mail.ReadWrite"] },
+  {
+    resource: TEAMS_RESOURCE,
+    scopes: [
+      "Team.ReadBasic.All", "Channel.ReadBasic.All", "TeamMember.Read.All",
+      "ChannelMessage.Read.All", "Chat.Read",
+    ],
+  },
 ];
 
 const SUPPORTED_RESOURCES: SupportedResource[] = RESOURCE_SCOPES.map(entry => entry.resource);
@@ -418,8 +442,15 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     return SUPPORTED_RESOURCES;
   }
 
+  /**
+   * Every resource type's types, joined.
+   *
+   * A plain concatenation, which is only safe because each per-resource file declares its own names
+   * (including its own cursor interface), so the joined text declares each name once. Each
+   * `Gatekeeper.getTypeScriptTypes()` still serves only its own file.
+   */
   async getTypeScriptTypes(): Promise<string> {
-    return TYPES_CODE;
+    return [TYPES_CODE, TEAMS_TYPES_CODE].join("\n");
   }
 }
 
@@ -973,6 +1004,18 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       };
     }
 
+    // Teams is a whole-instance resource: one connected account has exactly one Teams surface, and
+    // every deep link into it (a channel, a chat, a single message) is that same surface. So the
+    // path is not consulted, unlike the mailbox's — but the host still is, exactly, so that
+    // `teams.microsoft.com.example.com` does not bind it.
+    if (parsed.hostname === "teams.microsoft.com") {
+      let props: TeamsGatekeeperImplProps = { userObjectId: this.ctx.props.userObjectId };
+      return {
+        class: this.ctx.exports.TeamsGatekeeperImpl({props}),
+        resource: TEAMS_RESOURCE,
+      };
+    }
+
     throw new Error(`The Microsoft gatekeeper cannot connect this URL: ${url}`);
   }
 
@@ -982,6 +1025,13 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       return {
         iframeHtml: OUTLOOK_MAIL_CONFIGURATOR_HTML,
         ui: new RpcStub(new OutlookMailConfiguratorUI()),
+      };
+    }
+
+    if (resourceUrlPattern === TEAMS_RESOURCE.urlPattern) {
+      return {
+        iframeHtml: TEAMS_CONFIGURATOR_HTML,
+        ui: new RpcStub(new TeamsConfiguratorUI()),
       };
     }
 
@@ -1062,9 +1112,12 @@ export class MicrosoftVerifier extends WorkerEntrypoint<Env, MicrosoftVerifierPr
 // ---------------------------------------------------------------------------
 // Resource configurator
 //
-// RPC interface exposed to the resource-selection iframe. The mailbox is a singleton — a connected
-// account has exactly one — so its frame confirms the choice and needs nothing from the
-// gatekeeper.
+// RPC interface exposed to the resource-selection iframe. The mailbox and the Teams surface are
+// singletons — a connected account has exactly one of each — so those frames confirm the choice and
+// need nothing from the gatekeeper.
 
 @validateRpc()
 export class OutlookMailConfiguratorUI extends RpcTarget implements OutlookMailConfiguratorRpc {}
+
+@validateRpc()
+export class TeamsConfiguratorUI extends RpcTarget implements TeamsConfiguratorRpc {}

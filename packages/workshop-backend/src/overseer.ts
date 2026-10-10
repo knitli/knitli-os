@@ -1,4 +1,5 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
+import { capExecuteCodeOutput } from "./fork/turn-guards";
 import { isReasoningLevel } from "./fork/reasoning-levels";
 import { ActionApplyContextImpl, attestWorkspaceAudience, beginAdmission, forgetBuildAdmission,
   forgetContractedAdmissions } from "./fork/workspace-audience";
@@ -8589,6 +8590,7 @@ class OverseerImpl implements AgentHooks {
         }).join(" ");
       }).join("\n");
 
+      log = capExecuteCodeOutput(log);
       if (error !== undefined) {
         log += `\n\nUncaught exception: ${error}`;
       } else if (log === "") {

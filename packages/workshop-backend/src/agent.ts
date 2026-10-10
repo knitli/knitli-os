@@ -1,4 +1,5 @@
 import { AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AiChatStreamEvent, BlueprintBinding, BlueprintMerge, BlueprintOutput, ChatGadgetPin, ChatGadgetPinRecord, MainlineMergeGadget, WorkpieceId, type AiModelConfig, type PromptRef, isTextLikeAttachmentMimeType, validateBindingName, withTranscriptionContext } from '@gadgets/workshop-shared/api';
+import { newTurnBudget, recordStep, stoppedOnOutputCap, LENGTH_CAP_NOTICE, EXECUTE_CODE_OUTPUT_ADVICE, type TurnBudget } from "./fork/turn-guards";
 import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type CodeContent,
   type CodeChange, type FileChange } from '@gadgets/workshop-shared/code-change';
 import { PDF_MIME_TYPE, modelApiSupportsPdfAttachments } from './chat-attachment-pdf';
@@ -1247,6 +1248,8 @@ NOTE: You do NOT need this tool to use a resource yourself with \`executeCode\` 
 
 let EXECUTE_CODE_INTRO = `
 Executes one-off JavaScript code, returning the output it logs to the console. The code runs in a sandbox where it cannot talk to the internet, except through the bindings in its 'env' object; fetch() will not work. Otherwise, the code can call any built-in APIs available in Cloudflare Workers.
+
+${EXECUTE_CODE_OUTPUT_ADVICE}
 `.trim();
 
 let EXECUTE_CODE_SELF_PARAM = `
@@ -1489,10 +1492,12 @@ export async function runAgent(
     modelConfig: AiModelConfig,
     options: RunAgentOptions = {}): Promise<void> {
   let retries = 0;
+  let budget = newTurnBudget();
   while (true) {
     let history = hooks.loadChatHistory(chatId);
     let outcome = await runAgentPass(
-        hooks, handle, chatId, author, history, abortSignal, initiator, modelConfig, options);
+        hooks, handle, chatId, author, history, abortSignal, initiator, modelConfig, options,
+        budget);
     if (outcome.type === "transientFailure") {
       if (++retries > TRANSIENT_FAILURE_RETRIES) throw outcome.error;
       // The failed request persisted nothing, so the retry starts from the last saved step. What
@@ -1515,7 +1520,8 @@ async function runAgentPass(
     abortSignal: AbortSignal,
     initiator: AiChatAuthorInfo,
     modelConfig: AiModelConfig,
-    options: RunAgentOptions = {}): Promise<AgentPassOutcome> {
+    options: RunAgentOptions = {},
+    budget: TurnBudget = newTurnBudget()): Promise<AgentPassOutcome> {
 
   // The workspace's gadget registry, snapshotted at the start of the turn (gadgets provisional
   // to other chats are excluded -- they belong to those chats' proposed changes). This is the
@@ -4001,6 +4007,8 @@ async function runAgentPass(
   // see them; the awaited turn_end barrier then persists this same snapshot before another
   // model request is allowed to start.
   let capturedActionsForStep: ReturnType<AgentHooks["consumeCapturedActions"]>;
+  // Set by finishTurn when a turn guard ends the turn; turn_end commits it with the step.
+  let stopNotice: string | undefined;
 
   // The awaited event sink driving both the client stream fan-out and the persistence barrier.
   let emit = async (event: AgentEvent): Promise<void> => {
@@ -4140,10 +4148,19 @@ async function runAgentPass(
             });
           }
 
+          if (stoppedOnOutputCap(message, msg.message, !!msg.toolCalls)) {
+            msg.message = LENGTH_CAP_NOTICE;
+          }
+
           // The model-facing snapshot rides along for the overseer to persist beside the display
           // record.
           msg.modelData = makeStoredAssistantMessage(message);
           msgs.push(msg);
+        }
+
+        if (stopNotice !== undefined) {
+          msgs.push({type: "message", message: stopNotice});
+          stopNotice = undefined;
         }
 
         let capturedActions = capturedActionsForStep;
@@ -4232,9 +4249,11 @@ async function runAgentPass(
       if (message.stopReason === "error" || message.stopReason === "aborted") return;
       capturedActionsForStep = hooks.consumeCapturedActions(chatId);
       if (capturedActionsForStep?.awaitDecision) awaitingActionDecision = true;
+      if (!abortSignal.aborted) stopNotice = recordStep(budget, message, toolResults);
       // The stop reasons that end the turn come first: a compaction reload must not resume work
       // that one of them ended.
       if (
+          stopNotice !== undefined ||
           // Cancelled during tool execution: turn_end will persist the completed turn before
           // this decision ends the loop; don't start another (doomed) model request.
           abortSignal.aborted ||

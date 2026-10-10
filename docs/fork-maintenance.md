@@ -927,3 +927,21 @@ ids are facet-local, not Activity ids.
   override, drop ours and keep theirs; otherwise reapply the two lines in `parseArgs`.
 - **2026-10-04 sync:** upstream moved the task env declaration under `cache.env` (vp 1.0.0
   schema); the override list and test pin the nested form now. Nothing else changed.
+
+### Agent turn guards (ported from twinprime19/cloudflare-os)
+
+- **What:** a turn ends visibly after 3 consecutive steps whose tool calls all failed with
+  identical input, or at 30 steps, with a plain agent text notice committed in that step's
+  barrier. A step that stops on `length` with no text and no tool calls gets an explanatory
+  notice instead of an empty bubble. executeCode console output is capped at 32 KiB, before the
+  exception suffix, and the tool description says so.
+- **Where:** all policy is in the fork-owned `src/fork/turn-guards.ts` (Tier 1). Upstream seams:
+  `agent.ts` (`runAgent` owns a `TurnBudget`, passed as an optional `runAgentPass` parameter;
+  `finishTurn` calls `recordStep`; `turn_end` commits the notice and the length notice; one
+  `${EXECUTE_CODE_OUTPUT_ADVICE}` line in the executeCode intro) and `overseer.ts` (one
+  `capExecuteCodeOutput` call).
+- **Source:** fork commits edea30a0, ecf88cae (length notice only), 9a4fa1ad (decide in
+  `finishTurn`); Apache-2.0. Not ported: the Workers AI `reasoning_effort: low` change, because
+  `ai-models.ts` here already maps reasoning levels per model.
+- **Test:** `__tests__/knitli-turn-guards.test.ts` (Tier 1).
+- **At sync:** Tier 2. Upstream has no step cap; if it adds one, fold it into `TurnBudget`.

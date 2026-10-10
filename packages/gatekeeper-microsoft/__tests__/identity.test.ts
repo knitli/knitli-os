@@ -141,6 +141,18 @@ describe("classifyTokenFailure", () => {
     expect(classifyTokenFailure({ error: "interaction_required" }).permanent).toBe(true);
   });
 
+  it("treats invalid_grant as permanent even with a code nobody catalogued", () => {
+    for (const body of [
+      { error: "invalid_grant", error_codes: [54321] },
+      { error: "invalid_grant", error_description: "AADSTS99999: something new." },
+      { error: "invalid_grant" },
+    ]) {
+      const failure = classifyTokenFailure(body);
+      expect(failure.permanent).toBe(true);
+      expect(failure.message).toMatch(/reconnect/i);
+    }
+  });
+
   it("treats an uncatalogued code as transient so a live account is never killed by guesswork", () => {
     const failure = classifyTokenFailure({ error: "temporarily_unavailable", error_codes: [90033] });
     expect(failure.permanent).toBe(false);

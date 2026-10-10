@@ -306,8 +306,9 @@ describe("listColumns", () => {
 
     const columns = await newApi().listColumns("site-1", "list-1");
 
+    // Reported writable: it is kept for the very reason that it still accepts a create.
     expect(columns).toEqual([
-      { name: "Title", displayName: "Title", type: "text", required: false, readOnly: true },
+      { name: "Title", displayName: "Title", type: "text", required: false, readOnly: false },
     ]);
   });
 });

@@ -52,6 +52,10 @@ Workshop is deliberately not changed to pass the binding's resource.
 - **Reply-draft reconciliation is approximate.** A retried draft is recognised by the reply's text, in
   the same conversation, created after the first attempt began. Another draft that begins with the
   same text in that conversation within a minute of it can be taken for the first attempt's.
+- **A late "restored" can overtake a newer "expired".** The Workshop acknowledges a restored-
+  credentials notice after a follow-up read, so if the account dies again in that window the stale
+  acknowledgement can clear the newer expiry mark. The next failed call marks it again; closing the
+  window needs the Workshop to order the two notices, which it does not.
 - **The account's own profile read is not retried.** The Connections listing and sign-in read the
   profile with the account's current token and do not ask for a replacement when Microsoft has
   invalidated it before its expiry; the resource clients do. Reconnecting heals it.

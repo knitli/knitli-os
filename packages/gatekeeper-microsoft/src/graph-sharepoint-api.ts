@@ -320,7 +320,9 @@ function normalizeColumn(column: GraphColumnDefinition): ColumnDefinition | null
         : name,
     type,
     required: column.required === true,
-    readOnly: column.readOnly === true,
+    // `Title` is kept and written to even where a list marks it read-only, so it is reported as the
+    // writable column it is treated as.
+    readOnly: !isTitle && column.readOnly === true,
     ...(type === "choice" ? { choices: Array.isArray(choices) ? choices.filter(
         (choice): choice is string => typeof choice === "string") : [] } : {}),
     ...(type === "dateTime" && column.dateTime?.format === "dateOnly" ? { dateOnly: true } : {}),

@@ -234,6 +234,23 @@ describe("host teams reached only through a shared channel", () => {
   });
 });
 
+describe("chat metadata", () => {
+  it("re-reads a chat's info instead of returning the snapshot it was listed with", async () => {
+    let topic = "Before";
+    const calls = stubFetch(call => /\/chats\/[^/]+$/.test(new URL(call.url).pathname)
+      ? jsonResponse({ ...CHAT, topic })
+      : defaultRoute(call));
+    const session = await startSession();
+    const page = await (await session.listChats()).next();
+
+    expect((await page![0].chat.getInfo()).topic).toBe("Before");
+    topic = "After";
+    expect((await page![0].chat.getInfo()).topic).toBe("After");
+    expect(calls.filter(call => /\/chats\/[^/]+$/.test(new URL(call.url).pathname)))
+      .toHaveLength(2);
+  });
+});
+
 describe("resource description", () => {
   it("describes the Teams surface as a singleton", async () => {
     const description = await gatekeeper.describe();

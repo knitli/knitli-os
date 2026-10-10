@@ -568,7 +568,9 @@ class TeamsChatStub extends RpcTarget implements TeamsChat {
   }
 
   async getInfo(): Promise<TeamsChatInfo> {
-    let info = this.#cachedInfo ?? await this.#ctx.api.getChat(this.#chatId);
+    // Always re-read: a chat is renamed and updated while a capability for it is held, and the info
+    // it was listed with is only a snapshot.
+    let info = await this.#ctx.api.getChat(this.#chatId);
     this.#cachedInfo = info;
 
     await authorizeRestricted(this.#ctx.approvalQueue, {

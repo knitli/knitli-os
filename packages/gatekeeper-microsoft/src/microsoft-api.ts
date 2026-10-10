@@ -165,7 +165,12 @@ export function classifyTokenFailure(body: unknown): TokenFailure {
   const codeList = [...codes];
   const interactionRequired = INTERACTION_REQUIRED_ERRORS.has(error);
   const secretProblem = codeList.some(code => CLIENT_SECRET_AADSTS_CODES.has(code));
-  const permanent = interactionRequired || codeList.some(code => PERMANENT_AADSTS_CODES.has(code));
+  // `invalid_grant` is the standard "this grant is no longer good" answer (expired, revoked, replaced),
+  // and Microsoft directs applications to start a new interactive authorization on it, whatever the
+  // numeric code behind it, so a code not catalogued above cannot leave a dead refresh token retried.
+  const invalidGrant = error === "invalid_grant";
+  const permanent = interactionRequired || invalidGrant ||
+      codeList.some(code => PERMANENT_AADSTS_CODES.has(code));
   const detail = truncate(description || error || "no detail provided");
 
   let message: string;

@@ -1,3 +1,4 @@
+import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { WorkerEntrypoint, DurableObject, RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
@@ -451,6 +452,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "cloudflare.connect-timeout")) return;
     // Drop the account if the flow never completed, or if this was a transient auth-only sign-in
     // grant (used once to read the email for login).
     if (!this.hasRefreshToken() || this.ctx.storage.kv.get<boolean>("ephemeral")) {

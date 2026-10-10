@@ -55,7 +55,9 @@ which covers a user working through such a session; a page that cannot run does 
 An abort is a Durable Object restart, which the platform and this codebase already survive
 (deploys, access restarts). State is durable. In-flight work not tracked as agent work, such as a
 gatekeeper callback or hook delivery executing during the 5-second notification window, is cut
-short and retried by its own mechanism. A paused user pays one click to resume; nothing is lost.
+short and retried by its own mechanism. A collaborator `open()` suspended in the observer dialog when expiry commits can still persist the
+observer record the user just confirmed before failing with `WorkspaceSessionExpiredError`; that is
+the user's own authorized choice and is idempotent, so their next open finds it already done. A paused user pays one click to resume; nothing is lost.
 
 ## Billing
 

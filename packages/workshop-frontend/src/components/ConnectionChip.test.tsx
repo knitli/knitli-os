@@ -31,6 +31,17 @@ describe('ConnectionChip', () => {
     unmount()
   })
 
+  it('announces a pause from a live region that was already mounted', () => {
+    installDropSocketHandler(() => {})
+    const { container, unmount } = render(false)
+    const region = container.querySelector('[role="status"]')!
+    expect(region.textContent).toBe('')
+    act(() => pauseConnection())
+    expect(container.querySelector('[role="status"]')).toBe(region)
+    expect(region.textContent).toContain('paused')
+    unmount()
+  })
+
   it('prefers the Paused button over the outage chip, and resumes on click', () => {
     installDropSocketHandler(() => {})
     const { container, unmount } = render(true)

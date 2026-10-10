@@ -124,6 +124,8 @@ async function reconnect(): Promise<RpcStub<PublicApi>> {
       backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
     }
     skipSleep = false;
+    // A pause that landed during the backoff sleep must not dial; the loop head parks on it.
+    if (isConnectionPaused()) continue;
 
     const candidate = startConnection();
     try {

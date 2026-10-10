@@ -1505,6 +1505,7 @@ export default function GadgetEditor() {
         metadata={metadata}
         authenticatedApi={authenticatedApi}
         currentUserId={userInfo?.id ?? null}
+        connectionLost={showReconnecting}
       />
     )
   }

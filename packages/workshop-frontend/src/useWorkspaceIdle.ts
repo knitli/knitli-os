@@ -20,6 +20,19 @@ export function noteWorkspaceActivity(): void {
   lastActivityAt = Date.now()
 }
 
+// Live work the window cannot see as input (a hands-free voice session produces socket traffic but
+// no events), counted so overlapping holders compose.
+let holds = 0
+
+/** Keeps the connection from pausing while `active`, e.g. during a voice conversation. */
+export function useHoldWorkspaceIdle(active: boolean): void {
+  useEffect(() => {
+    if (!active) return
+    ++holds
+    return () => { --holds }
+  }, [active])
+}
+
 /**
  * Pauses the workspace's RPC connection when the tab has been hidden or without input long enough.
  * It never resumes on its own (see connectionPause.ts). `busy` blocks entering a pause but never
@@ -44,7 +57,7 @@ export function useWorkspaceIdle(busy: boolean): void {
       noteWorkspaceActivity()
     }
     const tick = () => {
-      if (isConnectionPaused() || busyRef.current) return
+      if (isConnectionPaused() || busyRef.current || holds > 0) return
       const now = Date.now()
       if (hiddenAt !== null) {
         if (now - hiddenAt >= HIDDEN_PAUSE_MS) pauseConnection()

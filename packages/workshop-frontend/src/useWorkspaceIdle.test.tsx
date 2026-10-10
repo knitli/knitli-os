@@ -5,19 +5,23 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { installDropSocketHandler, isConnectionPaused, resumeConnection } from './connectionPause'
-import { HIDDEN_PAUSE_MS, IDLE_TICK_MS, noteWorkspaceActivity, useWorkspaceIdle, VISIBLE_IDLE_PAUSE_MS } from './useWorkspaceIdle'
+import {
+  HIDDEN_PAUSE_MS, IDLE_TICK_MS, noteWorkspaceActivity, useHoldWorkspaceIdle, useWorkspaceIdle, VISIBLE_IDLE_PAUSE_MS,
+} from './useWorkspaceIdle'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-function Probe({ busy }: { busy: boolean }) {
+function Probe({ busy, holding = false }: { busy: boolean; holding?: boolean }) {
   useWorkspaceIdle(busy)
+  useHoldWorkspaceIdle(holding)
   return null
 }
 
 describe('useWorkspaceIdle', () => {
   let container: HTMLDivElement
   let root: ReturnType<typeof createRoot>
-  const mount = (busy = false) => act(() => root.render(<Probe busy={busy} />))
+  const mount = (busy = false, holding = false) =>
+    act(() => root.render(<Probe busy={busy} holding={holding} />))
   const elapse = (ms: number) => act(() => { vi.advanceTimersByTime(ms) })
 
   beforeEach(() => {
@@ -55,6 +59,15 @@ describe('useWorkspaceIdle', () => {
     elapse(VISIBLE_IDLE_PAUSE_MS + IDLE_TICK_MS)
     expect(isConnectionPaused()).toBe(false)
     mount(false)
+    elapse(IDLE_TICK_MS)
+    expect(isConnectionPaused()).toBe(true)
+  })
+
+  it('does not pause under a held activity such as a voice session, until it is released', () => {
+    mount(false, true)
+    elapse(VISIBLE_IDLE_PAUSE_MS + IDLE_TICK_MS)
+    expect(isConnectionPaused()).toBe(false)
+    mount(false, false)
     elapse(IDLE_TICK_MS)
     expect(isConnectionPaused()).toBe(true)
   })

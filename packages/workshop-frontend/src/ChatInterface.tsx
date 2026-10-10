@@ -111,6 +111,7 @@ import { useResolveAction } from "./useResolveAction";
 import { safeExternalUrl } from "./utils/safeExternalUrl";
 import { useAuthenticatedApi } from "./AuthContext";
 import { resumeConnection } from "./connectionPause";
+import { useHoldWorkspaceIdle } from "./useWorkspaceIdle";
 import { useVendorBranding } from "./useVendorBranding";
 import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
 import { formatFullTimestamp } from "./utils/formatTimestamp";
@@ -4173,6 +4174,7 @@ function ChatInterface({
     conversationAvailable: selectedChatId !== null && selectedModel !== null,
     submissionAvailable: !hasPendingConnectionRequest && !hasPendingAwaitedAction,
   });
+  useHoldWorkspaceIdle(voice.state.mode !== null);  // a live voice session is not idle
   const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false);
 
   const voiceStartRequest = initialVoice?.chatId;

@@ -538,7 +538,10 @@ export const ChatComposer = ({
   const handleSend = async () => {
     if (isDictating) return;
     if (conversationDraft) {
-      if (conversationDraft.canSend && !conversationDraft.readOnly) conversationDraft.onSend();
+      if (conversationDraft.canSend && !conversationDraft.readOnly) {
+        resumeConnection();
+        conversationDraft.onSend();
+      }
       return;
     }
     if (sendInFlightRef.current || isSending || isBlocked) return;

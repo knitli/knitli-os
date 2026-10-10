@@ -47,6 +47,7 @@ export function useResolveAction(
   }, [overseer, setProcessing, toasts])
 
   const resolveAction = useCallback(async (action: ActionLogEntry, decision: ActionDecision) => {
+    resumeConnection()  // the creation chooser below talks to the workspace before resolve() runs
     if (decision === 'approve' && action.type === 'action' && action.creation) setCreation(action)
     else await resolve(action.id, decision)
   }, [resolve])

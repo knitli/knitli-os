@@ -47,6 +47,10 @@ declare global {
       CFOS_INSTALL_KEY_ID?: string;       // active signing-key generation
       CFOS_INSTALL_PRIVATE_KEY?: string;  // secret: base64 PKCS#8 P-256 key that signs requests
 
+      // Fork: Web Push (src/fork/web-push.ts). The secret is an ECDSA P-256 private JWK as JSON;
+      // the public key is derived from it. Unset (or without PUBLIC_BASE_URL), Web Push is off.
+      WEB_PUSH_VAPID_PRIVATE_KEY?: string;
+
       // Optional product analytics stream. Deployments can bind this to a
       // structured Cloudflare Pipelines stream; local/dev configs omit it and analytics no-op.
       PRODUCT_ANALYTICS?: import("cloudflare:pipelines").Pipeline<ProductAnalyticsRecord>;

@@ -57,6 +57,10 @@
       "reason": "Regression test for the fork-owned ApprovalQueue.attestAudience() (src/fork/workspace-audience.ts)."
     },
     {
+      "path": "packages/workshop-backend/__tests__/knitli-web-push.test.ts",
+      "reason": "Regression test for the fork-owned Web Push channel (src/fork/web-push.ts)."
+    },
+    {
       "path": "packages/workshop-backend/__tests__/knitli-turn-guards.test.ts",
       "reason": "Regression test for the fork-owned agent turn guards and executeCode output cap."
     },

@@ -1,5 +1,5 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelReasoningInfo, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, UserNotification, VoiceOptions, VoicePreferences } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelReasoningInfo, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, UserNotification, WebPushSubscriptionInfo, VoiceOptions, VoicePreferences } from '@gadgets/workshop-shared/api';
 import { ActionDescription, Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ConnectInitiator, type ResolveRequestedResourceResult } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -22,6 +22,7 @@ import { offeredVoiceModels, validateVoicePreferences } from "./voice-config.js"
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken, PENDING_HANDOFF_LIFETIME_MS } from "./connect-handoff.js";
 import { deliver, registerDevice } from "./notification-service.js";
+import { addWebPushSubscription, deliverWebPush, webPushPublicKey } from "./fork/web-push.js";
 
 const logger = createWorkshopLogger("workshop.user");
 
@@ -358,6 +359,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         { ...this.storage.notificationSubscriptions.get(), [deviceKey]: subscriptionId });
   }
 
+  /** The key a browser subscribes to Web Push against, or null when the deployment has none. */
+  async getWebPushPublicKey(): Promise<string | null> {
+    return webPushPublicKey(this.env);
+  }
+
+  async addWebPushSubscription({ endpoint, ...keys }: WebPushSubscriptionInfo): Promise<void> {
+    if (!webPushPublicKey(this.env)) throw new Error("Web Push is not enabled on this deployment.");
+    this.storage.webPushSubscriptions.put(
+        addWebPushSubscription(this.storage.webPushSubscriptions.get(), endpoint, keys));
+  }
+
+  async removeWebPushSubscription(endpoint: string): Promise<void> {
+    let remaining = { ...this.storage.webPushSubscriptions.get() };
+    delete remaining[endpoint];
+    this.storage.webPushSubscriptions.put(remaining);
+  }
+
   /** Subscribe a visible authenticated client to live user notifications. */
   async subscribeToNotifications(
       subscriber: RpcStub<NotificationSubscriber>): Promise<RpcStub<{}>> {
@@ -386,6 +404,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       new Promise<boolean>(resolve => { timeout = setTimeout(() => resolve(false), 3_000); }),
     ]).finally(() => clearTimeout(timeout));
     if (acknowledged) return;
+    await deliverWebPush(this.env, this.storage.webPushSubscriptions, notification);
     let subscriptions = Object.entries(this.storage.notificationSubscriptions.get());
     let results = await Promise.allSettled(subscriptions.map(async ([deviceKey, subscriptionId]) => {
       if (await deliver(this.env, subscriptionId, notification)) return;

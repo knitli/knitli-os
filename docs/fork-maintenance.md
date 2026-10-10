@@ -274,6 +274,12 @@ Intentional, reviewed differences from upstream. Keep this current.
   `SettingsPage.tsx`, and the logout wrapper and `<WebPushSync />` in `AuthContext.tsx`. Both public
   files are served from the router's static assets at the origin root, which gives the worker scope
   `/`; no router change.
+- **Known limits:** a browser that refreshes its subscription while no Workshop tab is open is not
+  re-registered until the app is next opened (the worker holds no credentials to call the
+  authenticated API, and adding a worker-capable registration path would be new kernel surface);
+  until then the old endpoint is pruned when its push service reports it gone. A refresh while a tab
+  is open is picked up at once, and the entry it replaces is removed so it does not count against
+  the 10-device limit.
 - **At sync:** Tier 2 for the seams only; if upstream reshapes `publishNotification()`, keep the
   single `deliverWebPush()` call after the acknowledgement check and before the platform delivery.
 

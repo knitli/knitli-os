@@ -8,6 +8,9 @@ import { applicationServerKey, currentPushEnvironment, pushAvailability, subscri
 // One user per browser at a time is assumed: the auth token is shared by every tab through
 // localStorage, so tabs signed in as different users are unsupported and not guarded against here.
 const OWNER_KEY = 'gadgets.webPush.owner'
+// The endpoint last registered with the server, so a browser-refreshed subscription can take over
+// its slot instead of leaving the predecessor to count against the device limit until it is pruned.
+const ENDPOINT_KEY = 'gadgets.webPush.endpoint'
 const SIGN_OUT_TIMEOUT_MS = 3000
 /** The message `public/sw.js` answers by unsubscribing this browser from push. */
 const RELEASE_PUSH_MESSAGE = 'release-push-subscription'
@@ -22,10 +25,27 @@ const readOwner = () => {
 
 const writeOwner = (owner: string | null) => {
   try {
-    if (owner === null) localStorage.removeItem(OWNER_KEY)
-    else localStorage.setItem(OWNER_KEY, owner)
+    if (owner === null) {
+      localStorage.removeItem(OWNER_KEY)
+      localStorage.removeItem(ENDPOINT_KEY)
+    } else localStorage.setItem(OWNER_KEY, owner)
   } catch {
     // Without storage the subscription can never be proven ours, so it is dropped next visit.
+  }
+}
+
+/**
+ * Registers `subscription` with the server and, when the browser refreshed it since the last
+ * registration, removes the endpoint it replaces.
+ */
+export const registerBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, subscription: PushSubscription) => {
+  await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
+  try {
+    const previous = localStorage.getItem(ENDPOINT_KEY)
+    localStorage.setItem(ENDPOINT_KEY, subscription.endpoint)
+    if (previous && previous !== subscription.endpoint) await api.removeWebPushSubscription(previous).catch(() => {})
+  } catch {
+    // Without storage the old entry is left for the server to prune when its push service says gone.
   }
 }
 
@@ -89,7 +109,7 @@ export const syncBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, si
     await resubscribe(api, pushManager, subscription, key)
     return
   }
-  await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
+  await registerBrowserSubscription(api, subscription)
 }
 
 /**
@@ -118,7 +138,7 @@ const subscribeAnew = async (api: RpcStub<AuthenticatedApi>, pushManager: PushMa
     if (error instanceof DOMException && error.name === 'NotAllowedError') return writeOwner(null)
     throw error
   }
-  await api.addWebPushSubscription(toSubscriptionInfo(fresh.toJSON()))
+  await registerBrowserSubscription(api, fresh)
 }
 
 /**

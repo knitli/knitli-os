@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { claimBrowserSubscription, ownsBrowserSubscription, releaseBrowserSubscription } from './browserSubscription'
+import { claimBrowserSubscription, ownsBrowserSubscription, registerBrowserSubscription, releaseBrowserSubscription } from './browserSubscription'
 import {
   applicationServerKey,
   currentPushEnvironment,
   pushAvailability,
   subscribedWithKey,
-  toSubscriptionInfo,
 } from './pushSupport'
 
 /** Where this device stands with push notifications. */
@@ -84,7 +83,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
         // Re-register on every visit: the server forgets a device the push service reported gone,
         // and this heals a device that is back.
         // A failure here changes nothing about the device: it stays on, with Turn off available.
-        await api.addWebPushSubscription(toSubscriptionInfo(existing.toJSON())).catch((error: unknown) => {
+        await registerBrowserSubscription(api, existing).catch((error: unknown) => {
           console.error('Failed to register this device’s push subscription:', error)
         })
         if (!cancelled) setStatus('on')
@@ -167,7 +166,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
       }
       claimBrowserSubscription(owner)
       try {
-        await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
+        await registerBrowserSubscription(api, subscription)
       } catch (error) {
         // Not confirmed registered, so not on: don't leave a subscription the UI reports as off. If
         // it can't be dropped it may well be registered, so it stays on with Turn off offered.

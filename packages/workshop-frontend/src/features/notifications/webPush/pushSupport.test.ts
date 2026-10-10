@@ -26,6 +26,12 @@ describe('pushAvailability', () => {
     expect(pushAvailability(env({ userAgent: IPHONE.replace('18_4', '16_4'), hasPushManager: false }))).toBe('install-first')
   })
 
+  it('reads a desktop-mode iPad’s OS version from its Safari version', () => {
+    const ipad = (version: string) => IPAD.replace('Version/18.4', `Version/${version}`)
+    expect(pushAvailability(env({ userAgent: ipad('16.3'), maxTouchPoints: 5, hasPushManager: false }))).toBe('unsupported')
+    expect(pushAvailability(env({ userAgent: ipad('17.0'), maxTouchPoints: 5, hasPushManager: false }))).toBe('install-first')
+  })
+
   it('is unsupported elsewhere without the Push API, including a Mac and an installed app on old iOS', () => {
     expect(pushAvailability(env({ userAgent: IPAD, maxTouchPoints: 0, hasPushManager: false }))).toBe('unsupported')
     expect(pushAvailability(env({ userAgent: IPHONE, hasPushManager: false, standalone: true }))).toBe('unsupported')

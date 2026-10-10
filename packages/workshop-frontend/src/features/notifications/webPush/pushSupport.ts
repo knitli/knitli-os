@@ -33,8 +33,10 @@ export const pushAvailability = (env: PushEnvironment): PushAvailability => {
     || (/Macintosh/.test(env.userAgent) && env.maxTouchPoints > 1)
   if (!apple || env.standalone) return 'unsupported'
   // Home Screen apps get Web Push from iOS/iPadOS 16.4: installing on older ones would not help.
-  // (iPadOS in desktop mode reports no version, so it is given the benefit of the doubt.)
-  const version = /OS (\d+)[_.](\d+)/.exec(env.userAgent)
+  // A desktop-mode iPad hides its OS version, but its Safari version is the iPadOS version.
+  const version = /iPhone|iPad|iPod/.test(env.userAgent)
+    ? /OS (\d+)[_.](\d+)/.exec(env.userAgent)
+    : /Version\/(\d+)\.(\d+)/.exec(env.userAgent)
   if (version && (Number(version[1]) < 16 || (Number(version[1]) === 16 && Number(version[2]) < 4))) return 'unsupported'
   return 'install-first'
 }

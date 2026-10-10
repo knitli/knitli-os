@@ -59,13 +59,17 @@ Plan:
 4. Review the SharePoint auto-apply rule by itself. It is keyed to the list in the workspace, so it
    covers every gadget bound to that list.
 
-Decisions to make:
+Decisions (made 2026-10-10):
 
-- Do we need per-resource connect? The fork's "Connect Account" button asks for every resource's
-  scopes, so one unconsented resource breaks the flow for everyone.
-- Single tenant (their design) or several?
-- Entra app registration and consent: needs an admin who can grant `Sites.ReadWrite.All`,
-  `TeamMember.Read.All` and `ChannelMessage.Read.All`.
+- **Per-resource connect.** A user picks Outlook, Teams or SharePoint and only that resource's
+  scopes are requested; no generic connect-everything path. An unconsented resource must not break
+  the others.
+- **Single tenant.** Keep the fork's `TENANT_ID` pinning and the members-on-verified-domains
+  identity policy. Multi-tenant is out of scope.
+- **Test tenant.** Knitli has a tenant and the user is its admin, so the Entra app registration
+  and admin consent are theirs to do. The port documents the exact steps and permissions.
+- **SharePoint without auto-apply.** Port SharePoint List with every `createItem` going through
+  approval; leave the "Create list items" auto-apply rule out for now.
 
 Verification: their README has a manual checklist that is unchecked. We need a test tenant to run
 it, and that gates anything beyond the Outlook slice.

@@ -67,6 +67,9 @@ describe('syncBrowserSubscription', () => {
     localStorage.setItem('gadgets.webPush.endpoint', 'https://web.push.apple.com/before-refresh')
     await syncBrowserSubscription(asStub(api), new AbortController().signal)
     expect(api.removeWebPushSubscription).toHaveBeenCalledWith('https://web.push.apple.com/before-refresh')
+    // Removed first, so adding the replacement at the device limit cannot displace another device.
+    expect(api.removeWebPushSubscription.mock.invocationCallOrder[0])
+      .toBeLessThan(api.addWebPushSubscription.mock.invocationCallOrder[0])
 
     api.removeWebPushSubscription.mockClear()
     await syncBrowserSubscription(asStub(api), new AbortController().signal)

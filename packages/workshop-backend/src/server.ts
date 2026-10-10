@@ -6,7 +6,7 @@ import { handleOpenApiPublisher } from "./openapi-publisher";
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, ModelReasoningInfo, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, NotificationSubscriber, WebPushSubscriptionInfo } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, ModelReasoningInfo, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, NotificationSubscriber, WebPushSubscriptionInfo, SESSION_IDLE_CLOSE_CODE } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -38,12 +38,18 @@ import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
+import { IdleSessionError } from "./fork/idle-lease";
 
 const logger = createWorkshopLogger("workshop.server");
 
 // Set once we've asked the AdminSettings DO to install the bundled blueprints (see the
 // fetch handler), so later requests skip the call. The DO holds the real answer.
 let bundledBlueprintInstallStarted = false;
+
+// Fork: workspace opens held per API socket, keyed by the socket's abortSession callback, plus the
+// workspace whose expired lease is waiting for the socket's last open to be released.
+type SocketOpens = { count: number; idleFrom?: { id: string } };
+const liveOpensBySession = new WeakMap<(reason: Error) => void, SocketOpens>();
 
 const USER_SEARCH_POLICY_CACHE_TTL_MS = 30_000;
 
@@ -328,6 +334,41 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return resolveUiFeatureFlags(this.env, this.#userId.name!);
   }
 
+  // Fork: workspace opens this session holds, counted per open rather than per workspace id (a page
+  // can hold two opens of one workspace). The socket carries the idle close code only once an
+  // expired lease has released the last of them; one workspace idling says nothing about others.
+  // The count belongs to the socket, not to this capability: every AuthenticatedApiImpl minted on a
+  // socket shares its abortSession, which is therefore the key.
+  #opens(): SocketOpens {
+    let opens = liveOpensBySession.get(this.abortSession);
+    if (!opens) liveOpensBySession.set(this.abortSession, opens = { count: 0 });
+    return opens;
+  }
+
+  // Returns the idle release this open began after, if any. Once the open succeeds, that release
+  // is superseded: the user chose to carry on. Until then it must stand, or a failed open would
+  // erase the close the page holding the expired capability is owed.
+  #openStarted(): SocketOpens["idleFrom"] {
+    let opens = this.#opens();
+    ++opens.count;
+    return opens.idleFrom;
+  }
+
+  #openSucceeded(supersedes: SocketOpens["idleFrom"]): void {
+    let opens = this.#opens();
+    if (supersedes && opens.idleFrom === supersedes) delete opens.idleFrom;
+  }
+
+  // An idle release is remembered until the last open is gone, whichever kind of release that is:
+  // a temporary open that outlives the idle one must not swallow the close code.
+  #openReleased(id: string, idle: boolean): void {
+    let opens = this.#opens();
+    if (idle) opens.idleFrom = { id };
+    if (--opens.count === 0 && opens.idleFrom !== undefined) {
+      this.abortSession(new IdleSessionError(opens.idleFrom.id));
+    }
+  }
+
   async #openGadgetInternal(id: string, shareKey?: string,
                             configureObservers?: RpcStub<ObserverConfigCallback>)
       : Promise<NativeRpcStub<Overseer>> {
@@ -354,21 +395,40 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     //   gadget at a time (since each tab is a separate client), so it's probably fine for now.
     let closed = false;
     let started = false;
-    let notifyClosed = () => {
+    // Fork: set when the workspace reports its client-activity lease expired. Recorded
+    // synchronously as the notification arrives: the workspace aborts itself moments later.
+    let idle = false;
+    let notifyClosed = (reason?: "idle") => {
+      if (closed) return;
       closed = true;
+      idle = reason === "idle";
+      this.#openReleased(id, idle);
     };
     (notifyClosed as any)[Symbol.dispose] = () => {
       if (started && !closed) {
+        closed = true;
+        --this.#opens().count;
         // this.ctx.abort() would be nicer here, but it is still marked experimental in the
         // workers runtime.
         this.abortSession(new Error(`lost connection to workspace DO (gadget ${id})`));
       }
     }
 
+    // Fork: counted from here, not from open()'s return, so an open parked on a step the client
+    // controls is not invisible to another workspace's idle release on the same socket.
+    let supersedes = this.#openStarted();
     let result;
     try {
       result = await overseer.open(userId, profileId, notifyClosed, shareKey, configureObservers);
     } catch (err) {
+      // Fork: a failed open releases its count, unless the lease notification already did (an open
+      // parked on the observer dialog or a share-key redemption ended by an expired lease, which
+      // also parked the browser rather than letting it redial into the same wait). Before the
+      // fallible cleanup below, so a rejection there cannot leak the count.
+      if (!closed) {
+        closed = true;
+        this.#openReleased(id, false);
+      }
       // A denial proves this user's listing for the workspace is stale: revocation tries to drop it
       // (refreshAffectedCollaboratorListings), but that push is best-effort. Only catches entries
       // they click; others stay frozen at revocation, as a disconnected collaborator gets no pushes.
@@ -378,6 +438,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       throw err;
     }
     started = true;
+    this.#openSucceeded(supersedes);
     return result;
   }
 
@@ -1011,8 +1072,14 @@ export default {
       // TODO: When ctx.abort() becomes non-experimental, consider using that instead.
       let abortController = new AbortController();
       let abortSession = (reason: Error) => {
-        // Closing the socket fails no invocation, so nothing else logs this.
-        logger.warn("aborting api session", { event: "session.abort", error: reason });
+        // Closing the socket fails no invocation, so nothing else logs this. An expired lease is the
+        // routine end of a session nobody was using (fork).
+        let fields = { event: "session.abort", error: reason } as const;
+        if (reason instanceof IdleSessionError) {
+          logger.info("aborting api session", fields);
+        } else {
+          logger.warn("aborting api session", fields);
+        }
         abortController.abort(reason);
       };
 
@@ -1067,12 +1134,19 @@ function newWorkersWebSocketRpcResponse(
 
   // -- ADDED FOR GADGETS --
   if (options?.abortSignal) {
-    if (options.abortSignal.aborted) {
+    let signal = options.abortSignal;
+    let abort = () => {
+      // Close with the idle code before disposing, which would close with Cap'n Web's own: the
+      // browser reads the code to park rather than redial. The socket may already be gone.
+      if (signal.reason instanceof IdleSessionError) {
+        try { server.close(SESSION_IDLE_CLOSE_CODE, "idle"); } catch {}
+      }
       stub[Symbol.dispose]();
+    };
+    if (signal.aborted) {
+      abort();
     } else {
-      options.abortSignal.addEventListener("abort", () => {
-        stub[Symbol.dispose]();
-      });
+      signal.addEventListener("abort", abort);
     }
   }
   // -- END ADDED FOR GADGETS --

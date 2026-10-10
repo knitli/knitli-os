@@ -2,6 +2,7 @@
 // a putAction record factory, and a fake overseer client forged over
 // OverseerDurableObject.prototype.open.
 
+import { IdleLease } from "../src/fork/idle-lease.js";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import type { Collection, Singleton } from "@gadgets/typed-storage";
@@ -113,6 +114,9 @@ export async function openFakeOverseer(
       finishRevocationWithoutEffect: () => {},
       finishRevocationRequiringRestart: () => {},
       scheduleAccessRestart: async (_reason: string) => {},
+      // Fork: the client-activity lease open() arms and the interfaces register with.
+      idleLease: new IdleLease(),
+      clientActivity: () => {},
       scheduleRevocationRestart() { void this.scheduleAccessRestart("Workspace access changed."); },
       ctx: { id: { toString: () => "workspace-id" }, exports: opts.exports ?? {} },
       users: {

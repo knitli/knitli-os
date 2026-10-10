@@ -9,7 +9,7 @@
 // facet, still reaches it. Pushes can be delayed or dropped, so the driver also reads the history
 // hourly.
 
-import { guardedAlarmFor, hookAlarmRunsPerHour } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
+import { guardedAlarmFor } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { DurableObject, RpcTarget, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { SingleFlight } from "@gadgets/gatekeeper-kit/single-flight";
@@ -17,7 +17,7 @@ import type {
   ApprovalQueue, HookController, HookInitiator, HookTargetMetadata,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { GmailApi, GmailApiError } from "./google-api";
-import { HOUR_MS, HookDeliveryQueue, MAX_DELIVERIES_PER_RUN, MINUTE_MS, disposeStubs } from "./hook-delivery-queue";
+import { HOUR_MS, HookDeliveryQueue, MINUTE_MS, disposeStubs } from "./hook-delivery-queue";
 import { obsContext } from "./observability";
 import type { PushHooksEnv } from "./pubsub-push";
 import type { GmailMessageHook } from "./types";
@@ -185,9 +185,7 @@ export class GmailHookDriver extends DurableObject<Env> {
    * - delivering each queued message whose (re)try time has come, and forgetting finished ones.
    */
   async alarm(): Promise<void> {
-    await guardedAlarmFor(this.ctx, this.env, "google.gmail-hooks", () => this.#alarmBody(), {
-      maxPerHour: hookAlarmRunsPerHour(this.#registrations().length, MAX_DELIVERIES_PER_RUN),
-    });
+    await guardedAlarmFor(this.ctx, this.env, "google.gmail-hooks", () => this.#alarmBody());
   }
 
   async #alarmBody(): Promise<void> {

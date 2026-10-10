@@ -2,13 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import {
   ALARM_DISABLED_PROBE_MS,
   ALARM_GUARD_KEY_PREFIX,
-  ALARM_RUNS_PER_HOUR,
+  MAX_ALARM_RUNS_PER_MINUTE,
   alarmBackoffMs,
   alarmsDisabled,
   guardedAlarm,
   guardedAlarmFor,
   haltIfAlarmsDisabled,
-  hookAlarmRunsPerHour,
   scheduleAlarm,
   type AlarmGuardRecord,
   type AlarmGuardState,
@@ -16,7 +15,8 @@ import {
 } from "../src/fork/alarm-guard.js";
 
 const HOUR = 3_600_000;
-const T0 = 1_800_000_000_000 - (1_800_000_000_000 % HOUR); // the start of a clock hour
+const MINUTE = 60_000;
+const T0 = 1_800_000_000_000 - (1_800_000_000_000 % HOUR); // the start of a clock hour and minute
 
 /** An in-memory Durable Object slice with a fake clock and per-call write accounting. */
 class FakeState implements AlarmGuardState {
@@ -129,66 +129,64 @@ describe("alarm guard", () => {
     expect(state.map.size).toBe(1);
   });
 
-  it("persists the hourly count from the first run, so eviction at any point does not reset it", async () => {
+  it("persists the run count from the first run, so eviction at any point does not reset it", async () => {
     const run = vi.fn(ok);
-    await state.fire({ maxPerHour: 10 }, run);
-    expect(state.record("test")).toEqual({ bucket: T0 / HOUR, count: 1, failures: 0 });
-    for (let i = 0; i < 2; i++) await state.fire({ maxPerHour: 10 }, run);
+    await state.fire({ maxPerMinute: 10 }, run);
+    expect(state.record("test")).toEqual({ bucket: T0 / MINUTE, count: 1, failures: 0 });
+    for (let i = 0; i < 2; i++) await state.fire({ maxPerMinute: 10 }, run);
 
     // Evicted well under half the budget: the new instance carries on from 3, not from 0.
     const fresh = state.evicted();
-    for (let i = 0; i < 8; i++) await fresh.fire({ maxPerHour: 10 }, run);
+    for (let i = 0; i < 8; i++) await fresh.fire({ maxPerMinute: 10 }, run);
     expect(run).toHaveBeenCalledTimes(10);
     expect(fresh.record("test")!.count).toBe(11);
   });
 
-  it("opens the circuit past maxPerHour, without re-arming, logging once", async () => {
+  it("opens the circuit past maxPerMinute, without re-arming, logging once", async () => {
     const run = vi.fn(async () => {
       await state.storage.setAlarm(state.clock); // a body that re-arms at now: the loop
     });
     for (let i = 0; i < 5; i++) {
-      await state.fire({ maxPerHour: 5 }, run);
+      await state.fire({ maxPerMinute: 5 }, run);
       state.clock += 1;
     }
     expect(run).toHaveBeenCalledTimes(5);
 
     state.alarm = null;
-    expect(await state.fire({ maxPerHour: 5 }, run)).toBeLessThanOrEqual(1);
+    expect(await state.fire({ maxPerMinute: 5 }, run)).toBeLessThanOrEqual(1);
     expect(run).toHaveBeenCalledTimes(5);
     expect(state.alarm).toBeNull();
-    // Further runs in the same hour cost no writes and log nothing.
-    expect(await state.fire({ maxPerHour: 5 }, run)).toBe(0);
-    expect(await state.fire({ maxPerHour: 5 }, run)).toBe(0);
+    // Further runs in the same minute cost no writes and log nothing.
+    expect(await state.fire({ maxPerMinute: 5 }, run)).toBe(0);
+    expect(await state.fire({ maxPerMinute: 5 }, run)).toBe(0);
     const opens = error.mock.calls
       .filter(([fields]) => (fields as { event?: string }).event === "alarm.circuit.open");
     expect(opens).toHaveLength(1);
     expect(opens[0]![0]).toEqual(expect.objectContaining({ alarmKey: "test", count: 6 }));
   });
 
-  it("guardedAlarmFor honours the kill switch and a raised maxPerHour", async () => {
+  it("counts a run before it starts, so a run killed mid-flight still advances the count", async () => {
+    let during: AlarmGuardRecord | undefined;
+    await state.fire({}, async () => {
+      during = state.record("test");
+    });
+    expect(during).toEqual({ bucket: T0 / MINUTE, count: 1, failures: 0 });
+  });
+
+  it("the default flood threshold is far above any legitimate rate and still opens on a loop", async () => {
+    expect(MAX_ALARM_RUNS_PER_MINUTE).toBeGreaterThanOrEqual(5_000);
     const run = vi.fn(ok);
-    for (let i = 0; i < 150; i++) await guardedAlarmFor(state, {}, "k", run, { maxPerHour: 200 });
-    expect(run).toHaveBeenCalledTimes(150);
-    // The default cap still applies without the option, and defers rather than drops.
-    for (let i = 0; i < 125; i++) await guardedAlarmFor(state, {}, "d", run);
-    expect(run).toHaveBeenCalledTimes(150 + 120);
-    expect(state.alarm).toBe((Math.floor(Date.now() / HOUR) + 1) * HOUR); // real clock: no `now` option
-    state.alarm = T0 + 5;
+    for (let i = 0; i < MAX_ALARM_RUNS_PER_MINUTE + 3; i++) await state.fire({}, run);
+    expect(run).toHaveBeenCalledTimes(MAX_ALARM_RUNS_PER_MINUTE);
+  });
+
+  it("guardedAlarmFor halts under the kill switch and defers an open circuit", async () => {
+    const run = vi.fn(ok);
     await guardedAlarmFor(state, { ALARMS_DISABLED: "true" }, "k", run);
+    expect(run).not.toHaveBeenCalled();
     expect(state.alarm).toBeGreaterThan(Date.now());
-  });
-
-  it("guardedAlarmFor uses the listed cap for a key, and a listed cap exceeds the default", async () => {
-    const run = vi.fn(ok);
-    expect(ALARM_RUNS_PER_HOUR["scheduler"]).toBeGreaterThan(120);
-    for (let i = 0; i < 200; i++) await guardedAlarmFor(state, {}, "scheduler", run);
-    expect(run).toHaveBeenCalledTimes(200);
-  });
-
-  it("scales a hook driver's cap with its registrations", () => {
-    expect(hookAlarmRunsPerHour(0, 20)).toBe(7_200);
-    expect(hookAlarmRunsPerHour(41, 20)).toBe(7_200 + 7_380);
-    expect(hookAlarmRunsPerHour(1, 20)).toBeGreaterThan(hookAlarmRunsPerHour(0, 20));
+    await guardedAlarmFor(state, {}, "k", run);
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
   it("resumes on the next probe once the switch is cleared", async () => {
@@ -200,22 +198,22 @@ describe("alarm guard", () => {
     expect(run).toHaveBeenCalledTimes(1);
   });
 
-  it("deferWhenOpen re-arms for the next hour, never sooner", async () => {
-    for (let i = 0; i < 3; i++) await state.fire({ maxPerHour: 2, deferWhenOpen: true }, ok);
-    expect(state.alarm).toBe(T0 + HOUR);
+  it("deferWhenOpen re-arms for the next minute, never sooner", async () => {
+    for (let i = 0; i < 3; i++) await state.fire({ maxPerMinute: 2, deferWhenOpen: true }, ok);
+    expect(state.alarm).toBe(T0 + MINUTE);
   });
 
-  it("closes the circuit when the hour rolls over", async () => {
+  it("closes the circuit when the minute rolls over", async () => {
     const run = vi.fn(ok);
-    for (let i = 0; i < 4; i++) await state.fire({ maxPerHour: 2 }, run);
+    for (let i = 0; i < 4; i++) await state.fire({ maxPerMinute: 2 }, run);
     expect(run).toHaveBeenCalledTimes(2);
-    state.clock = T0 + HOUR;
-    await state.fire({ maxPerHour: 2 }, run);
+    state.clock = T0 + MINUTE;
+    await state.fire({ maxPerMinute: 2 }, run);
     expect(run).toHaveBeenCalledTimes(3);
-    // Also after an eviction: the persisted open-circuit record belongs to the old hour.
+    // Also after an eviction: the persisted open-circuit record belongs to the old minute.
     const fresh = state.evicted();
-    fresh.clock = T0 + 2 * HOUR;
-    await fresh.fire({ maxPerHour: 2 }, run);
+    fresh.clock = T0 + 2 * MINUTE;
+    await fresh.fire({ maxPerMinute: 2 }, run);
     expect(run).toHaveBeenCalledTimes(4);
   });
 
@@ -240,7 +238,7 @@ describe("alarm guard", () => {
     const runs = [ok, boom, boom, ok, boom, boom, boom, boom, boom, boom, boom, ok];
     for (const [i, run] of runs.entries()) {
       const before = state.alarmWrites.length;
-      await state.fire({ maxPerHour: 9, deferWhenOpen: i % 2 === 0 }, run);
+      await state.fire({ maxPerMinute: 9, deferWhenOpen: i % 2 === 0 }, run);
       for (const at of state.alarmWrites.slice(before)) expect(at).toBeGreaterThan(state.clock);
       state.clock += 1_000;
     }
@@ -279,15 +277,15 @@ describe("alarm guard", () => {
     expect(fresh.alarm).toBe(fresh.clock + 30_000);
   });
 
-  it("writes at most one storage key per invocation on every path", async () => {
+  it("writes at most one storage key, at most twice, per invocation on every path", async () => {
     const counts = [
       await state.fire({}, ok),
       await state.fire({}, boom),
       await state.fire({}, ok),
       await state.fire({ disabled: true }, ok),
     ];
-    for (let i = 0; i < 4; i++) counts.push(await state.fire({ maxPerHour: 4 }, boom));
-    expect(counts).toEqual([1, 1, 1, 0, 1, 1, 0, 0]);
+    for (let i = 0; i < 4; i++) counts.push(await state.fire({ maxPerMinute: 4 }, boom));
+    expect(counts).toEqual([1, 2, 2, 0, 2, 1, 0, 0]);
     expect(state.map.size).toBeLessThanOrEqual(1);
   });
 

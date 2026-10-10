@@ -1,15 +1,15 @@
 import { createLogger } from "../logger.js";
 
 /**
- * Durable Object alarm guardrails: an emergency stop, a floor under re-arm times, an hourly
- * circuit breaker, and failure backoff, so that no `alarm()` handler can become a self-re-arming
+ * Durable Object alarm guardrails: an emergency stop, a floor under re-arm times, a
+ * per-minute flood detector, and failure backoff, so that no `alarm()` handler can become a self-re-arming
  * loop. See `docs/alarm-audit.md` for why every handler needs them.
  */
 
 type AlarmGuardLogFields = {
   alarmKey?: string;
   count?: number;
-  maxPerHour?: number;
+  maxPerMinute?: number;
   failures?: number;
   retryAt?: number;
 };
@@ -17,6 +17,15 @@ type AlarmGuardLogFields = {
 const logger = createLogger<AlarmGuardLogFields>({ component: "observability.alarm-guard" });
 
 const HOUR_MS = 3_600_000;
+const WINDOW_MS = 60_000;
+
+/**
+ * Runs per clock minute above which the flood detector opens. The detector exists to stop a
+ * runaway re-arm loop, which makes thousands of runs a minute, not to rate-limit real traffic: the
+ * busiest legitimate alarm here peaks near 500 runs a minute (see `docs/alarm-audit.md`), so this
+ * leaves a margin of at least ten. Failing loops are stopped earlier by the failure backoff.
+ */
+export const MAX_ALARM_RUNS_PER_MINUTE = 6_000;
 
 /** The earliest an alarm armed through {@link scheduleAlarm} may fire, relative to now. */
 export const ALARM_FLOOR_MS = 1_000;
@@ -104,14 +113,14 @@ export type GuardedAlarmOptions = {
   key: string;
   /** The kill switch: pass {@link alarmsDisabled}`(env)`. */
   disabled?: boolean;
-  /** Runs allowed per clock hour before the circuit opens. Defaults to 120. */
-  maxPerHour?: number;
+  /** Runs allowed per clock minute before the circuit opens. Defaults to {@link MAX_ALARM_RUNS_PER_MINUTE}. */
+  maxPerMinute?: number;
   /** Failure backoff: `min(baseMs * 2^(failures - 1), maxMs)`. Defaults to 30 s and 1 h. */
   backoff?: { baseMs?: number; maxMs?: number };
   /** Consecutive failures after which the guard stops re-arming. Defaults to 8. */
   maxConsecutiveFailures?: number;
   /**
-   * While the circuit is open, re-arm once for the start of the next hour instead of leaving the
+   * While the circuit is open, re-arm once for the start of the next minute instead of leaving the
    * alarm off. Use it where an alarm that silently stops would lose work (a scheduler, a
    * keep-alive). Defaults to false.
    */
@@ -122,7 +131,7 @@ export type GuardedAlarmOptions = {
 
 /** The guard's counters for one alarm: one small key, overwritten in place, never growing. */
 export type AlarmGuardRecord = {
-  /** Clock hour (`floor(ms / 1h)`) that `count` belongs to. */
+  /** Clock minute (`floor(ms / 1 min)`) that `count` belongs to. */
   bucket: number;
   /** Runs started in `bucket`. */
   count: number;
@@ -144,9 +153,9 @@ export function alarmBackoffMs(
  *
  * 1. With `disabled` (the `ALARMS_DISABLED` kill switch) it re-arms the hourly probe, logs
  *    `alarm.disabled`, and returns without running `run`.
- * 2. It counts runs per clock hour. Past `maxPerHour` the circuit opens: it logs
- *    `alarm.circuit.open` once per hour at error level, skips `run`, and does not re-arm
- *    (or, with `deferWhenOpen`, re-arms for the next hour). The next hour closes it.
+ * 2. It counts runs per clock minute. Past `maxPerMinute` the circuit opens: it logs
+ *    `alarm.circuit.open` once per minute at error level, skips `run`, and does not re-arm
+ *    (or, with `deferWhenOpen`, re-arms for the next minute). The next minute closes it.
  * 3. If `run` throws, the guard owns the next alarm. It overrides whatever `run` armed with
  *    `now + backoff`, logs `alarm.failed`, and returns normally so the platform does not
  *    retry as well. A success resets the failure count.
@@ -154,39 +163,40 @@ export function alarmBackoffMs(
  *    (`alarm.gave_up`). Only an outside re-arm, such as an RPC, runs it again, and the first
  *    success resets it.
  *
- * Cost: one KV read and one KV write per run. The counters live in one small key
- * (`alarm-guard:<key>`), overwritten in place, and are always persisted rather than held in
- * memory, because a Durable Object that is evicted mid-hour would otherwise restart its count and
- * exceed the cap. Counters are updated after `run`, so a run the runtime kills outright (CPU
- * limit, eviction) is not counted; the platform's own bounded retry covers that case.
+ * Cost: one KV read and one KV write per run, plus a second write when the failure count changes.
+ * The counters live in one small key (`alarm-guard:<key>`), overwritten in place. The run is
+ * counted before `run` starts, so a run the runtime kills outright (CPU limit, eviction) still
+ * advances the count and cannot hide a loop; its failure count cannot be recorded, so only the
+ * flood detector bounds that case.
  */
 export async function guardedAlarm(
   state: AlarmGuardState,
   options: GuardedAlarmOptions,
   run: () => Promise<void>,
 ): Promise<void> {
-  const { key, maxPerHour = 120, maxConsecutiveFailures = 8, now = Date.now } = options;
+  const { key, maxPerMinute = MAX_ALARM_RUNS_PER_MINUTE, maxConsecutiveFailures = 8, now = Date.now } = options;
   const storage = state.storage;
   if (options.disabled) return halt(state, key);
 
   const storageKey = ALARM_GUARD_KEY_PREFIX + key;
-  const bucket = Math.floor(now() / HOUR_MS);
+  const bucket = Math.floor(now() / WINDOW_MS);
   const stored = storage.kv.get<AlarmGuardRecord>(storageKey);
   const previous = stored?.bucket === bucket ? stored.count : 0;
   const failures = stored?.failures ?? 0;
   const count = previous + 1;
 
-  if (count > maxPerHour) {
-    if (previous <= maxPerHour) {
-      logger.error("alarm circuit open: too many runs this hour", {
-        event: "alarm.circuit.open", alarmKey: key, count, maxPerHour,
+  if (count > maxPerMinute) {
+    if (previous <= maxPerMinute) {
+      logger.error("alarm circuit open: too many runs this minute", {
+        event: "alarm.circuit.open", alarmKey: key, count, maxPerMinute,
       });
       storage.kv.put<AlarmGuardRecord>(storageKey, { bucket, count, failures });
     }
-    if (options.deferWhenOpen) await storage.setAlarm((bucket + 1) * HOUR_MS);
+    if (options.deferWhenOpen) await storage.setAlarm((bucket + 1) * WINDOW_MS);
     return;
   }
 
+  storage.kv.put<AlarmGuardRecord>(storageKey, { bucket, count, failures });
   let nextFailures = 0;
   try {
     await run();
@@ -205,45 +215,21 @@ export async function guardedAlarm(
       });
     }
   }
-  storage.kv.put<AlarmGuardRecord>(storageKey, { bucket, count, failures: nextFailures });
-}
-
-/**
- * Runs per clock hour that {@link guardedAlarmFor} allows each guarded alarm, by key. An entry is
- * the alarm's legitimate worst case with headroom, so only a loop reaches it; derivations are in
- * `docs/alarm-audit.md`. A key not listed gets the {@link guardedAlarm} default of 120.
- */
-export const ALARM_RUNS_PER_HOUR: Readonly<Record<string, number>> = {
-  // One run per workspace turn or response; a turn is an LLM call, so over 1 per second is a loop.
-  overseer: 3_600,
-  // 500 schedules at the 60 s minimum, staggered so each firing is its own run, plus 20%.
-  scheduler: 36_000,
-};
-
-/**
- * Runs per clock hour a Google hook driver legitimately needs with `registrations` hooks. Gmail
- * documents at most one notification a second per watched user, so 3,600 push runs an hour; each
- * push queues a row per matching hook and a run drains `deliveriesPerRun` of them, adding
- * `3,600 * registrations / deliveriesPerRun` runs; an equal 3,600 covers retry, history-paging and
- * renewal runs. Chat documents no rate, so the same ceiling is assumed.
- */
-export function hookAlarmRunsPerHour(registrations: number, deliveriesPerRun: number): number {
-  return 7_200 + Math.ceil((3_600 * registrations) / deliveriesPerRun);
+  if (nextFailures !== failures) {
+    storage.kv.put<AlarmGuardRecord>(storageKey, { bucket, count, failures: nextFailures });
+  }
 }
 
 /**
  * The seam upstream `alarm()` handlers call: {@link guardedAlarm} with the `ALARMS_DISABLED` kill
- * switch read from `env`, `deferWhenOpen` on, and the cap {@link ALARM_RUNS_PER_HOUR} lists for
- * `key`, so a tripped breaker pauses the alarm for the hour rather than dropping the work.
- * `maxPerHour` overrides the cap.
+ * switch read from `env` and `deferWhenOpen` on, so a tripped flood detector pauses the alarm for
+ * the minute rather than dropping the work.
  */
 export function guardedAlarmFor(
   state: AlarmGuardState,
   env: object,
   key: string,
   run: () => Promise<void>,
-  { maxPerHour = ALARM_RUNS_PER_HOUR[key] }: Pick<GuardedAlarmOptions, "maxPerHour"> = {},
 ): Promise<void> {
-  return guardedAlarm(
-    state, { key, disabled: alarmsDisabled(env), deferWhenOpen: true, maxPerHour }, run);
+  return guardedAlarm(state, { key, disabled: alarmsDisabled(env), deferWhenOpen: true }, run);
 }

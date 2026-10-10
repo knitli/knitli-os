@@ -14,7 +14,20 @@ import { fileURLToPath } from "node:url";
  * guard in each. Adding a handler without it fails here instead of shipping unstoppable.
  */
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const GUARD = /\b(haltIfAlarmsDisabled|guardedAlarmFor|guardedAlarm|alarmsDisabled)\b/;
+// A call, not a mention: comments and string literals are blanked first (see `stripNonCode`).
+const GUARD = /\b(haltIfAlarmsDisabled|guardedAlarmFor|guardedAlarm|alarmsDisabled)\s*\(/;
+
+/**
+ * Blanks comments and string/template literal contents, so a guard name in prose or a message
+ * cannot satisfy the scan and a brace in a string cannot unbalance it. Template `${}` expressions
+ * are blanked too, which is acceptable for an alarm body's guard call.
+ */
+function stripNonCode(text: string): string {
+  return text.replace(
+    /\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`/g,
+    match => match.replace(/[^\n]/g, " "),
+  );
+}
 
 function sourceFiles(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -48,9 +61,22 @@ describe("Durable Object alarm kill switch", () => {
   it("finds a handler however it is spaced, and tells guarded from unguarded", () => {
     const unguarded = "class A {\n  async\n    alarm ()\n  : Promise<void> {\n    await go();\n  }\n}";
     const guarded = "class B {\n  async  alarm (\n  ) {\n    await haltIfAlarmsDisabled(this.ctx, this.env, \"b\");\n  }\n}";
-    const bodies = alarmBodies(`${unguarded}\n${guarded}`);
+    const bodies = alarmBodies(stripNonCode(`${unguarded}\n${guarded}`));
     assert.equal(bodies.length, 2);
     assert.deepEqual(bodies.map(body => GUARD.test(body)), [false, true]);
+  });
+
+  it("does not accept a guard name that is only mentioned in a comment or string", () => {
+    const mentioned = [
+      "class A { async alarm() { // haltIfAlarmsDisabled(this.ctx, this.env, \"a\")\n await go(); } }",
+      "class B { async alarm() { /* guardedAlarmFor( */ await go(); } }",
+      "class C { async alarm() { log(\"haltIfAlarmsDisabled(\"); await go(); } }",
+      "class D { async alarm() { const alarmsDisabled = true; await go(); } }",
+    ];
+    for (const source of mentioned) {
+      const [body] = alarmBodies(stripNonCode(source));
+      assert.ok(body && !GUARD.test(body), source);
+    }
   });
 
   it("is called by every alarm() handler", () => {
@@ -65,7 +91,7 @@ describe("Durable Object alarm kill switch", () => {
         continue;
       }
       for (const file of sourceFiles(src)) {
-        for (const body of alarmBodies(readFileSync(file, "utf8"))) {
+        for (const body of alarmBodies(stripNonCode(readFileSync(file, "utf8")))) {
           handlers++;
           if (!GUARD.test(body)) unguarded.push(file.slice(repoRoot.length + 1));
         }

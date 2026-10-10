@@ -11,7 +11,7 @@
 // One `ChatHookDriver` per space holds its enabled hooks and subscriptions, collapses duplicate
 // pushes, and retries failed deliveries from its alarm.
 
-import { guardedAlarmFor, hookAlarmRunsPerHour } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
+import { guardedAlarmFor } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { DurableObject, RpcTarget, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { SingleFlight } from "@gadgets/gatekeeper-kit/single-flight";
@@ -21,7 +21,7 @@ import type {
 import { fetchWithAuthRetry, type AccessTokenProvider } from "./auth-retry";
 import { ChatApiError, chatApiFailure, type ChatMessageRaw } from "./chat-api";
 import type { ChatMessageHook } from "./chat-types";
-import { HOUR_MS, HookDeliveryQueue, MAX_DELIVERIES_PER_RUN, MINUTE_MS, disposeStubs } from "./hook-delivery-queue";
+import { HOUR_MS, HookDeliveryQueue, MINUTE_MS, disposeStubs } from "./hook-delivery-queue";
 import { obsContext } from "./observability";
 import type { PushHooksEnv } from "./pubsub-push";
 
@@ -143,9 +143,7 @@ export class ChatHookDriver extends DurableObject<Env> {
    * - dropping expired subscriptions no hook uses any more.
    */
   async alarm(): Promise<void> {
-    await guardedAlarmFor(this.ctx, this.env, "google.chat-hooks", () => this.#alarmBody(), {
-      maxPerHour: hookAlarmRunsPerHour([...this.#registrations()].length, MAX_DELIVERIES_PER_RUN),
-    });
+    await guardedAlarmFor(this.ctx, this.env, "google.chat-hooks", () => this.#alarmBody());
   }
 
   async #alarmBody(): Promise<void> {

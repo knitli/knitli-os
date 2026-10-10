@@ -3,7 +3,7 @@
 // runs.
 import { withTests } from '@gadgets/scripts/gatekeeper-configurator'
 
-// The shared configurator and test tasks, with the type check also covering `__tests__`.
+/** The shared configurator and test tasks, with the type check also covering `__tests__`. */
 export default {
   ...withTests,
   run: {

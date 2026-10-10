@@ -253,17 +253,18 @@ Intentional, reviewed differences from upstream. Keep this current.
   and sends use `redirect: "manual"`. At most 10 subscriptions per user (a new device displaces the oldest); sends time out after 10 s and run beside the platform delivery; 404/410 prunes one.
   Payloads are fixed templates plus the chat title bounded to 96 characters, encrypted to the
   device.
-- **UI:** `packages/workshop-frontend/src/features/notifications/webPush/` (settings switch and
-  subscription hook), `public/sw.js` (push-only worker, no `fetch` handler so the WebSocket and
-  sign-in redirects are never intercepted) and `public/manifest.webmanifest`, all Tier 1. Upstream
-  The subscription is per browser, not per account, so the hook records the owning user in
+- **UI:** `packages/workshop-frontend/src/features/notifications/webPush/` (settings switch,
+  subscription hook and sync), `public/sw.js` (push-only worker, no `fetch` handler so the
+  WebSocket and sign-in redirects are never intercepted) and `public/manifest.webmanifest`, all
+  Tier 1. The subscription is per browser, not per account, so the hook records the owning user in
   `localStorage`: `WebPushSync` (mounted in `AuthContext.tsx`) drops a subscription that is not the
   signed-in user's and re-registers the user's own at every app start (this also heals a refreshed
   endpoint; `sw.js` has no `pushsubscriptionchange` handler because it holds no credentials), and
-  sign-out releases the subscription first.
-  seams: a manifest link in `index.html` (with `crossorigin="use-credentials"` for Cloudflare
-  Access) and the Notifications section in `SettingsPage.tsx`. Both files are served from the
-  router's static assets at the origin root, which gives the worker scope `/`; no router change.
+  sign-out releases the subscription first. Upstream seams: a manifest link in `index.html` (with
+  `crossorigin="use-credentials"` for Cloudflare Access), the Notifications section in
+  `SettingsPage.tsx`, and the logout wrapper and `<WebPushSync />` in `AuthContext.tsx`. Both
+  public files are served from the router's static assets at the origin root, which gives the
+  worker scope `/`; no router change.
 - **At sync:** Tier 2 for the seams only; if upstream reshapes `publishNotification()`, keep the
   single `deliverWebPush()` call after the acknowledgement check and before the platform delivery.
 

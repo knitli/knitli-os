@@ -4732,27 +4732,30 @@ class OverseerImpl implements AgentHooks {
   // `cls`, for the one caller that has the class in hand but has deliberately not published the
   // record yet (`addGatekeeper`): [restore]() would find no record, so it gets the raw facet.
   async getGatekeeperFacet(id: number, cls?: GatekeeperClass): Promise<Fetcher<Gatekeeper<any>>> {
-    if (cls) return this.#getGatekeeperFacetRaw(id, cls);
     let name = `gatekeeper${id}`;
     // A facet reset (e.g. the gatekeeper Worker deployed new code) aborts the facet, so the
     // next call gets a fresh one instead of the dead incarnation (see abortFacetOnReset).
-    return abortFacetOnReset(await this.ctx.restore(  // validates the gatekeeper exists, in [restore]()
-        {type: "gatekeeper", gatekeeperId: id} satisfies OverseerRestoreParams),
-        this.ctx.facets, name, this.gatekeeperFacetEpochs, this.logger.with({gatekeeperId: id}));
+    let wrap = (stub: Fetcher<Gatekeeper<any>>) => abortFacetOnReset(
+        stub, this.ctx.facets, name, this.gatekeeperFacetEpochs,
+        this.logger.with({gatekeeperId: id}));
+    if (cls) return wrap(this.#getGatekeeperFacetRaw(id, cls));
+    return wrap(await this.ctx.restore(  // validates the gatekeeper exists, in [restore]()
+        {type: "gatekeeper", gatekeeperId: id} satisfies OverseerRestoreParams));
   }
 
   // The bare facet stub behind getGatekeeperFacet(): a request made on it leaves the facet unable
-  // to call its own ctx.restore(). The abort invalidates every stub minted before it, so don't
-  // hold the returned stub: mint per use.
+  // to call its own ctx.restore(). restore() returns it directly, and [restore]() must return a
+  // genuine stub, so no abortFacetOnReset Proxy here -- only getGatekeeperFacet()'s own paths
+  // wrap. The abort invalidates every stub minted before it, so don't hold the returned stub:
+  // mint per use.
   #getGatekeeperFacetRaw(id: number, cls?: GatekeeperClass): Fetcher<Gatekeeper<any>> {
-    let name = `gatekeeper${id}`;
-    return abortFacetOnReset(this.ctx.facets.get(name, async () => {
+    return this.ctx.facets.get(`gatekeeper${id}`, async () => {
       let resolved = cls ?? this.storage.gatekeepers.get(id)?.class;
       if (!resolved) {
         throw new Error("no such gatekeeper?");
       }
       return {class: resolved};
-    }), this.ctx.facets, name, this.gatekeeperFacetEpochs, this.logger.with({gatekeeperId: id}));
+    });
   }
 
   // The git cache's pull delegate (see GitPullDelegate): reaches the gatekeeper through its

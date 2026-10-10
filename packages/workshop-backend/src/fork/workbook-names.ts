@@ -5,6 +5,7 @@
 // Overseer's naming -- do not pull SheetJS in with it.
 
 import { validateBindingName, type ChatAttachmentRef } from "@gadgets/workshop-shared/api";
+import type { ChatBindingEntry } from "../storage-schema/overseer-storage";
 
 export const XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 export const XLS_MIME_TYPE = "application/vnd.ms-excel";
@@ -104,5 +105,24 @@ function isUsableBindingName(name: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Compaction's fold of one message's workbook bindings into the checkpoint's binding map, as
+ * replay would bind them: only on user and gadget messages, before the message's tool calls, and
+ * clear of the names pending connection requests hold. Workbook names are derived rather than
+ * stamped, so the fold must repeat replay's derivation against the same taken set or a workbook
+ * could land under a different suffix.
+ */
+export function foldWorkbookBindings(
+  message: { author: { type: string }; attachments?: readonly ChatAttachmentRef[] },
+  chatBindings: Map<string, ChatBindingEntry>,
+  pendingNames: ReadonlySet<string>,
+): void {
+  if (message.author.type !== "user" && message.author.type !== "gadget") return;
+  let taken = new Set([...chatBindings.keys(), ...pendingNames]);
+  for (let { name, attachmentId } of deriveWorkbookBindings(message.attachments, taken)) {
+    chatBindings.set(name, { type: "attachment", id: attachmentId });
   }
 }

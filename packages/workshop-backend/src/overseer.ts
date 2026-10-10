@@ -1,5 +1,7 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { capExecuteCodeOutput } from "./fork/turn-guards";
+import { chatWorkbook, describeWorkbookBinding, dropWorkbook, isChatWorkbook, isSpreadsheetUpload, openWorkbookSession, readWorkbookRange, stageWorkbookUpload, workbookRefFields } from "./fork/workbook-upload";
+import { deriveWorkbookBindings } from "./fork/workbook-names";
 import { isReasoningLevel } from "./fork/reasoning-levels";
 import { ActionApplyContextImpl, attestWorkspaceAudience, beginAdmission, forgetBuildAdmission,
   forgetContractedAdmissions } from "./fork/workspace-audience";
@@ -2549,6 +2551,11 @@ class OverseerImpl implements AgentHooks {
           env[name] = stored.args;
           break;
         }
+        case "attachment":
+          if (isChatWorkbook(this.storage, chatId, entry.id)) {
+            env[name] = this.makeBindingLoopback({type: "workbook", id: entry.id}, caller);
+          }
+          break;
         default:
           entry satisfies never;
       }
@@ -5069,6 +5076,9 @@ class OverseerImpl implements AgentHooks {
             new WorktreeSessionImpl(this, target.id, turn.access, async () => initiator));
       }
 
+      case "workbook":
+        return Promise.resolve(openWorkbookSession(this.storage, caller, target.id));
+
       case "git":
         return Promise.resolve(new GitImpl(this, () => this.#gitAuthorFor(caller)));
 
@@ -5299,6 +5309,7 @@ class OverseerImpl implements AgentHooks {
         mimeType: content.state.mimeType,
         name: content.state.name,
         size: content.data.byteLength,
+        ...workbookRefFields(this.storage, id),
       });
     }
     if (total > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
@@ -5327,6 +5338,7 @@ class OverseerImpl implements AgentHooks {
     this.ctx.storage.transactionSync(() => {
       for (let content of Array.from(this.storage.chatAttachmentContent.stagedByUploadedAt.list({end: cutoff}))) {
         this.storage.chatAttachmentContent.delete(content.fileId);
+        dropWorkbook(this.storage, content.fileId);
       }
     });
   }
@@ -6594,6 +6606,16 @@ class OverseerImpl implements AgentHooks {
         `\`\`\`\n`;
   }
 
+  // AgentHooks: describe / read the spreadsheet behind a chat's attachment binding (fork/workbook-upload.ts).
+  async describeAttachmentBinding(chatId: number, envName: string, id: string): Promise<string> {
+    return describeWorkbookBinding(chatWorkbook(this.storage, chatId, id, envName), envName);
+  }
+
+  async readWorkbookRange(chatId: number, envName: string, id: string, sheet: string,
+                          range: string | undefined): Promise<string> {
+    return readWorkbookRange(this.storage, chatId, envName, id, sheet, range);
+  }
+
   async describeGatekeeper(name: string, gatekeeper: GatekeeperRecord): Promise<string> {
     let facet = await this.getGatekeeperFacet(gatekeeper.id);
 
@@ -7368,6 +7390,8 @@ class OverseerImpl implements AgentHooks {
         for (let capsule of msg.capsules ?? []) {
           if (capsule.bindingName !== undefined) taken.add(capsule.bindingName);
         }
+        // Derived at replay rather than stamped on the message (see agent.ts), so repeated here.
+        for (let {name} of deriveWorkbookBindings(msg.attachments, taken)) taken.add(name);
         for (let call of msg.toolCalls ?? []) {
           if ((call.toolName === "createGadget" || call.toolName === "createWorktree" ||
                call.toolName === "createExternalResource") &&
@@ -7587,6 +7611,8 @@ class OverseerImpl implements AgentHooks {
             anythingToName = true;
           }
         }
+        // As in chatScopeNames: workbook names are derived, not stamped.
+        for (let {name} of deriveWorkbookBindings(msg.attachments, taken)) taken.add(name);
         for (let call of msg.toolCalls ?? []) {
           if (call.toolName === "createGadget") {
             taken.add(call.input.bindingName);
@@ -10577,6 +10603,10 @@ type BindingLoopbackTarget = {
   // of coming back to life against a later execution's turn.
   executionId: string;
 } | {
+  // A spreadsheet attached to a chat (see fork/workbook-session.ts).
+  type: "workbook";
+  id: string;
+} | {
   // The `env.GIT` binding (see git-binding.ts).
   type: "git";
 };
@@ -11939,6 +11969,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     attachment: ChatAttachmentUpload,
     modelId: string | null,
   ): Promise<ChatAttachmentHandle> {
+    // Spreadsheets are parsed, not stored as sent (fork/workbook-upload.ts).
+    if (isSpreadsheetUpload(attachment)) return stageWorkbookUpload(this.impl, attachment);
     let provider: AiModelConfig["provider"] | undefined;
     if (modelId !== null) {
       provider = (await retryOnDoReset(
@@ -11981,6 +12013,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let content = this.impl.storage.chatAttachmentContent.get(id);
     if (content?.state.type === "staged") {
       this.impl.storage.chatAttachmentContent.delete(id);
+      dropWorkbook(this.impl.storage, id);
     }
   }
 
@@ -12255,6 +12288,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
             let content = this.impl.storage.chatAttachmentContent.get(attachment.id);
             if (content?.state.type === "committed" && content.state.chatId === chatId) {
               this.impl.storage.chatAttachmentContent.delete(attachment.id);
+              dropWorkbook(this.impl.storage, attachment.id);
             }
           }
         }

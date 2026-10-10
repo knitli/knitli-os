@@ -32,6 +32,11 @@ export type TeamsTeamInfo = {
   description?: string;
   /** Link that opens this team in Teams. */
   webUrl?: string;
+  /**
+   * True when you are not a member of this team and reach it only because it hosts a shared channel
+   * you belong to. Its roster is not available; read the shared channel itself.
+   */
+  sharedChannelsOnly?: boolean;
 }
 
 /** Whether a channel is open to the whole team, to a subset, or shared across tenants. */

@@ -439,6 +439,39 @@ describe("consent coverage", () => {
   });
 });
 
+describe("overlapping reconnects", () => {
+  it("keeps a flow's own scopes when another reconnect starts during its code exchange", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("idTokenClaims", { tid: TENANT, oid: "object-1" });
+    const wide = [...IDENTITY_SCOPES, ...MAIL_SCOPES];
+    await account.prepareReconnect("a".repeat(64), wide);
+    const begunA = await account.beginOAuthFlow("a".repeat(64));
+
+    // Reconnect B starts while A's authorization code is being exchanged. A shared scopes slot
+    // would be replaced here and then deleted by A when it finished.
+    fetchMock.mockImplementation(async () => {
+      await account.prepareReconnect("b".repeat(64), IDENTITY_SCOPES);
+      return jsonResponse({
+        access_token: "access-2", expires_in: 3600, refresh_token: "refresh-2",
+        scope: "openid profile email https://graph.microsoft.com/User.Read " +
+            "https://graph.microsoft.com/Mail.ReadWrite",
+        id_token: idToken({ tid: TENANT, oid: "object-1" }),
+      });
+    });
+    await account.acceptAuthCode("code-a", begunA!.oauthNonce);
+
+    // A exchanged, and staged, exactly what it asked for.
+    expect(lastTokenRequestBody().get("scope")).toBe(wide.join(" "));
+    await account.commitReconnect(stagedId(callback));
+    expect(await account.getGrantScopes()).toEqual(wide);
+    // B's flow still has its own request.
+    const begunB = await account.beginOAuthFlow("b".repeat(64));
+    expect(begunB!.scopes).toEqual(IDENTITY_SCOPES);
+  });
+});
+
 describe("refresh token rotation", () => {
   it("persists the rotated refresh token in place of the one it presented", async () => {
     const { context, account } = newAccount();

@@ -1027,7 +1027,8 @@ export class GraphTeamsApi {
         this.#collect<GraphTeam, TeamsTeamInfo>(
             graphUrl(["me", "teamwork", "associatedTeams"]), teamInfoFrom, MAX_TEAMS,
             "associated teams"));
-    return [...joined, ...associated.filter(team => !known.has(team.id))];
+    return [...joined, ...associated.filter(team => !known.has(team.id))
+        .map(team => ({ ...team, sharedChannelsOnly: true }))];
   }
 
   /**
@@ -1055,7 +1056,7 @@ export class GraphTeamsApi {
     if (joined) return joined;
     let associated = await this.#associatedTeams(async () => {
       let found = await this.#findTeam(graphUrl(["me", "teamwork", "associatedTeams"]), teamId);
-      return found ? [found] : [];
+      return found ? [{ ...found, sharedChannelsOnly: true }] : [];
     });
     if (associated[0]) return associated[0];
     throw new GraphApiError(404, "notFound", "That team is not one this account belongs to.");

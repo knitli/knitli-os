@@ -682,14 +682,17 @@ describe("credential death", () => {
     expect(reportCredentialsRejected).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps memoizing the token when nothing rejected it", async () => {
+  it("asks the account for the token on every call, so a revoked account stops serving at once", async () => {
+    // Entra has no revocation endpoint, so a token kept in memory would stay good after a
+    // disconnect and let a capability handed out earlier go on reading.
     stubFetch();
     const session = await startSession();
-
-    await session.listFolders();
     await session.listFolders();
 
-    expect(getAccessToken).toHaveBeenCalledTimes(1);
+    getAccessToken.mockRejectedValueOnce(new Error("This Microsoft connection can no longer be refreshed."));
+
+    await expect(session.listFolders()).rejects.toThrow(/can no longer be refreshed/);
+    expect(getAccessToken).toHaveBeenCalledTimes(2);
   });
 });
 

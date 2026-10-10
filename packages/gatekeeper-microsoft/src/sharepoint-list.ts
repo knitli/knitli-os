@@ -26,7 +26,8 @@ import { formatApprovalField, sanitizeApprovalTitle } from "./approval-text";
 import { AccessTokenCache, AccessTokenRequest, RetryAfterPolicy } from "./auth-retry";
 import { GraphApiError, truncate } from "./graph-api";
 import {
-  ColumnDefinition, GraphSharePointApi, ListItem, buildItemsFilter, sharePointThrottled,
+  ColumnDefinition, GraphSharePointApi, ListItem, buildItemsFilter, parseIsoDate,
+  sharePointThrottled,
 } from "./graph-sharepoint-api";
 import { MAX_PENDING_ACTIONS, PendingActionStore } from "./pending-actions";
 import type { GetItemsOptions, SharePointListSession } from "./sharepoint-types";
@@ -196,6 +197,12 @@ function validateValue(column: ColumnDefinition, value: unknown): unknown {
         throw new Error(
             `Column "${column.name}" expects a finite number, but got ${describeType(value)}.`);
       }
+      if (column.minimum !== undefined && value < column.minimum) {
+        throw new Error(`Column "${column.name}" accepts at least ${column.minimum}, but got ${value}.`);
+      }
+      if (column.maximum !== undefined && value > column.maximum) {
+        throw new Error(`Column "${column.name}" accepts at most ${column.maximum}, but got ${value}.`);
+      }
       return value;
     case "boolean":
       if (typeof value !== "boolean") {
@@ -231,7 +238,7 @@ function validateDateTime(column: ColumnDefinition, value: unknown): string {
   // A Date survives the RPC boundary, and a form is far likelier to send a string; both end up as
   // the ISO timestamp Graph documents, so neither the caller's formatting nor its time zone
   // shorthand reaches SharePoint.
-  let date = value instanceof Date ? value : typeof value === "string" ? new Date(value) : null;
+  let date = value instanceof Date ? value : typeof value === "string" ? parseIsoDate(value) : null;
   if (!date || Number.isNaN(date.valueOf())) {
     throw new Error(
         `Column "${column.name}" expects a date, e.g. "2026-09-15" or an ISO timestamp, but got ` +
@@ -411,6 +418,9 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
               `Unknown column "${echoName(name)}". Use internal column names from getColumns().`);
         }
       }
+    }
+    if (select && select.length === 0) {
+      throw new Error("`select` names no columns. Omit it to read every column, or name some.");
     }
     buildItemsFilter(where, columns);
 

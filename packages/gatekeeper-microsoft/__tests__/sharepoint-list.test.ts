@@ -404,6 +404,14 @@ describe("createItem", () => {
     await expect(cursor.next()).rejects.toThrow(/skipped 5 pages with nothing on them/);
   });
 
+  it("refuses an empty column selection before anything is authorized", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    await expect(session.getItems({ select: [] })).rejects.toThrow(/names no columns/);
+    expect(approvals.observations).toHaveLength(0);
+  });
+
   it("lets a required column that has a default be left out", async () => {
     stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
       ? jsonResponse({ value: [
@@ -581,6 +589,25 @@ describe("validateFields", () => {
         .toEqual({ Title: "x", Tag: "something new" });
     expect(() => validateFields({ Title: "x", Status: "Closed" }, SCHEMA))
         .toThrow(/does not offer the choice "Closed"/);
+  });
+
+  it("holds a number to its column's bounds", () => {
+    const bounded: ColumnDefinition[] = [
+      { name: "Qty", displayName: "Qty", type: "number", required: false, readOnly: false,
+        minimum: 1, maximum: 10 },
+    ];
+
+    expect(validateFields({ Qty: 1 }, bounded)).toEqual({ Qty: 1 });
+    expect(validateFields({ Qty: 10 }, bounded)).toEqual({ Qty: 10 });
+    expect(() => validateFields({ Qty: 0 }, bounded)).toThrow(/accepts at least 1, but got 0/);
+    expect(() => validateFields({ Qty: 11 }, bounded)).toThrow(/accepts at most 10, but got 11/);
+  });
+
+  it("refuses ambiguous or impossible dates instead of normalising them", () => {
+    expect(() => validateFields({ Title: "x", Due: "03/04/2026" }, SCHEMA)).toThrow(/expects a date/);
+    expect(() => validateFields({ Title: "x", Due: "2026-02-30" }, SCHEMA)).toThrow(/expects a date/);
+    expect(validateFields({ Title: "x", Due: "2026-02-28" }, SCHEMA).Due)
+      .toBe("2026-02-28T00:00:00.000Z");
   });
 
   it("names the column in every refusal", () => {

@@ -262,74 +262,35 @@ export async function fetchWithAuthRetry(
   }
 }
 
-/**
- * How far ahead of an access token's recorded expiry we treat it as already expired, so a token
- * doesn't lapse mid-request. Must agree with the `UserAccount`'s own safety window — otherwise the
- * caching layer happily serves a token the authoritative layer would already have replaced.
- */
-export const ACCESS_TOKEN_EXPIRY_SAFETY_MS = 60 * 1000;
-
 /** Mints an access token, bypassing any cache of its own when `forceRefresh` is set. */
 export type MintedAccessToken = { token: string; expires: Date };
 
 export type MintAccessToken = (opts?: AccessTokenRequest) => Promise<MintedAccessToken>;
 
 /**
- * Per-Durable-Object memo of the access token minted by the `UserAccount`, so a gatekeeper doesn't
- * pay an RPC on every Graph call. The token is re-minted once it is within `skewMs` of expiring, and
- * `forceRefresh` discards it outright — which is what makes the 401 retry in `fetchWithAuthRetry`
- * able to heal a token Entra invalidated ahead of its recorded expiry.
+ * How a resource gatekeeper gets its access token: from the `UserAccount`, on every call.
  *
- * Each gatekeeper Durable Object holds its own instance, so these can briefly diverge: two
- * gatekeepers may sit on different vintages of a token, both valid. They converge because every miss
- * goes to the same `UserAccount`, which is the single authority and the only thing that mints.
+ * Deliberately not memoized. Entra has no revocation endpoint to call, so disconnecting an account
+ * only destroys what the `UserAccount` holds; a token a resource Durable Object kept would stay
+ * good for the rest of its lifetime and let a capability handed out before the disconnect go on
+ * reading or applying approved writes. Asking the authority each time costs an RPC, and that
+ * authority answers from its own storage without a network round trip unless the token has to be
+ * re-minted, so the revoked account's next call fails at once.
+ *
+ * Each gatekeeper still holds one of these so the call sites keep one shape; `invalidate()` is a
+ * no-op kept for the same reason.
  */
 export class AccessTokenCache {
-  #cached: MintedAccessToken | undefined;
   #mint: MintAccessToken;
-  #skewMs: number;
 
-  constructor(mint: MintAccessToken, skewMs: number = ACCESS_TOKEN_EXPIRY_SAFETY_MS) {
+  constructor(mint: MintAccessToken) {
     this.#mint = mint;
-    this.#skewMs = skewMs;
-  }
-
-  /**
-   * Whether the memoized token can answer this request.
-   *
-   * The `staleToken` arm mirrors the re-check the authority performs, one layer up: a caller whose
-   * token was just rejected can be served locally if this cache has already moved past that token,
-   * because some earlier caller in the same 401 burst already replaced it.
-   */
-  #satisfies(cached: MintedAccessToken | undefined, opts?: AccessTokenRequest)
-      : cached is MintedAccessToken {
-    if (!cached) return false;
-    if (cached.expires.valueOf() <= Date.now() + this.#skewMs) return false;
-    if (opts?.staleToken !== undefined) return cached.token !== opts.staleToken;
-    return !opts?.forceRefresh;
   }
 
   async get(opts?: AccessTokenRequest): Promise<string> {
-    let cached = this.#cached;
-    if (!this.#satisfies(cached, opts)) {
-      cached = await this.#mint(opts);
-      this.#cached = cached;
-    }
-    return cached.token;
+    return (await this.#mint(opts)).token;
   }
 
-  /**
-   * Forget the memoized token, so the next `get()` asks the authority again.
-   *
-   * Needed for the claims-challenge path, which deliberately does not pass `forceRefresh`: a
-   * re-mint before the user reconnects would produce another token carrying the same rejected
-   * claims. Without this, the rejected token would keep being served from memory until its recorded
-   * expiry — including after a successful reconnect, so every call would report the account dead
-   * again and the reconnect prompt would keep reappearing. Dropping it locally means the first call
-   * after a reconnect reaches the authority and gets the new grant (or the recorded failure, if the
-   * account really is still dead).
-   */
-  invalidate(): void {
-    this.#cached = undefined;
-  }
+  /** Nothing is held, so there is nothing to forget. */
+  invalidate(): void {}
 }

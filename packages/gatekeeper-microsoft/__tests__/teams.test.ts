@@ -217,6 +217,23 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("host teams reached only through a shared channel", () => {
+  it("does not hand over the host team's roster", async () => {
+    stubFetch(call => call.url.includes("/me/teamwork/associatedTeams")
+      ? jsonResponse({ value: [{ id: "host-team", displayName: "Host" }] })
+      : defaultRoute(call));
+    const session = await startSession();
+
+    const host = (await session.listTeams()).find(entry => entry.info.id === "host-team")!;
+
+    expect(host.info.sharedChannelsOnly).toBe(true);
+    await expect(host.team.listMembers()).rejects.toThrow(/only through a shared channel/);
+    // A team the user really belongs to is unaffected.
+    const own = (await session.listTeams()).find(entry => entry.info.id === TEAM.id)!;
+    await expect(own.team.listMembers()).resolves.toBeDefined();
+  });
+});
+
 describe("resource description", () => {
   it("describes the Teams surface as a singleton", async () => {
     const description = await gatekeeper.describe();
@@ -709,7 +726,8 @@ describe("credential death", () => {
     const teams = await session.listTeams();
 
     expect(teams.map(entry => entry.info.displayName)).toEqual(["Engineering"]);
-    expect(getAccessToken).toHaveBeenCalledTimes(2);
+    // One token request per Graph request: the rejected call, then the joined and associated reads.
+    expect(getAccessToken).toHaveBeenCalledTimes(3);
     expect(new Headers(calls[1].init.headers).get("Authorization")).toBe("Bearer token-2");
     expect(reportCredentialsRejected).toHaveBeenCalledTimes(1);
   });

@@ -67,6 +67,12 @@ type StoredNonce = {
    * reconnect while another is in flight must not change how that other flow lands.
    */
   reconnect?: true;
+  /**
+   * The OAuth scopes this flow asks for. Carried by the flow's own nonce rather than held on the
+   * account: two reconnects can overlap, and a shared slot would let one erase or replace the other's
+   * request while its code exchange is still pending.
+   */
+  scopes: string[];
   /** The person the Workshop issued this connect link to; see `initiatorMatches` (fork). */
   initiator?: ConnectInitiator;
 };
@@ -557,13 +563,13 @@ export class UserAccount extends DurableObject<Env> {
     }
 
     this.ctx.storage.kv.put("callback", callback);
-    this.ctx.storage.kv.put<string[]>("requestedScopes", requestedScopes);
     // Sign-in-only grants are transient: dropped shortly after the email is read.
     this.ctx.storage.kv.put<boolean>("authOnly", authOnly ?? false);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
+      scopes: requestedScopes,
       initiator,
     });
   }
@@ -577,11 +583,11 @@ export class UserAccount extends DurableObject<Env> {
    */
   async prepareReconnect(
       initiationNonce: string, requestedScopes: string[], initiator?: ConnectInitiator) {
-    this.ctx.storage.kv.put<string[]>("requestedScopes", requestedScopes);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
+      scopes: requestedScopes,
       reconnect: true,
       initiator,
     });
@@ -639,10 +645,11 @@ export class UserAccount extends DurableObject<Env> {
       value: oauthNonce,
       expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
       stage: "oauth",
+      scopes: stored.scopes,
       reconnect: stored.reconnect,
       initiator: stored.initiator,
     });
-    let scopes = this.ctx.storage.kv.get<string[]>("requestedScopes") ?? IDENTITY_SCOPES;
+    let scopes = stored.scopes ?? IDENTITY_SCOPES;
     let authOnly = this.ctx.storage.kv.get<boolean>("authOnly") ?? false;
     return {oauthNonce, scopes, authOnly};
   }
@@ -673,7 +680,7 @@ export class UserAccount extends DurableObject<Env> {
         throw new Error("Took too long to complete the authorization. Please try again.");
       }
 
-      let scopes = this.ctx.storage.kv.get<string[]>("requestedScopes") ?? IDENTITY_SCOPES;
+      let scopes = stored.scopes ?? IDENTITY_SCOPES;
       let authOnly = this.ctx.storage.kv.get<boolean>("authOnly") ?? false;
 
       let grant = await exchangeAuthCode({
@@ -712,7 +719,6 @@ export class UserAccount extends DurableObject<Env> {
 
       // A sign-in-only grant asks for no resource scopes, so it has nothing to be short of.
       if (!authOnly) logUngrantedResources(scopes, grant.grantedScopes);
-      this.ctx.storage.kv.delete("requestedScopes");
       let recordedScopes = consentedScopes(scopes, grant.grantedScopes);
 
       if (stored.reconnect) {

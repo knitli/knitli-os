@@ -268,6 +268,8 @@ describe("getTeam", () => {
     const teams = await newApi().listJoinedTeams();
 
     expect(teams.map(team => team.id)).toEqual(["team-0", "host-team"]);
+    // The host team is reachable only through its shared channel, and says so.
+    expect(teams.map(team => team.sharedChannelsOnly)).toEqual([undefined, true]);
   });
 
   it("keeps the joined teams when the associated-teams read is refused, but not on an outage", async () => {

@@ -477,6 +477,13 @@ class TeamsTeamStub extends RpcTarget implements TeamsTeam {
   }
 
   async listMembers(): Promise<Cursor<TeamsMemberInfo>> {
+    // A host team reached only through a shared channel is not one the user belongs to; its roster
+    // is not theirs to read, and the broad delegated grant would otherwise hand it over.
+    if (this.#cachedInfo?.sharedChannelsOnly) {
+      throw new Error(
+          "You belong to this team only through a shared channel it hosts, so its member list is " +
+          "not available. Read the shared channel instead.");
+    }
     let scope = this.#scope();
 
     await authorizeRestricted(this.#ctx.approvalQueue, {

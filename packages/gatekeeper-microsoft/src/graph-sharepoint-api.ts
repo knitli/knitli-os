@@ -114,6 +114,10 @@ export type ColumnDefinition = {
   allowTextEntry?: boolean;
   /** A `text` column that accepts more than one line. */
   multiline?: boolean;
+  /** Smallest value a `number` column accepts, when the list sets one. */
+  minimum?: number;
+  /** Largest value a `number` column accepts, when the list sets one. */
+  maximum?: number;
   /** Longest value a `text` column accepts, in characters, when the list sets a limit. */
   maxLength?: number;
   /** A `person` or `lookup` column that holds more than one value. */
@@ -172,7 +176,7 @@ type GraphColumnDefinition = {
   required?: boolean;
   defaultValue?: { value?: string; formula?: string };
   text?: { allowMultipleLines?: boolean; maxLength?: number };
-  number?: unknown;
+  number?: { minimum?: number; maximum?: number };
   boolean?: unknown;
   dateTime?: unknown;
   choice?: { choices?: string[]; allowTextEntry?: boolean };
@@ -280,6 +284,10 @@ function normalizeColumn(column: GraphColumnDefinition): ColumnDefinition | null
     ...(column.defaultValue && (column.defaultValue.value || column.defaultValue.formula)
         ? { hasDefault: true } : {}),
     ...(type === "choice" && column.choice?.allowTextEntry === true ? { allowTextEntry: true } : {}),
+    ...(type === "number" && isRealBound(column.number?.minimum)
+        ? { minimum: column.number!.minimum } : {}),
+    ...(type === "number" && isRealBound(column.number?.maximum)
+        ? { maximum: column.number!.maximum } : {}),
     ...(type === "text" && column.text?.allowMultipleLines === true ? { multiline: true } : {}),
     // Graph reports 0 (or nothing) for a column with no limit of its own.
     ...(type === "text" && Number.isInteger(column.text?.maxLength) && column.text!.maxLength! > 0
@@ -347,7 +355,7 @@ function filterLiteral(column: ColumnDefinition, value: string | number | boolea
     }
     case "dateTime": {
       if (typeof value !== "string") throw mismatch();
-      let parsed = Date.parse(value);
+      let parsed = parseIsoDate(value)?.valueOf() ?? Number.NaN;
       if (Number.isNaN(parsed)) {
         throw new Error(
             `Column "${column.name}" holds dates, so its value must be an ISO 8601 date or ` +
@@ -690,6 +698,11 @@ export class GraphSharePointApi {
   /** The internal names to expand, defaulting to every column the list has. */
   #selectedFields(opts: ListItemsOptions): string[] {
     if (!opts.select) return opts.columns.map(column => column.name);
+    // An empty selection must not fall through to "expand every field", which discloses the whole
+    // row; it names nothing, so it is refused.
+    if (opts.select.length === 0) {
+      throw new Error("`select` names no columns. Omit it to read every column, or name some.");
+    }
     return opts.select.map(name => {
       let column = opts.columns.find(candidate => candidate.name === name);
       if (!column) {
@@ -713,6 +726,33 @@ export class GraphSharePointApi {
 }
 
 /** `$top` as Graph wants it: a positive integer within this client's ceiling. */
+/**
+ * A bound Graph really sets. An unbounded number column reports the double extremes, which say
+ * nothing and would only clutter the schema.
+ */
+function isRealBound(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && Math.abs(value) < 1e300;
+}
+
+/**
+ * Parse an ISO 8601 date (`2026-09-15`) or date-time (`2026-09-15T10:30:00Z`, with an optional
+ * offset), or null. Stricter than `Date.parse` on purpose: that accepts `03/04/2026` as March 4 and
+ * rolls `2026-02-30` over to March 2, so a mistake would be written to the list as a different date.
+ */
+export function parseIsoDate(value: string): Date | null {
+  let match = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})?)?$/
+      .exec(value.trim());
+  if (!match) return null;
+  let [year, month, day, hour = 0, minute = 0, second = 0] =
+      match.slice(1, 7).map(part => Number(part ?? 0));
+  if (month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return null;
+  // The day must exist in that month.
+  let probe = new Date(Date.UTC(year, month - 1, day));
+  if (probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) return null;
+  let date = new Date(value.trim());
+  return Number.isNaN(date.valueOf()) ? null : date;
+}
+
 function itemPageSize(requested: number | undefined): string {
   let size = requested ?? DEFAULT_ITEM_PAGE_SIZE;
   if (!Number.isFinite(size)) size = DEFAULT_ITEM_PAGE_SIZE;

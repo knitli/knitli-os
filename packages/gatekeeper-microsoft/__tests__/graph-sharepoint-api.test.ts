@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { GraphApiError, graphSiteByPathUrl } from "../src/graph-api";
 import {
-  ColumnDefinition, GraphSharePointApi, SHAREPOINT_USER_AGENT, buildItemsFilter,
+  ColumnDefinition, GraphSharePointApi, SHAREPOINT_USER_AGENT, buildItemsFilter, parseIsoDate,
 } from "../src/graph-sharepoint-api";
 
 type Call = { url: string; init: RequestInit };
@@ -222,6 +222,19 @@ describe("resolveListByUrl", () => {
 });
 
 describe("listColumns", () => {
+  it("keeps a number column's real bounds and drops the unbounded sentinels", async () => {
+    stubFetch(() => jsonResponse({ value: [
+      { name: "Qty", displayName: "Qty", number: { minimum: 1, maximum: 10 } },
+      { name: "Any", displayName: "Any",
+        number: { minimum: -1.7976931348623157e308, maximum: 1.7976931348623157e308 } },
+    ] }));
+
+    const columns = await newApi().listColumns("site-1", "list-1");
+
+    expect(columns.map(column => [column.minimum, column.maximum]))
+      .toEqual([[1, 10], [undefined, undefined]]);
+  });
+
   it("reports a text column's length limit, and nothing for an unlimited one", async () => {
     stubFetch(() => jsonResponse({ value: [
       { name: "Title", displayName: "Title", text: { maxLength: 255 } },
@@ -278,6 +291,14 @@ describe("listColumns", () => {
 });
 
 describe("listItems", () => {
+  it("refuses an empty selection instead of expanding every field", async () => {
+    const calls = stubFetch(() => jsonResponse({ value: [] }));
+
+    await expect(newApi().listItems("site-1", "list-1", { columns: SCHEMA, select: [] }))
+      .rejects.toThrow(/names no columns/);
+    expect(calls).toHaveLength(0);
+  });
+
   it("expands only the list's own columns and clamps the page size", async () => {
     const calls = stubFetch(() => jsonResponse({ value: [ITEM] }));
 
@@ -387,6 +408,30 @@ describe("getItem and createItem", () => {
     expect(JSON.parse(String(calls[0].init.body)))
       .toEqual({ fields: { Title: "New laptop", Qty: 2 } });
     expect(created.id).toBe("43");
+  });
+});
+
+describe("parseIsoDate", () => {
+  it("accepts ISO dates and date-times", () => {
+    expect(parseIsoDate("2026-09-15")?.toISOString()).toBe("2026-09-15T00:00:00.000Z");
+    expect(parseIsoDate("2026-09-15T10:30:00Z")?.toISOString()).toBe("2026-09-15T10:30:00.000Z");
+    expect(parseIsoDate("2026-09-15T10:30:00.250+02:00")?.toISOString())
+      .toBe("2026-09-15T08:30:00.250Z");
+  });
+
+  it("refuses what Date.parse would silently reinterpret", () => {
+    // Ambiguous formats, and calendar dates that do not exist (which Date rolls over).
+    for (const bad of ["03/04/2026", "March 4, 2026", "2026-02-30", "2026-13-01", "2026-04-31",
+                       "2026-09-15T25:00:00Z", "2026-9-5", "tomorrow", ""]) {
+      expect(parseIsoDate(bad)).toBeNull();
+    }
+    expect(parseIsoDate("2024-02-29")).not.toBeNull();
+    expect(parseIsoDate("2025-02-29")).toBeNull();
+  });
+
+  it("is what a date filter value must satisfy", () => {
+    expect(() => buildItemsFilter([{ column: "Due", op: "ge", value: "03/04/2026" }], SCHEMA))
+      .toThrow(/ISO 8601/);
   });
 });
 

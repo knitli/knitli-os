@@ -45,6 +45,10 @@ export type ColumnDefinition = {
   choices?: string[];
   /** A `choice` column that also accepts values outside `choices`. */
   allowTextEntry?: boolean;
+  /** Smallest value a `number` column accepts. Absent when the column sets none. */
+  minimum?: number;
+  /** Largest value a `number` column accepts. Absent when the column sets none. */
+  maximum?: number;
   /** A `text` column that accepts more than one line. */
   multiline?: boolean;
   /** Longest value a `text` column accepts, in characters. Absent when the column sets no limit. */

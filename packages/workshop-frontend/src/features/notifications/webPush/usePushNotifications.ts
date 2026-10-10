@@ -59,7 +59,9 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
       }
       // Learned up front so turning on never needs a round trip after the subscription exists.
       const { id: owner } = await api.whoami()
-      const registration = await navigator.serviceWorker.register(SERVICE_WORKER_URL)
+      await navigator.serviceWorker.register(SERVICE_WORKER_URL)
+      // subscribe() needs an active worker, which a first install doesn't have yet.
+      const registration = await navigator.serviceWorker.ready
       const subscription = await registration.pushManager.getSubscription()
       if (cancelled) return
       // Another user's subscription (or one made with an old key) is replaced, never shared; doing
@@ -120,7 +122,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
   }, [status])
 
   const enable = async () => {
-    if (!ready) return
+    if (!ready || busy) return
     setBusy(true)
     try {
       const { registration, key, owner } = ready
@@ -156,7 +158,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
   }
 
   const disable = async () => {
-    if (!ready) return
+    if (!ready || busy) return
     setBusy(true)
     try {
       try {
@@ -177,7 +179,6 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
   }
 
   const retry = () => {
-    setStatus('loading')
     setAttempt((n) => n + 1)
   }
 

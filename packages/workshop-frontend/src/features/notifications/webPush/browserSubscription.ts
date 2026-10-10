@@ -43,15 +43,19 @@ export const findPushManager = async (): Promise<PushManager | undefined> =>
  * Removes this browser's subscription from the browser and the server, and forgets its owner. The
  * browser side goes first and does not depend on the server: if the server call fails or stalls,
  * the endpoint is already dead (the server prunes it on its next 404/410) and nobody else's
- * notifications can reach this browser. `signal` abandons the release, checked after every await
+ * notifications can reach this browser. `owner`, when known, limits the release to that user's
+ * subscription. `signal` abandons the release, checked after every await
  * that precedes a mutation, for a caller that stopped waiting and whose session may have been
  * replaced by one that has claimed a new subscription.
  */
 export const releaseBrowserSubscription = async (
-  api: RpcStub<AuthenticatedApi>, pushManager: PushManager, signal?: AbortSignal,
+  api: RpcStub<AuthenticatedApi>, pushManager: PushManager, signal?: AbortSignal, owner?: string,
 ) => {
   const subscription = await pushManager.getSubscription()
   if (signal?.aborted) return
+  // The subscription is shared by every tab: leave one another user has since claimed alone.
+  const claimedBy = readOwner()
+  if (owner && claimedBy && claimedBy !== owner) return
   if (!subscription) return writeOwner(null)
   await subscription.unsubscribe()
   if (signal?.aborted) return
@@ -110,9 +114,10 @@ const resubscribe = async (
  * Signing out: stops this browser receiving the user's notifications. Best effort, and bounded.
  * It releases whatever subscription the browser holds without asking the server who the user is,
  * so a dropped connection cannot leave it behind: sign-in already dropped any subscription that was
- * not the user's, so what remains is theirs.
+ * not the user's, so what remains is theirs, unless another tab has signed in as someone else since:
+ * `owner`, the id this tab was signed in as, guards that.
  */
-export const releaseOnSignOut = async (api: RpcStub<AuthenticatedApi>) => {
+export const releaseOnSignOut = async (api: RpcStub<AuthenticatedApi>, owner?: string) => {
   if (pushAvailability(currentPushEnvironment()) !== 'supported') return
   const stopped = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -126,7 +131,7 @@ export const releaseOnSignOut = async (api: RpcStub<AuthenticatedApi>) => {
     await Promise.race([
       (async () => {
         const pushManager = await findPushManager()
-        if (pushManager && !stopped.signal.aborted) await releaseBrowserSubscription(api, pushManager, stopped.signal)
+        if (pushManager && !stopped.signal.aborted) await releaseBrowserSubscription(api, pushManager, stopped.signal, owner)
       })(),
       timeout,
     ])

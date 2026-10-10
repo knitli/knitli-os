@@ -50,7 +50,11 @@ export function AuthProvider({ children, authenticatedApi, onLogout }: AuthProvi
   const isAdmin = isAdminResult?.authenticatedApi === authenticatedApi ? isAdminResult.value : false
 
   return (
-    <AuthContext.Provider value={{ authenticatedApi, logout: () => void releaseOnSignOut(authenticatedApi).finally(onLogout), currentUser, isAdmin }}>
+    <AuthContext.Provider value={{ authenticatedApi, logout: () => {
+      // Sign out first: push cleanup is best effort and must not hold the session open if the page goes.
+      void releaseOnSignOut(authenticatedApi, currentUser?.id)
+      onLogout()
+    }, currentUser, isAdmin }}>
       <WebPushSync />
       {children}
     </AuthContext.Provider>

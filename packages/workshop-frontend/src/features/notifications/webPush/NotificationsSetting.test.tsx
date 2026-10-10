@@ -43,7 +43,8 @@ function installBrowser(options: { permission: NotificationPermission; subscribe
     requestPermission: vi.fn<() => Promise<NotificationPermission>>(async () => 'granted'),
   }
   const register = vi.fn<(url: string) => Promise<{ pushManager: typeof pushManager }>>(async () => ({ pushManager }))
-  Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { register } })
+  // `ready` resolves once the worker is active; subscribe() needs that.
+  Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { register, ready: Promise.resolve({ pushManager }) } })
   vi.stubGlobal('PushManager', function PushManager() {})
   vi.stubGlobal('Notification', notification)
   return { pushManager, register, subscription, notification }
@@ -171,6 +172,19 @@ describe('NotificationsSetting', () => {
     const container = await render(fakeApi())
     await act(async () => button(container, 'Turn on')!.click())
     expect(container.textContent).toContain('blocked')
+  })
+
+  it('announces its state through a live region and keeps focus on the same control', async () => {
+    installBrowser({ permission: 'default', subscribed: false })
+    const container = await render(fakeApi())
+    expect(container.querySelector('[role="status"]')).not.toBeNull()
+    const control = button(container, 'Turn on')!
+    control.focus()
+
+    await act(async () => control.click())
+    expect(container.querySelector('[role="status"]')!.textContent).toContain('On for this device')
+    expect(button(container, 'Turn off')).toBe(control)
+    expect(document.activeElement).toBe(control)
   })
 
   it('keeps Turn off available when re-registering an existing subscription fails', async () => {

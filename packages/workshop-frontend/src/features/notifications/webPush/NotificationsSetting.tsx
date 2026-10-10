@@ -19,7 +19,7 @@ const DESCRIPTIONS: Record<PushStatus, string> = {
 /** The per-device push notification switch on the profile page. */
 export const NotificationsSetting = ({ api }: { api: RpcStub<AuthenticatedApi> }) => {
   const toasts = useKumoToastManager()
-  const { status, busy, enable, disable, retry } = usePushNotifications(api)
+  const { status, enable, disable, retry } = usePushNotifications(api)
 
   const run = async (action: () => Promise<void>, failure: string) => {
     try {
@@ -30,13 +30,21 @@ export const NotificationsSetting = ({ api }: { api: RpcStub<AuthenticatedApi> }
     }
   }
 
+  // One control for every actionable state, so keyboard focus stays on it as the state changes.
+  // Not disabled while busy (that would drop focus); the hook ignores taps while it works.
+  const action: { label: string; variant: 'primary' | 'secondary'; onClick: () => void } | null =
+    status === 'off' ? { label: 'Turn on', variant: 'primary', onClick: () => run(enable, 'Failed to turn on notifications') }
+    : status === 'on' ? { label: 'Turn off', variant: 'secondary', onClick: () => run(disable, 'Failed to turn off notifications') }
+    : status === 'error' ? { label: 'Try again', variant: 'secondary', onClick: retry }
+    : null
+
   return (
     <div className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center">
       <div className="flex min-w-0 flex-1 items-start gap-3">
         {status === 'on'
           ? <Bell size={18} className="mt-0.5 shrink-0 text-kumo-default" />
           : <BellSlash size={18} className="mt-0.5 shrink-0 text-kumo-inactive" />}
-        <div className="min-w-0">
+        <div className="min-w-0" role="status">
           <p className="text-[14px] font-medium tracking-[-0.25px] text-kumo-default">
             {status === 'on' ? 'On for this device' : 'Push notifications'}
           </p>
@@ -45,20 +53,8 @@ export const NotificationsSetting = ({ api }: { api: RpcStub<AuthenticatedApi> }
           </p>
         </div>
       </div>
-      {status === 'error' && (
-        <Button variant="secondary" onClick={retry}>Try again</Button>
-      )}
-      {status === 'off' && (
-        <Button variant="primary" disabled={busy} onClick={() => run(enable, 'Failed to turn on notifications')}>
-          Turn on
-        </Button>
-      )}
-      {status === 'on' && (
-        <div className="flex shrink-0 gap-2">
-          <Button variant="secondary" disabled={busy} onClick={() => run(disable, 'Failed to turn off notifications')}>
-            Turn off
-          </Button>
-        </div>
+      {action && (
+        <Button className="shrink-0" variant={action.variant} onClick={action.onClick}>{action.label}</Button>
       )}
     </div>
   )

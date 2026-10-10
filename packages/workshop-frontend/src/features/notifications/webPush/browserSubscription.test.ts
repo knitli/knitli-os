@@ -182,6 +182,15 @@ describe('releaseOnSignOut', () => {
     expect(api.removeWebPushSubscription).not.toHaveBeenCalled()
   })
 
+  it('leaves alone a subscription another tab has since claimed for someone else', async () => {
+    const api = fakeApi()
+    const { subscription } = install()
+    localStorage.setItem(OWNER_KEY, 'next@example.com')
+    await releaseOnSignOut(asStub(api), 'me@example.com')
+    expect(subscription.unsubscribe).not.toHaveBeenCalled()
+    expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
+  })
+
   it('never blocks or fails the sign-out when the server is unreachable', async () => {
     const api = fakeApi()
     api.removeWebPushSubscription.mockRejectedValue(new Error('offline'))

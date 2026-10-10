@@ -158,9 +158,10 @@ export function alarmBackoffMs(
  * 2. It counts runs per clock minute. Past `maxPerMinute` the circuit opens: it logs
  *    `alarm.circuit.open` once per minute at error level, skips `run`, and does not re-arm
  *    (or, with `deferWhenOpen`, re-arms for the next minute). The next minute closes it.
- * 3. If `run` throws, the guard owns the next alarm. It overrides whatever `run` armed with
- *    `now + backoff`, logs `alarm.failed`, and returns normally so the platform does not
- *    retry as well. A success resets the failure count.
+ * 3. If `run` throws, the guard owns the next alarm: `now + backoff`, unless an alarm armed
+ *    earlier than that exists (a concurrent request's new work), which is kept. It logs
+ *    `alarm.failed` and returns normally so the platform does not retry as well. A success
+ *    resets the failure count.
  * 4. After `maxConsecutiveFailures` consecutive failures it stops arming retries
  *    (`alarm.gave_up`): an alarm armed during the run, by the body or a concurrent request, is
  *    kept but pushed out to the longest backoff, and with none armed the alarm stays off until an
@@ -218,7 +219,12 @@ export async function guardedAlarm(
         event: "alarm.gave_up", alarmKey: key, failures: nextFailures, error,
       });
     } else {
-      const retryAt = now() + alarmBackoffMs(nextFailures, options.backoff);
+      // An alarm already armed earlier than the backoff belongs to a concurrent request (or to a
+      // body that re-arms at once); keep it. A looping body then fails fast through the
+      // consecutive-failure limit above rather than being delayed past new work.
+      const armed = await storage.getAlarm();
+      const retryAt = armed !== null && armed < now() + alarmBackoffMs(nextFailures, options.backoff)
+        ? armed : now() + alarmBackoffMs(nextFailures, options.backoff);
       await storage.setAlarm(retryAt);
       logger.error("alarm failed; retrying with backoff", {
         event: "alarm.failed", alarmKey: key, failures: nextFailures, retryAt, error,

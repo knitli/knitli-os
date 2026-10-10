@@ -220,10 +220,10 @@ describe("alarm guard", () => {
     expect(run).toHaveBeenCalledTimes(4);
   });
 
-  it("backs off 30 s, 60 s, 120 s ... capped at 1 h, overriding the body's re-arm", async () => {
+  it("backs off 30 s, 60 s, 120 s ... capped at 1 h, overriding a later re-arm", async () => {
     const delays: number[] = [];
     const run = async () => {
-      await state.storage.setAlarm(state.clock); // re-arms at now, then fails
+      await state.storage.setAlarm(state.clock + 2 * HOUR); // a later re-arm is overridden
       throw new Error("boom");
     };
     for (let i = 0; i < 7; i++) {
@@ -237,10 +237,32 @@ describe("alarm guard", () => {
     expect(alarmBackoffMs(1, { baseMs: 0 })).toBe(1_000);
   });
 
+  it("keeps an earlier alarm armed by a concurrent request when a run fails", async () => {
+    await state.fire({}, async () => {
+      await state.storage.setAlarm(state.clock + 1_000); // new work, due before the backoff
+      throw new Error("boom");
+    });
+    expect(state.alarm).toBe(T0 + 1_000);
+  });
+
+  it("a body that re-arms at once and fails reaches the give-up limit quickly, then slows to hourly", async () => {
+    const loop = async () => {
+      await state.storage.setAlarm(state.clock + 1);
+      throw new Error("boom");
+    };
+    for (let i = 0; i < 8; i++) {
+      await state.fire({}, loop);
+      state.clock += 1;
+    }
+    expect(state.record("test")!.failures).toBe(8);
+    expect(state.alarm).toBeGreaterThanOrEqual(state.clock + HOUR - 5);
+  });
+
   it("never itself arms the alarm at or before now, on any path", async () => {
     const runs = [ok, boom, boom, ok, boom, boom, boom, boom, boom, boom, boom, ok];
     for (const [i, run] of runs.entries()) {
       const before = state.alarmWrites.length;
+      state.alarm = null; // the runtime clears an alarm as it fires
       await state.fire({ maxPerMinute: 9, deferWhenOpen: i % 2 === 0 }, run);
       for (const at of state.alarmWrites.slice(before)) expect(at).toBeGreaterThan(state.clock);
       state.clock += 1_000;
@@ -296,10 +318,12 @@ describe("alarm guard", () => {
     expect(state.record("test")!.failures).toBe(2);
     // The failure count survives eviction, so backoff keeps growing across restarts.
     const fresh = state.evicted();
+    fresh.alarm = null;
     await fresh.fire({}, boom);
     expect(fresh.alarm).toBe(fresh.clock + 120_000);
     await fresh.fire({}, ok);
     expect(fresh.record("test")!.failures).toBe(0);
+    fresh.alarm = null;
     await fresh.fire({}, boom);
     expect(fresh.alarm).toBe(fresh.clock + 30_000);
   });

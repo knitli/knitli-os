@@ -28,7 +28,7 @@ How Cloudflare handles alarms:
   `alarm.circuit.open`), and a throwing run is swallowed and replaced by an exponential-backoff
   alarm (30 s doubling to 1 h, `alarm.failed`), giving up after 8 consecutive failures
   (`alarm.gave_up`; an alarm armed meanwhile is kept but pushed out to an hour, never deleted, so a
-  concurrent request's wake-up is not lost). A run that succeeds and leaves no alarm armed deletes the guard's counter key, so an idle object returns to empty storage (a failing or given-up alarm keeps it). A guarded handler therefore no longer rethrows to the platform. All of ours
+  concurrent request's wake-up is not lost). A run that succeeds and leaves no alarm armed deletes the guard's counter key, so an idle object returns to empty storage (a failing or given-up alarm keeps it). A guarded handler therefore no longer rethrows to the platform. A retry never postpones an alarm armed earlier than the backoff, such as a concurrent request's new work; a body that re-arms at once and keeps failing is stopped by the failure limit instead (8 fast runs, then hourly). All of ours
   set `deferWhenOpen`, so an open circuit re-arms for the next minute instead of dropping the work.
 - **`scheduleAlarm`.** Arms an alarm no earlier than `now + 1 s`. Exported for new code; no
   existing handler uses it, because the ones that deliberately re-arm "at once" (scheduler

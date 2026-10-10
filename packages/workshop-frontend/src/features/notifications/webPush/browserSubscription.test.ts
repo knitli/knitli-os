@@ -8,6 +8,8 @@ import { applicationServerKey } from './pushSupport'
 const KEY = 'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8'
 const OWNER_KEY = 'gadgets.webPush.owner'
 
+const subscribe = vi.fn<(options: PushSubscriptionOptionsInit) => Promise<unknown>>()
+
 function install(subscribed = true, getSubscription?: () => Promise<unknown>) {
   const subscription = {
     endpoint: 'https://web.push.apple.com/refreshed',
@@ -15,7 +17,7 @@ function install(subscribed = true, getSubscription?: () => Promise<unknown>) {
     toJSON: () => ({ endpoint: 'https://web.push.apple.com/refreshed', keys: { p256dh: 'P', auth: 'A' } }),
     unsubscribe: vi.fn<() => Promise<boolean>>(async () => true),
   }
-  const registration = { pushManager: { getSubscription: getSubscription ?? (async () => (subscribed ? subscription : null)) } }
+  const registration = { pushManager: { subscribe, getSubscription: getSubscription ?? (async () => (subscribed ? subscription : null)) } }
   Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { getRegistration: async () => registration } })
   vi.stubGlobal('PushManager', function PushManager() {})
   vi.stubGlobal('Notification', { permission: 'granted' })
@@ -72,6 +74,37 @@ describe('syncBrowserSubscription', () => {
     await done
     expect(subscription.unsubscribe).not.toHaveBeenCalled()
     expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
+  })
+
+  describe('after the deployment rotated its VAPID key', () => {
+    const rotate = (subscription: ReturnType<typeof install>['subscription']) => {
+      Object.assign(subscription.options, { applicationServerKey: new Uint8Array(65).buffer })
+    }
+
+    it('replaces the dead subscription and registers the new one', async () => {
+      const api = fakeApi()
+      const { subscription } = install()
+      rotate(subscription)
+      const fresh = { toJSON: () => ({ endpoint: 'https://web.push.apple.com/new', keys: { p256dh: 'P2', auth: 'A2' } }) }
+      subscribe.mockResolvedValue(fresh)
+      localStorage.setItem(OWNER_KEY, 'me@example.com')
+      await syncBrowserSubscription(asStub(api), new AbortController().signal)
+      expect(subscription.unsubscribe).toHaveBeenCalled()
+      expect(api.removeWebPushSubscription).toHaveBeenCalledWith('https://web.push.apple.com/refreshed')
+      expect(subscribe).toHaveBeenCalledWith({ userVisibleOnly: true, applicationServerKey: applicationServerKey(KEY) })
+      expect(api.addWebPushSubscription).toHaveBeenCalledWith({ endpoint: 'https://web.push.apple.com/new', p256dh: 'P2', auth: 'A2' })
+    })
+
+    it('leaves the device off, for Settings to offer Turn on, where subscribing needs a tap', async () => {
+      const api = fakeApi()
+      const { subscription } = install()
+      rotate(subscription)
+      subscribe.mockRejectedValue(new Error('needs a user gesture'))
+      localStorage.setItem(OWNER_KEY, 'me@example.com')
+      await syncBrowserSubscription(asStub(api), new AbortController().signal)
+      expect(api.addWebPushSubscription).not.toHaveBeenCalled()
+      expect(localStorage.getItem(OWNER_KEY)).toBeNull()
+    })
   })
 
   it('does nothing without a subscription', async () => {

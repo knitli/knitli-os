@@ -1,6 +1,6 @@
 import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { currentPushEnvironment, pushAvailability, subscribedWithKey, toSubscriptionInfo } from './pushSupport'
+import { applicationServerKey, currentPushEnvironment, pushAvailability, subscribedWithKey, toSubscriptionInfo } from './pushSupport'
 
 // A browser's push subscription is one per origin, not one per account, so a browser reused after
 // sign-out would still hold the previous user's. Remember whose it is and let go of it for anyone else.
@@ -68,8 +68,9 @@ export const releaseBrowserSubscription = async (
  */
 export const syncBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, signal: AbortSignal) => {
   if (pushAvailability(currentPushEnvironment()) !== 'supported' || Notification.permission !== 'granted') return
-  const subscription = await (await findPushManager())?.getSubscription()
-  if (!subscription || signal.aborted) return
+  const pushManager = await findPushManager()
+  const subscription = await pushManager?.getSubscription()
+  if (!pushManager || !subscription || signal.aborted) return
   const { id } = await api.whoami()
   if (signal.aborted) return
   if (!ownsBrowserSubscription(id)) {
@@ -78,9 +79,31 @@ export const syncBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, si
     return
   }
   const key = await api.getWebPushPublicKey()
-  if (!signal.aborted && key && subscribedWithKey(subscription, key)) {
-    await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
+  if (signal.aborted || !key) return
+  if (!subscribedWithKey(subscription, key)) {
+    await resubscribe(api, pushManager, subscription, key, signal)
+    return
   }
+  await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
+}
+
+/**
+ * Replaces a subscription made with a VAPID key the deployment has since rotated: the push service
+ * rejects our sends for it, so it is dead. Browsers that allow it resubscribe at once; where
+ * subscribing needs a tap (iOS) the owner is cleared and Settings offers Turn on.
+ */
+const resubscribe = async (
+  api: RpcStub<AuthenticatedApi>, pushManager: PushManager, stale: PushSubscription, key: string, signal: AbortSignal,
+) => {
+  await stale.unsubscribe()
+  if (signal.aborted) return
+  await api.removeWebPushSubscription(stale.endpoint).catch(() => {})
+  if (signal.aborted) return
+  const fresh = await pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: applicationServerKey(key) })
+    .catch(() => null)
+  if (signal.aborted) return
+  if (!fresh) return writeOwner(null)
+  await api.addWebPushSubscription(toSubscriptionInfo(fresh.toJSON()))
 }
 
 /**

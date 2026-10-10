@@ -7,6 +7,7 @@ import { usePushNotifications, type PushStatus } from './usePushNotifications'
 const DESCRIPTIONS: Record<PushStatus, string> = {
   loading: 'Checking this device…',
   unsupported: 'This browser can’t receive notifications.',
+  error: 'Couldn’t check this device’s notifications.',
   disabled: 'Push notifications are not enabled on this deployment.',
   'install-first':
     'On iPhone and iPad, add Cloudflare OS to your Home Screen (Share, then Add to Home Screen) and open it from there to turn on notifications.',
@@ -18,7 +19,7 @@ const DESCRIPTIONS: Record<PushStatus, string> = {
 /** The per-device push notification switch on the profile page. */
 export const NotificationsSetting = ({ api }: { api: RpcStub<AuthenticatedApi> }) => {
   const toasts = useKumoToastManager()
-  const { status, busy, enable, disable } = usePushNotifications(api)
+  const { status, busy, enable, disable, retry } = usePushNotifications(api)
 
   const run = async (action: () => Promise<void>, failure: string) => {
     try {
@@ -44,6 +45,9 @@ export const NotificationsSetting = ({ api }: { api: RpcStub<AuthenticatedApi> }
           </p>
         </div>
       </div>
+      {status === 'error' && (
+        <Button variant="secondary" onClick={retry}>Try again</Button>
+      )}
       {status === 'off' && (
         <Button variant="primary" disabled={busy} onClick={() => run(enable, 'Failed to turn on notifications')}>
           Turn on

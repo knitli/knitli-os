@@ -14,6 +14,7 @@ import {
 export type PushStatus =
   | 'loading'
   | 'unsupported'
+  | 'error'
   | 'disabled'
   | 'install-first'
   | 'blocked'
@@ -34,6 +35,7 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
   const [status, setStatus] = useState<PushStatus>('loading')
   const [ready, setReady] = useState<Ready | null>(null)
   const [busy, setBusy] = useState(false)
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -60,17 +62,20 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
         && ownsBrowserSubscription(owner)) {
         // Re-register on every visit: the server forgets a device the push service reported gone,
         // and this heals a device that is back.
-        await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
+        // A failure here changes nothing about the device: it stays on, with Turn off available.
+        await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON())).catch((error: unknown) => {
+          console.error('Failed to register this device’s push subscription:', error)
+        })
         if (!cancelled) setStatus('on')
       } else {
         setStatus('off')
       }
     })().catch((error: unknown) => {
       console.error('Failed to check push notifications:', error)
-      if (!cancelled) setStatus('unsupported')
+      if (!cancelled) setStatus('error')
     })
     return () => { cancelled = true }
-  }, [api])
+  }, [api, attempt])
 
   // Permission is granted in browser or system settings, away from this page: look again when the
   // user comes back, so a blocked device gets its Turn on button without a reload.
@@ -151,5 +156,10 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
     }
   }
 
-  return { status, busy, enable, disable }
+  const retry = () => {
+    setStatus('loading')
+    setAttempt((n) => n + 1)
+  }
+
+  return { status, busy, enable, disable, retry }
 }

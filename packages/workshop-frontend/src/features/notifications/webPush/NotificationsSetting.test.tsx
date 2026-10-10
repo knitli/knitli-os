@@ -152,6 +152,29 @@ describe('NotificationsSetting', () => {
     expect(localStorage.getItem('gadgets.webPush.owner')).toBe('me@example.com')
   })
 
+  it('keeps Turn off available when re-registering an existing subscription fails', async () => {
+    const api = fakeApi()
+    api.addWebPushSubscription.mockRejectedValue(new Error('offline'))
+    installBrowser({ permission: 'granted', subscribed: true })
+    localStorage.setItem('gadgets.webPush.owner', 'me@example.com')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const container = await render(api)
+    expect(container.textContent).toContain('On for this device')
+    expect(button(container, 'Turn off')).toBeDefined()
+  })
+
+  it('offers to try again after a transient failure instead of calling the browser unsupported', async () => {
+    const api = fakeApi()
+    api.getWebPushPublicKey.mockRejectedValueOnce(new Error('offline'))
+    installBrowser({ permission: 'default', subscribed: false })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const container = await render(api)
+    expect(container.textContent).not.toContain('can’t receive')
+
+    await act(async () => button(container, 'Try again')!.click())
+    expect(button(container, 'Turn on')).toBeDefined()
+  })
+
   it('says so, and registers no service worker, when the deployment has no push key', async () => {
     const api = fakeApi()
     api.getWebPushPublicKey.mockResolvedValue(null)

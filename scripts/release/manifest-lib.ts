@@ -119,6 +119,8 @@ export interface WranglerConfig {
   services?: ServiceBinding[];
   /** Browser Rendering binding (Gadget PDF exports). */
   browser?: BindingDecl;
+  /** Send Email bindings (gatekeeper-email's outbound mail), keyed by `name`, not `binding`. */
+  send_email?: { name: string }[];
   /** Artifacts binding — closed beta, cut from customer manifests. */
   artifacts?: BindingDecl;
   /** Worker limits. First-party deployment tuning; cut from customer manifests. */
@@ -255,6 +257,10 @@ const HANDLED_CONFIG_KEYS = new Set([
   // Browser Rendering (Gadget PDF exports). Unlike artifacts it is generally available, so it
   // passes through to customer instances as a placeholder-free binding, like the AI binding.
   "browser",
+  // gatekeeper-email's outbound mail. Unrestricted (no destination/sender allowlists), so it
+  // passes through as a placeholder-free binding; what it can deliver depends on the account's
+  // Email Routing / Email Service setup, which the gatekeeper reports as a failed action.
+  "send_email",
   // gatekeeper-context's Artifacts binding is closed-beta and cannot be provisioned in arbitrary
   // user accounts; it is dropped from customer manifests (the gatekeeper degrades gracefully).
   "artifacts",
@@ -444,6 +450,9 @@ export function buildWorkerEntry(
   if (config.browser) {
     // `remote` is dev-only wrangler behavior; the deployed binding is just { type, name }.
     bindings.push({ type: "browser", name: config.browser.binding });
+  }
+  for (const sender of config.send_email ?? []) {
+    bindings.push({ type: "send_email", name: sender.name });
   }
   for (const loader of config.worker_loaders ?? []) {
     bindings.push({ type: "worker_loader", name: loader.binding });

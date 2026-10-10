@@ -14,7 +14,8 @@ for (const name of ["ChatHookDriver", "GmailHookDriver"] as const) {
   it(`${name} leaves no guard counter behind once it is idle`, async () => {
     const namespace = testEnv[name];
     const driver = namespace.get(namespace.idFromName(`idle-${crypto.randomUUID()}`));
-    const keys = await runInDurableObject(driver, async (instance: {alarm(): Promise<void>}, state) => {
+    const keys = await runInDurableObject(driver, async (instance, state) => {
+      if (!instance.alarm) throw new Error(`${name} has no alarm()`);
       await instance.alarm();
       return {
         keys: [...state.storage.kv.list()].map(([key]) => key),

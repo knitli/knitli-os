@@ -113,6 +113,18 @@
       "reason": "Connect-initiator enforcement regression for the hand-rolled Cloudflare account."
     },
     {
+      "path": "packages/gatekeeper-email/src/fork/",
+      "reason": "Fork-owned email send action (approval-backed, hourly-capped); the gatekeeper's email.ts carries only one-line seams into it."
+    },
+    {
+      "path": "packages/gatekeeper-email/__tests__/fork/",
+      "reason": "Regression tests for the fork-owned email send action."
+    },
+    {
+      "path": "packages/gatekeeper-email/vitest.config.ts",
+      "reason": "Test runner config for the fork-owned email send tests; upstream's package has no tests."
+    },
+    {
       "path": "packages/gatekeeper-ai-executor/",
       "reason": "The AI Executor gatekeeper, bound by the outer deployment rather than deployed as its own worker; zero conflict surface by construction."
     },

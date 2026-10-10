@@ -17,6 +17,35 @@ When a Gadget is connected to an email address:
 
 Emails are parsed using [postal-mime](https://www.npmjs.com/package/postal-mime), so the hook receives structured data (from, to, subject, text body, HTML body, attachments) rather than raw MIME.
 
+## Sending
+
+`EmailSession.send()` sends a message from the bound address:
+
+```typescript
+await env.EMAIL.send({
+  to: ["alice@example.com"],
+  subject: "Re: " + incoming.subject,
+  text: "Thanks, got it.",
+  inReplyTo: incoming.messageId ?? undefined,  // threads the reply
+});
+```
+
+Every send is queued as a "Send email" action showing the full message: sender, every recipient (Bcc included), subject, threading headers, both bodies as literal text (an HTML body appears as source, never rendered), and attachment names, types, sizes and SHA-256. A message too large for that view is refused rather than shown truncated. The approver may approve one message or enable "always allow" for this binding, which makes later sends from it apply without review. `send()` resolves once the action is queued; the message leaves only when it is applied. Sent mail cannot be recalled, so the action has no revert.
+
+Limits, all enforced before anything is sent: plain `name@example.com` recipients only, at most 50 per message; a From that is always the bound mailbox (the Gadget sets only `fromName`, without `< > @ "`, and `replyTo`); no line breaks or control characters in subject, names or filenames; `inReplyTo`/`references` must be well-formed Message-IDs; up to 10 attachments totalling 1 MiB, each with a plain `type/subtype` MIME type (no parameters, no `multipart` or `message`). A mailbox may send to at most 100 recipients per rolling hour, whether sends are approved one by one or always allowed; the count is kept in Durable Object storage, so it survives eviction. It is per binding, so a user who creates further bindings gets a further allowance.
+
+### Cloudflare requirements
+
+Delivery is up to the `SEND_EMAIL` (`send_email`) binding, declared in `cloudflare.config.ts` without destination or sender allowlists:
+
+- The sender address must belong to a domain onboarded to Cloudflare Email Service, or sending fails with `E_SENDER_NOT_VERIFIED` / `E_SENDER_DOMAIN_NOT_AVAILABLE`. The From domain is `EMAIL_DOMAIN` when set, else the hostname of `BASE_URL`, so set `EMAIL_DOMAIN` to the onboarded domain.
+- An unrestricted binding sends to any verified destination address in the account; to restrict it, add `allowed_destination_addresses` / `allowed_sender_addresses` to the binding. A recipient outside the allowlist fails with `E_RECIPIENT_NOT_ALLOWED`.
+- Cloudflare itself caps a message at 50 addresses, 5 MiB and 32 attachments; ours are tighter.
+
+When the binding rejects a message, the approved action fails with Cloudflare's error. A deployment without the binding fails the action with an explanation. This gatekeeper is not installable through the deploy wizard (`NOT_INSTALLABLE` in `scripts/release/manifest-lib.ts`), so only first-party deployments carry the binding.
+
+The fork-owned implementation is `src/fork/send.ts`.
+
 ## Creating a Binding
 
 1. Start the dev server (see root README).

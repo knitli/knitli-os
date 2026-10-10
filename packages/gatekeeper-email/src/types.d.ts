@@ -34,9 +34,49 @@ export type IncomingEmail = {
   html: string | null;
   /** File attachments. */
   attachments: EmailAttachment[];
+  /** The `Message-ID` header (e.g. "<abc@example.com>"), or null if absent. Pass it as
+   *  `inReplyTo` when replying, so the reply is threaded. */
+  messageId: string | null;
+  /** The `References` header of the message, or null if absent. */
+  references: string | null;
 }
 
-/** Session interface for an email binding. Provides the email address. */
+/** An outbound file attachment. */
+export type OutgoingEmailAttachment = {
+  /** File name, without path separators or quotes. */
+  filename: string;
+  /** Plain MIME type such as "application/pdf" (no parameters; not multipart or message). */
+  mimeType: string;
+  content: ArrayBuffer;
+}
+
+/** An outbound email message. The sender is always the bound mailbox. */
+export type OutgoingEmail = {
+  /** Recipient addresses, plain `name@example.com` form (no display names). At most 50 across
+   *  `to`, `cc`, and `bcc`; at least one of the three must be non-empty. */
+  to?: string[];
+  cc?: string[];
+  bcc?: string[];
+  /** Subject line, one line. */
+  subject: string;
+  /** Plain text body. At least one of `text` or `html` is required. */
+  text?: string;
+  /** HTML body. */
+  html?: string;
+  /** Optional Reply-To address. */
+  replyTo?: string;
+  /** Display name for the sender (no `< > @ "`). Defaults to no display name. */
+  fromName?: string;
+  /** `Message-ID` of the message being replied to (see `IncomingEmail.messageId`). */
+  inReplyTo?: string;
+  /** `References` header for threading; usually the replied-to message's `references` plus its
+   *  `messageId`. Defaults to `inReplyTo` when that is set. */
+  references?: string;
+  /** Attachments totalling at most 1 MiB. */
+  attachments?: OutgoingEmailAttachment[];
+}
+
+/** Session interface for an email binding: the address, sending from it, and receiving at it. */
 export interface EmailSession {
   /** Returns the full email address (e.g. "name@example.com"). */
   getAddress(): Promise<string>;
@@ -48,6 +88,16 @@ export interface EmailSession {
    *   `EmailHook` interface, which will be called back whenever an email arrives.
    */
   subscribe(callback: RpcStub<EmailHook>): Promise<void>;
+
+  /**
+   * Send an email from this mailbox's address. Resolves once the message is queued for the user's
+   * approval; it goes out only after the user approves it (each message, or automatically if they
+   * chose to always allow sending from this mailbox). Throws if the message is invalid or the
+   * mailbox has reached its limit of 100 recipients per hour.
+   *
+   * Delivery to arbitrary recipients depends on the deployment's Cloudflare email sending setup.
+   */
+  send(email: OutgoingEmail): Promise<void>;
 }
 
 /**

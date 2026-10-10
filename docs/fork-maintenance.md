@@ -1004,3 +1004,11 @@ ids are facet-local, not Activity ids.
   `ai-models.ts` here already maps reasoning levels per model.
 - **Test:** `__tests__/knitli-turn-guards.test.ts` (Tier 1).
 - **At sync:** Tier 2. Upstream has no step cap; if it adds one, fold it into `TurnBudget`.
+
+### Email send action (ported from michielappelman/cloudflare-os)
+
+- **Where:** `packages/gatekeeper-email/src/fork/send.ts` (Tier 1) and `__tests__/fork/send.test.ts`; one-line seams in `src/email.ts` (`#send` field, session `send()`, `getAutoApprovableActions`, `applyAction`/`rejectAction`/`revertAction`, `EMAIL_DOMAIN`, inbound `messageId`/`references`) and additive hunks in `src/types.d.ts`. Also `SEND_EMAIL` in `cloudflare.config.ts` (and the generated `wrangler.jsonc`/`worker-configuration.d.ts`), the `send_email` passthrough in `scripts/release/manifest-lib.ts` and its golden file, `withTests` in the package's `vite.config.ts`.
+- **What:** `EmailSession.send()` queues an approval-backed "Send email" action (`await-decision`, `claimBeforeApply`, no revert); the kind is advertised via `getAutoApprovableActions()` and the Workshop's per-binding rule (`${gatekeeperId}:${tag}`) decides auto-apply. Source commits `162f9d7`, `a090c84`; Apache-2.0.
+- **Divergences from the source fork:** durable rolling-hour cap of 100 recipients that also binds auto-approved sends (checked at submit, charged at apply); stricter address, Message-ID, MIME type, filename and `fromName` validation; messages whose approval view would truncate are refused.
+- **Fail closed:** sending needs `EMAIL_DOMAIN` and `EMAIL_SEND_PREFIX` (administrator-set worker vars; the manifest has no input for a non-installable gatekeeper) so users cannot claim `admin@` and send as it.
+- **At sync:** Tier 2 seams in `email.ts`/`types.d.ts`; if upstream adds sending, drop this entry and the port.

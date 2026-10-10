@@ -15,6 +15,11 @@
       "invocation_logs": false
     }
   },
+  "send_email": [
+    {
+      "name": "SEND_EMAIL"
+    }
+  ],
   "build": {
     "command": "pnpm exec capnweb-validate build --out .wrangler/validate",
     "watch_dir": "src"

@@ -662,6 +662,13 @@ export type CompactionCheckpoint = {
    */
   chatBindings: [string, ChatBindingEntry][];
 
+  /**
+   * Names of every connection request before the boundary, whatever became of it. Workbook binding
+   * names are derived at replay clear of these, and a denied request is no longer in the retained
+   * log to say so (see fork/workbook-names.ts). Absent on checkpoints written before workbooks.
+   */
+  requestedNames?: string[];
+
   /** The next change ID for replayed tool results. Change IDs remain sequential across boundaries. */
   nextChangeId: number;
 

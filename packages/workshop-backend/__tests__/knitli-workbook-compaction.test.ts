@@ -88,6 +88,26 @@ describe("compaction checkpoint workbook bindings", () => {
     expect(state.chatBindings).toContainEqual(["big_xlsx_2", {type: "attachment", id: "file-a"}]);
   });
 
+  it("carries every request's name into the checkpoint, so replay past it still avoids them", () => {
+    let denied = record(0, agent, {
+      type: "connectionRequest", requestId: "1:0", vendorId: "vendor", vendorName: "Vendor",
+      reason: "Needed", state: "denied", bindingName: "big_xlsx",
+    });
+    let log = [
+      denied,
+      upload(1, user, [{id: "file-a", name: "big.xlsx"}]),
+      message(2, agent, "ok"),
+      upload(3, user, [{id: "file-b", name: "big.xlsx"}]),
+    ];
+    let first = {chatId: 1, compactedTo: 2, summary: "s", ...buildState(log, 2)};
+    expect(first.requestedNames).toEqual(["big_xlsx"]);
+
+    // The denied request is gone from the retained log, but the next fold still holds its name.
+    let second = buildCompactionState(log.slice(2), 4, initialBindings, first);
+    expect(second.requestedNames).toEqual(["big_xlsx"]);
+    expect(second.chatBindings).toContainEqual(["big_xlsx_3", {type: "attachment", id: "file-b"}]);
+  });
+
   it("names two same-named spreadsheets in one message in attachment order", () => {
     let state = buildState([upload(0, user, [
       {id: "file-a", name: "report.xlsx"},

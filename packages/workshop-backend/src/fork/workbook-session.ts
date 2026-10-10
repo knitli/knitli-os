@@ -21,7 +21,7 @@
 import { RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import type { CellValue, Workbook } from "./workbook-binding";
-import { formatNumber, type WorkbookMeta } from "./chat-attachment-workbook";
+import { UNTRUSTED_SPREADSHEET_NOTICE, formatNumber, type WorkbookMeta } from "./chat-attachment-workbook";
 import { columnLabel, parseColumnLabel, renderAddressedRows } from "./workbook-grid";
 
 /**
@@ -97,8 +97,9 @@ function findSheetIndex(meta: WorkbookMeta, sheet: string): number {
   let sheetIndex = meta.sheets.findIndex(entry => entry.name === sheet);
   if (sheetIndex < 0) {
     let names = meta.sheets.map(entry => JSON.stringify(entry.name)).join(", ");
+    // Echoes the file's own sheet names, so the error carries the notice a successful read has.
     throw new Error(
-        `This workbook has no sheet named ${JSON.stringify(sheet)}. Its sheets are: ${names}.`);
+        `${UNTRUSTED_SPREADSHEET_NOTICE}\nThis workbook has no sheet named ${JSON.stringify(sheet)}. Its sheets are: ${names}.`);
   }
   return sheetIndex;
 }

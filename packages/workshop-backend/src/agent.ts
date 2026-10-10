@@ -1740,7 +1740,7 @@ async function runAgentPass(
   // Names of every connection request seen so far, whatever became of it. Workbook names are
   // derived at replay, and denying a request releases its name from claimedNames: if workbooks
   // avoided only pending names, denying one later would rename workbooks already referred to.
-  let requestedNames = new Set<string>();
+  let requestedNames = new Set(checkpoint?.requestedNames);
 
   // Whether a name is unavailable for a new chat binding. GIT_BINDING_NAME counts as in scope
   // because the automatic env.GIT occupies it; only new bindings are refused -- a chat binding

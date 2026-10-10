@@ -232,6 +232,8 @@ describe("Workbook binding", () => {
       async ({ session }) => {
     await expect(session.getRows("Sales")).rejects
         .toThrow(`This workbook has no sheet named "Sales". Its sheets are: "Summary", "Ledger".`);
+    // The names it echoes are the file author's words, so the error opens with the notice.
+    await expect(session.getRows("Sales")).rejects.toThrow(UNTRUSTED_SPREADSHEET_NOTICE);
   }));
 
   it("refuses a range that is not whole rows, or runs backwards", () => withWorkbook(

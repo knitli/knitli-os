@@ -8,14 +8,14 @@ import { applicationServerKey } from './pushSupport'
 const KEY = 'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8'
 const OWNER_KEY = 'gadgets.webPush.owner'
 
-function install(subscribed = true) {
+function install(subscribed = true, getSubscription?: () => Promise<unknown>) {
   const subscription = {
     endpoint: 'https://web.push.apple.com/refreshed',
     options: { applicationServerKey: applicationServerKey(KEY).buffer },
     toJSON: () => ({ endpoint: 'https://web.push.apple.com/refreshed', keys: { p256dh: 'P', auth: 'A' } }),
     unsubscribe: vi.fn<() => Promise<boolean>>(async () => true),
   }
-  const registration = { pushManager: { getSubscription: async () => (subscribed ? subscription : null) } }
+  const registration = { pushManager: { getSubscription: getSubscription ?? (async () => (subscribed ? subscription : null)) } }
   Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: { getRegistration: async () => registration } })
   vi.stubGlobal('PushManager', function PushManager() {})
   vi.stubGlobal('Notification', { permission: 'granted' })
@@ -42,7 +42,7 @@ describe('syncBrowserSubscription', () => {
     const api = fakeApi()
     install()
     localStorage.setItem(OWNER_KEY, 'me@example.com')
-    await syncBrowserSubscription(asStub(api))
+    await syncBrowserSubscription(asStub(api), new AbortController().signal)
     expect(api.addWebPushSubscription).toHaveBeenCalledWith({
       endpoint: 'https://web.push.apple.com/refreshed', p256dh: 'P', auth: 'A',
     })
@@ -53,15 +53,31 @@ describe('syncBrowserSubscription', () => {
       const api = fakeApi()
       const { subscription } = install()
       if (owner) localStorage.setItem(OWNER_KEY, owner)
-      await syncBrowserSubscription(asStub(api))
+      await syncBrowserSubscription(asStub(api), new AbortController().signal)
       expect(subscription.unsubscribe).toHaveBeenCalled()
       expect(api.addWebPushSubscription).not.toHaveBeenCalled()
     })
 
+  it('abandons a stale synchronization instead of dropping a subscription a newer session claimed', async () => {
+    const api = fakeApi()
+    const { subscription } = install()
+    const stale = new AbortController()
+    let finishIdentity!: (user: { id: string }) => void
+    api.whoami.mockReturnValue(new Promise((resolve) => { finishIdentity = resolve }))
+    const done = syncBrowserSubscription(asStub(api), stale.signal)
+    await vi.waitFor(() => expect(api.whoami).toHaveBeenCalled())
+    stale.abort()
+    localStorage.setItem(OWNER_KEY, 'next@example.com')
+    finishIdentity({ id: 'me@example.com' })
+    await done
+    expect(subscription.unsubscribe).not.toHaveBeenCalled()
+    expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
+  })
+
   it('does nothing without a subscription', async () => {
     const api = fakeApi()
     install(false)
-    await syncBrowserSubscription(asStub(api))
+    await syncBrowserSubscription(asStub(api), new AbortController().signal)
     expect(api.whoami).not.toHaveBeenCalled()
   })
 })
@@ -75,6 +91,33 @@ describe('releaseOnSignOut', () => {
     expect(api.removeWebPushSubscription).toHaveBeenCalledWith('https://web.push.apple.com/refreshed')
     expect(subscription.unsubscribe).toHaveBeenCalled()
     expect(localStorage.getItem(OWNER_KEY)).toBeNull()
+  })
+
+  it('still releases the browser when the connection is already gone', async () => {
+    const api = fakeApi()
+    api.whoami.mockRejectedValue(new Error('disconnected'))
+    api.removeWebPushSubscription.mockRejectedValue(new Error('disconnected'))
+    const { subscription } = install()
+    localStorage.setItem(OWNER_KEY, 'me@example.com')
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await releaseOnSignOut(asStub(api))
+    expect(subscription.unsubscribe).toHaveBeenCalled()
+    expect(localStorage.getItem(OWNER_KEY)).toBeNull()
+  })
+
+  it('leaves a subscription alone that only turns up after the sign-out gave up waiting', async () => {
+    vi.useFakeTimers()
+    const api = fakeApi()
+    let lookUp!: () => void
+    const { subscription } = install(true, () => new Promise((resolve) => { lookUp = () => resolve(subscription) }))
+    localStorage.setItem(OWNER_KEY, 'next@example.com')
+    const done = releaseOnSignOut(asStub(api))
+    await vi.advanceTimersByTimeAsync(3000)
+    await done
+    lookUp()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(subscription.unsubscribe).not.toHaveBeenCalled()
+    expect(localStorage.getItem(OWNER_KEY)).toBe('next@example.com')
   })
 
   it('never blocks or fails the sign-out when the server is unreachable', async () => {

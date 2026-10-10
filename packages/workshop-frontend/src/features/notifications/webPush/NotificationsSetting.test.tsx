@@ -142,6 +142,16 @@ describe('NotificationsSetting', () => {
     expect(container.querySelectorAll('button')).toHaveLength(0)
   })
 
+  it('offers Turn on once the user allows notifications in settings and comes back', async () => {
+    const browser = installBrowser({ permission: 'denied', subscribed: false })
+    const container = await render(fakeApi())
+    expect(container.textContent).toContain('blocked')
+
+    browser.notification.permission = 'default'
+    await act(async () => { window.dispatchEvent(new Event('focus')) })
+    expect(button(container, 'Turn on')).toBeDefined()
+  })
+
   it('tells iPhone users in Safari to add the app to the Home Screen', async () => {
     vi.stubGlobal('navigator', { ...navigator, userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X)', maxTouchPoints: 5 })
     const container = await render(fakeApi())

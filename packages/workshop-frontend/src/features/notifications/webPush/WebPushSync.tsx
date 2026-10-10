@@ -6,9 +6,11 @@ import { syncBrowserSubscription } from './browserSubscription'
 export const WebPushSync = () => {
   const { authenticatedApi } = useAuthenticatedApi()
   useEffect(() => {
-    syncBrowserSubscription(authenticatedApi).catch((error: unknown) => {
+    const controller = new AbortController()
+    syncBrowserSubscription(authenticatedApi, controller.signal).catch((error: unknown) => {
       console.error('Failed to synchronize push notifications:', error)
     })
+    return () => controller.abort()
   }, [authenticatedApi])
   return null
 }

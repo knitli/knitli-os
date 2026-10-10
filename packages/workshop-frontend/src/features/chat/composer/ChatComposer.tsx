@@ -568,8 +568,6 @@ export const ChatComposer = ({
       return;
     }
 
-    // A send that passed local validation is the deliberate request that wakes a paused workspace.
-    resumeConnection();
     sendInFlightRef.current = true;
     setIsSending(true);
     const draftSend = beginDraftSend();
@@ -582,6 +580,8 @@ export const ChatComposer = ({
         toasts.add({ title: "Slash commands cannot include resources or attachments", variant: "error" });
         return;
       }
+      // A send that passed every local check is the deliberate request that wakes a paused workspace.
+      resumeConnection();
       const { message, capsules: capsuleSpecifiers, formats: formatRefs } =
         submissionResult.submission;
 

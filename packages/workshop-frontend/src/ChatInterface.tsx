@@ -4342,6 +4342,7 @@ function ChatInterface({
 
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
+    resumeConnection();  // the dialog locks while deleting, so a parked connection would strand it
     setIsDeleting(true);
     try {
       await overseer.deleteChat(deleteTarget.id);

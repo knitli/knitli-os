@@ -48,7 +48,8 @@ let bundledBlueprintInstallStarted = false;
 
 // Fork: workspace opens held per API socket, keyed by the socket's abortSession callback, plus the
 // workspace whose expired lease is waiting for the socket's last open to be released.
-const liveOpensBySession = new WeakMap<(reason: Error) => void, { count: number; idleFrom?: string }>();
+type SocketOpens = { count: number; idleFrom?: { id: string } };
+const liveOpensBySession = new WeakMap<(reason: Error) => void, SocketOpens>();
 
 const USER_SEARCH_POLICY_CACHE_TTL_MS = 30_000;
 
@@ -338,25 +339,33 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   // expired lease has released the last of them; one workspace idling says nothing about others.
   // The count belongs to the socket, not to this capability: every AuthenticatedApiImpl minted on a
   // socket shares its abortSession, which is therefore the key.
-  #opens(): { count: number; idleFrom?: string } {
+  #opens(): SocketOpens {
     let opens = liveOpensBySession.get(this.abortSession);
     if (!opens) liveOpensBySession.set(this.abortSession, opens = { count: 0 });
     return opens;
   }
 
-  #openStarted(): void {
+  // Returns the idle release this open began after, if any. Once the open succeeds, that release
+  // is superseded: the user chose to carry on. Until then it must stand, or a failed open would
+  // erase the close the page holding the expired capability is owed.
+  #openStarted(): SocketOpens["idleFrom"] {
     let opens = this.#opens();
     ++opens.count;
-    delete opens.idleFrom;  // a fresh open after an idle release is a user's choice to carry on
+    return opens.idleFrom;
+  }
+
+  #openSucceeded(supersedes: SocketOpens["idleFrom"]): void {
+    let opens = this.#opens();
+    if (supersedes && opens.idleFrom === supersedes) delete opens.idleFrom;
   }
 
   // An idle release is remembered until the last open is gone, whichever kind of release that is:
   // a temporary open that outlives the idle one must not swallow the close code.
   #openReleased(id: string, idle: boolean): void {
     let opens = this.#opens();
-    if (idle) opens.idleFrom = id;
+    if (idle) opens.idleFrom = { id };
     if (--opens.count === 0 && opens.idleFrom !== undefined) {
-      this.abortSession(new IdleSessionError(opens.idleFrom));
+      this.abortSession(new IdleSessionError(opens.idleFrom.id));
     }
   }
 
@@ -407,7 +416,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     // Fork: counted from here, not from open()'s return, so an open parked on a step the client
     // controls is not invisible to another workspace's idle release on the same socket.
-    this.#openStarted();
+    let supersedes = this.#openStarted();
     let result;
     try {
       result = await overseer.open(userId, profileId, notifyClosed, shareKey, configureObservers);
@@ -429,6 +438,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       throw err;
     }
     started = true;
+    this.#openSucceeded(supersedes);
     return result;
   }
 

@@ -220,6 +220,25 @@ describe("workspace client-activity lease", () => {
         .toEqual({ code: SESSION_IDLE_CLOSE_CODE, reason: "idle" });
   });
 
+  it("keeps the idle close pending across an open that fails", async () => {
+    const { session, authenticated } = await signIn();
+    const idleOne = await authenticated.newGadget();
+    const idleId = (await idleOne.getMetadata()).id;
+    const live = await authenticated.newGadget();
+
+    advanceBeyondTheLease();
+    await live.getMetadata();
+    await runAlarm(idleId);
+    await settle();
+    expect(session.closes).toEqual([]);
+
+    await expect(authenticated.openGadget(exports.OverseerDurableObject.newUniqueId().toString()))
+        .rejects.toThrow();
+    live[Symbol.dispose]();
+    expect(await waitFor("the idle close", () => session.closes[0]))
+        .toEqual({ code: SESSION_IDLE_CLOSE_CODE, reason: "idle" });
+  });
+
   it("shares the open count across authenticated capabilities on one socket", async () => {
     const { session, authenticated, token } = await signIn();
     const second = await session.publicApi.authenticate(token);

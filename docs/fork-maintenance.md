@@ -250,25 +250,30 @@ Intentional, reviewed differences from upstream. Keep this current.
   `CFOS_INSTALL_PRIVATE_KEY` and never stored in `AdminConfig` or KV. Unset (or without
   `PUBLIC_BASE_URL`), the channel is off: `getWebPushPublicKey()` returns null, subscribing is
   refused and delivery is a no-op. Endpoints must be https on an allowlisted push-service host,
-  and sends use `redirect: "manual"`. At most 10 subscriptions per user (a new device displaces the oldest); sends time out after 10 s and run beside the platform delivery; 404/410 prunes one.
+  and sends use `redirect: "manual"`. At most 10 subscriptions per user (a new device displaces the oldest); sends time out after
+  10 s and run beside the platform delivery; 404/410 prunes one.
   Payloads are fixed templates plus the chat title bounded to 96 characters, encrypted to the
   device.
 - **UI:** `packages/workshop-frontend/src/features/notifications/webPush/` (settings switch,
-  subscription hook and sync), `public/sw.js` (push-only worker, no `fetch` handler so the
-  WebSocket and sign-in redirects are never intercepted) and `public/manifest.webmanifest`, all
-  Tier 1. The subscription is per browser, not per account, so the hook records the owning user in
-  `localStorage`: `WebPushSync` (mounted in `AuthContext.tsx`) drops a subscription that is not the
-  signed-in user's and re-registers the user's own at every app start (this also heals a refreshed
-  endpoint; `sw.js` has no `pushsubscriptionchange` handler because it holds no credentials), and
-  sign-out releases whatever the browser holds (it messages `sw.js` synchronously first, because the
-  Cloudflare Access sign-out navigates away at once and only the worker survives that; with no
-  controlling worker, logout waits for the page's cleanup). One user per browser is assumed: the auth
-  token is shared by every tab through `localStorage`, so tabs signed in as different users are
-  unsupported and not guarded against. Upstream seams: a manifest link in `index.html` (with
+  subscription hook and sync), `public/sw.js` and `public/manifest.webmanifest`, all Tier 1. The
+  worker has no `fetch` handler, so the WebSocket and sign-in redirects are never intercepted. It
+  does two jobs that must survive a sync, as the worker holds no credentials and outlives the page:
+  its `pushsubscriptionchange` handler wakes open pages with a `push-subscription-changed` message,
+  and its `release-push-subscription` message handler unsubscribes the browser at sign-out.
+  The subscription is per browser, not per account, so the hook records the owning user in
+  `localStorage`. `WebPushSync` (mounted in `AuthContext.tsx`) runs at app start, on every focus and
+  on that worker message, and retries with backoff on failure: it drops a subscription that is not
+  the signed-in user's, re-registers the user's own (healing a refreshed endpoint), and replaces one
+  made with a rotated VAPID key. Sign-out releases whatever the browser holds: it messages `sw.js`
+  synchronously first, because the Cloudflare Access sign-out navigates away at once and only the
+  worker survives that, and with no controlling worker (Safari's declarative push) logout waits,
+  bounded, for the page's own cleanup. One user per browser is assumed: the auth token is shared by
+  every tab through `localStorage`, so tabs signed in as different users are unsupported and not
+  guarded against. Upstream seams: a manifest link in `index.html` (with
   `crossorigin="use-credentials"` for Cloudflare Access), the Notifications section in
-  `SettingsPage.tsx`, and the logout wrapper and `<WebPushSync />` in `AuthContext.tsx`. Both
-  public files are served from the router's static assets at the origin root, which gives the
-  worker scope `/`; no router change.
+  `SettingsPage.tsx`, and the logout wrapper and `<WebPushSync />` in `AuthContext.tsx`. Both public
+  files are served from the router's static assets at the origin root, which gives the worker scope
+  `/`; no router change.
 - **At sync:** Tier 2 for the seams only; if upstream reshapes `publishNotification()`, keep the
   single `deliverWebPush()` call after the acknowledgement check and before the platform delivery.
 

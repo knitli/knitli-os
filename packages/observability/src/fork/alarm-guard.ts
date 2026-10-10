@@ -234,6 +234,14 @@ export async function guardedAlarm(
 }
 
 /**
+ * Removes a guarded alarm's counter. Call it where code outside the guarded handler cancels the
+ * alarm chain (an RPC that deletes the alarm), since the guard only cleans up after its own runs.
+ */
+export function clearAlarmGuard(state: AlarmGuardState, key: string): void {
+  state.storage.kv.delete(ALARM_GUARD_KEY_PREFIX + key);
+}
+
+/**
  * The seam upstream `alarm()` handlers call: {@link guardedAlarm} with the `ALARMS_DISABLED` kill
  * switch read from `env` and `deferWhenOpen` on, so a tripped flood detector pauses the alarm for
  * the minute rather than dropping the work.

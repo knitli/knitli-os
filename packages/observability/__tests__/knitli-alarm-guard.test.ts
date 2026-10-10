@@ -5,6 +5,7 @@ import {
   MAX_ALARM_RUNS_PER_MINUTE,
   alarmBackoffMs,
   alarmsDisabled,
+  clearAlarmGuard,
   guardedAlarm,
   guardedAlarmFor,
   haltIfAlarmsDisabled,
@@ -330,6 +331,15 @@ describe("alarm guard", () => {
     for (let i = 0; i < 8; i++) await state.fire({}, boom);
     expect(state.alarm).toBeGreaterThanOrEqual(state.clock + HOUR);
     expect(state.record("test")!.failures).toBe(8);
+  });
+
+  it("clearAlarmGuard removes a counter when code outside the handler cancels the chain", async () => {
+    await state.fire({}, async () => {
+      await state.storage.setAlarm(T0 + 60_000);
+    });
+    expect(state.record("test")).toBeDefined();
+    clearAlarmGuard(state, "test");
+    expect(state.map.size).toBe(0);
   });
 
   it("keeps separate counters per key", async () => {

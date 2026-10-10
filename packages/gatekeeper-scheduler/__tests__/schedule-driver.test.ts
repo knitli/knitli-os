@@ -326,8 +326,9 @@ describe("ScheduleDriver", () => {
     await testEnv.TEST_HOOKS.waitForDisposals({ approvalQueues: 2, callbacks: 2 }, 2_000);
 
     await driver.disable("workspace-a", "schedule-a");
+    // Unfiltered: cancelling the last alarm from an RPC also clears the alarm guard's counter.
     const keys = await runInDurableObject(driver, (_instance, state) =>
-      [...state.storage.kv.list()].map(([key]) => key).filter(key => !key.startsWith("alarm-guard:")),
+      [...state.storage.kv.list()].map(([key]) => key),
     );
     expect(keys).toEqual(["metadata"]);
     expect(await driver.getSchedule("workspace-a", "schedule-a")).toBeUndefined();
@@ -1255,6 +1256,27 @@ describe("ScheduleDriver", () => {
       expect(keys).toEqual(["metadata"]);
     });
     expect(keys).toEqual(["metadata"]);
+  });
+
+  it("clears the alarm guard's counter when disabling the last schedule cancels the alarm", async () => {
+    const driver = testEnv.SCHEDULE_DRIVER.getByName("guard-counter-cancel");
+    const activationTime = Date.now();
+    await enableSchedule(driver, {
+      workspaceId: "workspace-a",
+      scheduleId: "schedule-a",
+      spec: { kind: "interval" as const, everyMs: 60_000, anchorMs: activationTime },
+      title: "Unbounded",
+      description: "Keeps its alarm armed after each run.",
+      gadgetId,
+    }, activationTime);
+    await makeActiveScheduleDue(driver, "workspace-a", "schedule-a");
+    expect(await runDurableObjectAlarm(driver)).toBe(true);
+    const guardKeys = () => runInDurableObject(driver, (_instance, state) =>
+      [...state.storage.kv.list({ prefix: "alarm-guard:" })].map(([key]) => key));
+    expect(await guardKeys()).toEqual(["alarm-guard:scheduler"]);
+
+    await driver.disable("workspace-a", "schedule-a");
+    expect(await guardKeys()).toEqual([]);
   });
 
   it("keeps the alarm guard's counter across revocation cleanup passes", async () => {

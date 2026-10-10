@@ -14,8 +14,17 @@ import { fileURLToPath } from "node:url";
  * guard in each. Adding a handler without it fails here instead of shipping unstoppable.
  */
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-// A call, not a mention: comments and string literals are blanked first (see `stripNonCode`).
-const GUARD = /\b(haltIfAlarmsDisabled|guardedAlarmFor|guardedAlarm|alarmsDisabled)\s*\(/;
+// The guard must be the handler's first statement and must actually stop it: either
+// `if (await haltIfAlarmsDisabled(...)) return;`, or the whole body delegated to
+// `guardedAlarm`/`guardedAlarmFor` (which skip `run` under the kill switch). Calling a guard name
+// and ignoring its result, or after other work, does not count. Comments and strings are blanked
+// first (see `stripNonCode`).
+const GUARD = new RegExp(
+  String.raw`^\{\s*(?:` +
+    String.raw`if\s*\(\s*await\s+haltIfAlarmsDisabled\s*\([^;{}]*\)\s*\)\s*(?:\{\s*)?return\b` +
+    String.raw`|(?:return|await)\s+guardedAlarm(?:For)?\s*\(` +
+  String.raw`)`,
+);
 
 /**
  * Blanks comments and string/template literal contents, so a guard name in prose or a message
@@ -63,7 +72,7 @@ function alarmBodies(text: string): string[] {
 describe("Durable Object alarm kill switch", () => {
   it("finds a handler however it is spaced, and tells guarded from unguarded", () => {
     const unguarded = "class A {\n  async\n    alarm ()\n  : Promise<void> {\n    await go();\n  }\n}";
-    const guarded = "class B {\n  async  alarm (\n  ) {\n    await haltIfAlarmsDisabled(this.ctx, this.env, \"b\");\n  }\n}";
+    const guarded = "class B {\n  async  alarm (\n  ) {\n    if (await haltIfAlarmsDisabled(this.ctx, this.env, \"b\")) return;\n  }\n}";
     const bodies = alarmBodies(stripNonCode(`${unguarded}\n${guarded}`));
     assert.equal(bodies.length, 2);
     assert.deepEqual(bodies.map(body => GUARD.test(body)), [false, true]);
@@ -86,6 +95,10 @@ describe("Durable Object alarm kill switch", () => {
       "class B { async alarm() { /* guardedAlarmFor( */ await go(); } }",
       "class C { async alarm() { log(\"haltIfAlarmsDisabled(\"); await go(); } }",
       "class D { async alarm() { const alarmsDisabled = true; await go(); } }",
+      "class E { async alarm() { logger.info(alarmsDisabled(this.env)); await go(); } }",
+      "class F { async alarm() { await haltIfAlarmsDisabled(this.ctx, this.env, \"f\"); await go(); } }",
+      "class G { async alarm() { await go(); if (await haltIfAlarmsDisabled(this.ctx, this.env, \"g\")) return; } }",
+      "class H { async alarm() { const x = await guardedAlarmFor(a, b, \"h\", go); await more(); } }",
     ];
     for (const source of mentioned) {
       const [body] = alarmBodies(stripNonCode(source));

@@ -1,4 +1,4 @@
-import { ALARM_GUARD_KEY_PREFIX, guardedAlarmFor } from "@gadgets/observability/fork/alarm-guard";
+import { ALARM_GUARD_KEY_PREFIX, clearAlarmGuard, guardedAlarmFor } from "@gadgets/observability/fork/alarm-guard";
 import { DurableObject } from "cloudflare:workers";
 import type { RpcStub, RpcTarget } from "cloudflare:workers";
 import { reportIssue } from "@gadgets/observability/error-reporting";
@@ -563,8 +563,10 @@ export class ScheduleDriver extends DurableObject {
       if (candidate !== undefined && (target === undefined || candidate < target))
         target = candidate;
     }
-    if (target === undefined) await this.ctx.storage.deleteAlarm();
-    else await this.ctx.storage.setAlarm(target);
+    if (target === undefined) {
+      await this.ctx.storage.deleteAlarm();
+      clearAlarmGuard(this.ctx, "scheduler"); // this also runs outside the guarded alarm
+    } else await this.ctx.storage.setAlarm(target);
   }
 
   async #cleanupRevokedAccount(): Promise<void> {

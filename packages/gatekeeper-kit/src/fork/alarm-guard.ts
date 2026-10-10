@@ -9,6 +9,7 @@ export {
   ALARM_DISABLED_PROBE_MS,
   alarmBackoffMs,
   alarmsDisabled,
+  clearAlarmGuard,
   guardedAlarm,
   guardedAlarmFor,
   haltIfAlarmsDisabled,

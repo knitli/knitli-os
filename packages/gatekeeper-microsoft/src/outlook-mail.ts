@@ -28,7 +28,7 @@ import {
 import {
   type ActionDescriptionBuilder, buildDescription, type RenderedDescription,
 } from "@gadgets/gatekeeper-kit/action-description";
-import { authorizeRestricted } from "./restricted-observation";
+import { authorizeCursorOpen, authorizeRestricted } from "./restricted-observation";
 import { formatApprovalField, sanitizeApprovalTitle } from "./approval-text";
 import { AccessTokenCache, AccessTokenRequest } from "./auth-retry";
 import { GraphMailApi, MAX_REPLY_BODY_BYTES, validateSearchQuery } from "./graph-api";
@@ -275,7 +275,7 @@ class OutlookFolderStub extends RpcTarget implements OutlookFolder {
     let info = this.#cachedInfo;
     let scope = info ? `the "${info.name}" folder` : "the selected mail folder";
 
-    await authorizeRestricted(this.#ctx.approvalQueue, {
+    await authorizeCursorOpen(this.#ctx.approvalQueue, {
       title: "List Outlook messages in a folder",
       description: `Create a cursor over the most recent messages in ${scope}.`,
     });
@@ -503,7 +503,7 @@ class OutlookMailSessionImpl extends RpcTarget implements OutlookMailSession {
   }
 
   async listMessages(): Promise<Cursor<OutlookMessageEntry>> {
-    await authorizeRestricted(this.#ctx.approvalQueue, {
+    await authorizeCursorOpen(this.#ctx.approvalQueue, {
       title: "List Outlook messages",
       description: "Create a cursor over the most recent messages in the connected mailbox.",
     });
@@ -516,7 +516,7 @@ class OutlookMailSessionImpl extends RpcTarget implements OutlookMailSession {
     // asking a human to approve a search that cannot run.
     let validated = validateSearchQuery(query);
 
-    await authorizeRestricted(this.#ctx.approvalQueue, {
+    await authorizeCursorOpen(this.#ctx.approvalQueue, {
       title: "Search Outlook",
       description:
           "Create a cursor over mailbox messages matching this search.\n\n" +

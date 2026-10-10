@@ -737,7 +737,9 @@ export class SharePointListGatekeeperImpl
     try {
       await queue.authorizeObservation({
         ...description,
-        containsRestrictedData: true,
+        // Only a read that returns rows reveals any. Opening a cursor does not, and an abandoned or
+        // empty one must not put the whole workspace in restricted mode.
+        ...(revealsRows ? { containsRestrictedData: true } : {}),
         ...(observers.length > 0 ? { excludeObservers: observers } : {}),
       });
       if (revealsRows) this.ctx.storage.kv.put(ROWS_OBSERVED_KEY, true);

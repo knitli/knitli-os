@@ -695,8 +695,20 @@ describe("restricted observations", () => {
 
     expect(approvals.observations.length).toBeGreaterThan(0);
     for (const observation of approvals.observations) {
-      expect(observation.containsRestrictedData).toBe(true);
+      // Opening a cursor shows nothing yet; every read that returns data is restricted.
+      const opensCursor = observation.description.startsWith("Create a cursor");
+      expect(Boolean(observation.containsRestrictedData)).toBe(!opensCursor);
     }
+  });
+
+  it("leaves the workspace unrestricted when a cursor is opened and never read", async () => {
+    stubFetch(call => defaultRoute(call));
+    const session = await startSession();
+
+    await session.listChats();
+    await session.search("quarterly");
+
+    expect(approvals.observations.some(o => o.containsRestrictedData)).toBe(false);
   });
 });
 

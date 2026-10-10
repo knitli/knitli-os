@@ -146,11 +146,11 @@ function fakeGatekeeperContext() {
 
 /** Stands in for the overseer's approval queue. */
 function fakeApprovalQueue() {
-  const observations: { title: string; description: string }[] = [];
+  const observations: { title: string; description: string; containsRestrictedData?: boolean }[] = [];
   const actions: { id: number; description: Record<string, unknown> }[] = [];
   const queue = {
     dup: () => queue,
-    authorizeObservation: vi.fn(async (description: { title: string; description: string }) => {
+    authorizeObservation: vi.fn(async (description: { title: string; description: string; containsRestrictedData?: boolean }) => {
       observations.push(description);
     }),
     submitAction: vi.fn(async (id: number, description: Record<string, unknown>) => {
@@ -854,11 +854,12 @@ describe("observers", () => {
       await expect(session.getItem("7")).rejects.toThrow(/observation blocked/);
       await expect(session.getItems()).rejects.toThrow(/observation blocked/);
       // The exclusion names every tracked observer, and the read is restricted.
-      const rowReads = approvals.observations.slice();
-      expect(rowReads).toHaveLength(2);
-      for (const read of rowReads) {
-        expect(read).toMatchObject({ containsRestrictedData: true, excludeObservers: ["user-1"] });
-      }
+      const [getItemRead, getItemsOpen] = approvals.observations;
+      expect(approvals.observations).toHaveLength(2);
+      expect(getItemRead).toMatchObject({ containsRestrictedData: true, excludeObservers: ["user-1"] });
+      // Opening a cursor reveals no row, so it names the observers but does not restrict.
+      expect(getItemsOpen).toMatchObject({ excludeObservers: ["user-1"] });
+      expect(getItemsOpen.containsRestrictedData).toBeUndefined();
     });
 
     it("names every observer in the exclusion", async () => {
@@ -918,6 +919,16 @@ describe("observers", () => {
 
       release();
       await read;
+    });
+
+    it("does not put the workspace in restricted mode for a cursor that is never read", async () => {
+      stubFetch();
+      const session = await startSession();
+
+      await session.getItems();
+
+      expect(approvals.observations).toHaveLength(1);
+      expect(approvals.observations[0].containsRestrictedData).toBeUndefined();
     });
 
     it("does not count opening a cursor as reading rows", async () => {

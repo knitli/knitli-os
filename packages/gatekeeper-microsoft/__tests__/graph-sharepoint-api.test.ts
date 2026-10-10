@@ -49,7 +49,10 @@ const GRAPH_COLUMNS = [
   { name: "ID", displayName: "ID", readOnly: true, number: {} },
   { name: "Created", displayName: "Created", readOnly: true, dateTime: {} },
   { name: "Secret", displayName: "Secret", hidden: true, text: {} },
-  { name: "_UIVersionString", displayName: "Version", text: {} },
+  { name: "_UIVersionString", displayName: "Version", readOnly: true, text: {} },
+  // A custom column whose internal name merely starts like a built-in one is the list's own data.
+  { name: "_Status", displayName: "Status", text: {} },
+  { name: "LinkTitleOverride", displayName: "Override", text: {} },
   { name: "LinkTitleNoMenu", displayName: "Title", text: {} },
   { name: "ContentType", displayName: "Content Type", text: {} },
   { name: "Attachments", displayName: "Attachments", boolean: {} },
@@ -287,6 +290,10 @@ describe("listColumns", () => {
       { name: "Ref", displayName: "Reference", type: "lookup", required: false, readOnly: false },
       // Currency has no write shape this gatekeeper knows, so it is described but not writable.
       { name: "Budget", displayName: "Budget", type: "unsupported", required: false,
+        readOnly: false },
+      // Custom columns that merely start like built-in ones are the list's own data.
+      { name: "_Status", displayName: "Status", type: "text", required: false, readOnly: false },
+      { name: "LinkTitleOverride", displayName: "Override", type: "text", required: false,
         readOnly: false },
     ]);
   });

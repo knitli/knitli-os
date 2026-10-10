@@ -14,6 +14,9 @@ import {
   INVALID_LINK_HTML, connectHandoffPageHtml, htmlResponse,
 } from "@gadgets/gatekeeper-kit/connect-pages";
 import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
+import {
+  clearCredentialExpiryLatch, notifyCredentialsExpiredOnce,
+} from "@gadgets/gatekeeper-kit/credential-expiry";
 import { SerialTaskQueue } from "@gadgets/gatekeeper-kit/serial-queue";
 import { initiatorAllows, refuseForeignBrowser } from "@gadgets/observability/fork/connect-initiator";
 import {
@@ -770,6 +773,7 @@ export class UserAccount extends DurableObject<Env> {
       this.ctx.storage.kv.put<string[]>("grantScopes", recordedScopes);
       // These credentials are new, so any recorded permanent failure no longer applies.
       this.ctx.storage.kv.delete("mintFailure");
+      clearCredentialExpiryLatch(this.ctx.storage.kv);
 
       return { callback, stageId: undefined, authOnly };
     });
@@ -818,6 +822,7 @@ export class UserAccount extends DurableObject<Env> {
       // These credentials are new, so any recorded permanent failure no longer applies — and
       // clearing it re-arms the one-shot expiry notification for whatever kills them next.
       this.ctx.storage.kv.delete("mintFailure");
+      clearCredentialExpiryLatch(this.ctx.storage.kv);
     });
   }
 
@@ -918,6 +923,7 @@ export class UserAccount extends DurableObject<Env> {
 
       this.#storeGrant(result.grant);
       this.ctx.storage.kv.delete("mintFailure");
+      clearCredentialExpiryLatch(this.ctx.storage.kv);
       return result.grant.accessToken;
     });
   }
@@ -955,23 +961,22 @@ export class UserAccount extends DurableObject<Env> {
   // failures are not recorded: the next caller should be free to try again immediately.
   #recordMintFailure(failure: TokenFailure): void {
     if (!failure.permanent) return;
-    let previous = this.ctx.storage.kv.get<StoredMintFailure>("mintFailure");
     this.ctx.storage.kv.put<StoredMintFailure>("mintFailure", {
       message: failure.message, at: Date.now(),
     });
-    // Recorded before notifying so only the first caller of a burst notifies.
-    if (!previous) this.#notifyCredentialsDead();
+    this.#notifyCredentialsDead();
   }
 
   // Tell the workshop the credentials are permanently dead so the UI prompts a reconnect instead of
   // every call failing opaquely. Fire and forget — a notification failure must not mask the error.
+  //
+  // Tried again on each permanent failure until one gets through, and then once per death: the
+  // kit's latch is written only after the Workshop has been told, so a failed notification cannot
+  // silence every later one, and a burst of failures shares a single notification. It is re-armed
+  // wherever a recorded failure is cleared, i.e. whenever new credentials go live.
   #notifyCredentialsDead(): void {
     let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
-    callback?.credentialsExpired().catch(notifyErr => {
-      logger.warn("failed to notify credential expiry", {
-        event: "credentials.expiry.notify.failed", error: notifyErr,
-      });
-    });
+    void notifyCredentialsExpiredOnce(this.ctx.storage.kv, callback, VENDOR_ID);
   }
 
   /**

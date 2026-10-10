@@ -73,10 +73,9 @@ const DEFAULT_MAX_RETRY_AFTER_MS = 10 * 1000;
 const SYSTEM_COLUMN_NAMES = new Set([
   "ContentType", "Attachments", "Edit", "DocIcon", "ItemChildCount", "FolderChildCount", "AppAuthor",
   "AppEditor", "ComplianceAssetId",
+  // The rendered-link twins of `Title`.
+  "LinkTitle", "LinkTitleNoMenu", "LinkTitle2",
 ]);
-
-/** `LinkTitle`, `LinkTitleNoMenu`, `LinkTitle2`: the rendered-link twins of `Title`. */
-const SYSTEM_COLUMN_PREFIXES = ["_", "LinkTitle"];
 
 /**
  * The column every create stamps with its own id. A retried create (the response was lost, or the
@@ -242,8 +241,7 @@ function listUrlName(webUrl: string | undefined): string | null {
 
 /** Whether a column is plumbing rather than data. */
 function isSystemColumn(name: string): boolean {
-  return SYSTEM_COLUMN_NAMES.has(name) ||
-      SYSTEM_COLUMN_PREFIXES.some(prefix => name.startsWith(prefix));
+  return SYSTEM_COLUMN_NAMES.has(name);
 }
 
 function columnTypeOf(column: GraphColumnDefinition): ColumnType {

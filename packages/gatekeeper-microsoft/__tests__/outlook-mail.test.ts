@@ -258,8 +258,21 @@ describe("reads", () => {
 
     expect(approvals.observations.length).toBeGreaterThanOrEqual(5);
     for (const observation of approvals.observations) {
-      expect(observation.containsRestrictedData).toBe(true);
+      // Opening a cursor shows nothing yet; every read that returns data is restricted.
+      const opensCursor = observation.description.startsWith("Create a cursor");
+      expect(Boolean(observation.containsRestrictedData)).toBe(!opensCursor);
     }
+  });
+
+  it("leaves the workspace unrestricted when a cursor is opened and never read", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    await session.listMessages();
+    await session.search("from:bob");
+
+    expect(approvals.observations).toHaveLength(2);
+    expect(approvals.observations.some(o => o.containsRestrictedData)).toBe(false);
   });
 
   it("cuts off a very long body and says so", async () => {

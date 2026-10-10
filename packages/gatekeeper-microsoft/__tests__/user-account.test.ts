@@ -578,6 +578,40 @@ describe("mint failure taxonomy", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("tries the death notification again after one fails, then stops once it lands", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    callback.credentialsExpired
+      .mockRejectedValueOnce(new Error("workshop unreachable"))
+      .mockResolvedValue(undefined);
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    // A fresh Response per call: a body can be read only once.
+    fetchMock.mockImplementation(async () => jsonResponse({
+      error: "invalid_grant", error_codes: [700082],
+      error_description: "AADSTS700082: The refresh token has expired due to inactivity.",
+    }, 400));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await expect(account.getAccessToken()).rejects.toThrow();
+    await vi.waitFor(() => expect(callback.credentialsExpired).toHaveBeenCalledTimes(1));
+
+    // Past the cooldown the next call asks Entra again, fails again, and notifies again.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 5 * 60 * 1000 });
+    try {
+      await expect(account.getAccessToken()).rejects.toThrow();
+      await vi.waitFor(() => expect(callback.credentialsExpired).toHaveBeenCalledTimes(2));
+
+      // It got through, so a further failure stays quiet.
+      vi.setSystemTime(Date.now() + 5 * 60 * 1000);
+      await expect(account.getAccessToken()).rejects.toThrow();
+      await Promise.resolve();
+      expect(callback.credentialsExpired).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps retrying a transient rejection and leaves the account alive", async () => {
     const { context, account } = newAccount();
     const callback = fakeCallback();

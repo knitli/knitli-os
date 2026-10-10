@@ -33,7 +33,7 @@ import {
   ActionKind, AgentCatalog, ApprovalQueue, Cursor, Gatekeeper, GatekeeperUserVerifier,
   ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
-import { authorizeRestricted } from "./restricted-observation";
+import { authorizeCursorOpen, authorizeRestricted } from "./restricted-observation";
 import { formatApprovalField, sanitizeApprovalTitle } from "./approval-text";
 import { AccessTokenCache, AccessTokenRequest } from "./auth-retry";
 import type { GraphPage } from "./graph-api";
@@ -486,7 +486,7 @@ class TeamsTeamStub extends RpcTarget implements TeamsTeam {
     }
     let scope = this.#scope();
 
-    await authorizeRestricted(this.#ctx.approvalQueue, {
+    await authorizeCursorOpen(this.#ctx.approvalQueue, {
       title: "List Microsoft Teams team members",
       description: `Create a cursor over the roster of ${scope.label}.${scopeField(scope)}`,
     });
@@ -535,7 +535,7 @@ class TeamsChannelStub extends RpcTarget implements TeamsChannel {
   async listMessages(): Promise<Cursor<TeamsMessageEntry>> {
     let scope = scopeOf("the selected channel", "Channel", this.#cachedInfo?.displayName);
 
-    await authorizeRestricted(this.#ctx.approvalQueue, {
+    await authorizeCursorOpen(this.#ctx.approvalQueue, {
       title: "List Microsoft Teams channel messages",
       description:
           `Create a cursor over the top-level messages of ${scope.label}.${scopeField(scope)}`,
@@ -584,7 +584,7 @@ class TeamsChatStub extends RpcTarget implements TeamsChat {
   async listMembers(): Promise<Cursor<TeamsMemberInfo>> {
     let scope = this.#scope();
 
-    await authorizeRestricted(this.#ctx.approvalQueue, {
+    await authorizeCursorOpen(this.#ctx.approvalQueue, {
       title: "List Microsoft Teams chat members",
       description: `Create a cursor over everyone in ${scope.label}.${scopeField(scope)}`,
     });
@@ -595,7 +595,7 @@ class TeamsChatStub extends RpcTarget implements TeamsChat {
   async listMessages(): Promise<Cursor<TeamsMessageEntry>> {
     let scope = this.#scope();
 
-    await authorizeRestricted(this.#ctx.approvalQueue, {
+    await authorizeCursorOpen(this.#ctx.approvalQueue, {
       title: "List Microsoft Teams chat messages",
       description: `Create a cursor over the messages in ${scope.label}.${scopeField(scope)}`,
     });
@@ -655,7 +655,7 @@ class TeamsChannelMessageStub extends RpcTarget implements TeamsChannelMessage {
         "the reply chain under the selected message", "Message",
         body === undefined ? undefined : oneLine(body, MAX_EXCERPT_CHARS) || "(no text)");
 
-    await authorizeRestricted(this.#ctx.approvalQueue, {
+    await authorizeCursorOpen(this.#ctx.approvalQueue, {
       title: "List Microsoft Teams message replies",
       description: `Create a cursor over ${scope.label}.${scopeField(scope)}`,
     });
@@ -736,7 +736,7 @@ class TeamsSessionImpl extends RpcTarget implements TeamsSession {
   }
 
   async listChats(): Promise<Cursor<TeamsChatEntry>> {
-    await authorizeRestricted(this.#ctx.approvalQueue, {
+    await authorizeCursorOpen(this.#ctx.approvalQueue, {
       title: "List Microsoft Teams chats",
       description: "Create a cursor over the chats the connected user takes part in.",
     });
@@ -762,7 +762,7 @@ class TeamsSessionImpl extends RpcTarget implements TeamsSession {
     // asking a human to approve a search that cannot run.
     let validated = validateTeamsSearchQuery(query);
 
-    await authorizeRestricted(this.#ctx.approvalQueue, {
+    await authorizeCursorOpen(this.#ctx.approvalQueue, {
       title: "Search Microsoft Teams",
       description:
           "Create a cursor over the Teams messages matching this search.\n\n" +

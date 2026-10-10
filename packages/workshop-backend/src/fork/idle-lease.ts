@@ -117,6 +117,12 @@ export class IdleLease {
     return "ended";
   }
 
+  /** Undo a committed expiry whose abort could not be carried out; waits a full lease to retry. */
+  reopen(): void {
+    this.#committed = false;
+    this.#lastCheckAt = this.now();
+  }
+
   /** How long since the last sign of life, for the log. */
   idleMs(): number {
     return this.now() - Math.max(
@@ -142,8 +148,10 @@ export type LeaseHost = {
   hasAgentWork(): boolean;
   /** Recompute the Overseer's single alarm. */
   rearm(): void;
-  /** Flush storage and abort the incarnation. */
-  flushAndAbort(reason: string): Promise<void>;
+  /** Flush storage; the abort follows, so a failure here must leave the incarnation running. */
+  flush(): Promise<void>;
+  /** Abort the incarnation. */
+  abort(reason: string): void;
 };
 
 /**
@@ -186,7 +194,16 @@ export async function reapIdleSession(host: LeaseHost): Promise<void> {
   await lease.notifyAll();
   // Nothing may be awaited between the flush and the abort: the input gate keeps other events out
   // only while this continuation runs.
-  await host.flushAndAbort(ABORT_REASON);
+  try {
+    await host.flush();
+  } catch (error) {
+    // Nothing was aborted, so the incarnation lives on: take back the commitment and re-arm, or it
+    // would refuse every browser call and never be reaped.
+    lease.reopen();
+    host.rearm();
+    throw error;
+  }
+  host.abort(ABORT_REASON);
 }
 
 /** The key under which a browser-owned capability keeps its lease renewal. */

@@ -116,7 +116,7 @@ describe("renewOnClientCalls", () => {
 });
 
 describe("reapIdleSession", () => {
-  function host(opts: { kv?: string | null | Error; agentWork?: boolean } = {}) {
+  function host(opts: { kv?: string | null | Error; agentWork?: boolean; flushFails?: boolean } = {}) {
     let c = clock();
     let events: string[] = [];
     let lease = new IdleLease(c.now);
@@ -131,7 +131,8 @@ describe("reapIdleSession", () => {
       } as unknown as KVNamespace,
       hasAgentWork: () => opts.agentWork ?? false,
       rearm: () => { events.push("rearm"); },
-      flushAndAbort: async reason => { events.push(`abort:${reason}`); },
+      flush: async () => { if (opts.flushFails) throw new Error("sync failed"); },
+      abort: reason => { events.push(`abort:${reason}`); },
     };
     return { c, lease, h, events };
   }
@@ -167,6 +168,17 @@ describe("reapIdleSession", () => {
       await reapIdleSession(disabled.h);
       expect(disabled.events).toEqual(["rearm"]);
     }
+  });
+
+  it("takes back the commitment and re-arms when the final flush fails", async () => {
+    let { c, lease, h, events } = host({ kv: "on", flushFails: true });
+    lease.touch();
+    c.advance(SESSION_LEASE_MS);
+    await expect(reapIdleSession(h)).rejects.toThrow("sync failed");
+    expect(events).toEqual(["rearm", "rearm"]);
+    expect(() => lease.touch()).not.toThrow();
+    c.advance(SESSION_LEASE_MS);
+    expect(lease.decide(false, false)).toBe("ended");
   });
 
   it("a released notifier is not told", async () => {

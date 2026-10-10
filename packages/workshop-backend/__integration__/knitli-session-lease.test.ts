@@ -200,6 +200,26 @@ describe("workspace client-activity lease", () => {
         .toEqual({ code: SESSION_IDLE_CLOSE_CODE, reason: "idle" });
   });
 
+  it("keeps the idle close pending when a later non-idle release empties the socket", async () => {
+    const { session, authenticated } = await signIn();
+    const idleOne = await authenticated.newGadget();
+    const idleId = (await idleOne.getMetadata()).id;
+    const temporary = await authenticated.newGadget();
+    const temporaryId = (await temporary.getMetadata()).id;
+
+    advanceBeyondTheLease();
+    await temporary.getMetadata();
+    await runAlarm(idleId);
+    await settle();
+    expect(session.closes).toEqual([]);
+
+    // The temporary open goes away normally; the socket still owes the idle close.
+    temporary[Symbol.dispose]();
+    expect(temporaryId).not.toBe(idleId);
+    expect(await waitFor("the idle close", () => session.closes[0]))
+        .toEqual({ code: SESSION_IDLE_CLOSE_CODE, reason: "idle" });
+  });
+
   it("shares the open count across authenticated capabilities on one socket", async () => {
     const { session, authenticated, token } = await signIn();
     const second = await session.publicApi.authenticate(token);

@@ -46,8 +46,9 @@ const logger = createWorkshopLogger("workshop.server");
 // fetch handler), so later requests skip the call. The DO holds the real answer.
 let bundledBlueprintInstallStarted = false;
 
-// Fork: workspace opens held per API socket, keyed by the socket's abortSession callback.
-const liveOpensBySession = new WeakMap<(reason: Error) => void, number>();
+// Fork: workspace opens held per API socket, keyed by the socket's abortSession callback, plus the
+// workspace whose expired lease is waiting for the socket's last open to be released.
+const liveOpensBySession = new WeakMap<(reason: Error) => void, { count: number; idleFrom?: string }>();
 
 const USER_SEARCH_POLICY_CACHE_TTL_MS = 30_000;
 
@@ -337,14 +338,26 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   // expired lease has released the last of them; one workspace idling says nothing about others.
   // The count belongs to the socket, not to this capability: every AuthenticatedApiImpl minted on a
   // socket shares its abortSession, which is therefore the key.
-  #adjustOpens(delta: 1 | -1): number {
-    let count = (liveOpensBySession.get(this.abortSession) ?? 0) + delta;
-    liveOpensBySession.set(this.abortSession, count);
-    return count;
+  #opens(): { count: number; idleFrom?: string } {
+    let opens = liveOpensBySession.get(this.abortSession);
+    if (!opens) liveOpensBySession.set(this.abortSession, opens = { count: 0 });
+    return opens;
   }
 
+  #openStarted(): void {
+    let opens = this.#opens();
+    ++opens.count;
+    delete opens.idleFrom;  // a fresh open after an idle release is a user's choice to carry on
+  }
+
+  // An idle release is remembered until the last open is gone, whichever kind of release that is:
+  // a temporary open that outlives the idle one must not swallow the close code.
   #openReleased(id: string, idle: boolean): void {
-    if (this.#adjustOpens(-1) === 0 && idle) this.abortSession(new IdleSessionError(id));
+    let opens = this.#opens();
+    if (idle) opens.idleFrom = id;
+    if (--opens.count === 0 && opens.idleFrom !== undefined) {
+      this.abortSession(new IdleSessionError(opens.idleFrom));
+    }
   }
 
   async #openGadgetInternal(id: string, shareKey?: string,
@@ -385,7 +398,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     (notifyClosed as any)[Symbol.dispose] = () => {
       if (started && !closed) {
         closed = true;
-        this.#adjustOpens(-1);
+        --this.#opens().count;
         // this.ctx.abort() would be nicer here, but it is still marked experimental in the
         // workers runtime.
         this.abortSession(new Error(`lost connection to workspace DO (gadget ${id})`));
@@ -394,7 +407,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     // Fork: counted from here, not from open()'s return, so an open parked on a step the client
     // controls is not invisible to another workspace's idle release on the same socket.
-    this.#adjustOpens(1);
+    this.#openStarted();
     let result;
     try {
       result = await overseer.open(userId, profileId, notifyClosed, shareKey, configureObservers);
@@ -405,7 +418,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       // fallible cleanup below, so a rejection there cannot leak the count.
       if (!closed) {
         closed = true;
-        this.#adjustOpens(-1);
+        this.#openReleased(id, false);
       }
       // A denial proves this user's listing for the workspace is stale: revocation tries to drop it
       // (refreshAffectedCollaboratorListings), but that push is best-effort. Only catches entries

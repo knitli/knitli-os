@@ -966,11 +966,9 @@ class OverseerImpl implements AgentHooks {
       kv: this.env.BLUEPRINTS,
       hasAgentWork: () => this.#hasAgentWork(),
       rearm: () => this.#updateAlarm(),
-      flushAndAbort: async reason => {
-        // ctx.abort() does not respect the output gate, so flush explicitly.
-        await this.ctx.storage.sync();
-        this.ctx.abort(reason, { retryAlarm: false });
-      },
+      // ctx.abort() does not respect the output gate, so flush explicitly first.
+      flush: () => this.ctx.storage.sync(),
+      abort: reason => this.ctx.abort(reason, { retryAlarm: false }),
     });
   }
 

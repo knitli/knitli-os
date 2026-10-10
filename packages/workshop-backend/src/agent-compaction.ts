@@ -323,7 +323,7 @@ export function buildCompactionState(
   let nextChangeId = previous?.nextChangeId ?? 0;
   // Names of every connection request, whatever became of it: replay keeps workbook names clear of
   // all of them, so that denying a request cannot rename a workbook.
-  let pendingNames = new Set<string>();
+  let pendingNames = new Set(previous?.requestedNames);
 
   for (let message of compacted) {
     if (message.type === "connectionRequest" && message.bindingName !== undefined) {
@@ -376,6 +376,7 @@ export function buildCompactionState(
 
   return {
     chatBindings: [...chatBindings],
+    requestedNames: [...pendingNames],
     nextChangeId,
     ...foldCompactedCode(messages, compactedTo, previous),
   };

@@ -7603,7 +7603,7 @@ class OverseerImpl implements AgentHooks {
     }
     let namingLog = chatMessages;
     let anythingToName = false;
-    let requestedNames = new Set<string>();  // see agent.ts
+    let requestedNames = new Set(this.getActiveChatCompaction(chatId)?.requestedNames);  // see agent.ts
     for (let msg of namingLog) {
       if (msg.type === "message") {
         for (let capsule of msg.capsules ?? []) {

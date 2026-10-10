@@ -125,6 +125,10 @@
       "reason": "Regression tests for the fork-owned email send action."
     },
     {
+      "path": "packages/gatekeeper-email/tsconfig.test.json",
+      "reason": "Type-checks the fork-owned email send tests; upstream's package has no tests."
+    },
+    {
       "path": "packages/gatekeeper-email/vitest.config.ts",
       "reason": "Test runner config for the fork-owned email send tests; upstream's package has no tests."
     },

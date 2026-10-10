@@ -35,6 +35,17 @@ Rules for every port:
   are the two cases here).
 - **Keep the fork's tests.** Port their tests with the code; they are the best spec we have.
 
+## Status (2026-10-10)
+
+| Port | State |
+| --- | --- |
+| Agent turn guards and `executeCode` output cap | Landed (#64). The Workers AI reasoning cap is deliberately not ported. The eval for a looping agent is still open. |
+| Alarm guards | PR #63 |
+| Microsoft gatekeeper | Draft PR #66, waiting on the live-tenant checklist |
+| Web Push | Kernel PR #67, UI PR #68 (stacked on #67) |
+| Email `send` | PR #69 |
+| Spreadsheet attachments, idle lease | Not started |
+
 ## Ports
 
 ### 1. Microsoft gatekeeper (`twinprime19`, `packages/gatekeeper-microsoft`)
@@ -59,7 +70,10 @@ Plan:
    a static `GATEKEEPER_MICROSOFT` would make the optional gatekeeper a dependency of every
    deployment. Verify the generated install binding instead. Add a `deploy-inputs.json` with
    `CLIENT_ID`, `CLIENT_SECRET` and `TENANT_ID` so the deploy wizard can supply the tenant, and
-   map `TENANT_ID` for local development.
+   map `TENANT_ID` for local development. Sign-in also needs `microsoft` in the backend's
+   `AUTH_GATEKEEPERS` allowlist, which the deploy service injects separately from the release
+   manifest and which defaults to empty; document that production step (and the local
+   `AUTH_GATEKEEPERS=microsoft` setting), otherwise Outlook can connect but no login button shows.
 2. Compare it against `gatekeeper-kit` and `write-gatekeeper` conventions and swap hand-rolled
    pieces for kit helpers (connect handoff, credential stage, action builders).
 3. Land in stages, each its own PR: sign-in plus Outlook, then Teams, then SharePoint.
@@ -119,9 +133,8 @@ Decision: the reasoning cap is not ported. It would override the user's `setChat
 because the overseer passes the chat's stored `reasoningEffort` to every model request. If we want
 a downgrade, it should be a defined recovery state after the guard trips, not a blanket cap.
 
-Plan: small and mostly in `agent.ts`. Port the guards and the output cap, add tests, and add an eval
-to `workshop-evals` that checks a looping agent stops. Check for overlap with `step-transactionality`
-before starting.
+Status: landed in #64 (guards, output cap and tests, in `src/fork/turn-guards.ts`). Remaining work:
+an eval in `workshop-evals` that checks a looping agent stops.
 
 ### 5. Durable Object alarm guards (`XcityUS/xct-os`)
 
@@ -212,7 +225,7 @@ generation and GitHub write work; we have `gatekeeper-github`.
 ## Suggested order
 
 1. Alarm guards (#5): small and independent.
-2. Turn guards (#4): small, easy to test.
+2. Turn guards (#4): done (#64).
 3. Email send investigation, then port if it is sound.
 4. Web Push (#6) once we know how it fits next to upstream notifications.
 5. Microsoft gatekeeper (#1), Outlook slice first, in parallel with the above since it is a

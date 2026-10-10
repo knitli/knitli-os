@@ -9,7 +9,7 @@ notice. The lease is that alarm.
 ## Behaviour
 
 - A call a browser makes through a capability the Overseer handed it (the workspace interface,
-  gadget and gatekeeper capabilities, and calls through a gadget UI's facet stub) renews a 10-minute
+  gadget and gatekeeper capabilities, calls through a gadget UI's facet stub, and calls on a gatekeeper session the browser retains) renews a 10-minute
   lease. `open()` arms it. Pings, the user's workspace list, the agent, hooks, gatekeeper callbacks
   and the alarm do not renew it.
 - A finished agent turn also renews it, so a user gets a full lease to read an answer.

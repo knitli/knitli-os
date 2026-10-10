@@ -1,7 +1,7 @@
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { capExecuteCodeOutput } from "./fork/turn-guards";
 import { isReasoningLevel } from "./fork/reasoning-levels";
-import { IdleLease, clientActivityOf, ownedByClient, reapIdleSession, renewOnClientCalls } from "./fork/idle-lease";
+import { IdleLease, clientActivityOf, ownedByClient, reapIdleSession, renewOnClientCalls, renewOnStubCalls } from "./fork/idle-lease";
 import { ActionApplyContextImpl, attestWorkspaceAudience, beginAdmission, forgetBuildAdmission,
   forgetContractedAdmissions } from "./fork/workspace-audience";
 import type { WorkspaceAudience } from "@gadgets/workshop-shared/gatekeeper";
@@ -13456,7 +13456,10 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   }
 
   async openSession(): Promise<RpcStub<Session>> {
-    return this.impl.openGatekeeperSession(this.id, await this.#facet(), {from: "user"});
+    let session = await this.impl.openGatekeeperSession(this.id, await this.#facet(), {from: "user"});
+    // Fork: the browser then calls the session directly, so its calls must renew the lease too.
+    let renew = clientActivityOf(this);
+    return renew ? renewOnStubCalls(session, renew) : session;
   }
 
   async getCreationSpec(): Promise<GatekeeperCreationSpec> {

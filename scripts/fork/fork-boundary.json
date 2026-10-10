@@ -153,6 +153,10 @@
       "reason": "Fork design-plan archive; upstream has no docs/superpowers tree."
     },
     {
+      "path": "plans/fork-ports.md",
+      "reason": "Plan for porting features from other cloudflare-os forks; plans/ is shared with upstream so this stays file-scoped."
+    },
+    {
       "path": "plans/prompt-presets-and-reasoning-controls.md",
       "reason": "Fork implementation plan for prompt presets; plans/ is shared with upstream so this stays file-scoped."
     },

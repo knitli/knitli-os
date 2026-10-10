@@ -76,7 +76,7 @@ describe("compaction checkpoint workbook bindings", () => {
     ]);
   });
 
-  it("takes the base name when the request holding it was denied", () => {
+  it("keeps clear of a denied request's name too, so denying one never renames a workbook", () => {
     let state = buildState([
       record(0, agent, {
         type: "connectionRequest", requestId: "1:0", vendorId: "vendor", vendorName: "Vendor",
@@ -85,7 +85,7 @@ describe("compaction checkpoint workbook bindings", () => {
       upload(1, user, [{id: "file-a", name: "big.xlsx"}]),
     ], 2);
 
-    expect(state.chatBindings).toContainEqual(["big_xlsx", {type: "attachment", id: "file-a"}]);
+    expect(state.chatBindings).toContainEqual(["big_xlsx_2", {type: "attachment", id: "file-a"}]);
   });
 
   it("names two same-named spreadsheets in one message in attachment order", () => {

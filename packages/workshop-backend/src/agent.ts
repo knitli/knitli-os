@@ -1737,6 +1737,11 @@ async function runAgentPass(
   // to anything yet. A denied request releases its name (log-derived, so replay agrees).
   let claimedNames = new Set<string>();
 
+  // Names of every connection request seen so far, whatever became of it. Workbook names are
+  // derived at replay, and denying a request releases its name from claimedNames: if workbooks
+  // avoided only pending names, denying one later would rename workbooks already referred to.
+  let requestedNames = new Set<string>();
+
   // Whether a name is unavailable for a new chat binding. GIT_BINDING_NAME counts as in scope
   // because the automatic env.GIT occupies it; only new bindings are refused -- a chat binding
   // that already took the name (from before env.GIT existed) keeps resolving as it did.
@@ -2197,7 +2202,7 @@ async function runAgentPass(
               // that depended on their interleaving would differ between a live turn and its replays.
               let workbookNames = new Map<string, string>();
               for (let {name, attachmentId} of deriveWorkbookBindings(
-                  msg.attachments, new Set([...chatBindings.keys(), ...claimedNames]))) {
+                  msg.attachments, new Set([...chatBindings.keys(), ...requestedNames]))) {
                 chatBindings.set(name, {type: "attachment", id: attachmentId});
                 workbookNames.set(attachmentId, name);
               }
@@ -2801,6 +2806,7 @@ async function runAgentPass(
         // agent is resumed and reads this as a user message describing the result; on deny it
         // isn't resumed (and the name is released), but the note is still surfaced here so the
         // agent sees the outcome the next time the user messages it.
+        if (msg.bindingName !== undefined) requestedNames.add(msg.bindingName);
         if (msg.state === "pending") {
           if (msg.bindingName !== undefined) {
             claimedNames.add(msg.bindingName);

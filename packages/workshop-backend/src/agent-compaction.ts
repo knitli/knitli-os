@@ -321,10 +321,14 @@ export function buildCompactionState(
   let compacted = messages.filter(message => message.sequence < compactedTo);
   let chatBindings = new Map(previous?.chatBindings ?? initialBindings);
   let nextChangeId = previous?.nextChangeId ?? 0;
-  // Names held by connection requests still pending, which replay keeps workbook names clear of.
+  // Names of every connection request, whatever became of it: replay keeps workbook names clear of
+  // all of them, so that denying a request cannot rename a workbook.
   let pendingNames = new Set<string>();
 
   for (let message of compacted) {
+    if (message.type === "connectionRequest" && message.bindingName !== undefined) {
+      pendingNames.add(message.bindingName);
+    }
     if (message.type === "message") {
       for (let capsule of message.capsules ?? []) {
         if (capsule.bindingName !== undefined && !chatBindings.has(capsule.bindingName)) {
@@ -350,8 +354,6 @@ export function buildCompactionState(
       if (message.bindingName !== undefined) {
         chatBindings.set(message.bindingName, {type: "value", messageSequence: message.sequence});
       }
-    } else if (message.type === "connectionRequest" && message.state === "pending") {
-      if (message.bindingName !== undefined) pendingNames.add(message.bindingName);
     } else if (message.type === "connectionRequest" && message.state === "accepted" &&
                message.gatekeeperId !== undefined && message.bindingName !== undefined) {
       if (!chatBindings.has(message.bindingName)) {

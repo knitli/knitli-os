@@ -307,6 +307,9 @@ describe("describeAttachmentBinding", () => {
     let description = await impl.describeAttachmentBinding(CHAT_ID, "QUARTERLY_XLSX", fileId);
 
     expect(description).toContain("Binding: QUARTERLY_XLSX");
+    // The file and sheet names are the file author's words, so the notice covers them.
+    expect(description).toContain(
+        `${UNTRUSTED_SPREADSHEET_NOTICE} That covers the file name and sheet names below too.`);
     // The name came from outside the workspace, so it is fenced the way every agent-facing
     // untrusted file name is, rather than quoted.
     expect(description).toContain('the workbook `quarterly.xlsx` attached to this chat');

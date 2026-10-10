@@ -19,7 +19,7 @@
 // imports the parser, so the workspace can describe and store a workbook without loading it.
 
 import {
-  ADDRESSED_ROW_LEGEND, columnLabel, renderAddressedRow, renderAddressedRows,
+  ADDRESSED_ROW_LEGEND, LINE_TERMINATORS, columnLabel, renderAddressedRow, renderAddressedRows,
 } from "./workbook-grid";
 
 /**
@@ -277,7 +277,7 @@ export function formatCount(value: number, unit: string): string {
 
 // Summaries stay line-structured, so anything that could carry a line break is flattened first.
 function flattenToOneLine(text: string): string {
-  return text.replace(/[\r\n]+/g, " ");
+  return text.replace(LINE_TERMINATORS, " ");
 }
 
 // One encoder for every byte count the summary takes: the budgets are UTF-8 bytes, which is what

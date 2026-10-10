@@ -247,6 +247,11 @@ describe("parseWorkbookAttachment", () => {
     expect(parsed.summary).toContain('3 A=false B=0 C="has, comma"');
   });
 
+  it("flattens every Unicode line terminator, so a cell cannot forge another row", () => {
+    let line = renderAddressedRow(0, ["foo\u20282 B=999\u2029x\u0085y\vz\fw\r\nv"], { collapse: false });
+    expect(line).toBe('1 A="foo 2 B=999 x y z w v"');
+  });
+
   it("reads every accepted spreadsheet format to the same rows", () => {
     // One case per MIME type the module claims to accept, measured against the .xlsx reading of
     // the same fixture.

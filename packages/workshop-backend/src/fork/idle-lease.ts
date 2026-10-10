@@ -29,6 +29,9 @@ const NOTIFY_TIMEOUT_MS = 5_000;
 
 const ABORT_REASON = "idle session lease expired";
 
+// How soon a failed final flush is retried.
+const FLUSH_RETRY_MS = 5_000;
+
 /** Raised to the front Worker's session when a workspace ended it for idleness. */
 export class IdleSessionError extends Error {
   constructor(gadgetId: string) {
@@ -57,6 +60,9 @@ export class IdleLease {
   // from that decision. A check that merely arrived early leaves it untouched.
   #lastCheckAt?: number;
   #committed = false;
+  // Set when the clients were told and the final flush then failed: the expiry cannot be taken
+  // back, so the next alarm resumes it.
+  #flushRetry = false;
   #notifiers = new Set<() => Promise<void>>();
 
   constructor(private now: () => number = Date.now) {}
@@ -86,6 +92,7 @@ export class IdleLease {
 
   /** When the alarm must next run for the lease, or undefined if it is unarmed or finished. */
   alarmTime(): number | undefined {
+    if (this.#flushRetry) return this.now() + FLUSH_RETRY_MS;
     return this.#lastClientAt === undefined || this.#committed ? undefined : this.#deadline();
   }
 
@@ -105,6 +112,7 @@ export class IdleLease {
    * means unarmed; "deferred" means leave it alone and re-arm.
    */
   decide(hasAgentWork: boolean, disabled: boolean): "none" | "deferred" | "ended" {
+    if (this.#flushRetry) return "ended";
     if (this.#committed || this.#lastClientAt === undefined) return "none";
     let now = this.now();
     if (disabled || hasAgentWork || now < this.#deadline()) {
@@ -117,10 +125,18 @@ export class IdleLease {
     return "ended";
   }
 
-  /** Undo a committed expiry whose abort could not be carried out; waits a full lease to retry. */
-  reopen(): void {
-    this.#committed = false;
-    this.#lastCheckAt = this.now();
+  /** The final flush failed after the clients were told: resume the expiry at the next alarm. */
+  retryFlush(): void {
+    this.#flushRetry = true;
+  }
+
+  clearFlushRetry(): void {
+    this.#flushRetry = false;
+  }
+
+  /** Whether an expiry is waiting to resume after a failed flush. */
+  get flushRetryPending(): boolean {
+    return this.#flushRetry;
   }
 
   /** How long since the last sign of life, for the log. */
@@ -174,6 +190,7 @@ export async function reapIdleSession(host: LeaseHost): Promise<void> {
     });
   }
 
+  let resuming = lease.flushRetryPending;
   let idleMs = lease.idleMs();
   let outcome = lease.decide(host.hasAgentWork(), disabled);
   if (outcome === "none") return;
@@ -187,19 +204,24 @@ export async function reapIdleSession(host: LeaseHost): Promise<void> {
     return;
   }
 
-  logger.info("session lease expired", { event: "overseer.session.lease.expired", durationMs: idleMs });
-  // The lease is now excluded from the alarm; what remains is delivery and retention work, which
-  // legitimately re-fires on the next incarnation.
-  host.rearm();
-  await lease.notifyAll();
+  if (!resuming) {
+    logger.info("session lease expired", { event: "overseer.session.lease.expired", durationMs: idleMs });
+    // The lease is now excluded from the alarm; what remains is delivery and retention work, which
+    // legitimately re-fires on the next incarnation.
+    host.rearm();
+    await lease.notifyAll();
+  }
+  lease.clearFlushRetry();
+  if (resuming) host.rearm();  // drop the retry alarm before the abort
   // Nothing may be awaited between the flush and the abort: the input gate keeps other events out
   // only while this continuation runs.
   try {
     await host.flush();
   } catch (error) {
-    // Nothing was aborted, so the incarnation lives on: take back the commitment and re-arm, or it
-    // would refuse every browser call and never be reaped.
-    lease.reopen();
+    // The clients were already told the workspace is gone, so the expiry cannot be taken back (its
+    // sockets may be parked and their open counts released): keep refusing calls and resume the
+    // flush and abort at the next alarm.
+    lease.retryFlush();
     host.rearm();
     throw error;
   }

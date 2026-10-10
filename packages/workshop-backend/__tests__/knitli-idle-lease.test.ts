@@ -120,6 +120,7 @@ describe("reapIdleSession", () => {
     let c = clock();
     let events: string[] = [];
     let lease = new IdleLease(c.now);
+    let flush = { fails: opts.flushFails ?? false };
     let h: LeaseHost = {
       lease,
       kv: {
@@ -131,10 +132,10 @@ describe("reapIdleSession", () => {
       } as unknown as KVNamespace,
       hasAgentWork: () => opts.agentWork ?? false,
       rearm: () => { events.push("rearm"); },
-      flush: async () => { if (opts.flushFails) throw new Error("sync failed"); },
+      flush: async () => { if (flush.fails) throw new Error("sync failed"); },
       abort: reason => { events.push(`abort:${reason}`); },
     };
-    return { c, lease, h, events };
+    return { c, lease, h, events, flush };
   }
 
   it("notifies, re-arms without the lease, then aborts, in that order", async () => {
@@ -170,15 +171,21 @@ describe("reapIdleSession", () => {
     }
   });
 
-  it("takes back the commitment and re-arms when the final flush fails", async () => {
-    let { c, lease, h, events } = host({ kv: "on", flushFails: true });
+  it("keeps the expiry committed when the final flush fails, and resumes it without re-notifying", async () => {
+    let { c, lease, h, events, flush } = host({ kv: "on", flushFails: true });
     lease.touch();
+    lease.addNotifier(async () => { events.push("notify"); });
     c.advance(SESSION_LEASE_MS);
     await expect(reapIdleSession(h)).rejects.toThrow("sync failed");
-    expect(events).toEqual(["rearm", "rearm"]);
-    expect(() => lease.touch()).not.toThrow();
-    c.advance(SESSION_LEASE_MS);
-    expect(lease.decide(false, false)).toBe("ended");
+    expect(events).toEqual(["rearm", "notify", "rearm"]);
+    // Clients were told, so calls stay refused and the alarm comes back soon.
+    expect(() => lease.touch()).toThrow(WorkspaceSessionExpiredError);
+    expect(lease.alarmTime()).toBe(c.now() + 5_000);
+
+    flush.fails = false;
+    await reapIdleSession(h);
+    expect(events).toEqual(
+        ["rearm", "notify", "rearm", "rearm", "abort:idle session lease expired"]);
   });
 
   it("a released notifier is not told", async () => {

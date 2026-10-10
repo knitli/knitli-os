@@ -998,3 +998,12 @@ ids are facet-local, not Activity ids.
   (Tier 1).
 - **At sync:** Tier 2. Re-check that new browser-facing capability mints are wrapped in
   `ownedByClient`, or their calls will not renew the lease.
+- **Frontend half:** new fork-owned `connectionPause.ts`, `useConnectionPaused.ts`,
+  `useWorkspaceIdle.ts`, `components/ConnectionChip.tsx` (Tier 1). Upstream seams: `main.tsx`
+  (owns the `WebSocket` to read its close code, parks `reconnect()` while paused, drop handler);
+  `GadgetEditor.tsx` (idle hook, `ConnectionChip` replacing `ReconnectingChip` at four sites);
+  `GadgetUseView.tsx` and `AppShell.tsx` (chip); `GadgetUI.tsx` (pause-aware waits, iframe
+  `activity` forwarding); `useWorkspaceOpen.ts` (pause-aware catch, dialog cancel, heartbeat skip);
+  `ChatInterface.tsx`, `ChatComposer.tsx`, `useResolveAction.tsx` (`resumeConnection()` calls).
+  Source: fork commits 1bd0baa4/d489f587 (#23), 7256a6a6, 94a99094, 053c0622. Not ported:
+  the `?open=` reason parameter (it only fed the dropped session log).

@@ -45,7 +45,7 @@ Rules for every port:
 | Web Push | Kernel PR #67, UI PR #68 (stacked on #67) |
 | Email `send` | PR #69 |
 | Spreadsheet attachments | Not started |
-| Idle lease | Backend stage in progress (branch port/idle-lease); frontend stage pending |
+| Idle lease | Branch port/idle-lease: backend and frontend commits done; unmeasured in production |
 
 ## Ports
 

@@ -13,6 +13,13 @@ import './styles.css'
 import FrontendErrorBoundary from './FrontendErrorBoundary'
 import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
 import { applySiteFavicon, cacheBustSiteLogoUrl } from './siteLogoUtils'
+import {
+  installDropSocketHandler,
+  isConnectionPaused,
+  noteSocketClosed,
+  noteSocketOpened,
+  waitWhilePaused,
+} from './connectionPause'
 import { getBackendHost } from './connectHandoff';
 
 // ---------------------------------------------------------------------------
@@ -87,7 +94,13 @@ function startConnection(): RpcStub<PublicApi> {
   lastConnectTime = Date.now();
   const apiHost = getBackendHost();
   const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + apiHost + '/api';
-  const stub = newWebSocketRpcSession<PublicApi>(wsUrl);
+  // Own the socket instead of handing capnweb a URL: the close code is the only place the server
+  // can say a workspace lease expired. This listener is registered before capnweb's, so the pause
+  // is set before `handleBroken` publishes a replacement connection.
+  const ws = new WebSocket(wsUrl);
+  noteSocketOpened(ws);
+  ws.addEventListener('close', event => noteSocketClosed(ws, event.code));
+  const stub = newWebSocketRpcSession<PublicApi>(ws);
   stub.onRpcBroken(handleBroken);
   return stub;
 }
@@ -104,6 +117,8 @@ async function reconnect(): Promise<RpcStub<PublicApi>> {
   let skipSleep = Date.now() - lastConnectTime >= INITIAL_BACKOFF_MS;
   let backoff = INITIAL_BACKOFF_MS;
   for (;;) {
+    // A deliberate pause (idle tab) parks here instead of dialing; on resume, dial at once.
+    if (await waitWhilePaused()) skipSleep = true;
     if (!skipSleep) {
       await sleep(backoff * (0.85 + 0.3 * Math.random()));  // jittered against stampedes
       backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
@@ -118,6 +133,9 @@ async function reconnect(): Promise<RpcStub<PublicApi>> {
       disposeQuietly(candidate);
       continue;
     }
+
+    // A pause that landed while this probe was in flight must not end with a live socket.
+    if (isConnectionPaused()) { disposeQuietly(candidate); continue; }
 
     lastProvenAt = Date.now();
     isConnectionLost = false;
@@ -173,6 +191,9 @@ window.addEventListener('online', () => void probeOnWake());
 // Current stub. handleBroken() will replace this on disconnect.
 installWorkshopErrorReporting()
 let currentStub = startConnection();
+// Disposal fires onRpcBroken -> handleBroken, the path probeOnWake uses; during an outage the
+// placeholder is already published and the parked loop is all that is needed.
+installDropSocketHandler(() => { if (!isConnectionLost) disposeQuietly(currentStub); });
 
 const router = createRouter()
 applyStoredThemeMode()

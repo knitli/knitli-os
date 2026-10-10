@@ -110,6 +110,7 @@ import { useAlwaysApproveTag } from "./useAlwaysApproveTag";
 import { useResolveAction } from "./useResolveAction";
 import { safeExternalUrl } from "./utils/safeExternalUrl";
 import { useAuthenticatedApi } from "./AuthContext";
+import { resumeConnection } from "./connectionPause";
 import { useVendorBranding } from "./useVendorBranding";
 import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
 import { formatFullTimestamp } from "./utils/formatTimestamp";
@@ -4683,6 +4684,7 @@ function ChatInterface({
 
   // Open the gatekeeper modal pre-seeded with the agent's requested vendor/resource.
   const handleAcceptConnection = (msg: AiChatMessage & { type: "connectionRequest" }) => {
+    resumeConnection();  // deciding a request wakes a paused workspace
     setConnectionAccept({
       requestId: msg.requestId,
       vendorId: msg.vendorId,
@@ -4722,6 +4724,7 @@ function ChatInterface({
   };
 
   const handleDenyConnection = async (requestId: string) => {
+    resumeConnection();
     setProcessingConnections((prev) => new Set(prev).add(requestId));
     try {
       await overseer.denyConnectionRequest(requestId);

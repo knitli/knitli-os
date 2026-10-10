@@ -24,6 +24,7 @@ import type {
   SlashCommandRequest,
 } from "@gadgets/workshop-shared/api";
 import { isTransientRpcError } from "../../../rpcErrors";
+import { resumeConnection } from "../../../connectionPause";
 import { slashCommandTokenKey } from "./slash-commands/slashCommandInput";
 import {
   ComposerMirror, composerTextareaClass, type ComposerMirrorHandle, type MirrorToken,
@@ -541,6 +542,8 @@ export const ChatComposer = ({
       return;
     }
     if (sendInFlightRef.current || isSending || isBlocked) return;
+    // A send is the deliberate request that wakes a paused workspace.
+    resumeConnection();
     setSendHiccup(null);
     const attachmentsSnapshot = pendingAttachments;
     const readyAttachments = attachmentsSnapshot

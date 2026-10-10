@@ -1,6 +1,7 @@
 import { Link } from '@tanstack/react-router'
 import { Hexagon } from '@phosphor-icons/react'
 import { FormatGlyph } from './components/format/FormatVisuals'
+import ConnectionChip from './components/ConnectionChip'
 import { RpcStub } from 'capnweb'
 import {
   AuthenticatedApi,
@@ -110,6 +111,7 @@ export default function GadgetUseView({
 
         {/* Right: presence and user menu */}
         <div className="flex items-center gap-2 flex-shrink-0">
+          <ConnectionChip lost={false} />
           <GadgetExportMenu
             gadget={gadget}
             gadgetTitle={gadgets.find(g => g.id === selectedGadgetId)?.title ?? 'Gadget'}

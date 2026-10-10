@@ -18,17 +18,46 @@ notice. The lease is that alarm.
 - On expiry the Overseer tells each live client interface and each open still in progress, flushes
   storage and aborts. The front Worker closes the socket with close code 4001 once no workspace
   open remains on that session; the browser parks (stage 2) rather than redialling.
+- The lease arms only once the caller is the owner or an authorized collaborator; a denied `open()`
+  never renews it. An open parked before that point (a collaborator in a share-key redemption or
+  observer dialog) is ended by the lease only if a prior owner or collaborator call armed it.
 - Calls arriving after the decision is committed fail with `WorkspaceSessionExpiredError`; the
   client reconnects. The abort happens in the same continuation as the flush, so no write follows it.
-- A KV key `.sessionLease` with value `off` in the `BLUEPRINTS` namespace disables enforcement
-  (checks are skipped and re-armed). A KV read failure leaves it enforced.
+- The lease is **opt-in**: it enforces only while the KV key `.sessionLease` in the `BLUEPRINTS`
+  namespace holds `on`. Absent, any other value, or a failed KV read means disabled (checks are
+  skipped and re-armed). It ends sessions with a close code only the idle-pause UI understands, so
+  enable it once that UI is deployed; flipping the key needs no deploy. A workspace picks the
+  change up at its next lease check: immediately for a freshly woken one, but up to one lease (10
+  minutes) later for one already resident, since a disabled check re-arms a full lease out and the
+  KV read (cached 60 seconds) only happens when the alarm runs.
+- The reap runs even when another alarm concern fails; the failure is rethrown afterwards so the
+  platform still retries it.
+
+## Known limitation
+
+A client that disposes the workspace interface but keeps capabilities it minted (gadget,
+gatekeeper, facet, subscription) keeps renewing the lease through them, and the session's open has
+already been released by the interface's disposal. If those later go idle, the Overseer ends
+itself but the socket is not closed with the idle code, so the browser finds its retained
+capabilities broken instead of parking. The shipped client disposes the interface only on
+navigation, which drops what it minted too.
+
+A gatekeeper session the browser retains (`openSession()`), and capabilities such as cursors that
+its calls return, are called directly on the gatekeeper and never pass through the Overseer, so they
+do not renew the lease. Proxying them through the Overseer would renew it but changes their failure
+semantics: calls then die with the Overseer's access restarts instead of completing (it broke the
+`sensitive-observations` integration test, whose read must resolve before the 100 ms restart). The
+shipped client's visible-tab heartbeat renews the lease every 30 seconds while the page is alive,
+which covers a user working through such a session; a page that cannot run does no such work.
 
 ## What expiry costs
 
 An abort is a Durable Object restart, which the platform and this codebase already survive
 (deploys, access restarts). State is durable. In-flight work not tracked as agent work, such as a
 gatekeeper callback or hook delivery executing during the 5-second notification window, is cut
-short and retried by its own mechanism. A paused user pays one click to resume; nothing is lost.
+short and retried by its own mechanism. A collaborator `open()` suspended in the observer dialog when expiry commits can still persist the
+observer record the user just confirmed before failing with `WorkspaceSessionExpiredError`; that is
+the user's own authorized choice and is idempotent, so their next open finds it already done. A paused user pays one click to resume; nothing is lost.
 
 ## Billing
 

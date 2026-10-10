@@ -11,6 +11,7 @@
 // One `ChatHookDriver` per space holds its enabled hooks and subscriptions, collapses duplicate
 // pushes, and retries failed deliveries from its alarm.
 
+import { guardedAlarmFor } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { DurableObject, RpcTarget, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { SingleFlight } from "@gadgets/gatekeeper-kit/single-flight";
@@ -142,6 +143,10 @@ export class ChatHookDriver extends DurableObject<Env> {
    * - dropping expired subscriptions no hook uses any more.
    */
   async alarm(): Promise<void> {
+    await guardedAlarmFor(this.ctx, this.env, "google.chat-hooks", () => this.#alarmBody());
+  }
+
+  async #alarmBody(): Promise<void> {
     const now = Date.now();
     await this.#queue.run(now, (hookKey, message) => this.#deliver(hookKey, message));
     const registrations = [...this.#registrations()].map(([, registration]) => registration);

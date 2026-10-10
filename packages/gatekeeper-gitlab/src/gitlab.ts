@@ -9,6 +9,7 @@
 // `CredentialCoordinator`, which redeems a refresh token once and persists the rotated pair
 // before serving either.
 
+import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { DurableObject, RpcStub, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
@@ -504,6 +505,7 @@ export class UserAccount extends DurableObject<Env> implements AccountCredential
   }
 
   async alarm(): Promise<void> {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "gitlab.connect-timeout")) return;
     // Drop the account if the flow never completed, or if this was a transient auth-only sign-in
     // grant (used once to read the email for login). The latter still holds live tokens, which
     // are revoked rather than left to expire.

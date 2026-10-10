@@ -45,7 +45,7 @@ Rules for every port:
 | Web Push | Kernel PR #67, UI PR #68 (stacked on #67) |
 | Email `send` | PR #69 |
 | Spreadsheet attachments | Not started |
-| Idle lease | Branch port/idle-lease: backend and frontend commits done; unmeasured in production |
+| Idle lease | Kernel landed (#74); UI PR open. Off by default: set KV `.sessionLease` to `on` after the UI is deployed (docs/workspace-idle-lease.md). Saving not yet measured. |
 
 ## Ports
 

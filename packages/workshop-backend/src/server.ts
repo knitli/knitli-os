@@ -46,6 +46,11 @@ const logger = createWorkshopLogger("workshop.server");
 // fetch handler), so later requests skip the call. The DO holds the real answer.
 let bundledBlueprintInstallStarted = false;
 
+// Fork: workspace opens held per API socket, keyed by the socket's abortSession callback, plus the
+// workspace whose expired lease is waiting for the socket's last open to be released.
+type SocketOpens = { count: number; idleFrom?: { id: string } };
+const liveOpensBySession = new WeakMap<(reason: Error) => void, SocketOpens>();
+
 const USER_SEARCH_POLICY_CACHE_TTL_MS = 30_000;
 
 function publicBlueprintInfo(id: string, metadata: BlueprintPublicInfo['metadata']): BlueprintPublicInfo {
@@ -332,11 +337,36 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   // Fork: workspace opens this session holds, counted per open rather than per workspace id (a page
   // can hold two opens of one workspace). The socket carries the idle close code only once an
   // expired lease has released the last of them; one workspace idling says nothing about others.
-  #liveOpens = 0;
+  // The count belongs to the socket, not to this capability: every AuthenticatedApiImpl minted on a
+  // socket shares its abortSession, which is therefore the key.
+  #opens(): SocketOpens {
+    let opens = liveOpensBySession.get(this.abortSession);
+    if (!opens) liveOpensBySession.set(this.abortSession, opens = { count: 0 });
+    return opens;
+  }
 
+  // Returns the idle release this open began after, if any. Once the open succeeds, that release
+  // is superseded: the user chose to carry on. Until then it must stand, or a failed open would
+  // erase the close the page holding the expired capability is owed.
+  #openStarted(): SocketOpens["idleFrom"] {
+    let opens = this.#opens();
+    ++opens.count;
+    return opens.idleFrom;
+  }
+
+  #openSucceeded(supersedes: SocketOpens["idleFrom"]): void {
+    let opens = this.#opens();
+    if (supersedes && opens.idleFrom === supersedes) delete opens.idleFrom;
+  }
+
+  // An idle release is remembered until the last open is gone, whichever kind of release that is:
+  // a temporary open that outlives the idle one must not swallow the close code.
   #openReleased(id: string, idle: boolean): void {
-    --this.#liveOpens;
-    if (idle && this.#liveOpens === 0) this.abortSession(new IdleSessionError(id));
+    let opens = this.#opens();
+    if (idle) opens.idleFrom = { id };
+    if (--opens.count === 0 && opens.idleFrom !== undefined) {
+      this.abortSession(new IdleSessionError(opens.idleFrom.id));
+    }
   }
 
   async #openGadgetInternal(id: string, shareKey?: string,
@@ -372,40 +402,43 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       if (closed) return;
       closed = true;
       idle = reason === "idle";
-      // A notification that beats open()'s return belongs to an open that has not started; it is
-      // settled below.
-      if (started) this.#openReleased(id, idle);
+      this.#openReleased(id, idle);
     };
     (notifyClosed as any)[Symbol.dispose] = () => {
       if (started && !closed) {
         closed = true;
-        --this.#liveOpens;
+        --this.#opens().count;
         // this.ctx.abort() would be nicer here, but it is still marked experimental in the
         // workers runtime.
         this.abortSession(new Error(`lost connection to workspace DO (gadget ${id})`));
       }
     }
 
+    // Fork: counted from here, not from open()'s return, so an open parked on a step the client
+    // controls is not invisible to another workspace's idle release on the same socket.
+    let supersedes = this.#openStarted();
     let result;
     try {
       result = await overseer.open(userId, profileId, notifyClosed, shareKey, configureObservers);
     } catch (err) {
+      // Fork: a failed open releases its count, unless the lease notification already did (an open
+      // parked on the observer dialog or a share-key redemption ended by an expired lease, which
+      // also parked the browser rather than letting it redial into the same wait). Before the
+      // fallible cleanup below, so a rejection there cannot leak the count.
+      if (!closed) {
+        closed = true;
+        this.#openReleased(id, false);
+      }
       // A denial proves this user's listing for the workspace is stale: revocation tries to drop it
       // (refreshAffectedCollaboratorListings), but that push is best-effort. Only catches entries
       // they click; others stay frozen at revocation, as a disconnected collaborator gets no pushes.
       if (getOpenGadgetErrorCode(err) === OPEN_GADGET_ERROR_CODES.workspaceAccessDenied) {
         await this.#user.forgetSharedGadget(id);
       }
-      // Fork: an open parked on a step the client controls (observer-config dialog, share-key
-      // redemption) was ended by an expired lease; the browser must park, not redial into the
-      // same wait.
-      if (idle && this.#liveOpens === 0) this.abortSession(new IdleSessionError(id));
       throw err;
     }
     started = true;
-    ++this.#liveOpens;
-    // The lease can also expire between open() producing its result and this continuation.
-    if (closed) this.#openReleased(id, idle);
+    this.#openSucceeded(supersedes);
     return result;
   }
 

@@ -256,6 +256,40 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **At sync:** Tier 2 for the seams only; if upstream reshapes `publishNotification()`, keep the
   single `deliverWebPush()` call after the acknowledgement check and before the platform delivery.
 
+### Spreadsheet attachments
+
+- **Where:** `packages/workshop-backend/src/fork/workbook-*.ts`, `chat-attachment-workbook.ts`,
+  `workbook-parser-runtime.ts` and `workbook-binding.d.ts` (Tier 1), the bundling step
+  `scripts/fork/build-workbook-runtime.ts`, the `knitli-workbook-*.test.ts` regression tests, and
+  `docs/spreadsheet-attachments.md`. Upstream-file seams: `overseer.ts` (`uploadChatAttachment`
+  routes spreadsheets to `stageWorkbookUpload()`; `canonicalizeChatAttachmentRefs` adds
+  `workbookRefFields()`; three `dropWorkbook()` calls where an attachment is deleted; the
+  `attachment` case of `getEnvForAgent()` and the `workbook` case of `startGatekeeperSession()`
+  with its loopback target; two `AgentHooks` methods; one `deriveWorkbookBindings()` line in each
+  of `chatScopeNames()` and the naming chokepoint), `agent.ts` (the `attachment` binding case in
+  `describeBinding`, the `readSheet` tool and its removal when no workbook is bound, the replay
+  text, the `readSheet` replay case, the spawned-tool filter), `agent-compaction.ts` (the
+  `foldWorkbookBindings()` call and request-name set, saved as `requestedNames` on the checkpoint and
+  backfilled for old ones in `getActiveChatCompaction()` by `fork/workbook-checkpoint.ts`), `storage-schema/overseer-storage.ts` (the
+  `attachment` `ChatBindingEntry` and one spread of `workbookCollections`),
+  `workshop-shared/src/api.ts` (`ChatAttachmentRef.convertedFrom`, the `readSheet` `AiToolCall`),
+  `scripts/build-browser-runtime.ts` (one import), `package.json`, `.gitignore`.
+- **What:** Spreadsheets attached in chat are parsed in a sandboxed dynamic worker into a budgeted
+  summary (the attachment) and row pages (separate storage), read through `readSheet` and an
+  `env.<name>` binding. See `docs/spreadsheet-attachments.md`. Ported from
+  twinprime19/cloudflare-os (8874b77b, fa3c158a, b19af8e2, 321aa306, 2daa9653, 2c8eec3e, 5ed1dc79).
+- **Why:** Models cannot work from a flattened workbook (hundreds of thousands of tokens, dates
+  as serial numbers); the rows are data to compute over, not prompt.
+- **Decisions:** the parser is `@e965/xlsx` 0.20.3 from the public npm registry (byte-identical to
+  SheetJS's CDN 0.20.3), not the fork's CDN tarball, so no registry-policy exception is needed.
+  Beyond the fork: an archive-entry ceiling, an untrusted-data notice on every text the model
+  reads, and a fork-owned storage shape (an index collection beside upstream's attachment record,
+  which is unchanged) in place of the fork's extra fields on the record. The fork's mailbox
+  import, 10 MiB document conversion and 1.75 MiB attachment cap are separate features and are not
+  part of this port; the UI (picker, tray) is a follow-up.
+- **At sync:** Tier 2 for the seams only. If upstream moves attachment storage or the chat binding
+  map, keep the three `dropWorkbook()` sites and the `attachment` binding case in step.
+
 ### Deployment-admin connector frames
 
 - **Where:** `packages/workshop-backend/src/fork/admin-gatekeeper-apps.ts` and `packages/workshop-frontend/src/features/admin/gatekeeper-apps/`.
@@ -977,8 +1011,8 @@ ids are facet-local, not Activity ids.
 - **What:** the Overseer ends its own incarnation (`ctx.abort`, after `storage.sync()`) once 10
   minutes pass with no browser call, no finished agent turn and no outstanding agent work. The
   front Worker then closes the socket with `SESSION_IDLE_CLOSE_CODE` (4001) so the browser can
-  park instead of redialling. Behaviour, races and billing: `docs/workspace-idle-lease.md`. A KV
-  key `.sessionLease` = `off` in `BLUEPRINTS` disables enforcement without a deploy.
+  park instead of redialling. Behaviour, races and billing: `docs/workspace-idle-lease.md`. The lease is
+  opt-in: it enforces only while KV key `.sessionLease` = `on` in `BLUEPRINTS` (no deploy needed).
 - **Where:** state, decision, reap and the call wrapper are in the fork-owned
   `src/fork/idle-lease.ts` (Tier 1). Upstream seams in `overseer.ts`: the `idleLease` /
   `clientActivity` fields; `#hasAgentWork()` extracted from `#updateAlarm` (plus two lines adding
@@ -996,6 +1030,9 @@ ids are facet-local, not Activity ids.
   the `workspace.session.*` / `session.closed` diagnostic logging and its observability fields.
 - **Tests:** `__tests__/knitli-idle-lease.test.ts`, `__integration__/knitli-session-lease.test.ts`
   (Tier 1).
+- **Alarm guard:** `alarm()` runs the tasks and the reap together inside `guardedAlarmFor`, so
+  the reap's re-arm precedes any retry alarm the guard sets, and a kill-switched (`ALARMS_DISABLED`)
+  object does not reap.
 - **At sync:** Tier 2. Re-check that new browser-facing capability mints are wrapped in
   `ownedByClient`, or their calls will not renew the lease.
 - **Frontend half:** new fork-owned `connectionPause.ts`, `useConnectionPaused.ts`,
@@ -1007,3 +1044,37 @@ ids are facet-local, not Activity ids.
   `ChatInterface.tsx`, `ChatComposer.tsx`, `useResolveAction.tsx` (`resumeConnection()` calls).
   Source: fork commits 1bd0baa4/d489f587 (#23), 7256a6a6, 94a99094, 053c0622. Not ported:
   the `?open=` reason parameter (it only fed the dropped session log).
+
+### Alarm guards (`ALARMS_DISABLED` kill switch, circuit breaker)
+
+- **Where:** `packages/observability/src/fork/alarm-guard.ts` (Tier 1), re-exported to gatekeepers
+  by `packages/gatekeeper-kit/src/fork/alarm-guard.ts` (Tier 1); a one-line seam plus one import in
+  each of the 20 upstream `alarm()` handlers; `docs/alarm-audit.md` lists them; one row in the
+  `packages/gatekeeper-kit/README.md` module inventory (Tier 2).
+- **What:** every `alarm()` starts with `haltIfAlarmsDisabled(this.ctx, this.env, key)`, which
+  skips the work and re-arms an hourly probe when the Worker var `ALARMS_DISABLED` is `"true"`, so clearing it resumes every object without recovery code. The four handlers that
+  re-arm (`OverseerDurableObject`, `ScheduleDriver`, Google `ChatHookDriver` and `GmailHookDriver`)
+  call
+  `guardedAlarmFor(ctx, env, key, run)` instead: a flood detector of `MAX_ALARM_RUNS_PER_MINUTE` (6,000) runs per clock minute, derived in `docs/alarm-audit.md` (counted and persisted before each run, so eviction or a killed run cannot hide a loop), and a throwing run is
+  replaced by an exponential-backoff alarm instead of being rethrown to the platform. The
+  scheduler's "reports and rethrows alarm infrastructure failures" test now asserts the backoff
+  alarm instead.
+- **Why:** Cloudflare has no spend cap, and a self-re-arming failing alarm is an unbounded bill.
+  Ported from XcityUS/xct-os (Apache-2.0), commits bca8a50221 (guard module), 7967b00e33 and
+  23b2cf894a (handler wiring), 4aa392421e (coverage test).
+- **Test:** `packages/observability/__tests__/knitli-alarm-guard.test.ts` (guard behavior) and
+  `packages/gatekeeper-google/__tests__/workerd/knitli-hook-alarm-idle.test.ts` (idle hook drivers keep no guard key; one include line in `vitest.worker.config.ts` is Tier 2) and
+  `scripts/fork/alarm-guard-coverage.test.ts` (each `alarm(` method body, async or not must call the
+  guard; checked per method, and fails if the guard is removed from any one). Exceptions: `schedule-driver.test.ts` is an upstream test edited for the backoff.
+- **At sync:** Tier 2 for each seam. A new upstream `alarm()` fails the coverage test until it gets
+  the one-line check and a row in `docs/alarm-audit.md`. If upstream adds its own alarm guard, drop
+  ours. The overseer breaker only bounds an undeliverable external-response loop (see the audit);
+  it does not delete the record.
+
+### Email send action (ported from michielappelman/cloudflare-os)
+
+- **Where:** `packages/gatekeeper-email/src/fork/send.ts` (Tier 1) and `__tests__/fork/send.test.ts`; one-line seams in `src/email.ts` (`#send` field, session `send()`, `getAutoApprovableActions`, `applyAction`/`rejectAction`/`revertAction`, `EMAIL_DOMAIN`, inbound `messageId`/`references`) and additive hunks in `src/types.d.ts`. Also `SEND_EMAIL` in `cloudflare.config.ts` (and the generated `wrangler.jsonc`/`worker-configuration.d.ts`), the `send_email` passthrough in `scripts/release/manifest-lib.ts` and its golden file, `withTests` in the package's `vite.config.ts`.
+- **What:** `EmailSession.send()` queues an approval-backed "Send email" action (`await-decision`, `claimBeforeApply`, no revert); the kind is advertised via `getAutoApprovableActions()` and the Workshop's per-binding rule (`${gatekeeperId}:${tag}`) decides auto-apply. Source commits `162f9d7`, `a090c84`; Apache-2.0.
+- **Divergences from the source fork:** durable rolling-hour cap of 100 recipients that also binds auto-approved sends (checked at submit, charged at apply); stricter address, Message-ID, MIME type, filename and `fromName` validation; messages whose approval view would truncate are refused.
+- **Fail closed:** sending needs `EMAIL_DOMAIN` and `EMAIL_SEND_PREFIX` (administrator-set worker vars; the manifest has no input for a non-installable gatekeeper) so users cannot claim `admin@` and send as it.
+- **At sync:** Tier 2 seams in `email.ts`/`types.d.ts`; if upstream adds sending, drop this entry and the port.

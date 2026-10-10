@@ -116,7 +116,7 @@ import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
 import { formatFullTimestamp } from "./utils/formatTimestamp";
 import { copyToClipboard } from "./clipboard";
 import { isImeComposing } from "./keyboardEvent";
-import { formatAttachmentSize } from "./features/chat/attachmentFormatting";
+import { attachmentDownloadName, formatAttachmentSize } from "./features/chat/attachmentFormatting";
 import { ChatComposer } from "./features/chat/composer/ChatComposer";
 import type { PromptPresetOption } from "./features/chat/controls/ComposerPromptSelector";
 import { composerDraftStorageKey } from "./features/chat/composer/draft/composerDraft";
@@ -647,6 +647,11 @@ function getToolCallSummary(
     }
     case "giveUp":
       return { verb: "Stopped" };
+    case "readSheet":
+      return {
+        verb: "Read sheet",
+        target: `${tc.input.sheet} ${tc.input.range ?? ""}`.trim(),
+      };
     case "webFetch": {
       let target = tc.input.url;
       try {
@@ -741,6 +746,8 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return count === 1 ? "Searched files" : `Searched files ${formatTimes(count)}`;
     case "webFetch":
       return `Fetched ${pluralize(count, "page")}`;
+    case "readSheet":
+      return `Read ${pluralize(count, "sheet range")}`;
     case "executeCode":
       return count === 1 ? "Ran code" : `Ran code ${formatTimes(count)}`;
     case "describeBinding":
@@ -788,6 +795,8 @@ function getToolIcon(
       return Terminal;
     case "webFetch":
       return Globe;
+    case "readSheet":
+      return FileIcon;
     case "grep":
     case "describeBinding":
       return MagnifyingGlass;
@@ -836,6 +845,8 @@ function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undef
       return "Running code";
     case "webFetch":
       return "Fetching web page";
+    case "readSheet":
+      return "Reading sheet";
     case "observeUserChanges":
       return "Observing user changes";
     case "giveUp":
@@ -864,6 +875,7 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "createWorktree": return "Creating worktree";
     case "executeCode": return "Running code";
     case "webFetch": return "Fetching";
+    case "readSheet": return "Reading sheet";
     case "observeUserChanges": return "Observing user changes";
     case "giveUp": return "Stopping";
     case "listBlueprints": return "Listing blueprints";
@@ -884,6 +896,7 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "editFile": return `Making ${count} edits`;
     case "grep": return `Searching files ${formatTimes(count)}`;
     case "webFetch": return `Fetching ${pluralize(count, "page")}`;
+    case "readSheet": return `Reading ${pluralize(count, "sheet range")}`;
     case "executeCode": return count === 1 ? "Running code" : `Running code ${formatTimes(count)}`;
     case "describeBinding": return `Inspecting ${pluralize(count, "binding")}`;
     case "setBindingHook": return `Connecting ${pluralize(count, "binding")}`;
@@ -3202,7 +3215,6 @@ function ChatInterface({
     try {
       let bytes = attachment.content;
       const mimeType = attachment.mimeType;
-      const name = attachment.name;
       if (!bytes) {
         bytes = await overseer.getChatAttachmentContent(chatId, attachment.id);
       }
@@ -3211,7 +3223,7 @@ function ChatInterface({
       try {
         const a = document.createElement("a");
         a.href = url;
-        a.download = name ?? "attachment";
+        a.download = attachmentDownloadName(attachment);
         a.click();
       } finally {
         setTimeout(() => URL.revokeObjectURL(url), 0);

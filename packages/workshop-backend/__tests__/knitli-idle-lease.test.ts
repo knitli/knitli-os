@@ -13,6 +13,12 @@ function clock(start = 1_000_000) {
 }
 
 describe("IdleLease", () => {
+  it("assertLive checks without arming or renewing", () => {
+    let lease = new IdleLease(clock().now);
+    lease.assertLive();
+    expect(lease.alarmTime()).toBeUndefined();
+  });
+
   it("is unarmed until a browser touches it, and the first touch says so", () => {
     let c = clock();
     let lease = new IdleLease(c.now);
@@ -75,6 +81,7 @@ describe("IdleLease", () => {
     expect(lease.alarmTime()).toBeUndefined();
     expect(lease.decide(false, false)).toBe("none");
     expect(() => lease.touch()).toThrow(WorkspaceSessionExpiredError);
+    expect(() => lease.assertLive()).toThrow(WorkspaceSessionExpiredError);
   });
 });
 
@@ -109,10 +116,11 @@ describe("renewOnClientCalls", () => {
 });
 
 describe("reapIdleSession", () => {
-  function host(opts: { kv?: string | null | Error; agentWork?: boolean } = {}) {
+  function host(opts: { kv?: string | null | Error; agentWork?: boolean; flushFails?: boolean } = {}) {
     let c = clock();
     let events: string[] = [];
     let lease = new IdleLease(c.now);
+    let flush = { fails: opts.flushFails ?? false };
     let h: LeaseHost = {
       lease,
       kv: {
@@ -124,13 +132,14 @@ describe("reapIdleSession", () => {
       } as unknown as KVNamespace,
       hasAgentWork: () => opts.agentWork ?? false,
       rearm: () => { events.push("rearm"); },
-      flushAndAbort: async reason => { events.push(`abort:${reason}`); },
+      flush: async () => { if (flush.fails) throw new Error("sync failed"); },
+      abort: reason => { events.push(`abort:${reason}`); },
     };
-    return { c, lease, h, events };
+    return { c, lease, h, events, flush };
   }
 
   it("notifies, re-arms without the lease, then aborts, in that order", async () => {
-    let { c, lease, h, events } = host();
+    let { c, lease, h, events } = host({ kv: "on" });
     lease.touch();
     lease.addNotifier(async () => { events.push("notify"); });
     c.advance(SESSION_LEASE_MS);
@@ -145,29 +154,42 @@ describe("reapIdleSession", () => {
   });
 
   it("never aborts over running agent work", async () => {
-    let { c, lease, h, events } = host({ agentWork: true });
+    let { c, lease, h, events } = host({ kv: "on", agentWork: true });
     lease.touch();
     c.advance(SESSION_LEASE_MS * 3);
     await reapIdleSession(h);
     expect(events).toEqual(["rearm"]);
   });
 
-  it("honours the kill switch but stays enforced when KV fails", async () => {
-    let off = host({ kv: "off" });
-    off.lease.touch();
-    off.c.advance(SESSION_LEASE_MS);
-    await reapIdleSession(off.h);
-    expect(off.events).toEqual(["rearm"]);
+  it("enforces only when enabled, and a KV failure leaves it disabled", async () => {
+    for (let kv of [null, "off", new Error("kv down")]) {
+      let disabled = host({ kv });
+      disabled.lease.touch();
+      disabled.c.advance(SESSION_LEASE_MS);
+      await reapIdleSession(disabled.h);
+      expect(disabled.events).toEqual(["rearm"]);
+    }
+  });
 
-    let broken = host({ kv: new Error("kv down") });
-    broken.lease.touch();
-    broken.c.advance(SESSION_LEASE_MS);
-    await reapIdleSession(broken.h);
-    expect(broken.events).toEqual(["rearm", "abort:idle session lease expired"]);
+  it("keeps the expiry committed when the final flush fails, and resumes it without re-notifying", async () => {
+    let { c, lease, h, events, flush } = host({ kv: "on", flushFails: true });
+    lease.touch();
+    lease.addNotifier(async () => { events.push("notify"); });
+    c.advance(SESSION_LEASE_MS);
+    await expect(reapIdleSession(h)).rejects.toThrow("sync failed");
+    expect(events).toEqual(["rearm", "notify", "rearm"]);
+    // Clients were told, so calls stay refused and the alarm comes back soon.
+    expect(() => lease.touch()).toThrow(WorkspaceSessionExpiredError);
+    expect(lease.alarmTime()).toBe(c.now() + 5_000);
+
+    flush.fails = false;
+    await reapIdleSession(h);
+    expect(events).toEqual(
+        ["rearm", "notify", "rearm", "rearm", "abort:idle session lease expired"]);
   });
 
   it("a released notifier is not told", async () => {
-    let { c, lease, h, events } = host();
+    let { c, lease, h, events } = host({ kv: "on" });
     lease.touch();
     let watch = lease.addNotifier(async () => { events.push("notify"); });
     watch[Symbol.dispose]();

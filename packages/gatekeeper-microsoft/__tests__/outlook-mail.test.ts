@@ -217,6 +217,8 @@ describe("resource description", () => {
 
     expect(description.url).toBe("https://outlook.office.com/mail/");
     expect(description.tsType).toBe("OutlookMailSession");
+    // Nobody else can be shown to share a mailbox, so sharing is refused up front.
+    expect(description.observerPolicy).toBe("owner-only");
     expect(await gatekeeper.getAutoApprovableActions()).toEqual([]);
   });
 });

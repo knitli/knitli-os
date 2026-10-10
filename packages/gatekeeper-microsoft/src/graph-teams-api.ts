@@ -1013,29 +1013,66 @@ export class GraphTeamsApi {
 
   // ── Teams and channels ────────────────────────────────────────────────────────
 
-  /** The teams the connected user has joined. Throws rather than answering a truncated list. */
+  /**
+   * The teams the connected user belongs to: the ones they have joined, plus the teams that host a
+   * shared channel they are in. `me/joinedTeams` omits the latter (Graph points clients at the
+   * associated-teams API for them), yet they are where such a channel and its messages live.
+   * Throws rather than answering a truncated list.
+   */
   async listJoinedTeams(): Promise<TeamsTeamInfo[]> {
-    return await this.#collect<GraphTeam, TeamsTeamInfo>(
+    let joined = await this.#collect<GraphTeam, TeamsTeamInfo>(
         graphUrl(["me", "joinedTeams"]), teamInfoFrom, MAX_TEAMS, "joined teams");
+    let known = new Set(joined.map(team => team.id));
+    let associated = await this.#associatedTeams(() =>
+        this.#collect<GraphTeam, TeamsTeamInfo>(
+            graphUrl(["me", "teamwork", "associatedTeams"]), teamInfoFrom, MAX_TEAMS,
+            "associated teams"));
+    return [...joined, ...associated.filter(team => !known.has(team.id))];
   }
 
   /**
-   * One team, but only if the connected user has joined it. `GET /teams/{id}` also answers for a
+   * The associated-teams read, or nothing when this account cannot make it. It only adds teams the
+   * joined list lacks, so a refusal (the permission, or a tenant without the API) must not take the
+   * joined teams down with it.
+   */
+  async #associatedTeams(read: () => Promise<TeamsTeamInfo[]>): Promise<TeamsTeamInfo[]> {
+    try {
+      return await read();
+    } catch (err) {
+      if (err instanceof GraphApiError && (err.status === 403 || err.status === 404)) return [];
+      throw err;
+    }
+  }
+
+  /**
+   * One team, but only if the connected user belongs to it. `GET /teams/{id}` also answers for a
    * team the account merely administers, so membership is checked against the user's own joined
-   * teams, and the answer is taken from that listing.
+   * and associated teams, and the answer is taken from that listing.
    */
   async getTeam(teamId: string): Promise<TeamsTeamInfo> {
     graphUrl(["teams", teamId]); // rejects an empty or relative id before any request
-    let next: string = graphUrl(["me", "joinedTeams"]);
+    let joined = await this.#findTeam(graphUrl(["me", "joinedTeams"]), teamId);
+    if (joined) return joined;
+    let associated = await this.#associatedTeams(async () => {
+      let found = await this.#findTeam(graphUrl(["me", "teamwork", "associatedTeams"]), teamId);
+      return found ? [found] : [];
+    });
+    if (associated[0]) return associated[0];
+    throw new GraphApiError(404, "notFound", "That team is not one this account belongs to.");
+  }
+
+  /** Walks a team collection until the team turns up, without a ceiling error when it does not. */
+  async #findTeam(url: string, teamId: string): Promise<TeamsTeamInfo | undefined> {
+    let next: string = url;
     for (let page = 0; page < MAX_WALK_PAGES; page++) {
       let body: GraphCollection<GraphTeam> = await this.#fetchJson<GraphCollection<GraphTeam>>(next);
       let match = (body.value ?? []).find(team => team.id === teamId);
       if (match) return teamInfoFrom(match);
       let link = body["@odata.nextLink"];
-      if (!link) break;
+      if (!link) return undefined;
       next = assertGraphUrl(link);
     }
-    throw new GraphApiError(404, "notFound", "That team is not one this account has joined.");
+    return undefined;
   }
 
   /**

@@ -244,9 +244,43 @@ describe("getTeam", () => {
     // A Teams service admin can read any team directly, so only the joined list is trusted.
     const calls = stubFetch(() => jsonResponse({ value: [{ id: "team-0", displayName: "Other" }] }));
 
-    await expect(newApi().getTeam("team-9")).rejects.toThrow(/not one this account has joined/);
+    await expect(newApi().getTeam("team-9")).rejects.toThrow(/not one this account belongs to/);
 
     expect(calls.every(call => !new URL(call.url).pathname.startsWith("/v1.0/teams/"))).toBe(true);
+  });
+
+  it("finds the host team of a shared channel, which joinedTeams leaves out", async () => {
+    const calls = stubFetch(call => new URL(call.url).pathname.endsWith("/me/teamwork/associatedTeams")
+      ? jsonResponse({ value: [{ id: "host-team", displayName: "Host" }] })
+      : jsonResponse({ value: [{ id: "team-0", displayName: "Mine" }] }));
+
+    await expect(newApi().getTeam("host-team")).resolves.toMatchObject({ id: "host-team" });
+    // Found by membership, never by reading the team directly.
+    expect(calls.every(call => !new URL(call.url).pathname.startsWith("/v1.0/teams/"))).toBe(true);
+  });
+
+  it("lists joined and host teams together, without repeating one", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith("/me/teamwork/associatedTeams")
+      ? jsonResponse({ value: [
+        { id: "team-0", displayName: "Mine" }, { id: "host-team", displayName: "Host" }] })
+      : jsonResponse({ value: [{ id: "team-0", displayName: "Mine" }] }));
+
+    const teams = await newApi().listJoinedTeams();
+
+    expect(teams.map(team => team.id)).toEqual(["team-0", "host-team"]);
+  });
+
+  it("keeps the joined teams when the associated-teams read is refused, but not on an outage", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith("/me/teamwork/associatedTeams")
+      ? jsonResponse({ error: { code: "Forbidden" } }, 403)
+      : jsonResponse({ value: [{ id: "team-0", displayName: "Mine" }] }));
+    await expect(newApi().listJoinedTeams()).resolves.toHaveLength(1);
+
+    vi.unstubAllGlobals();
+    stubFetch(call => new URL(call.url).pathname.endsWith("/me/teamwork/associatedTeams")
+      ? jsonResponse({ error: { code: "serviceError" } }, 400)
+      : jsonResponse({ value: [{ id: "team-0", displayName: "Mine" }] }));
+    await expect(newApi().listJoinedTeams()).rejects.toThrow();
   });
 
   it("finds a team on a later page", async () => {

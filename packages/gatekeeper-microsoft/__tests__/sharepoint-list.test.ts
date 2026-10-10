@@ -404,6 +404,50 @@ describe("createItem", () => {
     await expect(cursor.next()).rejects.toThrow(/skipped 5 pages with nothing on them/);
   });
 
+  it("lets a required column that has a default be left out", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+      ? jsonResponse({ value: [
+        { name: "Title", displayName: "Title", required: true, text: {} },
+        { name: "Stage", displayName: "Stage", required: true, defaultValue: { value: "New" },
+          text: {} },
+      ] })
+      : defaultRoute(call));
+    const session = await startSession();
+
+    await session.createItem({ Title: "x" });
+
+    expect(approvals.actions).toHaveLength(1);
+    await expect(session.createItem({ Stage: "Open" })).rejects.toThrow(/"Title" is required/);
+  });
+
+  it("does not latch the row observation for an item that does not exist", async () => {
+    stubFetch(call => /\/items\/404$/.test(new URL(call.url).pathname)
+      ? jsonResponse({ error: { code: "itemNotFound", message: "gone" } }, 404)
+      : defaultRoute(call));
+    const session = await startSession();
+
+    await expect(session.getItem("404")).rejects.toThrow();
+
+    // Nothing was revealed, so nothing was authorized or marked restricted, and a collaborator may
+    // still be admitted.
+    expect(approvals.observations).toHaveLength(0);
+    const verifier = new RpcStub(new (class extends RpcTarget {
+      async hasListAccess(): Promise<boolean> { return true; }
+    })());
+    await expect(gatekeeper.addObserver("user-1", verifier as never)).resolves.toBeUndefined();
+  });
+
+  it("refuses a page of items too large to read, naming how to shrink it", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/items`)
+      ? jsonResponse({ value: [{ id: "1", fields: { Details: "x".repeat(5 * 1024 * 1024) } }] })
+      : defaultRoute(call));
+    const session = await startSession();
+    const cursor = await session.getItems();
+
+    await expect(cursor.next()).rejects.toThrow(/too large to read here/);
+    expect(approvals.observations.filter(o => o.title.startsWith("Read "))).toHaveLength(0);
+  });
+
   it("drops the pending action when the queue refuses the submission", async () => {
     stubFetch();
     approvals.queue.submitAction.mockRejectedValueOnce(new Error("queue is down"));
@@ -759,6 +803,26 @@ describe("MicrosoftVerifier.hasListAccess", () => {
       },
     } as never, {} as never);
   }
+
+  it("reports a claims challenge to the account", async () => {
+    stubFetch(() => new Response("{}", {
+      status: 401,
+      headers: { "WWW-Authenticate": 'Bearer error="insufficient_claims", claims="eyJhIjoxfQ=="' },
+    }));
+    const verifier = new MicrosoftVerifier({
+      props: { userObjectId: DO_ID },
+      exports: {
+        UserAccount: {
+          idFromString: (id: string) => id,
+          get: () => ({ getAccessToken, reportCredentialsRejected }),
+        },
+      },
+    } as never, {} as never);
+
+    await expect(verifier.hasListAccess(SITE_ID, LIST_ID)).rejects.toThrow();
+
+    expect(reportCredentialsRejected).toHaveBeenCalledWith("insufficient_claims", expect.any(String));
+  });
 
   it("admits an account that can read the list", async () => {
     await expect(verifierFor(200).hasListAccess(SITE_ID, LIST_ID)).resolves.toBe(true);

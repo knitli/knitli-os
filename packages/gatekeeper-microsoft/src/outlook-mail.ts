@@ -597,6 +597,9 @@ export class OutlookMailGatekeeperImpl
       snippet: "Your Microsoft 365 mailbox",
       suggestedBindingName: "OUTLOOK_MAILBOX",
       tsType: "OutlookMailSession",
+      // A mailbox cannot be shown to be shared with anyone else (addObserver always throws), so the
+      // Workshop refuses to share a workspace holding it instead of failing later at open.
+      observerPolicy: "owner-only",
     };
   }
 

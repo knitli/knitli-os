@@ -993,6 +993,20 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     return this.ctx.exports.UserAccount.get(id);
   }
 
+  /**
+   * A SharePoint client for this account's own token. A claims-challenge 401 is reported to the
+   * account, so a Conditional Access rejection raises the reconnect prompt instead of failing every
+   * call while the connection still looks healthy.
+   */
+  #sharePointApi(): GraphSharePointApi {
+    return new GraphSharePointApi(
+        async opts => (await this.#account().getAccessToken(opts)).token,
+        {
+          onCredentialsRejected: (detail, rejectedToken) =>
+              this.#account().reportCredentialsRejected(detail, rejectedToken),
+        });
+  }
+
   async describe(): Promise<AccountDescription> {
     let account = this.#account();
     let grantedResourcesPromise = account.getGrantedResourceUrlPatterns();
@@ -1111,8 +1125,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     siteId: string;
     listId: string;
   }> {
-    let api = new GraphSharePointApi(
-        async opts => (await this.#account().getAccessToken(opts)).token);
+    let api = this.#sharePointApi();
     try {
       let site = await api.resolveSite(listUrl.hostname, listUrl.sitePath);
       let list = await api.resolveListByUrl(site.id, listUrl.listSegment);
@@ -1230,6 +1243,20 @@ export class MicrosoftVerifier extends WorkerEntrypoint<Env, MicrosoftVerifierPr
   }
 
   /**
+   * A SharePoint client for this account's own token. A claims-challenge 401 is reported to the
+   * account, so a Conditional Access rejection raises the reconnect prompt instead of failing every
+   * call while the connection still looks healthy.
+   */
+  #sharePointApi(): GraphSharePointApi {
+    return new GraphSharePointApi(
+        async opts => (await this.#account().getAccessToken(opts)).token,
+        {
+          onCredentialsRejected: (detail, rejectedToken) =>
+              this.#account().reportCredentialsRejected(detail, rejectedToken),
+        });
+  }
+
+  /**
    * Can this account open that list?
    *
    * Reading the list's own metadata is the cheapest question SharePoint answers with the permission
@@ -1239,8 +1266,7 @@ export class MicrosoftVerifier extends WorkerEntrypoint<Env, MicrosoftVerifierPr
    * to add the collaborator.
    */
   async hasListAccess(siteId: string, listId: string): Promise<boolean> {
-    let api = new GraphSharePointApi(
-        async opts => (await this.#account().getAccessToken(opts)).token);
+    let api = this.#sharePointApi();
     try {
       await api.describeList(siteId, listId);
       return true;

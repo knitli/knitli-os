@@ -816,6 +816,8 @@ export class TeamsGatekeeperImpl
       snippet: "Your Microsoft Teams messages, read-only",
       suggestedBindingName: "MICROSOFT_TEAMS",
       tsType: "TeamsSession",
+      // Same as the mailbox: addObserver always throws, so sharing is refused up front.
+      observerPolicy: "owner-only",
     };
   }
 

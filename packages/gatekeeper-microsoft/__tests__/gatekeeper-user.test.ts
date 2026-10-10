@@ -413,6 +413,22 @@ describe("resource surface", () => {
     expect(calls).toEqual([]);
   });
 
+  it("reports a claims challenge met while resolving a list, so a reconnect is offered", async () => {
+    const callback = { credentialsExpired: vi.fn(async () => {}) };
+    context.storage.kv.put("callback", callback);
+    stubSharePointGraph({
+      site: () => new Response("{}", {
+        status: 401,
+        headers: { "WWW-Authenticate": 'Bearer error="insufficient_claims", claims="eyJhIjoxfQ=="' },
+      }),
+    });
+
+    await expect(user.getGatekeeperClassFor(LIST_URL)).rejects.toThrow();
+
+    expect(callback.credentialsExpired).toHaveBeenCalledTimes(1);
+    expect(context.storage.kv.get("mintFailure")).toBeDefined();
+  });
+
   it("reports a list it cannot open in the words of whoever pasted the URL", async () => {
     stubSharePointGraph({ lists: () => jsonResponse({ value: [] }) });
 

@@ -151,7 +151,7 @@ export function validateFields(
       .filter(([, value]) => value !== null)
       .map(([name]) => name));
   for (let column of columns) {
-    if (!column.required) continue;
+    if (!column.required || column.hasDefault) continue;
     if (provided.has(column.name)) continue;
     throw new Error(
         `Column "${column.name}" is required by this list, so createItem() cannot leave it out.`);
@@ -442,13 +442,18 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
           `"${echoName(id)}" is not a SharePoint item id. Item ids are positive whole numbers.`);
     }
 
+    // Fetched before the observation is authorized: an item that does not exist reveals no row, and
+    // authorizing first would latch the restricted flag and close the gadget to new collaborators
+    // for a read that returned nothing. Nothing is returned until the authorization succeeds.
+    let item = await this.#ctx.api.getItem(this.#ctx.siteId, this.#ctx.listId, id);
+
     await this.#ctx.authorizeRows({
       title: sanitizeApprovalTitle(`Read item ${echoName(id)} from ${this.#ctx.listName()}`),
       description:
           "Read one item of this SharePoint list.\n\n" + formatApprovalField("Item id", id),
     }, true);
 
-    return await this.#ctx.api.getItem(this.#ctx.siteId, this.#ctx.listId, id);
+    return item;
   }
 
   async createItem(fields: Record<string, unknown>): Promise<void> {

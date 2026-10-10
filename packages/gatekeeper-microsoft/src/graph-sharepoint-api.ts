@@ -22,6 +22,7 @@
 // which `graphUrl` encodes; filters are built from a structured `WhereClause[]` validated against
 // the list's real columns, so there is no way to hand this client an OData expression.
 
+import { ResponseTooLargeError, readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
 import {
   AccessTokenProvider, CredentialsRejectedReporter, RetryAfterPolicy, claimsChallengeDetail,
   fetchWithAuthRetry,
@@ -41,6 +42,9 @@ export const SHAREPOINT_USER_AGENT = "NONISV|Contoso|CloudflareOS/1.0";
 /** Items Graph is asked for per page, and the ceiling a caller can raise it to. */
 export const DEFAULT_ITEM_PAGE_SIZE = 25;
 const MAX_ITEM_PAGE_SIZE = 200;
+
+/** Largest response read for items; see `#fetchJsonCapped`. */
+const MAX_ITEM_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 /** Pages of `/lists` walked while looking for the list a pasted URL names. */
 const MAX_LIST_PAGES = 10;
@@ -102,6 +106,8 @@ export type ColumnDefinition = {
   type: ColumnType;
   required: boolean;
   readOnly: boolean;
+  /** A required column that SharePoint fills in itself when a create leaves it out. */
+  hasDefault?: boolean;
   /** Allowed values, for `choice` columns. */
   choices?: string[];
   /** A `choice` column that also accepts values outside `choices` (a fill-in choice). */
@@ -164,6 +170,7 @@ type GraphColumnDefinition = {
   hidden?: boolean;
   readOnly?: boolean;
   required?: boolean;
+  defaultValue?: { value?: string; formula?: string };
   text?: { allowMultipleLines?: boolean; maxLength?: number };
   number?: unknown;
   boolean?: unknown;
@@ -270,6 +277,8 @@ function normalizeColumn(column: GraphColumnDefinition): ColumnDefinition | null
     readOnly: column.readOnly === true,
     ...(type === "choice" ? { choices: Array.isArray(choices) ? choices.filter(
         (choice): choice is string => typeof choice === "string") : [] } : {}),
+    ...(column.defaultValue && (column.defaultValue.value || column.defaultValue.formula)
+        ? { hasDefault: true } : {}),
     ...(type === "choice" && column.choice?.allowTextEntry === true ? { allowTextEntry: true } : {}),
     ...(type === "text" && column.text?.allowMultipleLines === true ? { multiline: true } : {}),
     // Graph reports 0 (or nothing) for a column with no limit of its own.
@@ -468,6 +477,26 @@ export class GraphSharePointApi {
     });
   }
 
+  /**
+   * Like `#fetchJson`, but the body is read under a byte ceiling. List fields are whatever the
+   * list's editors wrote, so a page of large multiline values is refused rather than buffered whole
+   * and handed to the caller.
+   */
+  async #fetchJsonCapped<T>(url: string): Promise<T> {
+    let response = await this.#request(url);
+    if (!response.ok) throw await this.#toError(response);
+    try {
+      return JSON.parse(await readTextCapped(response, MAX_ITEM_RESPONSE_BYTES)) as T;
+    } catch (err) {
+      if (err instanceof ResponseTooLargeError) {
+        throw new Error(
+            "That response from SharePoint is too large to read here. Ask for fewer items with " +
+            "a smaller `top`, or `select` fewer columns.", { cause: err });
+      }
+      throw err;
+    }
+  }
+
   async #fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     let response = await this.#request(url, init);
     if (!response.ok) throw await this.#toError(response);
@@ -639,7 +668,7 @@ export class GraphSharePointApi {
 
   /** One item, with every field expanded. */
   async getItem(siteId: string, listId: string, itemId: string): Promise<ListItem> {
-    return listItemFrom(await this.#fetchJson<GraphListItem>(
+    return listItemFrom(await this.#fetchJsonCapped<GraphListItem>(
         graphUrl(["sites", siteId, "lists", listId, "items", itemId], { $expand: "fields" })));
   }
 
@@ -673,7 +702,7 @@ export class GraphSharePointApi {
   }
 
   async #itemPage(url: string): Promise<GraphPage<ListItem>> {
-    let body = await this.#fetchJson<GraphCollection<GraphListItem>>(url);
+    let body = await this.#fetchJsonCapped<GraphCollection<GraphListItem>>(url);
     let next = body["@odata.nextLink"];
     return {
       items: (body.value ?? []).map(listItemFrom),

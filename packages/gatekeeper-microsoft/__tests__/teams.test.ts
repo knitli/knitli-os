@@ -104,6 +104,7 @@ function defaultRoute(call: Call): Response {
   if (method !== "GET") throw new Error(`unexpected ${method}: ${call.url}`);
 
   if (path.endsWith("/me/joinedTeams")) return jsonResponse({ value: [TEAM] });
+  if (path.endsWith("/me/teamwork/associatedTeams")) return jsonResponse({ value: [] });
   if (path.endsWith("/me/chats")) return jsonResponse({ value: [CHAT] });
   if (path.endsWith("/replies")) return jsonResponse({ value: [REPLY] });
   if (/\/channels\/[^/]+\/messages$/.test(path)) return jsonResponse({ value: [CHANNEL_MESSAGE] });
@@ -632,6 +633,15 @@ describe("observers", () => {
     await expect(gatekeeper.addObserver("observer-1", verifier as never))
       .rejects.toThrow(/may only be observed by that account's owner/);
     await expect(gatekeeper.removeObserver("observer-1")).resolves.toBeUndefined();
+  });
+});
+
+describe("resource description", () => {
+  it("is owner-only, so the Workshop refuses to share a workspace holding it", async () => {
+    const description = await gatekeeper.describe();
+
+    expect(description.tsType).toBe("TeamsSession");
+    expect(description.observerPolicy).toBe("owner-only");
   });
 });
 

@@ -39,6 +39,8 @@ export type ColumnDefinition = {
   required: boolean;
   /** SharePoint computes this column; it can be read but never written. */
   readOnly: boolean;
+  /** A required column SharePoint fills in itself, so `createItem()` may leave it out. */
+  hasDefault?: boolean;
   /** Allowed values, for `choice` columns. `createItem()` refuses anything else unless `allowTextEntry`. */
   choices?: string[];
   /** A `choice` column that also accepts values outside `choices`. */

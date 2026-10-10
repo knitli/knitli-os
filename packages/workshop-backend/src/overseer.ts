@@ -1,3 +1,4 @@
+import { clearAlarmGuard, guardedAlarmFor } from "@gadgets/observability/fork/alarm-guard";
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { capExecuteCodeOutput } from "./fork/turn-guards";
 import { chatWorkbook, describeWorkbookBinding, dropWorkbook, isChatWorkbook, isSpreadsheetUpload, openWorkbookSession, readWorkbookRange, stageWorkbookUpload, workbookRefFields } from "./fork/workbook-upload";
@@ -1013,6 +1014,7 @@ class OverseerImpl implements AgentHooks {
       this.ctx.storage.setAlarm(Math.min(...times));
     } else {
       this.ctx.storage.deleteAlarm();
+      clearAlarmGuard(this.ctx, "overseer");
     }
   }
 
@@ -9975,19 +9977,23 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * See OverseerImpl.runAlarmTasks for how the concerns are run together.
    */
   async alarm() {
-    // Fork: the reap runs even when another concern failed (that failure is rethrown after, so the
-    // platform still retries it), or a failing delivery would keep an expired workspace resident.
-    let failed: { error: unknown } | undefined;
-    try {
-      await this.impl.runAlarmTasks();
-    } catch (error) {
-      // Logged here because an expiry that follows aborts the object and the abort is all the
-      // platform sees; the concern's own state is re-armed and retried by the next incarnation.
-      this.impl.logger.error("alarm task failed", { event: "overseer.alarm.task.failed", error });
-      failed = { error };
-    }
-    await this.impl.reapIdleSession();
-    if (failed) throw failed.error;
+    await guardedAlarmFor(this.ctx, this.env, "overseer", async () => {
+      // Fork: the reap runs even when another concern failed (that failure is rethrown after, so
+      // the guard still backs off and retries it), or a failing delivery would keep an expired
+      // workspace resident. The reap sits inside the guard so its re-arm lands before the guard
+      // sets any retry alarm.
+      let failed: { error: unknown } | undefined;
+      try {
+        await this.impl.runAlarmTasks();
+      } catch (error) {
+        // Logged here because an expiry that follows aborts the object and the abort is all the
+        // platform sees; the concern's own state is re-armed and retried by the next incarnation.
+        this.impl.logger.error("alarm task failed", { event: "overseer.alarm.task.failed", error });
+        failed = { error };
+      }
+      await this.impl.reapIdleSession();
+      if (failed) throw failed.error;
+    });
   }
 
   // Initialize a brand-new workspace's storage. (Before git-backed code storage this also wrote

@@ -9,6 +9,7 @@
 // facet, still reaches it. Pushes can be delayed or dropped, so the driver also reads the history
 // hourly.
 
+import { guardedAlarmFor } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { DurableObject, RpcTarget, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { SingleFlight } from "@gadgets/gatekeeper-kit/single-flight";
@@ -184,6 +185,10 @@ export class GmailHookDriver extends DurableObject<Env> {
    * - delivering each queued message whose (re)try time has come, and forgetting finished ones.
    */
   async alarm(): Promise<void> {
+    await guardedAlarmFor(this.ctx, this.env, "google.gmail-hooks", () => this.#alarmBody());
+  }
+
+  async #alarmBody(): Promise<void> {
     const kv = this.ctx.storage.kv;
     if (this.#registrations().length > 0 && (kv.get<number>("syncAt") ?? 0) <= Date.now()) await this.#sync();
 

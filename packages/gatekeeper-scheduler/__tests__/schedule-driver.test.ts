@@ -180,7 +180,7 @@ describe("ScheduleDriver", () => {
     );
 
     const keys = await runInDurableObject(driver, (_instance, state) =>
-      [...state.storage.kv.list()].map(([key]) => key).toSorted(),
+      [...state.storage.kv.list()].map(([key]) => key).filter(key => !key.startsWith("alarm-guard:")).toSorted(),
     );
     expect(keys).toContain("schedule:workspace-a:schedule-a");
     expect(keys).toContain("caps:workspace-a:schedule-a");
@@ -326,6 +326,7 @@ describe("ScheduleDriver", () => {
     await testEnv.TEST_HOOKS.waitForDisposals({ approvalQueues: 2, callbacks: 2 }, 2_000);
 
     await driver.disable("workspace-a", "schedule-a");
+    // Unfiltered: cancelling the last alarm from an RPC also clears the alarm guard's counter.
     const keys = await runInDurableObject(driver, (_instance, state) =>
       [...state.storage.kv.list()].map(([key]) => key),
     );
@@ -928,22 +929,19 @@ describe("ScheduleDriver", () => {
     );
   });
 
-  it("reports and rethrows alarm infrastructure failures", async () => {
+  it("reports alarm infrastructure failures and re-arms with backoff instead of rethrowing", async () => {
     const driver = testEnv.SCHEDULE_DRIVER.getByName("alarm-failure");
     await runInDurableObject(driver, (_instance, state) =>
       state.storage.kv.put("metadata", { schemaVersion: 999, revoked: false }),
     );
 
-    const failure = await runInDurableObject(driver, async (instance) => {
-      try {
-        await instance.alarm();
-        return "did not reject";
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
+    // The alarm guard owns retries: it swallows the failure and arms a backoff alarm.
+    const armed = await runInDurableObject(driver, async (instance, state) => {
+      await instance.alarm();
+      return state.storage.getAlarm();
     });
 
-    expect(failure).toContain("Unsupported scheduler driver metadata");
+    expect(armed).toBeGreaterThan(Date.now());
     expect(reportIssue).toHaveBeenCalledWith(
       "scheduler.alarm",
       expect.any(Error),
@@ -976,7 +974,7 @@ describe("ScheduleDriver", () => {
       } catch (error) {
         message = error instanceof Error ? error.message : String(error);
       }
-      return { message, keys: [...state.storage.kv.list()].map(([key]) => key) };
+      return { message, keys: [...state.storage.kv.list()].map(([key]) => key).filter(key => !key.startsWith("alarm-guard:")) };
     });
     expect(enableResult).toEqual({ message: "alarm unavailable", keys: [] });
 
@@ -1253,11 +1251,49 @@ describe("ScheduleDriver", () => {
     let keys: string[] = [];
     await vi.waitFor(async () => {
       keys = await runInDurableObject(driver, (_instance, state) =>
-        [...state.storage.kv.list()].map(([key]) => key),
+        [...state.storage.kv.list()].map(([key]) => key).filter(key => !key.startsWith("alarm-guard:")),
       );
       expect(keys).toEqual(["metadata"]);
     });
     expect(keys).toEqual(["metadata"]);
+  });
+
+  it("clears the alarm guard's counter when disabling the last schedule cancels the alarm", async () => {
+    const driver = testEnv.SCHEDULE_DRIVER.getByName("guard-counter-cancel");
+    const activationTime = Date.now();
+    await enableSchedule(driver, {
+      workspaceId: "workspace-a",
+      scheduleId: "schedule-a",
+      spec: { kind: "interval" as const, everyMs: 60_000, anchorMs: activationTime },
+      title: "Unbounded",
+      description: "Keeps its alarm armed after each run.",
+      gadgetId,
+    }, activationTime);
+    await makeActiveScheduleDue(driver, "workspace-a", "schedule-a");
+    expect(await runDurableObjectAlarm(driver)).toBe(true);
+    const guardKeys = () => runInDurableObject(driver, (_instance, state) =>
+      [...state.storage.kv.list({ prefix: "alarm-guard:" })].map(([key]) => key));
+    expect(await guardKeys()).toEqual(["alarm-guard:scheduler"]);
+
+    await driver.disable("workspace-a", "schedule-a");
+    expect(await guardKeys()).toEqual([]);
+  });
+
+  it("keeps the alarm guard's counter across revocation cleanup passes", async () => {
+    const driver = testEnv.SCHEDULE_DRIVER.getByName("revocation-guard-counter");
+    await runInDurableObject(driver, (_instance, state) => {
+      for (let index = 0; index < 250; index++) state.storage.kv.put(`junk:${index}`, index);
+    });
+    await driver.revoke();
+    const counts = await runInDurableObject(driver, async (instance, state) => {
+      await state.storage.deleteAlarm(); // take over from the real alarm so the passes are ours
+      const read = () => state.storage.kv.get<{ count: number }>("alarm-guard:scheduler")?.count;
+      await instance.alarm();
+      const first = read();
+      await instance.alarm();
+      return [first, read()];
+    });
+    expect(counts[1]).toBeGreaterThan(counts[0]!);
   });
 });
 

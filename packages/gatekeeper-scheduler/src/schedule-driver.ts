@@ -1,3 +1,4 @@
+import { ALARM_GUARD_KEY_PREFIX, clearAlarmGuard, guardedAlarmFor } from "@gadgets/observability/fork/alarm-guard";
 import { DurableObject } from "cloudflare:workers";
 import type { RpcStub, RpcTarget } from "cloudflare:workers";
 import { reportIssue } from "@gadgets/observability/error-reporting";
@@ -235,6 +236,10 @@ export class ScheduleDriver extends DurableObject {
   }
 
   async alarm(): Promise<void> {
+    await guardedAlarmFor(this.ctx, this.env, "scheduler", () => this.#alarmBody());
+  }
+
+  async #alarmBody(): Promise<void> {
     await obsContext.with({ accountId: this.ctx.id.toString(), operation: "alarm" }, async () => {
       const startedAt = Date.now();
       try {
@@ -558,14 +563,17 @@ export class ScheduleDriver extends DurableObject {
       if (candidate !== undefined && (target === undefined || candidate < target))
         target = candidate;
     }
-    if (target === undefined) await this.ctx.storage.deleteAlarm();
-    else await this.ctx.storage.setAlarm(target);
+    if (target === undefined) {
+      await this.ctx.storage.deleteAlarm();
+      clearAlarmGuard(this.ctx, "scheduler"); // this also runs outside the guarded alarm
+    } else await this.ctx.storage.setAlarm(target);
   }
 
   async #cleanupRevokedAccount(): Promise<void> {
     const entries = [...this.ctx.storage.kv.list({ limit: REVOCATION_CLEANUP_BATCH_SIZE + 1 })];
+    // The alarm guard's counter is kept: deleting it mid-run would restart its flood count each pass.
     const cleanup = entries
-      .filter(([key]) => key !== METADATA_KEY)
+      .filter(([key]) => key !== METADATA_KEY && !key.startsWith(ALARM_GUARD_KEY_PREFIX))
       .slice(0, REVOCATION_CLEANUP_BATCH_SIZE);
     for (const [key, value] of cleanup) {
       if (key.startsWith(CAPABILITIES_PREFIX)) disposeCapabilities(value as StoredCapabilities);
@@ -573,8 +581,9 @@ export class ScheduleDriver extends DurableObject {
     this.ctx.storage.transactionSync(() => {
       for (const [key] of cleanup) this.ctx.storage.kv.delete(key);
     });
-    const remains = [...this.ctx.storage.kv.list({ limit: 2 })].some(
-      ([key]) => key !== METADATA_KEY,
+    // The guard's counter is never remaining data.
+    const remains = [...this.ctx.storage.kv.list({ limit: 3 })].some(
+      ([key]) => key !== METADATA_KEY && !key.startsWith(ALARM_GUARD_KEY_PREFIX),
     );
     if (remains) await this.ctx.storage.setAlarm(Date.now());
     else await this.ctx.storage.deleteAlarm();

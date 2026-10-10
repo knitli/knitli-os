@@ -63,6 +63,21 @@ describe('WebPushSync', () => {
     delete (navigator as { serviceWorker?: unknown }).serviceWorker
   })
 
+  it('runs once more when asked during a run, which may have read the subscription before it changed', async () => {
+    let finish!: () => void
+    sync.mockReset()
+    sync.mockReturnValueOnce(new Promise<void>((resolve) => { finish = resolve })).mockResolvedValue(undefined)
+    await act(async () => root.unmount())
+    root = createRoot(document.createElement('div'))
+    await act(async () => root.render(<WebPushSync />))
+    expect(sync).toHaveBeenCalledTimes(1)
+
+    await act(async () => { window.dispatchEvent(new Event('focus')) })
+    expect(sync).toHaveBeenCalledTimes(1)
+    await act(async () => finish())
+    expect(sync).toHaveBeenCalledTimes(2)
+  })
+
   it('stops retrying once unmounted', async () => {
     await act(async () => root.unmount())
     await vi.advanceTimersByTimeAsync(120_000)

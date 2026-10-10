@@ -17,9 +17,14 @@ export const WebPushSync = () => {
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     let running = false
+    let again = false
     let retries = 0
     const run = async () => {
-      if (running) return
+      if (running) {
+        // Asked while a run is in flight: that run may have read the subscription before it changed.
+        again = true
+        return
+      }
       running = true
       try {
         await syncBrowserSubscription(authenticatedApi, controller.signal)
@@ -31,6 +36,10 @@ export const WebPushSync = () => {
         }
       } finally {
         running = false
+        if (again && !controller.signal.aborted) {
+          again = false
+          void run()
+        }
       }
     }
     const runNow = () => {

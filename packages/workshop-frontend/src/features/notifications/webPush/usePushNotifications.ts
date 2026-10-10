@@ -96,13 +96,21 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
     return () => { cancelled = true }
   }, [api, attempt])
 
-  // Permission is granted in browser or system settings, away from this page: look again when the
-  // user comes back, so a blocked device gets its Turn on button without a reload.
+  // Permission changes in browser or system settings, away from this page: look again when the user
+  // comes back, so a blocked device gets its Turn on button, and one that was turned off there stops
+  // claiming to be on, without a reload.
   useEffect(() => {
-    if (status !== 'blocked') return
+    if (status !== 'blocked' && status !== 'on' && status !== 'off') return
     let cancelled = false
     const recheck = () => {
-      if (!cancelled && Notification.permission !== 'denied') setStatus('off')
+      if (cancelled) return
+      if (Notification.permission === 'denied') {
+        // The browser drops the subscription along with the permission.
+        setReady((current) => current && { ...current, existing: null })
+        setStatus('blocked')
+      } else if (status === 'blocked') {
+        setStatus('off')
+      }
     }
     const onVisible = () => {
       if (document.visibilityState === 'visible') recheck()

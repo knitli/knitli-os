@@ -241,6 +241,18 @@ describe('NotificationsSetting', () => {
     expect(button(container, 'Turn on')).toBeDefined()
   })
 
+  it('stops claiming to be on once notifications are blocked in settings', async () => {
+    const browser = installBrowser({ permission: 'granted', subscribed: true })
+    localStorage.setItem('gadgets.webPush.owner', 'me@example.com')
+    const container = await render(fakeApi())
+    expect(container.textContent).toContain('On for this device')
+
+    browser.notification.permission = 'denied'
+    await act(async () => { window.dispatchEvent(new Event('focus')) })
+    expect(container.textContent).toContain('blocked')
+    expect(button(container, 'Turn off')).toBeUndefined()
+  })
+
   it('says so, and registers no service worker, when the deployment has no push key', async () => {
     const api = fakeApi()
     api.getWebPushPublicKey.mockResolvedValue(null)

@@ -5,6 +5,7 @@ import {
   MAX_CHAT_ATTACHMENT_BYTES,
   prepareChatAttachment,
 } from "./prepareChatAttachment";
+import { MAX_SPREADSHEET_UPLOAD_BYTES } from "./spreadsheetTypes";
 
 const OVER_LIMIT = MAX_CHAT_ATTACHMENT_BYTES + 1;
 const png = new File(["png"], "photo.png", { type: "image/png" });
@@ -31,6 +32,15 @@ describe("prepareChatAttachment", () => {
       blob: file,
       mimeType: "text/plain",
     });
+  });
+
+  it("lets a spreadsheet exceed the stored-file limit, up to its own", async () => {
+    const type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    const sheet = new File([new Uint8Array(MAX_CHAT_ATTACHMENT_BYTES + 1)], "q.xlsx", { type });
+    await expect(prepareChatAttachment(sheet)).resolves.toEqual({ blob: sheet, mimeType: type });
+
+    const huge = new File([new Uint8Array(MAX_SPREADSHEET_UPLOAD_BYTES + 1)], "h.xlsx", { type });
+    await expect(prepareChatAttachment(huge)).rejects.toThrow("Spreadsheets must be 10.0 MB or smaller.");
   });
 
   it("rejects a non-image attachment above the upload limit", async () => {

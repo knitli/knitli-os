@@ -206,6 +206,15 @@ describe("alarm guard", () => {
     expect(state.alarm).toBe(T0 + MINUTE);
   });
 
+  it("never defers an open circuit into the past when the clock crosses the minute rollover", async () => {
+    const options = { key: "r", maxPerMinute: 1, deferWhenOpen: true };
+    await guardedAlarm(state, { ...options, now: () => T0 + 10 }, ok);
+    // The count is read just before the rollover; by the time the deferral is armed, the clock is past it.
+    const reads = [T0 + MINUTE - 1];
+    await guardedAlarm(state, { ...options, now: () => reads.shift() ?? T0 + MINUTE + 500 }, ok);
+    expect(state.alarm).toBe(T0 + MINUTE + 500 + 1_000);
+  });
+
   it("closes the circuit when the minute rolls over", async () => {
     const run = vi.fn(ok);
     for (let i = 0; i < 4; i++) await state.fire({ maxPerMinute: 2 }, run);

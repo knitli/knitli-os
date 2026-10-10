@@ -52,8 +52,9 @@ export interface AlarmGuardState {
 
 /**
  * The emergency-stop variable. Set the Worker var `ALARMS_DISABLED` to `"true"` and redeploy
- * to halt every alarm that checks it within minutes: each one deletes itself the next time it
- * fires.
+ * to halt every alarm that checks it: each one skips its work the next time it fires and re-arms an
+ * hourly probe ({@link ALARM_DISABLED_PROBE_MS}), so a disabled object still wakes once an hour,
+ * and clearing the variable resumes it with no recovery code.
  */
 export type AlarmKillSwitchEnv = { readonly ALARMS_DISABLED?: string };
 
@@ -198,7 +199,8 @@ export async function guardedAlarm(
       });
       storage.kv.put<AlarmGuardRecord>(storageKey, { bucket, count, failures });
     }
-    if (options.deferWhenOpen) await storage.setAlarm((bucket + 1) * WINDOW_MS);
+    // Floored: logging and the write above may have carried the clock past the rollover already.
+    if (options.deferWhenOpen) await scheduleAlarm(state, (bucket + 1) * WINDOW_MS, { now });
     return;
   }
 

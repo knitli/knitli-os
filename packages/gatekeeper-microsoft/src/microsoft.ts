@@ -128,6 +128,9 @@ const MINT_FAILURE_COOLDOWN_MS = 60 * 1000;
 // later, so every login pays for its own lookup.
 const VERIFIED_DOMAIN_CACHE_MS = 24 * 60 * 60 * 1000;
 
+/** Set while the Workshop has yet to acknowledge that credentials are working again. */
+const RESTORE_PENDING_KEY = "restorePending";
+
 /** Storage key prefix of a connect flow's nonce record, and the key of the list of live ones. */
 const NONCE_KEY_PREFIX = "nonce:";
 const NONCE_INDEX_KEY = "nonces";
@@ -520,6 +523,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 }
 
 export class UserAccount extends DurableObject<Env> {
+  #restoring = false;
+
   // Serialize minting, reconnect, and revoke against each other. Minting is a network round trip, so
   // without this a single invalidated token has every concurrent caller mint its own — a burst
   // against Entra's token endpoint that may get throttled, turning a recoverable rejection into a
@@ -784,6 +789,7 @@ export class UserAccount extends DurableObject<Env> {
       this.ctx.storage.kv.put<string[]>("grantScopes", recordedScopes);
       // These credentials are new, so any recorded permanent failure no longer applies.
       this.ctx.storage.kv.delete("mintFailure");
+      this.ctx.storage.kv.delete(RESTORE_PENDING_KEY);
       clearCredentialExpiryLatch(this.ctx.storage.kv);
 
       return { callback, stageId: undefined, authOnly };
@@ -833,6 +839,7 @@ export class UserAccount extends DurableObject<Env> {
       // These credentials are new, so any recorded permanent failure no longer applies — and
       // clearing it re-arms the one-shot expiry notification for whatever kills them next.
       this.ctx.storage.kv.delete("mintFailure");
+      this.ctx.storage.kv.delete(RESTORE_PENDING_KEY);
       clearCredentialExpiryLatch(this.ctx.storage.kv);
     });
   }
@@ -863,6 +870,8 @@ export class UserAccount extends DurableObject<Env> {
     // Fast path, deliberately outside the lock: the overwhelmingly common case is a valid cached
     // token, and that must not serialize behind anything. It also runs before the refresh-token
     // check, because a sign-in-only grant has an access token and never has a refresh token.
+    if (this.ctx.storage.kv.get<boolean>(RESTORE_PENDING_KEY)) this.#notifyCredentialsRestored();
+
     let cached = this.ctx.storage.kv.get<EntraAccessToken>("accessToken");
     if (this.#tokenSatisfies(cached, opts)) {
       return cached;
@@ -936,7 +945,9 @@ export class UserAccount extends DurableObject<Env> {
       this.#storeGrant(result.grant);
       // A refused token request that now succeeds (a rotated client secret, a restored consent) is
       // credentials coming back without a browser, which the Workshop has to be told about.
+      // Kept until the Workshop has acknowledged it, so a delivery that fails is tried again.
       recovered = recorded !== undefined && recorded.claims !== true;
+      if (recovered) this.ctx.storage.kv.put<boolean>(RESTORE_PENDING_KEY, true);
       this.ctx.storage.kv.delete("mintFailure");
       clearCredentialExpiryLatch(this.ctx.storage.kv);
       return result.grant.accessToken;
@@ -948,13 +959,22 @@ export class UserAccount extends DurableObject<Env> {
 
   // Tell the Workshop credentials are working again, so it stops offering a reconnect. Best effort,
   // like the expiry notice: a failure to deliver must not fail the call that was just served.
+  //
+  // The notice stays pending in storage until the Workshop acknowledges it, and the next token
+  // request tries again, so a delivery that fails cannot leave the account marked expired for good.
   #notifyCredentialsRestored(): void {
-    let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
-    callback?.credentialsRestored().catch(err => {
-      logger.warn("failed to notify credential restoration", {
-        event: "credentials.restored.notify.failed", error: err,
-      });
-    });
+    let kv = this.ctx.storage.kv;
+    let callback = kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+    if (!callback || this.#restoring) return;
+    this.#restoring = true;
+    callback.credentialsRestored()
+        .then(() => kv.delete(RESTORE_PENDING_KEY))
+        .catch(err => {
+          logger.warn("failed to notify credential restoration", {
+            event: "credentials.restored.notify.failed", error: err,
+          });
+        })
+        .finally(() => { this.#restoring = false; });
   }
 
   /**
@@ -993,6 +1013,8 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.put<StoredMintFailure>("mintFailure", {
       message: failure.message, at: Date.now(), ...(claims ? { claims: true as const } : {}),
     });
+    // Dead again, so there is nothing left to say is restored.
+    this.ctx.storage.kv.delete(RESTORE_PENDING_KEY);
     this.#notifyCredentialsDead();
   }
 

@@ -481,6 +481,23 @@ describe("createItem", () => {
     expect(approvals.observations.filter(o => o.title.startsWith("Read "))).toHaveLength(0);
   });
 
+  it("records the schema read a refused create reveals, and only then", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    // The refusal lists the choices the column offers, which the caller was never given.
+    await expect(session.createItem({ Title: "x", Status: "Closed" }))
+        .rejects.toThrow(/Allowed: New, Open/);
+
+    expect(approvals.observations).toHaveLength(1);
+    expect(approvals.observations[0].title).toMatch(/^Create refused against the schema of /);
+    expect(approvals.observations[0].description).toContain("Allowed: New, Open");
+
+    approvals.observations.length = 0;
+    await session.createItem({ Title: "fine" });
+    expect(approvals.observations).toHaveLength(0);
+  });
+
   it("drops the pending action when the queue refuses the submission", async () => {
     stubFetch();
     approvals.queue.submitAction.mockRejectedValueOnce(new Error("queue is down"));

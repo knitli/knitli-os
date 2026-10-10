@@ -668,6 +668,36 @@ describe("mint failure taxonomy", () => {
     }
   });
 
+  it("keeps the restoration notice pending until the Workshop acknowledges it", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    callback.credentialsRestored
+      .mockRejectedValueOnce(new Error("workshop unreachable"))
+      .mockResolvedValue(undefined);
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    context.storage.kv.put("mintFailure", { message: "dead", at: Date.now() - 10 * 60 * 1000 });
+    fetchMock.mockImplementation(async () => jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-new",
+      scope: "openid profile email https://graph.microsoft.com/User.Read offline_access",
+    }));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await account.getAccessToken();
+    await vi.waitFor(() => expect(callback.credentialsRestored).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(context.storage.kv.get("restorePending")).toBe(true));
+
+    // The next request is served from the cached token, and still retries the notice.
+    await vi.waitFor(async () => {
+      await account.getAccessToken();
+      expect(callback.credentialsRestored).toHaveBeenCalledTimes(2);
+    });
+    await vi.waitFor(() => expect(context.storage.kv.get("restorePending")).toBeUndefined());
+
+    await account.getAccessToken();
+    expect(callback.credentialsRestored).toHaveBeenCalledTimes(2);
+  });
+
   it("does not call a claims rejection restored just because the token endpoint still answers", async () => {
     const { context, account } = newAccount();
     const callback = fakeCallback();

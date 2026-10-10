@@ -511,7 +511,19 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
       // The list may have changed since its schema was cached (a column or choice added, a
       // requirement dropped). Refused locally, the call would never reach SharePoint to find out,
       // so check once against the live schema before reporting the refusal.
-      validated = validateFields(fields, await this.#ctx.refreshColumns());
+      try {
+        validated = validateFields(fields, await this.#ctx.refreshColumns());
+      } catch (err) {
+        // A refusal names columns, required fields and the choices a column offers, which the
+        // caller has not been given, so it is a read of the schema and is recorded like one.
+        await this.#ctx.approvalQueue.authorizeObservation({
+          title: sanitizeApprovalTitle(`Create refused against the schema of ${this.#ctx.listName()}`),
+          description:
+              "A create was refused, and the refusal describes this SharePoint list's columns.\n\n" +
+              formatApprovalField("Refusal", err instanceof Error ? err.message : String(err)),
+        });
+        throw err;
+      }
     }
 
     if (this.#ctx.pendingActions.list().length >= MAX_PENDING_ACTIONS) {

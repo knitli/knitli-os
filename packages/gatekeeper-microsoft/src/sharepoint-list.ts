@@ -76,6 +76,11 @@ type SharePointListAction = {
   fields: Record<string, unknown>;
   /** Stamped on the row, so a retry of this action can tell its own earlier create from none. */
   marker: string;
+  /**
+   * Whether the approval disclosed adding the marker column, i.e. the list lacked it when this was
+   * queued. Absent on actions queued before this was recorded, which are treated as approved.
+   */
+  schemaChangeApproved?: boolean;
 };
 
 /** The list's name and link, as `describe()` last read them. */
@@ -516,6 +521,7 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
 
     let actionId = this.#ctx.pendingActions.submit({
       type: "createItem", fields: validated, marker: crypto.randomUUID(),
+      schemaChangeApproved: !this.#ctx.hasMarkerColumn(),
     });
     try {
       await this.#ctx.approvalQueue.submitAction(actionId, {
@@ -676,6 +682,14 @@ export class SharePointListGatekeeperImpl
       let columns = await api.listColumns(siteId, listId);
       let existing = columns.find(column => column.name === MARKER_COLUMN);
       if (!existing) {
+        // The approval named no schema change if the column was there when this was queued. It has
+        // since been removed, and a row an earlier attempt made has lost its marker with it, so
+        // neither recreating the column nor creating the row again is this approval's to do.
+        if (action.schemaChangeApproved === false) {
+          throw new Error(
+              `The ${MARKER_COLUMN} column this action relied on has been removed from the list. ` +
+              "Reject this action and submit it again.");
+        }
         await this.#addMarkerColumn(api);
         this.#columnCache = undefined;
       } else {

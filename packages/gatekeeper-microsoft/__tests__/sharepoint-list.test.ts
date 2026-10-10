@@ -546,6 +546,26 @@ describe("applyAction", () => {
         && new URL(call.url).pathname.endsWith("/columns"))).toHaveLength(0);
   });
 
+  it("will not recreate a marker column the approval did not name", async () => {
+    // Queued while the list had the column, so the approval carried no schema change. Deleted
+    // since, an earlier attempt's row would have lost its marker, and a new row would duplicate it.
+    let hasMarker = true;
+    const calls = stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        && (call.init.method ?? "GET") === "GET"
+      ? jsonResponse({ value: hasMarker
+        ? [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] : GRAPH_COLUMNS })
+      : defaultRoute(call));
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+    hasMarker = false;
+
+    await expect(applyApprovedAction(1)).rejects.toThrow(/has been removed from the list/);
+
+    expect(creates(calls)).toHaveLength(0);
+    expect(calls.some(call => (call.init.method ?? "GET") === "POST"
+        && call.url.includes("/columns"))).toBe(false);
+  });
+
   it("finds its own earlier row on a retry instead of creating a second", async () => {
     // The first attempt landed and its answer was lost: the marker lookup now finds the row.
     const calls = stubFetch(call => call.url.includes("GadgetsActionId")

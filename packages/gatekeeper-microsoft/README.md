@@ -47,6 +47,15 @@ and not the Teams or Sites one, and the binding fails when it reaches Graph. Con
 SharePoint from the Connections page, naming the resource, before using such a blueprint. The
 Workshop is deliberately not changed to pass the binding's resource.
 
+## Known limits
+
+- **Reply-draft reconciliation is approximate.** A retried draft is recognised by the reply's text, in
+  the same conversation, created after the first attempt began. Another draft that begins with the
+  same text in that conversation within a minute of it can be taken for the first attempt's.
+- **The account's own profile read is not retried.** The Connections listing and sign-in read the
+  profile with the account's current token and do not ask for a replacement when Microsoft has
+  invalidated it before its expiry; the resource clients do. Reconnecting heals it.
+
 ## Restricted mode
 
 The mailbox and Teams refuse every observer (nothing here can show a collaborator has the same

@@ -708,6 +708,36 @@ describe("approved actions", () => {
     expect(write.init.body).toBe(JSON.stringify({ destinationId: "folder-archive" }));
   });
 
+  it("treats a move whose message is already in the destination as done, without moving again", async () => {
+    // The first attempt moved it and its answer was lost; moving again copies and deletes anew.
+    const calls = stubFetch(call => /\/me\/messages\/[^/]+$/.test(new URL(call.url).pathname)
+      ? jsonResponse({ ...MESSAGE, parentFolderId: "folder-archive" })
+      : defaultRoute(call));
+    const session = await startSession();
+    const message = await firstMessage(session);
+    await message.moveToFolder("folder-archive");
+
+    await applyApprovedAction(approvals.actions[0].id);
+
+    expect(calls.some(call => call.url.endsWith("/move"))).toBe(false);
+    expect(context.storage.kv.get(`pending:action:${approvals.actions[0].id}`)).toBeUndefined();
+  });
+
+  it("re-reads a folder's counts instead of returning the snapshot it was listed with", async () => {
+    let unread = 3;
+    const calls = stubFetch(call => /\/me\/mailFolders\/[^/]+$/.test(new URL(call.url).pathname)
+      ? jsonResponse({ ...FOLDERS[0], unreadItemCount: unread })
+      : defaultRoute(call));
+    const session = await startSession();
+    const [folder] = await session.listFolders();
+
+    expect((await folder.folder.getInfo()).unreadItemCount).toBe(3);
+    unread = 1;
+    expect((await folder.folder.getInfo()).unreadItemCount).toBe(1);
+    expect(calls.filter(call => /\/me\/mailFolders\/[^/]+$/.test(new URL(call.url).pathname)))
+      .toHaveLength(2);
+  });
+
   it("applies a reply draft as a createReply call", async () => {
     const calls = stubFetch();
     const session = await startSession();

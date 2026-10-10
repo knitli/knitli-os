@@ -286,7 +286,9 @@ class OutlookFolderStub extends RpcTarget implements OutlookFolder {
   }
 
   async getInfo(): Promise<OutlookFolderInfo> {
-    let info = this.#cachedInfo ?? await this.#ctx.api.getFolder(this.#folderId);
+    // Always re-read: counts and names change as mail arrives, is read and is moved, and the info a
+    // folder was listed with is only a snapshot.
+    let info = await this.#ctx.api.getFolder(this.#folderId);
     this.#cachedInfo = info;
 
     await authorizeRestricted(this.#ctx.approvalQueue, {
@@ -692,9 +694,16 @@ export class OutlookMailGatekeeperImpl
       case "setRead":
         await api.setMessageRead(action.messageId, action.read);
         break;
-      case "move":
-        await api.moveMessage(action.messageId, action.destinationFolderId);
+      case "move": {
+        // A move copies the message to the destination and removes the original, so replaying one
+        // that already happened (its answer was lost, or the record was not cleared) is not a
+        // no-op. A message already in the destination is a move that is done.
+        let current = await api.getMessage(action.messageId);
+        if (current.folderId !== action.destinationFolderId) {
+          await api.moveMessage(action.messageId, action.destinationFolderId);
+        }
         break;
+      }
       case "replyDraft": {
         // createReply makes a new draft each time, so a retry could leave two. The first attempt is
         // recorded before it runs; a retry then looks for a draft that attempt already made.

@@ -691,8 +691,12 @@ describe("approved actions", () => {
     const write = calls.find(call => (call.init.method ?? "GET") === "PATCH")!;
     expect(write.url).toMatch(/\/me\/messages\/AAMkImmutable1$/);
     expect(write.init.body).toBe(JSON.stringify({ isRead: false }));
-    await expect(applyApprovedAction(approvals.actions[0].id))
-      .rejects.toThrow(/Unknown pending Outlook action/);
+    // The platform may retry an approval whose outcome it never recorded: the replay answers as
+    // done and does not write again.
+    const writes = calls.filter(call => (call.init.method ?? "GET") === "PATCH").length;
+    await expect(applyApprovedAction(approvals.actions[0].id)).resolves.toBeUndefined();
+    expect(calls.filter(call => (call.init.method ?? "GET") === "PATCH")).toHaveLength(writes);
+    await expect(applyApprovedAction(999)).rejects.toThrow(/Unknown pending Outlook action/);
   });
 
   it("applies a move to the folder captured at queue time", async () => {
@@ -819,8 +823,8 @@ describe("approved actions", () => {
     await gatekeeper.rejectAction(approvals.actions[0].id);
 
     expect(methodsUsed(calls)).toEqual(["GET"]);
-    await expect(gatekeeper.rejectAction(approvals.actions[0].id))
-      .rejects.toThrow(/Unknown pending Outlook action/);
+    await expect(gatekeeper.rejectAction(approvals.actions[0].id)).resolves.toBeUndefined();
+    await expect(gatekeeper.rejectAction(999)).rejects.toThrow(/Unknown pending Outlook action/);
   });
 
   it("does not offer revert", async () => {

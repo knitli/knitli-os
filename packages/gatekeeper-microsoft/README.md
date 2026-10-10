@@ -56,6 +56,11 @@ Workshop is deliberately not changed to pass the binding's resource.
   credentials notice after a follow-up read, so if the account dies again in that window the stale
   acknowledgement can clear the newer expiry mark. The next failed call marks it again; closing the
   window needs the Workshop to order the two notices, which it does not.
+- **Date filters send the timestamp in quotes.** Graph's general `$filter` grammar writes date-time
+  values without quotes, while SharePoint list items are filtered by SharePoint itself, whose
+  documented examples quote them. This gatekeeper follows the SharePoint examples and has not been
+  checked against a live list (see the verification checklist); if a date filter is rejected or
+  compares as text, that is where to look.
 - **The account's own profile read is not retried.** The Connections listing and sign-in read the
   profile with the account's current token and do not ask for a replacement when Microsoft has
   invalidated it before its expiry; the resource clients do. Reconnecting heals it.
@@ -542,6 +547,10 @@ the site's members can see.
       list → record whether Graph accepts it, and whether it needs both columns indexed. Microsoft
       documents limits on filtering several list fields in one request; this gatekeeper sends the
       clauses together and does not reject them up front.
+- [ ] **A date filter compares dates.** `getItems({where: [{column: <a date column>, op: "ge",
+      value: "2026-01-01"}]})` on a list whose dates you know → only rows on or after that date come
+      back, for both a date-only and a date-and-time column. Record whether the quoted timestamp was
+      accepted.
 - [ ] **Filtering works on a real list.** `getItems()` with a `where` clause on an indexed column
       and `top` of 200 → pages correctly. Record the largest `top` Graph actually honoured; on a
       list past the 5000-item threshold, filtering an unindexed column is expected to fail with

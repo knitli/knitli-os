@@ -77,6 +77,8 @@ type StoredNonce = {
    * request while its code exchange is still pending.
    */
   scopes: string[];
+  /** The account's `grantEpoch` when this reconnect began; carried to the stage it produces. */
+  epoch?: number;
   /** A claims directive the authorization request must repeat, for a reconnect after a challenge. */
   claims?: string;
   /** The person the Workshop issued this connect link to; see `initiatorMatches` (fork). */
@@ -88,6 +90,8 @@ type StagedGrant = {
   grant: EntraTokenGrant;
   /** The scopes this flow asked for, recorded as `grantScopes` when the stage is committed. */
   scopes: string[];
+  /** The account's `grantEpoch` when the flow began; see `commitReconnect`. */
+  epoch?: number;
 };
 
 // The last mint that failed permanently, kept in storage so an evicted object doesn't rediscover a
@@ -131,6 +135,20 @@ const MINT_FAILURE_COOLDOWN_MS = 60 * 1000;
 // sign-in, since each login runs on a freshly minted account object that self-destructs minutes
 // later, so every login pays for its own lookup.
 const VERIFIED_DOMAIN_CACHE_MS = 24 * 60 * 60 * 1000;
+
+/** Counts the grants that have gone live, so a reconnect can tell another one finished first. */
+const GRANT_EPOCH_KEY = "grantEpoch";
+
+/** `a` and `b` together, each scope once however Entra spelled it. */
+function unionScopes(a: string[], b: string[]): string[] {
+  let seen = new Set<string>();
+  return [...a, ...b].filter(scope => {
+    let key = normalizeScope(scope);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 /** Set while the Workshop has yet to acknowledge that credentials are working again. */
 const RESTORE_PENDING_KEY = "restorePending";
@@ -652,6 +670,7 @@ export class UserAccount extends DurableObject<Env> {
       stage: "initiation",
       scopes: requestedScopes,
       reconnect: true,
+      epoch: this.ctx.storage.kv.get<number>(GRANT_EPOCH_KEY) ?? 0,
       // After a Conditional Access challenge, the new sign-in must carry the same demand.
       claims: this.ctx.storage.kv.get<StoredMintFailure>("mintFailure")?.claimsChallenge,
       initiator,
@@ -711,6 +730,7 @@ export class UserAccount extends DurableObject<Env> {
       stage: "oauth",
       scopes: stored.scopes,
       reconnect: stored.reconnect,
+      epoch: stored.epoch,
       claims: stored.claims,
       initiator: stored.initiator,
     });
@@ -792,12 +812,13 @@ export class UserAccount extends DurableObject<Env> {
         // meanwhile, and a recorded mint failure still describes it, so both stand until the
         // commit.
         let stageId = stageCredentials<StagedGrant>(
-            this.ctx.storage.kv, { grant, scopes: recordedScopes }, Date.now());
+            this.ctx.storage.kv, { grant, scopes: recordedScopes, epoch: stored.epoch }, Date.now());
         return { callback, stageId, authOnly };
       }
 
       this.#storeGrant(grant, recordedScopes);
       this.ctx.storage.kv.put<string[]>("grantScopes", recordedScopes);
+      this.#bumpGrantEpoch();
       // These credentials are new, so any recorded permanent failure no longer applies.
       this.ctx.storage.kv.delete("mintFailure");
       this.ctx.storage.kv.delete(RESTORE_PENDING_KEY);
@@ -845,14 +866,34 @@ export class UserAccount extends DurableObject<Env> {
       let staged = commitStagedCredentials<StagedGrant>(
           this.ctx.storage.kv, Date.now(), stageId);
       if (!staged) throw new Error("No reconnect is awaiting confirmation. Please try again.");
+      // Another grant committed while this flow was out at Microsoft (a reconnect or an added
+      // resource that finished first). This flow asked for scopes as they were when it began, so
+      // replacing the current set would silently drop what that one added. Consent accumulates per
+      // user, so the union is requestable.
+      let overtaken = staged.epoch !== undefined &&
+          staged.epoch !== (this.ctx.storage.kv.get<number>(GRANT_EPOCH_KEY) ?? 0);
+      let priorScopes = this.ctx.storage.kv.get<string[]>("grantScopes") ?? [];
+      let priorGranted = this.ctx.storage.kv.get<string[]>("grantedScopes") ?? [];
       this.#storeGrant(staged.grant, staged.scopes);
-      this.ctx.storage.kv.put<string[]>("grantScopes", staged.scopes);
+      this.ctx.storage.kv.put<string[]>(
+          "grantScopes", overtaken ? unionScopes(priorScopes, staged.scopes) : staged.scopes);
+      if (overtaken) {
+        let granted = this.ctx.storage.kv.get<string[]>("grantedScopes") ?? [];
+        this.ctx.storage.kv.put<string[]>("grantedScopes", unionScopes(priorGranted, granted));
+      }
+      this.#bumpGrantEpoch();
       // These credentials are new, so any recorded permanent failure no longer applies — and
       // clearing it re-arms the one-shot expiry notification for whatever kills them next.
       this.ctx.storage.kv.delete("mintFailure");
       this.ctx.storage.kv.delete(RESTORE_PENDING_KEY);
       clearCredentialExpiryLatch(this.ctx.storage.kv);
     });
+  }
+
+  /** Marks that a new grant went live, for flows that began before it. */
+  #bumpGrantEpoch(): void {
+    this.ctx.storage.kv.put<number>(
+        GRANT_EPOCH_KEY, (this.ctx.storage.kv.get<number>(GRANT_EPOCH_KEY) ?? 0) + 1);
   }
 
   hasRefreshToken() {

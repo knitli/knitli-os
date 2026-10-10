@@ -684,7 +684,11 @@ export class SharePointListGatekeeperImpl
   async applyAction(actionId: number): Promise<void> {
     let pendingActions = new PendingActionStore<SharePointListAction>(this.ctx.storage.kv);
     let action = pendingActions.get(actionId);
-    if (!action) throw new Error(`Unknown pending SharePoint list action: ${actionId}`);
+    if (!action) {
+      // Already applied or rejected: the platform is retrying an approval it never recorded.
+      if (pendingActions.wasFinished(actionId)) return;
+      throw new Error(`Unknown pending SharePoint list action: ${actionId}`);
+    }
 
     let { siteId, listId } = this.ctx.props;
     let api = this.#api(APPLY_RETRY_AFTER);
@@ -722,7 +726,7 @@ export class SharePointListGatekeeperImpl
       }
       throw err;
     }
-    pendingActions.remove(actionId);
+    pendingActions.finish(actionId);
   }
 
   async #addMarkerColumn(api: GraphSharePointApi): Promise<void> {
@@ -742,9 +746,10 @@ export class SharePointListGatekeeperImpl
   async rejectAction(actionId: number): Promise<void | {restart?: boolean}> {
     let pendingActions = new PendingActionStore<SharePointListAction>(this.ctx.storage.kv);
     if (!pendingActions.get(actionId)) {
+      if (pendingActions.wasFinished(actionId)) return;
       throw new Error(`Unknown pending SharePoint list action: ${actionId}`);
     }
-    pendingActions.remove(actionId);
+    pendingActions.finish(actionId);
   }
 
   async revertAction(_action: number):

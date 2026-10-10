@@ -461,6 +461,38 @@ describe("alarm", () => {
 });
 
 describe("overlapping reconnects", () => {
+  it("keeps what an earlier-committing reconnect added when a slower one commits", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-0");
+    context.storage.kv.put("grantScopes", [...IDENTITY_SCOPES, ...MAIL_SCOPES]);
+    context.storage.kv.put("grantedScopes", [...IDENTITY_SCOPES, ...MAIL_SCOPES]);
+    context.storage.kv.put("idTokenClaims", { tid: TENANT, oid: "object-1" });
+    const withTeams = [...IDENTITY_SCOPES, ...MAIL_SCOPES, ...TEAMS_SCOPES];
+    // Both begin from the same grant: A adds Teams, B (started earlier) still asks mail only.
+    await account.prepareReconnect("a".repeat(64), withTeams);
+    await account.prepareReconnect("b".repeat(64), [...IDENTITY_SCOPES, ...MAIL_SCOPES]);
+    const begunA = await account.beginOAuthFlow("a".repeat(64));
+    const begunB = await account.beginOAuthFlow("b".repeat(64));
+    const respond = (scopes: string[]) => jsonResponse({
+      access_token: "access", expires_in: 3600, refresh_token: "refresh",
+      scope: scopes.map(scope => `https://graph.microsoft.com/${scope}`).join(" "),
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    });
+
+    fetchMock.mockImplementation(async () => respond(withTeams));
+    await account.acceptAuthCode("code-a", begunA!.oauthNonce);
+    await account.commitReconnect(stagedId(callback));
+    fetchMock.mockImplementation(async () => respond([...IDENTITY_SCOPES, ...MAIL_SCOPES]));
+    await account.acceptAuthCode("code-b", begunB!.oauthNonce);
+    await account.commitReconnect(stagedId(callback));
+
+    // B's commit did not take Teams back.
+    expect(await account.getGrantScopes()).toEqual(expect.arrayContaining(TEAMS_SCOPES));
+    expect(await account.getGrantedResourceUrlPatterns()).toContain("https://teams.microsoft.com/*");
+  });
+
   it("does not invalidate a reconnect that is out at Microsoft when another one starts", async () => {
     const { context, account } = newAccount();
     const callback = fakeCallback();

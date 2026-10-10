@@ -667,6 +667,23 @@ describe("applyAction", () => {
         .rejects.toThrow(/Unknown column "GadgetsActionId"/);
   });
 
+  it("answers a replay of an applied or rejected action as done, without creating again", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+    await session.createItem({ Title: "one" });
+    await session.createItem({ Title: "two" });
+    await applyApprovedAction(1);
+    await gatekeeper.rejectAction(2);
+    const created = creates(calls).length;
+
+    await expect(applyApprovedAction(1)).resolves.toBeUndefined();
+    await expect(gatekeeper.rejectAction(2)).resolves.toBeUndefined();
+    await expect(applyApprovedAction(2)).resolves.toBeUndefined();
+
+    expect(creates(calls)).toHaveLength(created);
+    await expect(applyApprovedAction(999)).rejects.toThrow(/Unknown pending/);
+  });
+
   it("rethrows a failed create and leaves the action pending for a retry", async () => {
     stubFetch(call => isItemCreate(call)
         ? jsonResponse({ error: { code: "activityLimitReached" } }, 429)

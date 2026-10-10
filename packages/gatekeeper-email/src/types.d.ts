@@ -90,10 +90,9 @@ export interface EmailSession {
   subscribe(callback: RpcStub<EmailHook>): Promise<void>;
 
   /**
-   * Send an email from this mailbox's address. Resolves once the message is queued for the user's
-   * approval; it goes out only after the user approves it (each message, or automatically if they
-   * chose to always allow sending from this mailbox). Throws if the message is invalid or the
-   * mailbox has reached its limit of 100 recipients per hour.
+   * Send an email from this mailbox's address. Resolves once the message has been accepted for
+   * sending, which does not confirm delivery. Throws if the message is invalid, the mailbox may not
+   * send email on this deployment, or it has reached its limit of 100 recipients per hour.
    *
    * Delivery to arbitrary recipients depends on the deployment's Cloudflare email sending setup.
    */

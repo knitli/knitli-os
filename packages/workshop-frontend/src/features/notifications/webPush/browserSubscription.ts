@@ -6,6 +6,8 @@ import { applicationServerKey, currentPushEnvironment, pushAvailability, subscri
 // sign-out would still hold the previous user's. Remember whose it is and let go of it for anyone else.
 const OWNER_KEY = 'gadgets.webPush.owner'
 const SIGN_OUT_TIMEOUT_MS = 3000
+/** The message `public/sw.js` answers by unsubscribing this browser from push. */
+const RELEASE_PUSH_MESSAGE = 'release-push-subscription'
 
 const readOwner = () => {
   try {
@@ -129,6 +131,12 @@ const resubscribe = async (
  */
 export const releaseOnSignOut = async (api: RpcStub<AuthenticatedApi>, owner?: string) => {
   if (pushAvailability(currentPushEnvironment()) !== 'supported') return
+  // Before any await, so it is sent even if the page is navigated away at once (the Cloudflare Access
+  // sign-out redirects immediately): the service worker outlives the document and unsubscribes.
+  const claimedBy = readOwner()
+  if (!owner || !claimedBy || claimedBy === owner) {
+    navigator.serviceWorker.controller?.postMessage({ type: RELEASE_PUSH_MESSAGE })
+  }
   const stopped = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<void>((resolve) => {

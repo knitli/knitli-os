@@ -260,7 +260,8 @@ Intentional, reviewed differences from upstream. Keep this current.
   `localStorage`: `WebPushSync` (mounted in `AuthContext.tsx`) drops a subscription that is not the
   signed-in user's and re-registers the user's own at every app start (this also heals a refreshed
   endpoint; `sw.js` has no `pushsubscriptionchange` handler because it holds no credentials), and
-  sign-out releases the subscription first. Upstream seams: a manifest link in `index.html` (with
+  sign-out releases the subscription (it messages `sw.js` synchronously first, because the Cloudflare
+  Access sign-out navigates away at once and only the worker survives that). Upstream seams: a manifest link in `index.html` (with
   `crossorigin="use-credentials"` for Cloudflare Access), the Notifications section in
   `SettingsPage.tsx`, and the logout wrapper and `<WebPushSync />` in `AuthContext.tsx`. Both
   public files are served from the router's static assets at the origin root, which gives the

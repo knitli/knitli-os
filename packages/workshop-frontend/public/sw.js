@@ -30,6 +30,17 @@ self.addEventListener('push', (event) => {
   })())
 })
 
+// Sent by the page on sign-out. The page may be navigated away before it can unsubscribe itself,
+// and this worker survives it.
+self.addEventListener('message', (event) => {
+  if (!event.data || event.data.type !== 'release-push-subscription') return
+  event.waitUntil(
+    self.registration.pushManager.getSubscription()
+      .then((subscription) => subscription && subscription.unsubscribe())
+      .catch(() => {}),
+  )
+})
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
   const url = new URL((event.notification.data && event.notification.data.url) || '/', self.location.origin)

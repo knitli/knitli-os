@@ -182,6 +182,26 @@ describe('releaseOnSignOut', () => {
     expect(api.removeWebPushSubscription).not.toHaveBeenCalled()
   })
 
+  it('asks the service worker to unsubscribe before anything is awaited, for an immediate redirect', () => {
+    const api = fakeApi()
+    install()
+    const postMessage = vi.fn<(message: unknown) => void>()
+    Object.assign(navigator.serviceWorker, { controller: { postMessage } })
+    localStorage.setItem(OWNER_KEY, 'me@example.com')
+    void releaseOnSignOut(asStub(api), 'me@example.com')
+    expect(postMessage).toHaveBeenCalledWith({ type: 'release-push-subscription' })
+  })
+
+  it('does not ask the service worker to drop a subscription another tab claimed for someone else', () => {
+    const api = fakeApi()
+    install()
+    const postMessage = vi.fn<(message: unknown) => void>()
+    Object.assign(navigator.serviceWorker, { controller: { postMessage } })
+    localStorage.setItem(OWNER_KEY, 'next@example.com')
+    void releaseOnSignOut(asStub(api), 'me@example.com')
+    expect(postMessage).not.toHaveBeenCalled()
+  })
+
   it('leaves alone a subscription another tab has since claimed for someone else', async () => {
     const api = fakeApi()
     const { subscription } = install()

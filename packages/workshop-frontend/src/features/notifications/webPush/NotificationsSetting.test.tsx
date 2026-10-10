@@ -187,6 +187,23 @@ describe('NotificationsSetting', () => {
     expect(document.activeElement).toBe(control)
   })
 
+  it('goes by what the browser holds after replacing a stale subscription the app-wide sync also replaced', async () => {
+    const browser = installBrowser({ permission: 'granted', subscribed: true })
+    localStorage.setItem('gadgets.webPush.owner', 'me@example.com')
+    const stale = {
+      ...browser.subscription,
+      options: { applicationServerKey: new Uint8Array(65).buffer },
+      unsubscribe: vi.fn<() => Promise<boolean>>(async () => true),
+    }
+    // The sync has already swapped in a current subscription by the time this hook looks again.
+    browser.pushManager.getSubscription.mockResolvedValueOnce(stale as unknown as typeof browser.subscription)
+    const api = fakeApi()
+    const container = await render(api)
+    expect(stale.unsubscribe).toHaveBeenCalled()
+    expect(container.textContent).toContain('On for this device')
+    expect(api.addWebPushSubscription).toHaveBeenCalledTimes(1)
+  })
+
   it('turns off only the account it shows, not one another tab signed in as', async () => {
     const browser = installBrowser({ permission: 'granted', subscribed: true })
     localStorage.setItem('gadgets.webPush.owner', 'me@example.com')

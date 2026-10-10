@@ -62,25 +62,26 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
       await navigator.serviceWorker.register(SERVICE_WORKER_URL)
       // subscribe() needs an active worker, which a first install doesn't have yet.
       const registration = await navigator.serviceWorker.ready
-      const subscription = await registration.pushManager.getSubscription()
-      if (cancelled) return
+      const isCurrent = (candidate: PushSubscription | null) =>
+        candidate !== null && subscribedWithKey(candidate, key) && ownsBrowserSubscription(owner)
+      let subscription = await registration.pushManager.getSubscription()
       // Another user's subscription (or one made with an old key) is replaced, never shared; doing
-      // it here keeps that await out of the tap.
-      let existing = subscription
-      if (existing && (!subscribedWithKey(existing, key) || !ownsBrowserSubscription(owner))) {
-        await existing.unsubscribe()
-        existing = null
+      // it here keeps that await out of the tap. The app-wide sync may be replacing it too, so look
+      // again afterwards and go by what the browser holds now.
+      if (subscription && !isCurrent(subscription)) {
+        await subscription.unsubscribe()
+        subscription = await registration.pushManager.getSubscription()
       }
       if (cancelled) return
+      const existing = isCurrent(subscription) ? subscription : null
       setReady({ registration, key, owner, existing })
       if (Notification.permission === 'denied') {
         setStatus('blocked')
-      } else if (subscription && Notification.permission === 'granted' && subscribedWithKey(subscription, key)
-        && ownsBrowserSubscription(owner)) {
+      } else if (existing && Notification.permission === 'granted') {
         // Re-register on every visit: the server forgets a device the push service reported gone,
         // and this heals a device that is back.
         // A failure here changes nothing about the device: it stays on, with Turn off available.
-        await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON())).catch((error: unknown) => {
+        await api.addWebPushSubscription(toSubscriptionInfo(existing.toJSON())).catch((error: unknown) => {
           console.error('Failed to register this device’s push subscription:', error)
         })
         if (!cancelled) setStatus('on')

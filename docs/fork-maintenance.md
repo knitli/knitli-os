@@ -256,6 +256,40 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **At sync:** Tier 2 for the seams only; if upstream reshapes `publishNotification()`, keep the
   single `deliverWebPush()` call after the acknowledgement check and before the platform delivery.
 
+### Spreadsheet attachments
+
+- **Where:** `packages/workshop-backend/src/fork/workbook-*.ts`, `chat-attachment-workbook.ts`,
+  `workbook-parser-runtime.ts` and `workbook-binding.d.ts` (Tier 1), the bundling step
+  `scripts/fork/build-workbook-runtime.ts`, the `knitli-workbook-*.test.ts` regression tests, and
+  `docs/spreadsheet-attachments.md`. Upstream-file seams: `overseer.ts` (`uploadChatAttachment`
+  routes spreadsheets to `stageWorkbookUpload()`; `canonicalizeChatAttachmentRefs` adds
+  `workbookRefFields()`; three `dropWorkbook()` calls where an attachment is deleted; the
+  `attachment` case of `getEnvForAgent()` and the `workbook` case of `startGatekeeperSession()`
+  with its loopback target; two `AgentHooks` methods; one `deriveWorkbookBindings()` line in each
+  of `chatScopeNames()` and the naming chokepoint), `agent.ts` (the `attachment` binding case in
+  `describeBinding`, the `readSheet` tool and its removal when no workbook is bound, the replay
+  text, the `readSheet` replay case, the spawned-tool filter), `agent-compaction.ts` (the
+  `foldWorkbookBindings()` call and request-name set, saved as `requestedNames` on the checkpoint and
+  backfilled for old ones in `getActiveChatCompaction()` by `fork/workbook-checkpoint.ts`), `storage-schema/overseer-storage.ts` (the
+  `attachment` `ChatBindingEntry` and one spread of `workbookCollections`),
+  `workshop-shared/src/api.ts` (`ChatAttachmentRef.convertedFrom`, the `readSheet` `AiToolCall`),
+  `scripts/build-browser-runtime.ts` (one import), `package.json`, `.gitignore`.
+- **What:** Spreadsheets attached in chat are parsed in a sandboxed dynamic worker into a budgeted
+  summary (the attachment) and row pages (separate storage), read through `readSheet` and an
+  `env.<name>` binding. See `docs/spreadsheet-attachments.md`. Ported from
+  twinprime19/cloudflare-os (8874b77b, fa3c158a, b19af8e2, 321aa306, 2daa9653, 2c8eec3e, 5ed1dc79).
+- **Why:** Models cannot work from a flattened workbook (hundreds of thousands of tokens, dates
+  as serial numbers); the rows are data to compute over, not prompt.
+- **Decisions:** the parser is `@e965/xlsx` 0.20.3 from the public npm registry (byte-identical to
+  SheetJS's CDN 0.20.3), not the fork's CDN tarball, so no registry-policy exception is needed.
+  Beyond the fork: an archive-entry ceiling, an untrusted-data notice on every text the model
+  reads, and a fork-owned storage shape (an index collection beside upstream's attachment record,
+  which is unchanged) in place of the fork's extra fields on the record. The fork's mailbox
+  import, 10 MiB document conversion and 1.75 MiB attachment cap are separate features and are not
+  part of this port; the UI (picker, tray) is a follow-up.
+- **At sync:** Tier 2 for the seams only. If upstream moves attachment storage or the chat binding
+  map, keep the three `dropWorkbook()` sites and the `attachment` binding case in step.
+
 ### Deployment-admin connector frames
 
 - **Where:** `packages/workshop-backend/src/fork/admin-gatekeeper-apps.ts` and `packages/workshop-frontend/src/features/admin/gatekeeper-apps/`.

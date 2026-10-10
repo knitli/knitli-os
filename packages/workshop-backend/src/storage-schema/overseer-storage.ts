@@ -19,6 +19,7 @@ import type {
   AssistantMessage, TextContent, ThinkingContent, ToolCall,
 } from "@earendil-works/pi-ai";
 import { createTypedStorage, collection, singleton, keyString } from "@gadgets/typed-storage";
+import { workbookCollections } from "../fork/workbook-storage";
 import {
   actionChangeTime,
   type ActionState, type AgentSpawnerConfig, type AiChatAuthorInfo, type AiChatMessage,
@@ -622,12 +623,14 @@ export type AiChatAgentContext = {
 
 /**
  * One entry of the chat's binding map: what a name in the agent's executeCode `env` resolves to.
- * Either a workpiece (a gadget or gatekeeper -- the overseer distinguishes at env-build time) or
- * the value arguments of an agent callback.
+ * Either a workpiece (a gadget or gatekeeper -- the overseer distinguishes at env-build time),
+ * the value arguments of an agent callback, or a spreadsheet attached to the chat, whose rows the
+ * agent reads through the binding instead of receiving them as text (see fork/workbook-binding.d.ts).
  */
 export type ChatBindingEntry =
   | { type: "workpiece"; id: WorkpieceId }
-  | { type: "value"; messageSequence: number };
+  | { type: "value"; messageSequence: number }
+  | { type: "attachment"; id: string };
 
 /**
  * Stores replay state for one compacted chat prefix. A chat keeps every checkpoint it has
@@ -658,6 +661,14 @@ export type CompactionCheckpoint = {
    * `env.NAME`.
    */
   chatBindings: [string, ChatBindingEntry][];
+
+  /**
+   * Names of every connection request before the boundary, whatever became of it. Workbook binding
+   * names are derived at replay clear of these, and a denied request is no longer in the retained
+   * log to say so (see fork/workbook-names.ts). Filled in from the stored prefix on first use for checkpoints written
+   * before workbooks (fork/workbook-checkpoint.ts).
+   */
+  requestedNames?: string[];
 
   /** The next change ID for replayed tool results. Change IDs remain sequential across boundaries. */
   nextChangeId: number;
@@ -1482,6 +1493,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
           },
         },
       }),
+
+      // Spreadsheet attachments' index and row pages (fork/workbook-storage.ts).
+      ...workbookCollections,
 
       // Non-owner collaborators who have configured their gatekeeper accounts and passed all
       // `addObserver` checks. See `ObserverRecord`. The secondary index lets the forward-exclusion

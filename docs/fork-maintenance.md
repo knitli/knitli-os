@@ -250,7 +250,7 @@ Intentional, reviewed differences from upstream. Keep this current.
   `CFOS_INSTALL_PRIVATE_KEY` and never stored in `AdminConfig` or KV. Unset (or without
   `PUBLIC_BASE_URL`), the channel is off: `getWebPushPublicKey()` returns null, subscribing is
   refused and delivery is a no-op. Endpoints must be https on an allowlisted push-service host,
-  and sends use `redirect: "manual"`. At most 10 subscriptions per user; 404/410 prunes one.
+  and sends use `redirect: "manual"`. At most 10 subscriptions per user (a new device displaces the oldest); sends time out after 10 s and run beside the platform delivery; 404/410 prunes one.
   Payloads are fixed templates plus the chat title bounded to 96 characters, encrypted to the
   device.
 - **At sync:** Tier 2 for the seams only; if upstream reshapes `publishNotification()`, keep the

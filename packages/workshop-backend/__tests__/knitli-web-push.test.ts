@@ -108,6 +108,7 @@ describe("web push crypto", () => {
 describe("subscription validation", () => {
   it.each([
     "https://web.push.apple.com/x",
+    "https://us.push.apple.com/x",
     "https://fcm.googleapis.com/fcm/send/x",
     "https://updates.push.services.mozilla.com/wpush/v2/x",
     "https://wns2-par02p.notify.windows.com/w/?token=x",
@@ -120,6 +121,7 @@ describe("subscription validation", () => {
     "https://internal.example/x",
     "https://web.push.apple.com.evil.example/x",
     "https://evilnotify.windows.com.example/x",
+    "https://push.apple.com.evil.example/x",
     "https://user:pw@fcm.googleapis.com/x",
     "https://fcm.googleapis.com:8443/x",
     "not a url",
@@ -127,14 +129,19 @@ describe("subscription validation", () => {
     expect(() => checkPushEndpoint(endpoint)).toThrow();
   });
 
-  it("refuses malformed keys and a full list, but lets a known endpoint replace its keys", () => {
+  it("refuses malformed keys", () => {
     expect(() => addWebPushSubscription({}, IPHONE, { ...KEYS, p256dh: "AAAA" })).toThrow(/valid/);
     expect(() => addWebPushSubscription({}, IPHONE, { ...KEYS, auth: "AAAA" })).toThrow(/valid/);
-    let full = Object.fromEntries(Array.from({ length: MAX_WEB_PUSH_SUBSCRIPTIONS },
-        (_, i) => [`https://fcm.googleapis.com/${i}`, KEYS]));
-    expect(() => addWebPushSubscription(full, IPHONE, KEYS)).toThrow(/Too many/);
-    let replaced = addWebPushSubscription(full, "https://fcm.googleapis.com/0", { ...KEYS, auth: "AAAAAAAAAAAAAAAAAAAAAA" });
-    expect(replaced["https://fcm.googleapis.com/0"].auth).toBe("AAAAAAAAAAAAAAAAAAAAAA");
+  });
+
+  it("displaces the oldest device when full, and lets a known endpoint replace its keys", () => {
+    let url = (i: number) => `https://fcm.googleapis.com/${i}`;
+    let full = Object.fromEntries(Array.from({ length: MAX_WEB_PUSH_SUBSCRIPTIONS }, (_, i) => [url(i), KEYS]));
+    let added = addWebPushSubscription(full, IPHONE, KEYS);
+    expect(Object.keys(added)).toEqual([...Array.from({ length: MAX_WEB_PUSH_SUBSCRIPTIONS - 1 }, (_, i) => url(i + 1)), IPHONE]);
+    let replaced = addWebPushSubscription(full, url(0), { ...KEYS, auth: "AAAAAAAAAAAAAAAAAAAAAA" });
+    expect(Object.keys(replaced)).toHaveLength(MAX_WEB_PUSH_SUBSCRIPTIONS);
+    expect(replaced[url(0)].auth).toBe("AAAAAAAAAAAAAAAAAAAAAA");
   });
 });
 
@@ -204,6 +211,8 @@ describe("UserDurableObject web push", () => {
     let [, init] = fetcher.mock.calls[0];
     let headers = new Headers(init?.headers);
     expect(init?.redirect).toBe("manual");
+    // A hung endpoint is cut off rather than holding the platform push behind it.
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
     expect(headers.get("content-encoding")).toBe("aes128gcm");
     expect(headers.get("authorization")).toContain(`k=${publicKey}`);
     expect((init!.body as Uint8Array).length).toBeGreaterThan(86);

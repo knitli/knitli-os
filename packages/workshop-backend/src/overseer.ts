@@ -7385,13 +7385,16 @@ class OverseerImpl implements AgentHooks {
       taken = new Set(Object.keys(this.defaultBindingList()));
     }
     taken.add(GIT_BINDING_NAME);
+    // Every connection request's name, denied or not: see requestedNames in agent.ts.
+    let requestedNames = new Set<string>();
     for (let msg of chatMessages ?? this.storage.chats.list({prefix: chatKeyPrefix(chatId)})) {
       if (msg.type === "message") {
         for (let capsule of msg.capsules ?? []) {
           if (capsule.bindingName !== undefined) taken.add(capsule.bindingName);
         }
         // Derived at replay rather than stamped on the message (see agent.ts), so repeated here.
-        for (let {name} of deriveWorkbookBindings(msg.attachments, taken)) taken.add(name);
+        for (let {name} of deriveWorkbookBindings(
+            msg.attachments, new Set([...taken, ...requestedNames]))) taken.add(name);
         for (let call of msg.toolCalls ?? []) {
           if ((call.toolName === "createGadget" || call.toolName === "createWorktree" ||
                call.toolName === "createExternalResource") &&
@@ -7400,6 +7403,7 @@ class OverseerImpl implements AgentHooks {
           }
         }
       } else if (msg.type === "connectionRequest") {
+        if (msg.bindingName !== undefined) requestedNames.add(msg.bindingName);
         if (msg.bindingName !== undefined && msg.state !== "denied") {
           taken.add(msg.bindingName);
         }
@@ -7599,6 +7603,7 @@ class OverseerImpl implements AgentHooks {
     }
     let namingLog = chatMessages;
     let anythingToName = false;
+    let requestedNames = new Set<string>();  // see agent.ts
     for (let msg of namingLog) {
       if (msg.type === "message") {
         for (let capsule of msg.capsules ?? []) {
@@ -7612,7 +7617,8 @@ class OverseerImpl implements AgentHooks {
           }
         }
         // As in chatScopeNames: workbook names are derived, not stamped.
-        for (let {name} of deriveWorkbookBindings(msg.attachments, taken)) taken.add(name);
+        for (let {name} of deriveWorkbookBindings(
+            msg.attachments, new Set([...taken, ...requestedNames]))) taken.add(name);
         for (let call of msg.toolCalls ?? []) {
           if (call.toolName === "createGadget") {
             taken.add(call.input.bindingName);
@@ -7633,6 +7639,7 @@ class OverseerImpl implements AgentHooks {
         }
       } else if (msg.type === "connectionRequest") {
         if (msg.bindingName !== undefined) {
+          requestedNames.add(msg.bindingName);
           if (msg.state !== "denied") taken.add(msg.bindingName);
           if (msg.gatekeeperId !== undefined && !nameByTarget.has(msg.gatekeeperId)) {
             nameByTarget.set(msg.gatekeeperId, msg.bindingName);

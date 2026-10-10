@@ -15,6 +15,13 @@
 
 import type { CellValue } from "./chat-attachment-workbook";
 
+/**
+ * Every character a model or renderer may read as a line boundary: CR, LF, VT, FF, NEL, and the
+ * Unicode line and paragraph separators. A cell holding one could otherwise forge another
+ * addressed row.
+ */
+export const LINE_TERMINATORS = /[\r\n\v\f\u0085\u2028\u2029]+/g;
+
 /** A run of more than this many adjacent numeric cells collapses to one range entry. */
 export const NUMERIC_RUN_COLLAPSE_THRESHOLD = 8;
 
@@ -86,7 +93,7 @@ export function parseColumnLabel(label: string): number {
 export function formatCellValue(value: NonNullable<CellValue>): string {
   if (typeof value === "number") return String(value);
   if (typeof value === "boolean") return value ? "true" : "false";
-  let text = value.replace(/[\r\n]+/g, " ");
+  let text = value.replace(LINE_TERMINATORS, " ");
   if (text !== "" && !/[ "=]/.test(text)) return text;
   return `"${text.replace(/"/g, '""')}"`;
 }

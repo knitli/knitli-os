@@ -10,6 +10,7 @@
 import type { ChatAttachmentHandle, ChatAttachmentRef, ChatAttachmentUpload }
     from "@gadgets/workshop-shared/api";
 import type { GatekeeperCaller, OverseerStorage } from "../storage-schema/overseer-storage";
+import { LINE_TERMINATORS } from "./workbook-grid";
 import { formatCount, MAX_WORKBOOK_PROMPT_BYTES } from "./chat-attachment-workbook";
 import type { WorkbookMeta } from "./chat-attachment-workbook";
 import { parseWorkbookIsolated } from "./workbook-parser-isolate";
@@ -90,7 +91,7 @@ function assertContentMatchesMimeType(content: Uint8Array, mimeType: string): vo
 export async function stageWorkbookUpload(
     host: WorkbookHost, attachment: ChatAttachmentUpload): Promise<ChatAttachmentHandle> {
   let mimeType = mimeTypeOf(attachment);
-  let name = attachment.name?.replace(/[\r\n]/g, " ").slice(0, 255).trim() || undefined;
+  let name = attachment.name?.replace(LINE_TERMINATORS, " ").slice(0, 255).trim() || undefined;
 
   if (attachment.content.byteLength > MAX_WORKBOOK_UPLOAD_BYTES) {
     throw new Error("Spreadsheets must be 10 MB or smaller.");
@@ -204,6 +205,8 @@ export function describeWorkbookBinding(
       `${JSON.stringify(sheet.name)} (${formatCount(sheet.rowCount, "row")} × ` +
       `${formatCount(sheet.colCount, "col")})`).join(", ");
   return `Binding: ${envName}\n` +
+      `\n` +
+      `${UNTRUSTED_SPREADSHEET_NOTICE} That covers the file name and sheet names below too.\n` +
       `\n` +
       `This binding is the workbook ${fenceUntrustedFileName(record.name ?? "(unnamed)")} ` +
       `attached to this chat: ${formatCount(record.meta.sheets.length, "sheet")} — ${sheets}. ` +

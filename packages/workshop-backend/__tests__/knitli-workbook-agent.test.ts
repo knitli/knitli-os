@@ -158,6 +158,30 @@ describe("spreadsheet attachment in the agent", () => {
     expect(texts[0]).toContain(`readSheet(file: "GIT_2"`);
   }));
 
+  it("keeps a workbook's name when a connection request holding it is denied later", () =>
+      withImpl(async impl => {
+    let sequence = impl.nextChatSequence(CHAT_ID);
+    let request = (state: string) => ({
+      chatId: CHAT_ID, sequence, timestamp: new Date(0), author: { type: "agent", id: "m", name: "A" },
+      type: "connectionRequest", requestId: `${CHAT_ID}:${sequence}`, vendorId: "v", vendorName: "V",
+      reason: "r", state, bindingName: "big_xlsx",
+    });
+    impl.storage.chats.put(request("pending"));
+    await sendMessage(impl, "Here.", workbook("big.xlsx", ROWS));
+    let replayedName = async () => {
+      let [context] = await runScriptedTurn(impl, [fauxAssistantMessage(fauxText("Ok."))]);
+      return /readSheet\(file: "([^"]+)"/.exec(
+          textOf(context.messages.find(message => message.role === "user" &&
+              textOf(message).includes("Attached spreadsheet"))!))![1];
+    };
+    let before = await replayedName();
+
+    impl.storage.chats.put(request("denied"));
+    await sendMessage(impl, "Again.");
+    expect(await replayedName()).toBe(before);
+    expect(before).toBe("big_xlsx_2");
+  }));
+
   it("deletes a chat holding a workbook along with its row pages", () => withImpl(async (impl, instance) => {
     await sendMessage(impl, "Look.", workbook("big.xlsx", ROWS));
     expect([...impl.storage.chatWorkbookRows.list()].length).toBe(1);

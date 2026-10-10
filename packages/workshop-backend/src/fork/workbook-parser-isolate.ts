@@ -187,20 +187,24 @@ export async function parseWorkbookIsolated(
   name: string,
 ): Promise<StreamedWorkbook> {
   let result: ParseReply;
+  let parser = loader.load({
+    compatibilityDate: "2026-02-01",
+    compatibilityFlags: ["disallow_importable_env"],
+    mainModule: "parser.js",
+    modules: { "parser.js": WORKBOOK_PARSER_RUNTIME },
+    env: {},
+    // The parser reads the bytes it is handed and nothing else.
+    globalOutbound: null,
+    limits: { cpuMs: WORKBOOK_PARSE_CPU_MS },
+  }).getEntrypoint<WorkbookParserEntrypoint>();
   try {
-    let parser = loader.load({
-      compatibilityDate: "2026-02-01",
-      compatibilityFlags: ["disallow_importable_env"],
-      mainModule: "parser.js",
-      modules: { "parser.js": WORKBOOK_PARSER_RUNTIME },
-      env: {},
-      // The parser reads the bytes it is handed and nothing else.
-      globalOutbound: null,
-      limits: { cpuMs: WORKBOOK_PARSE_CPU_MS },
-    }).getEntrypoint<WorkbookParserEntrypoint>();
     result = await parser.parse(bytes, mimeType, name);
   } catch (error) {
     throw classifyParseFailure(error);
+  } finally {
+    // Released once the call has returned; the result's row cursor is a separate capability and
+    // stays alive for the streaming that follows. (Fetcher's type omits the disposer stubs have.)
+    (parser as Partial<Disposable>)[Symbol.dispose]?.();
   }
   return { summary: result.summary, meta: result.meta, rows: streamRows(result, result.meta) };
 }

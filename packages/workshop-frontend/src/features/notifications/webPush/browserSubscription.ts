@@ -32,16 +32,20 @@ export const ownsBrowserSubscription = async (api: RpcStub<AuthenticatedApi>) =>
 export const claimBrowserSubscription = async (api: RpcStub<AuthenticatedApi>) =>
   writeOwner((await api.whoami()).id)
 
-/** Removes this browser's subscription from the server and the browser, and forgets its owner. */
+/**
+ * Removes this browser's subscription from the browser and the server, and forgets its owner. The
+ * browser side goes first and does not depend on the server: if the server call fails or stalls,
+ * the endpoint is already dead (the server prunes it on its next 404/410) and nobody else's
+ * notifications can reach this browser.
+ */
 export const releaseBrowserSubscription = async (
   api: RpcStub<AuthenticatedApi>, registration: ServiceWorkerRegistration,
 ) => {
   const subscription = await registration.pushManager.getSubscription()
-  if (subscription) {
-    await api.removeWebPushSubscription(subscription.endpoint)
-    await subscription.unsubscribe()
-  }
+  if (!subscription) return writeOwner(null)
+  await subscription.unsubscribe()
   writeOwner(null)
+  await api.removeWebPushSubscription(subscription.endpoint)
 }
 
 /**

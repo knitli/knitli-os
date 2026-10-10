@@ -31,6 +31,7 @@ const fakeApi = () => ({
 const asStub = (api: ReturnType<typeof fakeApi>) => api as unknown as RpcStub<AuthenticatedApi>
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   localStorage.clear()
   delete (navigator as { serviceWorker?: unknown }).serviceWorker
@@ -83,5 +84,19 @@ describe('releaseOnSignOut', () => {
     localStorage.setItem(OWNER_KEY, 'me@example.com')
     vi.spyOn(console, 'error').mockImplementation(() => {})
     await expect(releaseOnSignOut(asStub(api))).resolves.toBeUndefined()
+  })
+
+  it('unsubscribes the browser and forgets the owner even when the server never answers', async () => {
+    vi.useFakeTimers()
+    const api = fakeApi()
+    api.removeWebPushSubscription.mockReturnValue(new Promise(() => {}))
+    const { subscription } = install()
+    localStorage.setItem(OWNER_KEY, 'me@example.com')
+    const done = releaseOnSignOut(asStub(api))
+    await vi.advanceTimersByTimeAsync(3000)
+    await done
+    vi.useRealTimers()
+    expect(subscription.unsubscribe).toHaveBeenCalled()
+    expect(localStorage.getItem(OWNER_KEY)).toBeNull()
   })
 })

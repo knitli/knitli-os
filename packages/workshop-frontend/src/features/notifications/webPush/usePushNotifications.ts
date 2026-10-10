@@ -102,8 +102,8 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
     if (!ready) return
     setBusy(true)
     try {
-      await releaseBrowserSubscription(api, ready.registration)
-      setStatus('off')
+      // The browser side is released even when the server call fails, so this device is off either way.
+      await releaseBrowserSubscription(api, ready.registration).finally(() => setStatus('off'))
     } finally {
       setBusy(false)
     }

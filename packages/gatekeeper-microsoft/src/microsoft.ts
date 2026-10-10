@@ -77,6 +77,8 @@ type StoredNonce = {
    * request while its code exchange is still pending.
    */
   scopes: string[];
+  /** A claims directive the authorization request must repeat, for a reconnect after a challenge. */
+  claims?: string;
   /** The person the Workshop issued this connect link to; see `initiatorMatches` (fork). */
   initiator?: ConnectInitiator;
 };
@@ -98,6 +100,8 @@ type StoredMintFailure = {
    * case, so a later successful mint says nothing about it having been fixed.
    */
   claims?: true;
+  /** The directive Graph sent with it, which the reconnect repeats; see `claimsChallengeValue`. */
+  claimsChallenge?: string;
 };
 
 type CachedVerifiedDomains = {
@@ -400,6 +404,7 @@ export default {
       // A reconnect gets it too: it must be the original account, and with another account signed in
       // Entra would pick that one silently, fail the identity check, and pick it again next time.
       if (begun.authOnly || begun.reconnect) newUrl.searchParams.set("prompt", "select_account");
+      if (begun.claims) newUrl.searchParams.set("claims", begun.claims);
 
       return Response.redirect(newUrl.toString(), 302);
     } else if (relPath === "/oauth") {
@@ -647,6 +652,8 @@ export class UserAccount extends DurableObject<Env> {
       stage: "initiation",
       scopes: requestedScopes,
       reconnect: true,
+      // After a Conditional Access challenge, the new sign-in must carry the same demand.
+      claims: this.ctx.storage.kv.get<StoredMintFailure>("mintFailure")?.claimsChallenge,
       initiator,
     });
   }
@@ -691,8 +698,8 @@ export class UserAccount extends DurableObject<Env> {
    * flow is sign-in only. Returns null if the nonce is invalid or expired.
    */
   async beginOAuthFlow(initiationNonce: string):
-      Promise<{oauthNonce: string, scopes: string[], authOnly: boolean, reconnect: boolean}
-              | null> {
+      Promise<{oauthNonce: string, scopes: string[], authOnly: boolean, reconnect: boolean,
+               claims?: string} | null> {
     let stored = this.#takeNonce(initiationNonce, "initiation");
     if (!stored) return null;
 
@@ -704,11 +711,15 @@ export class UserAccount extends DurableObject<Env> {
       stage: "oauth",
       scopes: stored.scopes,
       reconnect: stored.reconnect,
+      claims: stored.claims,
       initiator: stored.initiator,
     });
     let scopes = stored.scopes ?? IDENTITY_SCOPES;
     let authOnly = this.ctx.storage.kv.get<boolean>("authOnly") ?? false;
-    return {oauthNonce, scopes, authOnly, reconnect: stored.reconnect === true};
+    return {
+      oauthNonce, scopes, authOnly, reconnect: stored.reconnect === true,
+      ...(stored.claims ? { claims: stored.claims } : {}),
+    };
   }
 
   /**
@@ -967,14 +978,14 @@ export class UserAccount extends DurableObject<Env> {
     let callback = kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback || this.#restoring) return;
     this.#restoring = true;
-    callback.credentialsRestored()
+    this.ctx.waitUntil(callback.credentialsRestored()
         .then(() => kv.delete(RESTORE_PENDING_KEY))
         .catch(err => {
           logger.warn("failed to notify credential restoration", {
             event: "credentials.restored.notify.failed", error: err,
           });
         })
-        .finally(() => { this.#restoring = false; });
+        .finally(() => { this.#restoring = false; }));
   }
 
   /**
@@ -991,7 +1002,8 @@ export class UserAccount extends DurableObject<Env> {
    * between); the report is then about credentials that no longer exist and is dropped, rather than
    * killing the fresh grant.
    */
-  async reportCredentialsRejected(detail?: string, rejectedToken?: string): Promise<void> {
+  async reportCredentialsRejected(
+      detail?: string, rejectedToken?: string, claims?: string): Promise<void> {
     await this.#updateCredentials(async () => {
       let current = this.ctx.storage.kv.get<EntraAccessToken>("accessToken");
       if (rejectedToken !== undefined && current && current.token !== rejectedToken) return;
@@ -1002,16 +1014,17 @@ export class UserAccount extends DurableObject<Env> {
         codes: [],
         message: "Microsoft requires this account to sign in again" +
             (detail ? ` (${detail})` : "") + ". Please reconnect the account.",
-      }, true);
+      }, true, claims);
     });
   }
 
   // Record a permanent failure and, the first time an account dies, tell the Workshop. Transient
   // failures are not recorded: the next caller should be free to try again immediately.
-  #recordMintFailure(failure: TokenFailure, claims = false): void {
+  #recordMintFailure(failure: TokenFailure, claims = false, claimsChallenge?: string): void {
     if (!failure.permanent) return;
     this.ctx.storage.kv.put<StoredMintFailure>("mintFailure", {
       message: failure.message, at: Date.now(), ...(claims ? { claims: true as const } : {}),
+      ...(claimsChallenge ? { claimsChallenge } : {}),
     });
     // Dead again, so there is nothing left to say is restored.
     this.ctx.storage.kv.delete(RESTORE_PENDING_KEY);
@@ -1027,7 +1040,9 @@ export class UserAccount extends DurableObject<Env> {
   // wherever a recorded failure is cleared, i.e. whenever new credentials go live.
   #notifyCredentialsDead(): void {
     let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
-    void notifyCredentialsExpiredOnce(this.ctx.storage.kv, callback, VENDOR_ID);
+    // Registered with the runtime so the notice outlives the call that failed: a floating RPC can be
+    // cut off when that invocation ends, leaving the account shown healthy.
+    this.ctx.waitUntil(notifyCredentialsExpiredOnce(this.ctx.storage.kv, callback, VENDOR_ID));
   }
 
   /**
@@ -1100,8 +1115,8 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     return new GraphSharePointApi(
         async opts => (await this.#account().getAccessToken(opts)).token,
         {
-          onCredentialsRejected: (detail, rejectedToken) =>
-              this.#account().reportCredentialsRejected(detail, rejectedToken),
+          onCredentialsRejected: (detail, rejectedToken, claims) =>
+              this.#account().reportCredentialsRejected(detail, rejectedToken, claims),
         });
   }
 

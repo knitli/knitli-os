@@ -25,6 +25,7 @@ let executionContext: unknown;
 beforeEach(() => {
   const values = new Map<string, unknown>();
   account = new UserAccount({
+    waitUntil: vi.fn(),
     id: { toString: () => DO_ID },
     storage: {
       setAlarm: vi.fn(),

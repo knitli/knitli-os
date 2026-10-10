@@ -24,6 +24,7 @@ const env = {
 function fakeDurableObjectContext() {
   const values = new Map<string, unknown>();
   return {
+    waitUntil: vi.fn(),
     id: { toString: () => DO_ID },
     storage: {
       setAlarm: vi.fn(),
@@ -107,6 +108,32 @@ describe("authorization request", () => {
 
     expect(new URL(response.headers.get("Location")!).searchParams.get("prompt"))
       .toBe("select_account");
+  });
+
+  it("repeats a Conditional Access claims challenge in the reconnect authorization", async () => {
+    // Without the directive Entra would issue the same insufficient token again.
+    context.storage.kv.put("callback", { credentialsExpired: async () => {} });
+    context.storage.kv.put("refreshToken", "refresh-old");
+    context.storage.kv.put("accessToken", {
+      token: "access-live", expires: new Date(Date.now() + 30 * 60 * 1000),
+    });
+    const claims = '{"access_token":{"acrs":{"essential":true,"value":"c1"}}}';
+    await account.reportCredentialsRejected("insufficient_claims", "access-live", claims);
+    await account.prepareReconnect(INITIATION_NONCE, IDENTITY_SCOPES);
+
+    const response = await worker.fetch(
+      get(`/${DO_ID}/${INITIATION_NONCE}`), env as never, executionContext as never);
+
+    expect(new URL(response.headers.get("Location")!).searchParams.get("claims")).toBe(claims);
+  });
+
+  it("sends no claims parameter when there was no challenge", async () => {
+    await account.prepareReconnect(INITIATION_NONCE, IDENTITY_SCOPES);
+
+    const response = await worker.fetch(
+      get(`/${DO_ID}/${INITIATION_NONCE}`), env as never, executionContext as never);
+
+    expect(new URL(response.headers.get("Location")!).searchParams.has("claims")).toBe(false);
   });
 
   it("asks Microsoft for the account picker on a sign-in-only flow", async () => {

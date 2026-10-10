@@ -593,9 +593,9 @@ export class SharePointListGatekeeperImpl
   #api(retryAfter: RetryAfterPolicy): GraphSharePointApi {
     return new GraphSharePointApi(opts => this.#getAccessToken(opts), {
       retryAfter,
-      onCredentialsRejected: async (detail: string, rejectedToken: string) => {
+      onCredentialsRejected: async (detail: string, rejectedToken: string, claims?: string) => {
         this.#tokens.invalidate();
-        await this.#account().reportCredentialsRejected(detail, rejectedToken);
+        await this.#account().reportCredentialsRejected(detail, rejectedToken, claims);
       },
     });
   }

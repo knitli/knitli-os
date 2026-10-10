@@ -104,6 +104,7 @@ async function scopesFor(options?: Record<string, unknown>): Promise<string[]> {
 function accountWithGrant(grantedScopes: string[]): UserAccount {
   const values = new Map<string, unknown>([["grantedScopes", grantedScopes]]);
   const ctx = {
+    waitUntil: vi.fn(),
     id: { toString: () => DO_ID },
     storage: {
       setAlarm: vi.fn(),

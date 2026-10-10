@@ -28,6 +28,7 @@ const ORGANIZATION = {
 function fakeDurableObjectContext() {
   const values = new Map<string, unknown>();
   return {
+    waitUntil: vi.fn(),
     id: { toString: () => DO_ID },
     storage: {
       setAlarm: vi.fn(),

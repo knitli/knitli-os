@@ -426,7 +426,9 @@ class TeamsTeamStub extends RpcTarget implements TeamsTeam {
   }
 
   async getInfo(): Promise<TeamsTeamInfo> {
-    let info = this.#cachedInfo ?? await this.#ctx.api.getTeam(this.#teamId);
+    // Always re-read: a team is renamed and edited while a capability for it is held, and the info
+    // it was listed with is only a snapshot.
+    let info = await this.#ctx.api.getTeam(this.#teamId);
     this.#cachedInfo = info;
 
     await authorizeRestricted(this.#ctx.approvalQueue, {
@@ -519,7 +521,7 @@ class TeamsChannelStub extends RpcTarget implements TeamsChannel {
   }
 
   async getInfo(): Promise<TeamsChannelInfo> {
-    let info = this.#cachedInfo ?? await this.#ctx.api.getChannel(this.#teamId, this.#channelId);
+    let info = await this.#ctx.api.getChannel(this.#teamId, this.#channelId);
     this.#cachedInfo = info;
 
     await authorizeRestricted(this.#ctx.approvalQueue, {
@@ -811,9 +813,9 @@ export class TeamsGatekeeperImpl
    */
   #api(): GraphTeamsApi {
     return new GraphTeamsApi(opts => this.#getAccessToken(opts), {
-      onCredentialsRejected: async (detail: string, rejectedToken: string) => {
+      onCredentialsRejected: async (detail: string, rejectedToken: string, claims?: string) => {
         this.#tokens.invalidate();
-        await this.#account().reportCredentialsRejected(detail, rejectedToken);
+        await this.#account().reportCredentialsRejected(detail, rejectedToken, claims);
       },
     });
   }

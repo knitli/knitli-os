@@ -234,6 +234,26 @@ describe("host teams reached only through a shared channel", () => {
   });
 });
 
+describe("team and channel metadata", () => {
+  it("re-reads a team's and a channel's info instead of the snapshot they were listed with", async () => {
+    let name = "Before";
+    stubFetch(call => /\/teams\/[^/]+\/channels$/.test(new URL(call.url).pathname)
+      ? jsonResponse({ value: [{ ...CHANNEL, displayName: name }] })
+      : new URL(call.url).pathname.endsWith("/me/joinedTeams")
+        ? jsonResponse({ value: [{ ...TEAM, displayName: name }] })
+        : defaultRoute(call));
+    const session = await startSession();
+    const [team] = await session.listTeams();
+    const [channel] = await team.team.listChannels();
+
+    expect((await team.team.getInfo()).displayName).toBe("Before");
+    expect((await channel.channel.getInfo()).displayName).toBe("Before");
+    name = "After";
+    expect((await team.team.getInfo()).displayName).toBe("After");
+    expect((await channel.channel.getInfo()).displayName).toBe("After");
+  });
+});
+
 describe("chat metadata", () => {
   it("re-reads a chat's info instead of returning the snapshot it was listed with", async () => {
     let topic = "Before";
@@ -737,7 +757,7 @@ describe("credential death", () => {
     const session = await startSession();
 
     await expect(session.listTeams()).rejects.toThrow(/sign in again/i);
-    expect(reportCredentialsRejected).toHaveBeenCalledWith("insufficient_claims", "token-1");
+    expect(reportCredentialsRejected).toHaveBeenCalledWith("insufficient_claims", "token-1", '{"a":1}');
   });
 
   it("drops its own token memo, so the call after a reconnect uses the new token", async () => {

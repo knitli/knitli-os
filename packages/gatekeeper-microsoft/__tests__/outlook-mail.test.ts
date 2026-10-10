@@ -836,7 +836,7 @@ describe("credential death", () => {
     const session = await startSession();
 
     await expect(session.listFolders()).rejects.toThrow(/sign in again/i);
-    expect(reportCredentialsRejected).toHaveBeenCalledWith("insufficient_claims", "token-1");
+    expect(reportCredentialsRejected).toHaveBeenCalledWith("insufficient_claims", "token-1", '{"a":1}');
   });
 
   it("drops its own token memo, so the call after a reconnect uses the new token", async () => {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { claimsChallengeValue } from "../src/auth-retry";
 import { GraphApiError, GraphMailApi, assertGraphUrl, graphUrl, validateSearchQuery } from "../src/graph-api";
 import { fetchProfilePhoto } from "../src/microsoft-api";
 
@@ -615,6 +616,19 @@ describe("attachments", () => {
     expect(calls.some(call => call.url.endsWith("/$value"))).toBe(false);
   });
 
+  it("names neither the attachment nor its size in a refusal made before the read is authorized", async () => {
+    stubFetch(call => jsonResponse(call.url.includes("att-big")
+      ? { ...ATTACHMENTS[0], name: "secret-merger.pdf", size: 10 * 1024 * 1024 + 7 }
+      : { ...ATTACHMENTS[0], name: "secret-merger.pdf", "@odata.type": "#microsoft.graph.itemAttachment" }));
+    const api = newApi();
+
+    for (const id of ["att-big", "att-item"]) {
+      const error = await api.getAttachmentBytes(MESSAGE.id, id).catch((err: unknown) => err);
+      expect(String(error)).not.toContain("secret-merger");
+      expect(String(error)).not.toContain("10485767");
+    }
+  });
+
   it("refuses an oversized attachment from its metadata, before downloading it", async () => {
     const calls = stubFetch(call => new URL(call.url).pathname.endsWith("/$value")
       ? new Response(new Uint8Array(1024))
@@ -634,7 +648,7 @@ describe("attachments", () => {
       : jsonResponse({ ...ATTACHMENTS[0], size: 1024 }));
 
     await expect(newApi().getAttachmentBytes(MESSAGE.id, "att-file"))
-      .rejects.toThrow(/returned 10485761 bytes, which is over the 10485760-byte limit/);
+      .rejects.toThrow(/returned more than the 10485760-byte limit/);
   });
 
   it("surfaces a Graph error from the metadata read in mailbox terms", async () => {
@@ -673,5 +687,25 @@ describe("writes", () => {
       .rejects.toThrow(/at most/);
 
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("claimsChallengeValue", () => {
+  const encode = (json: string) => btoa(json);
+
+  it("decodes the directive Graph sends with a claims challenge", () => {
+    const json = '{"access_token":{"nbf":{"essential":true,"value":"1"}}}';
+
+    expect(claimsChallengeValue(`Bearer realm="", error="insufficient_claims", claims="${encode(json)}"`))
+      .toBe(json);
+  });
+
+  it("is null when there is none, or it is not usable", () => {
+    expect(claimsChallengeValue(null)).toBeNull();
+    expect(claimsChallengeValue('Bearer error="invalid_token"')).toBeNull();
+    expect(claimsChallengeValue('Bearer claims="!!not-base64!!"')).toBeNull();
+    expect(claimsChallengeValue(`Bearer claims="${encode("not json")}"`)).toBeNull();
+    expect(claimsChallengeValue(`Bearer claims="${encode(JSON.stringify({ a: "x".repeat(5000) }))}"`))
+      .toBeNull();
   });
 });

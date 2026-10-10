@@ -345,11 +345,6 @@ function attachmentInfoFrom(attachment: GraphAttachment): OutlookAttachmentInfo 
   };
 }
 
-/** An attachment name as it can safely appear in a one-line error message. */
-function attachmentLabel(name: string): string {
-  return truncate(name.replace(/[\r\n]+/g, " "), 100);
-}
-
 /**
  * Validate an agent-supplied KQL search string.
  *
@@ -662,22 +657,23 @@ export class GraphMailApi {
   async getAttachmentBytes(messageId: string, attachmentId: string)
       : Promise<{ info: OutlookAttachmentInfo; content: ArrayBuffer }> {
     let info = await this.#getAttachment(messageId, attachmentId);
-    let label = attachmentLabel(info.name);
 
+    // These refusals happen before the read is authorized, so none of them names the attachment or
+    // its size: that is mailbox data, and the audited listAttachments() is where it comes from.
     if (info.kind === "item") {
       throw new Error(
-          `"${label}" is an Outlook item attached to this message (an email, event or contact), ` +
-          "not a file, so it has no file contents to read.");
+          "That attachment is an Outlook item attached to this message (an email, event or " +
+          "contact), not a file, so it has no file contents to read.");
     }
     if (info.kind === "reference") {
       throw new Error(
-          `"${label}" is a link to a file stored in OneDrive or SharePoint, not a copy of the ` +
-          "file, so the mailbox holds no contents to read. Open the link in Outlook instead.");
+          "That attachment is a link to a file stored in OneDrive or SharePoint, not a copy of " +
+          "the file, so the mailbox holds no contents to read. Open the link in Outlook instead.");
     }
     if (info.sizeBytes > MAX_ATTACHMENT_BYTES) {
       throw new Error(
-          `"${label}" is ${info.sizeBytes} bytes, which is over the ${MAX_ATTACHMENT_BYTES}-byte ` +
-          "limit for reading an attachment. It was not downloaded.");
+          `That attachment is over the ${MAX_ATTACHMENT_BYTES}-byte limit for reading an ` +
+          "attachment. It was not downloaded.");
     }
 
     // `$value` is written literally for the same reason the OData query options are: it is a
@@ -688,8 +684,8 @@ export class GraphMailApi {
 
     if (content.byteLength > MAX_ATTACHMENT_BYTES) {
       throw new Error(
-          `"${label}" returned ${content.byteLength} bytes, which is over the ` +
-          `${MAX_ATTACHMENT_BYTES}-byte limit for reading an attachment.`);
+          `That attachment returned more than the ${MAX_ATTACHMENT_BYTES}-byte limit for reading ` +
+          "an attachment.");
     }
     return { info, content };
   }

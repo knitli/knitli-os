@@ -33,6 +33,7 @@ function idToken(claims: Record<string, unknown>): string {
 function fakeContext() {
   const values = new Map<string, unknown>();
   return {
+    waitUntil: vi.fn(),
     id: { toString: () => "a".repeat(64) },
     storage: {
       setAlarm: vi.fn(),
@@ -594,6 +595,8 @@ describe("mint failure taxonomy", () => {
     await expect(account.getAccessToken()).rejects.toThrow(/reconnect the account/i);
 
     expect(callback.credentialsExpired).toHaveBeenCalledTimes(1);
+    // The notice is handed to the runtime, so it outlives the call that failed.
+    expect(context.waitUntil).toHaveBeenCalled();
     // The second caller was answered from the recorded failure rather than another round trip.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

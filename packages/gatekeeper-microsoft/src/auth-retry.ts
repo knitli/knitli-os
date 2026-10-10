@@ -49,7 +49,8 @@ export type AccessTokenProvider = (opts?: AccessTokenRequest) => Promise<string>
  * mark the account dead so the Workshop offers a reconnect; failures are swallowed by the caller so
  * a notification problem cannot mask the underlying request error.
  */
-export type CredentialsRejectedReporter = (detail: string, rejectedToken: string) => Promise<void>;
+export type CredentialsRejectedReporter =
+    (detail: string, rejectedToken: string, claims?: string) => Promise<void>;
 
 /**
  * How long this client will sit out a throttling `Retry-After`, and what to do when the server asks
@@ -118,6 +119,29 @@ export function claimsChallengeDetail(header: string | null | undefined): string
   if (!hasClaims && !insufficientClaims) return null;
   let error = header.match(/(^|[\s,])error\s*=\s*"([^"]*)"/i)?.[2];
   return (error || "insufficient_claims").slice(0, MAX_CHALLENGE_DETAIL_CHARS);
+}
+
+/** Largest claims directive kept; a real one is a few hundred bytes. */
+const MAX_CLAIMS_CHALLENGE_CHARS = 4000;
+
+/**
+ * The claims directive of a `WWW-Authenticate` challenge, as the JSON string a new authorization
+ * request carries in its `claims` parameter, or null when there is none or it is not usable.
+ *
+ * Graph sends it base64-encoded. Entra only issues a token with the claims a Conditional Access or
+ * continuous access evaluation policy demands if the interactive request repeats this directive, so
+ * a reconnect that drops it gets the same insufficient token back.
+ */
+export function claimsChallengeValue(header: string | null | undefined): string | null {
+  let encoded = header?.match(/(^|[\s,])claims\s*=\s*"([^"]*)"/i)?.[2];
+  if (!encoded) return null;
+  try {
+    let json = atob(encoded.replace(/-/g, "+").replace(/_/g, "/"));
+    JSON.parse(json);
+    return json.length <= MAX_CLAIMS_CHALLENGE_CHARS ? json : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -220,7 +244,10 @@ export async function fetchWithAuthRetry(
         // connection is healthy. A reporting failure is swallowed — it must not replace the real
         // error with a notification error.
         if (opts.onCredentialsRejected) {
-          await opts.onCredentialsRejected(claimsDetail, token).catch(() => {});
+          await opts.onCredentialsRejected(
+              claimsDetail, token,
+              claimsChallengeValue(response.headers.get("WWW-Authenticate")) ?? undefined)
+              .catch(() => {});
         }
         return response;
       }

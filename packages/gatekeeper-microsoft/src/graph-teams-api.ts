@@ -904,6 +904,8 @@ export class GraphTeamsApi {
     return await fetchWithAuthRetry(url, { ...init, headers }, this.#getAccessToken, {
       timeoutMs: GRAPH_TIMEOUT_MS,
       retryAfter: this.#retryAfterPolicy,
+      // `/search/query` is a POST only because the query travels in the body; it reads.
+      idempotent: new URL(url).pathname.endsWith("/search/query"),
       ...(this.#onCredentialsRejected
           ? { onCredentialsRejected: this.#onCredentialsRejected }
           : {}),
@@ -1048,10 +1050,24 @@ export class GraphTeamsApi {
         "channels in this team");
   }
 
+  /**
+   * One channel, but only if it is among those the connected user can see. `GET .../channels/{id}`
+   * also answers for a private channel the account has not joined (an admin may read it), so
+   * visibility is checked against the team's own channel listing, and the answer is taken from it.
+   */
   async getChannel(teamId: string, channelId: string): Promise<TeamsChannelInfo> {
-    let channel = await this.#fetchJson<GraphChannel>(
-        graphUrl(["teams", teamId, "channels", channelId]));
-    return channelInfoFrom(teamId, channel);
+    graphUrl(["teams", teamId, "channels", channelId]); // rejects an empty or relative id up front
+    let next: string = graphUrl(["teams", teamId, "channels"]);
+    for (let page = 0; page < MAX_WALK_PAGES; page++) {
+      let body: GraphCollection<GraphChannel> =
+          await this.#fetchJson<GraphCollection<GraphChannel>>(next);
+      let match = (body.value ?? []).find(channel => channel.id === channelId);
+      if (match) return channelInfoFrom(teamId, match);
+      let link = body["@odata.nextLink"];
+      if (!link) break;
+      next = assertGraphUrl(link);
+    }
+    throw new GraphApiError(404, "notFound", "That channel is not one this account can see.");
   }
 
   async listTeamMembers(teamId: string): Promise<GraphPage<TeamsMemberInfo>> {

@@ -78,7 +78,7 @@ describe("URL construction", () => {
     expect(calls[0].url).toBe(
       `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(hostileId)}` +
       `?$select=${encodeURIComponent(
-        "id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead," +
+        "id,subject,from,replyTo,toRecipients,ccRecipients,receivedDateTime,isRead," +
         "hasAttachments,bodyPreview,parentFolderId,webLink,conversationId")}`);
     // /v1.0/me/messages/<id> — the id never becomes extra path segments.
     expect(new URL(calls[0].url).pathname.split("/")).toHaveLength(5);

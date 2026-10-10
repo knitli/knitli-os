@@ -33,7 +33,7 @@ const MAX_GRAPH_ERROR_CHARS = 500;
 
 /** Message fields every listing and metadata read selects. Keeps payloads bounded. */
 const MESSAGE_SELECT = [
-  "id", "subject", "from", "toRecipients", "ccRecipients", "receivedDateTime", "isRead",
+  "id", "subject", "from", "replyTo", "toRecipients", "ccRecipients", "receivedDateTime", "isRead",
   "hasAttachments", "bodyPreview", "parentFolderId", "webLink", "conversationId",
 ].join(",");
 
@@ -103,6 +103,7 @@ type GraphMessage = {
   id?: string;
   subject?: string;
   from?: GraphRecipient;
+  replyTo?: GraphRecipient[];
   toRecipients?: GraphRecipient[];
   ccRecipients?: GraphRecipient[];
   receivedDateTime?: string;
@@ -277,10 +278,12 @@ function messageInfoFrom(message: GraphMessage): OutlookMessageInfo {
   }
   let received = message.receivedDateTime ? new Date(message.receivedDateTime) : new Date(0);
   let from = addressFrom(message.from);
+  let replyTo = addressesFrom(message.replyTo);
   return {
     id: message.id,
     subject: message.subject ?? "(no subject)",
     ...(from ? { from } : {}),
+    ...(replyTo.length > 0 ? { replyTo } : {}),
     to: addressesFrom(message.toRecipients),
     cc: addressesFrom(message.ccRecipients),
     receivedAt: Number.isNaN(received.valueOf()) ? new Date(0) : received,

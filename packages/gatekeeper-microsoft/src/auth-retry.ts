@@ -83,6 +83,11 @@ export type FetchWithAuthRetryOptions = {
   retries?: number;
   /** Per-attempt abort timeout in milliseconds. Omitted means no timeout is imposed. */
   timeoutMs?: number;
+  /**
+   * The request only reads, whatever its method (a search sent as a POST because its query travels
+   * in the body). Network errors and 5xx responses are then replayed as they are for a GET.
+   */
+  idempotent?: boolean;
   /** Invoked once when a 401 carries a claims challenge. */
   onCredentialsRejected?: CredentialsRejectedReporter;
   /**
@@ -164,7 +169,9 @@ export async function fetchWithAuthRetry(
   getAccessToken: AccessTokenProvider,
   opts: FetchWithAuthRetryOptions = {},
 ): Promise<Response> {
-  let method = (init.method ?? "GET").toUpperCase();
+  // Whether replaying changes nothing on the server, which is what decides if an ambiguous failure
+  // (a timeout, a 5xx) may be retried.
+  let method = opts.idempotent ? "GET" : (init.method ?? "GET").toUpperCase();
   let retries = opts.retries ?? 3;
 
   // A request can only be replayed if its body can be sent again. A string body (what every call

@@ -291,8 +291,8 @@ export interface TeamsSession {
    * `query` is Microsoft Search (KQL): bare words match the sender, the body, and the text of
    * attachments, and these terms narrow the search — `from:bob`, `to:alice`, `mentions:<user id>`,
    * `hasAttachment:true`, `isRead:true`, `isMentioned:true`, `sent>2026-01-01`. Terms may be
-   * combined with `AND`/`OR`/`NOT`. Double quotes are not accepted, since the query is itself sent
-   * as a quoted KQL string.
+   * combined with `AND`/`OR`/`NOT`. Wrap words in double quotes to match them as an exact phrase,
+   * e.g. `"quarterly report"`.
    *
    * Results come back newest first by message date — Microsoft's index does not rank Teams
    * messages by relevance and refuses to sort them any other way. Each hit is metadata only: read

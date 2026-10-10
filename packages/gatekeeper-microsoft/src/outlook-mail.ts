@@ -446,11 +446,14 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
       throw new Error(`Reply body must be at most ${MAX_REPLY_BODY_BYTES} bytes.`);
     }
     let info = await this.#readInfoForAction("draft a reply to");
+    // Graph addresses a reply to the Reply-To addresses when the message has any, and to the sender
+    // otherwise, so the approver is shown the same.
+    let replyTarget = info.replyTo?.map(entry => entry.address)
+        ?? [info.from?.address].filter((address): address is string => Boolean(address));
     let recipients = replyAll
-        ? [info.from?.address, ...info.to.map(entry => entry.address),
+        ? [...replyTarget, ...info.to.map(entry => entry.address),
            ...info.cc.map(entry => entry.address)]
-            .filter((address): address is string => Boolean(address))
-        : [info.from?.address ?? "(unknown sender)"];
+        : replyTarget.length > 0 ? replyTarget : ["(unknown sender)"];
 
     await submitOutlookAction(
         this.#ctx,
@@ -461,7 +464,7 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
           ...describeMessageAction(
               "Create a reply draft in the Outlook mailbox. The draft is not sent; it is left in " +
               "Drafts for the user to review.", info, this.#messageId)
-              .inline("Reply to", replyAll ? "everyone" : "sender")
+              .inline("Reply to", replyAll ? "everyone" : info.replyTo ? "the Reply-To address" : "sender")
               .list("Draft recipients", recipients)
               .verbatim("Draft body", body)
               .finish(),

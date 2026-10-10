@@ -262,6 +262,58 @@ describe("getTeam", () => {
   });
 });
 
+describe("getChannel", () => {
+  const channelsPath = "/v1.0/teams/team-1/channels";
+
+  it("returns a channel the account can see, taken from the team's own listing", async () => {
+    const calls = stubFetch(() => jsonResponse({
+      value: [{ id: "channel-0", displayName: "General" }, { id: "channel-1", displayName: "Mine" }],
+    }));
+
+    const channel = await newApi().getChannel("team-1", "channel-1");
+
+    expect(channel).toMatchObject({ id: "channel-1", teamId: "team-1", displayName: "Mine" });
+    expect(new URL(calls[0].url).pathname).toBe(channelsPath);
+  });
+
+  it("refuses a private channel the account has not joined, even though Graph would serve it", async () => {
+    // An admin can GET any channel directly; only the listing reflects what the account can see.
+    const calls = stubFetch(call => new URL(call.url).pathname === channelsPath
+      ? jsonResponse({ value: [{ id: "channel-0", displayName: "General" }] })
+      : jsonResponse({ id: "channel-9", displayName: "Private" }));
+
+    await expect(newApi().getChannel("team-1", "channel-9"))
+      .rejects.toThrow(/not one this account can see/);
+
+    expect(calls.every(call => new URL(call.url).pathname === channelsPath)).toBe(true);
+  });
+});
+
+describe("search transport", () => {
+  it("replays a search after a transient 5xx, though it is sent as a POST", async () => {
+    let attempts = 0;
+    const calls = stubFetch(() => ++attempts === 1
+      ? jsonResponse({ error: { code: "serviceError" } }, 503)
+      : jsonResponse(searchResponse([{ id: "m-1", chat: "chat-1" }])));
+
+    const page = await newApi().searchMessages("quarterly");
+
+    expect(page.hits).toHaveLength(1);
+    expect(calls).toHaveLength(2);
+    expect(calls.every(call => call.init.method === "POST")).toBe(true);
+  });
+
+  it("still does not replay any other POST-shaped failure it was not told is a read", async () => {
+    // Only /search/query is marked idempotent; the marker is by endpoint, not by method.
+    let attempts = 0;
+    stubFetch(() => { attempts++; return jsonResponse({ error: { code: "serviceError" } }, 503); });
+
+    await expect(newApi().searchMessages("quarterly")).rejects.toThrow();
+
+    expect(attempts).toBe(3);
+  });
+});
+
 describe("error taxonomy", () => {
   it("truncates provider error text", async () => {
     stubFetch(() => jsonResponse({ error: { code: "invalidRequest", message: "x".repeat(600) } },

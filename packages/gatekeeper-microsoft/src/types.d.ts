@@ -24,6 +24,8 @@ export type OutlookMessageInfo = {
   subject: string;
   /** Absent for messages with no sender, e.g. some drafts. */
   from?: OutlookAddress;
+  /** Where a reply is addressed, when the sender asked for it to go somewhere other than `from`. */
+  replyTo?: OutlookAddress[];
   to: OutlookAddress[];
   cc: OutlookAddress[];
   receivedAt: Date;
@@ -197,7 +199,8 @@ export interface OutlookMessage {
   moveToFolder(folderId: string): Promise<void>;
 
   /**
-   * Create a draft reply to the sender, with `body` above the quoted original.
+   * Create a draft reply to the sender (to `replyTo` when the message names one), with `body` above
+   * the quoted original.
    *
    * Queued for approval, and nothing is ever sent: once approved, the draft appears in the
    * mailbox's Drafts folder for the user to review and send. The draft is not readable from this

@@ -534,6 +534,23 @@ describe("queued mutations", () => {
     });
   });
 
+  it("shows the Reply-To address as the draft recipient when the message names one", async () => {
+    stubFetch(call => /\/me\/messages\/[^/]+$/.test(new URL(call.url).pathname)
+      ? jsonResponse({ ...MESSAGE, replyTo: [{ emailAddress: { address: "list@example.com" } }] })
+      : defaultRoute(call));
+    const session = await startSession();
+    const message = await session.getMessage(MESSAGE.id);
+
+    await message.createReplyDraft("Noted.");
+    await message.createReplyAllDraft("Noted.");
+
+    const recipients = approvals.actions.map(action => (action.description.fields as
+      { label: string; items?: string[] }[]).find(field => field.label === "Draft recipients")!.items);
+    // Graph addresses the reply to Reply-To, not to the sender.
+    expect(recipients[0]).toEqual(["list@example.com"]);
+    expect(recipients[1]).toEqual(["list@example.com", "me@example.com", "team@example.com"]);
+  });
+
   it("rejects a relative destination folder id before queueing anything", async () => {
     const calls = stubFetch();
     const session = await startSession();

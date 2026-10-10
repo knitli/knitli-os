@@ -39,8 +39,10 @@ export type ColumnDefinition = {
   required: boolean;
   /** SharePoint computes this column; it can be read but never written. */
   readOnly: boolean;
-  /** Allowed values, for `choice` columns. `createItem()` refuses anything else. */
+  /** Allowed values, for `choice` columns. `createItem()` refuses anything else unless `allowTextEntry`. */
   choices?: string[];
+  /** A `choice` column that also accepts values outside `choices`. */
+  allowTextEntry?: boolean;
   /** A `text` column that accepts more than one line. */
   multiline?: boolean;
   /** Longest value a `text` column accepts, in characters. Absent when the column sets no limit. */

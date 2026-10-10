@@ -22,6 +22,7 @@ const GRAPH_COLUMNS = [
   { name: "Done", displayName: "Done", boolean: {} },
   { name: "Due", displayName: "Due date", dateTime: {} },
   { name: "Status", displayName: "Status", choice: { choices: ["New", "Open"] } },
+  { name: "Tag", displayName: "Tag", choice: { choices: ["a", "b"], allowTextEntry: true } },
   { name: "Owner", displayName: "Owner", personOrGroup: {} },
   { name: "Ref", displayName: "Reference", lookup: {} },
   { name: "Budget", displayName: "Budget", currency: {} },
@@ -41,6 +42,10 @@ const SCHEMA: ColumnDefinition[] = [
   {
     name: "Status", displayName: "Status", type: "choice", required: false, readOnly: false,
     choices: ["New", "Open"],
+  },
+  {
+    name: "Tag", displayName: "Tag", type: "choice", required: false, readOnly: false,
+    choices: ["a", "b"], allowTextEntry: true,
   },
   { name: "Owner", displayName: "Owner", type: "person", required: false, readOnly: false },
   { name: "Ref", displayName: "Reference", type: "lookup", required: false, readOnly: false },
@@ -223,7 +228,7 @@ describe("reads", () => {
     await session.getColumns();
 
     expect(columns.map(column => column.name)).toEqual(
-        ["Title", "Details", "Qty", "Done", "Due", "Status", "Owner", "Ref", "Budget"]);
+        ["Title", "Details", "Qty", "Done", "Due", "Status", "Tag", "Owner", "Ref", "Budget"]);
     expect(calls.filter(call => call.url.includes("/columns"))).toHaveLength(1);
     expect(approvals.observations).toHaveLength(2);
     expect(approvals.observations[0].title).toMatch(/^Read column schema of /);
@@ -527,6 +532,13 @@ describe("validateFields", () => {
     });
   });
 
+  it("lets a fill-in choice column take a value outside its options, and only that kind", () => {
+    expect(validateFields({ Title: "x", Tag: "something new" }, SCHEMA))
+        .toEqual({ Title: "x", Tag: "something new" });
+    expect(() => validateFields({ Title: "x", Status: "Closed" }, SCHEMA))
+        .toThrow(/does not offer the choice "Closed"/);
+  });
+
   it("names the column in every refusal", () => {
     const cases: [Record<string, unknown>, RegExp][] = [
       [{ Title: "x", Nope: 1 }, /Unknown column "Nope"/],
@@ -538,6 +550,7 @@ describe("validateFields", () => {
       [{ Title: 7 }, /Column "Title" expects text, but got a number/],
       [{ Title: "x", Status: "Closed" }, /Column "Status" does not offer the choice "Closed"/],
       [{ Title: "x", Status: 1 }, /Column "Status" expects one of its choices/],
+      [{ Title: "x", Tag: 1 }, /Column "Tag" expects one of its choices/],
       [{ Title: "x", Owner: "bob@example.com" }, /Column "Owner" is a person column/],
       [{ Title: "x", Ref: 3 }, /Column "Ref" is a lookup column/],
       [{ Title: "x", Budget: 10 }, /Column "Budget" has a type this connection can read but not/],

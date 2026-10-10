@@ -104,6 +104,8 @@ export type ColumnDefinition = {
   readOnly: boolean;
   /** Allowed values, for `choice` columns. */
   choices?: string[];
+  /** A `choice` column that also accepts values outside `choices` (a fill-in choice). */
+  allowTextEntry?: boolean;
   /** A `text` column that accepts more than one line. */
   multiline?: boolean;
   /** Longest value a `text` column accepts, in characters, when the list sets a limit. */
@@ -166,7 +168,7 @@ type GraphColumnDefinition = {
   number?: unknown;
   boolean?: unknown;
   dateTime?: unknown;
-  choice?: { choices?: string[] };
+  choice?: { choices?: string[]; allowTextEntry?: boolean };
   personOrGroup?: { allowMultipleSelection?: boolean };
   lookup?: { allowMultipleValues?: boolean };
 };
@@ -268,6 +270,7 @@ function normalizeColumn(column: GraphColumnDefinition): ColumnDefinition | null
     readOnly: column.readOnly === true,
     ...(type === "choice" ? { choices: Array.isArray(choices) ? choices.filter(
         (choice): choice is string => typeof choice === "string") : [] } : {}),
+    ...(type === "choice" && column.choice?.allowTextEntry === true ? { allowTextEntry: true } : {}),
     ...(type === "text" && column.text?.allowMultipleLines === true ? { multiline: true } : {}),
     // Graph reports 0 (or nothing) for a column with no limit of its own.
     ...(type === "text" && Number.isInteger(column.text?.maxLength) && column.text!.maxLength! > 0

@@ -547,8 +547,8 @@ describe("echo discipline", () => {
 
   it("flattens a counterpart-controlled name into a title and fences it in a description",
       async () => {
-        stubFetch(call => /\/channels\/[^/]+$/.test(new URL(call.url).pathname)
-          ? jsonResponse(HOSTILE)
+        stubFetch(call => /\/teams\/[^/]+\/channels$/.test(new URL(call.url).pathname)
+          ? jsonResponse({ value: [HOSTILE] })
           : defaultRoute(call));
         const session = await startSession();
 

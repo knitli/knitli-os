@@ -213,7 +213,8 @@ function validateValue(column: ColumnDefinition, value: unknown): unknown {
       // A choice column whose options Graph did not report has nothing to check against; refusing
       // every value there would make the column unusable rather than safe.
       let choices = column.choices ?? [];
-      if (choices.length > 0 && !choices.includes(value)) {
+      // A fill-in choice column accepts values outside its options.
+      if (choices.length > 0 && !column.allowTextEntry && !choices.includes(value)) {
         throw new Error(
             `Column "${column.name}" does not offer the choice "${echoName(value)}". Allowed: ` +
             `${choices.join(", ")}.`);

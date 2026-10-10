@@ -27,7 +27,8 @@ How Cloudflare handles alarms:
 - **`guardedAlarm`.** Wraps a re-arming handler: at most `maxPerMinute` runs per clock minute, 6,000 by default, as a flood detector (then
   `alarm.circuit.open`), and a throwing run is swallowed and replaced by an exponential-backoff
   alarm (30 s doubling to 1 h, `alarm.failed`), giving up after 8 consecutive failures
-  (`alarm.gave_up`). A run that succeeds and leaves no alarm armed deletes the guard's counter key, so an idle object returns to empty storage (a failing or given-up alarm keeps it). A guarded handler therefore no longer rethrows to the platform. All of ours
+  (`alarm.gave_up`; an alarm armed meanwhile is kept but pushed out to an hour, never deleted, so a
+  concurrent request's wake-up is not lost). A run that succeeds and leaves no alarm armed deletes the guard's counter key, so an idle object returns to empty storage (a failing or given-up alarm keeps it). A guarded handler therefore no longer rethrows to the platform. All of ours
   set `deferWhenOpen`, so an open circuit re-arms for the next minute instead of dropping the work.
 - **`scheduleAlarm`.** Arms an alarm no earlier than `now + 1 s`. Exported for new code; no
   existing handler uses it, because the ones that deliberately re-arm "at once" (scheduler
@@ -88,7 +89,7 @@ plus a 60 s keep-alive; a Google hook driver runs once per push (Gmail documents
 notification a second per user, so 60 a minute) plus one drain run per 20 queued deliveries
 (`MAX_DELIVERIES_PER_RUN`), which stays under the threshold for hundreds of registrations. Retries
 add no runs the threshold has to cover: a failing run is replaced by an exponential-backoff alarm
-(30 s doubling to 1 h, given up after 8 failures), and that backoff, not the threshold, is what
+(30 s doubling to 1 h, after 8 failures retries slow to hourly), and that backoff, not the threshold, is what
 stops a loop that throws. The run is counted before it starts, so a run killed by the runtime
 (CPU limit, eviction) still counts.
 

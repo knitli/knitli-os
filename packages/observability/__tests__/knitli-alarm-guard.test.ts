@@ -247,22 +247,46 @@ describe("alarm guard", () => {
     expect(state.alarmWrites.length).toBeGreaterThan(0);
   });
 
-  it("gives up after N consecutive failures and stops re-arming", async () => {
+  it("gives up after N consecutive failures, slowing a loop's re-arm to the longest backoff", async () => {
     for (let i = 1; i < 8; i++) {
       await state.fire({}, boom);
       expect(state.alarm).not.toBeNull();
       state.clock = state.alarm!;
     }
-    await state.storage.setAlarm(state.clock); // the body's own re-arm must not survive
     await state.fire({}, async () => {
-      await state.storage.setAlarm(state.clock);
+      await state.storage.setAlarm(state.clock); // the body's own re-arm at now must not survive
       throw new Error("boom");
     });
-    expect(state.alarm).toBeNull();
+    expect(state.alarm).toBe(state.clock + HOUR);
     expect(state.record("test")!.failures).toBe(8);
     expect(error).toHaveBeenLastCalledWith(expect.objectContaining({
       event: "alarm.gave_up", alarmKey: "test", failures: 8,
     }));
+  });
+
+  it("gives up without arming anything when nothing is armed, and keeps a later concurrent alarm", async () => {
+    for (let i = 1; i < 8; i++) {
+      await state.fire({}, boom);
+      state.clock = state.alarm!;
+    }
+    await state.fire({}, async () => {
+      state.alarm = null;
+      throw new Error("boom");
+    });
+    expect(state.alarm).toBeNull();
+
+    state.clock += 1;
+    const wake = state.clock + 3 * HOUR; // a request arms new work during the failing run
+    await state.fire({}, async () => {
+      await state.storage.setAlarm(wake);
+      throw new Error("boom");
+    });
+    expect(state.alarm).toBe(wake);
+  });
+
+  it("honours a backoff maximum below the base, down to the alarm floor", () => {
+    expect(alarmBackoffMs(1, { baseMs: 30_000, maxMs: 5_000 })).toBe(5_000);
+    expect(alarmBackoffMs(3, { baseMs: 30_000, maxMs: 0 })).toBe(1_000);
   });
 
   it("a success resets the failure count", async () => {
@@ -304,7 +328,7 @@ describe("alarm guard", () => {
 
   it("keeps the failure record when the alarm is given up", async () => {
     for (let i = 0; i < 8; i++) await state.fire({}, boom);
-    expect(state.alarm).toBeNull();
+    expect(state.alarm).toBeGreaterThanOrEqual(state.clock + HOUR);
     expect(state.record("test")!.failures).toBe(8);
   });
 

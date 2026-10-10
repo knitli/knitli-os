@@ -147,7 +147,7 @@ export function alarmBackoffMs(
   { baseMs = 30_000, maxMs = HOUR_MS }: { baseMs?: number; maxMs?: number } = {},
 ): number {
   const base = Math.max(baseMs, ALARM_FLOOR_MS);
-  return Math.min(base * 2 ** Math.max(failures - 1, 0), Math.max(maxMs, base));
+  return Math.min(base * 2 ** Math.max(failures - 1, 0), Math.max(maxMs, ALARM_FLOOR_MS));
 }
 
 /**
@@ -161,9 +161,10 @@ export function alarmBackoffMs(
  * 3. If `run` throws, the guard owns the next alarm. It overrides whatever `run` armed with
  *    `now + backoff`, logs `alarm.failed`, and returns normally so the platform does not
  *    retry as well. A success resets the failure count.
- * 4. After `maxConsecutiveFailures` consecutive failures it deletes the alarm instead
- *    (`alarm.gave_up`). Only an outside re-arm, such as an RPC, runs it again, and the first
- *    success resets it.
+ * 4. After `maxConsecutiveFailures` consecutive failures it stops arming retries
+ *    (`alarm.gave_up`): an alarm armed during the run, by the body or a concurrent request, is
+ *    kept but pushed out to the longest backoff, and with none armed the alarm stays off until an
+ *    outside re-arm, such as an RPC. The first success resets it.
  *
  * Cost: one KV read and one KV write per run, plus a second write when the failure count changes,
  * and an alarm read. When a run succeeds and leaves no alarm armed the key is deleted, so an idle
@@ -207,7 +208,12 @@ export async function guardedAlarm(
   } catch (error) {
     nextFailures = failures + 1;
     if (nextFailures >= maxConsecutiveFailures) {
-      await storage.deleteAlarm();
+      // Never delete an alarm: a concurrent request may have armed it for new work during the run.
+      // Slow whatever is armed to the longest backoff; with nothing armed, stay off.
+      const armed = await storage.getAlarm();
+      if (armed !== null) {
+        await storage.setAlarm(Math.max(armed, now() + alarmBackoffMs(nextFailures, options.backoff)));
+      }
       logger.error("alarm gave up after consecutive failures", {
         event: "alarm.gave_up", alarmKey: key, failures: nextFailures, error,
       });

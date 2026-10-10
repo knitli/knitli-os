@@ -253,6 +253,17 @@ describe('NotificationsSetting', () => {
     expect(button(container, 'Turn off')).toBeUndefined()
   })
 
+  it('stops claiming to be on once notification permission is reset to ask', async () => {
+    const browser = installBrowser({ permission: 'granted', subscribed: true })
+    localStorage.setItem('gadgets.webPush.owner', 'me@example.com')
+    const container = await render(fakeApi())
+
+    browser.notification.permission = 'default'
+    await act(async () => { window.dispatchEvent(new Event('focus')) })
+    expect(container.textContent).not.toContain('On for this device')
+    expect(button(container, 'Turn on')).toBeDefined()
+  })
+
   it('is not stuck busy when the API is replaced while turning on', async () => {
     const browser = installBrowser({ permission: 'default', subscribed: false })
     let finish!: () => void

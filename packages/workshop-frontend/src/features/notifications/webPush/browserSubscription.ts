@@ -38,17 +38,23 @@ const writeOwner = (owner: string | null) => {
  * Registers `subscription` with the server. When the browser refreshed it since the last
  * registration, the endpoint it replaces is removed first: adding at the device limit displaces the
  * oldest entry, which must not be another device's while this one's predecessor is still stored.
+ * If that removal fails this throws before adding, and the new endpoint is recorded only afterwards,
+ * so the caller's retry removes the predecessor again.
  */
 export const registerBrowserSubscription = async (api: RpcStub<AuthenticatedApi>, subscription: PushSubscription) => {
   let previous: string | null = null
   try {
     previous = localStorage.getItem(ENDPOINT_KEY)
-    localStorage.setItem(ENDPOINT_KEY, subscription.endpoint)
   } catch {
     // Without storage the old entry is left for the server to prune when its push service says gone.
   }
-  if (previous && previous !== subscription.endpoint) await api.removeWebPushSubscription(previous).catch(() => {})
+  if (previous && previous !== subscription.endpoint) await api.removeWebPushSubscription(previous)
   await api.addWebPushSubscription(toSubscriptionInfo(subscription.toJSON()))
+  try {
+    localStorage.setItem(ENDPOINT_KEY, subscription.endpoint)
+  } catch {
+    // As above.
+  }
 }
 
 /** Whether this browser's subscription was made for `owner`, the signed-in user's id. */

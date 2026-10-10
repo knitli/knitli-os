@@ -76,6 +76,20 @@ describe('syncBrowserSubscription', () => {
     expect(api.removeWebPushSubscription).not.toHaveBeenCalled()
   })
 
+  it('keeps the predecessor on record, and adds nothing, while its removal keeps failing', async () => {
+    const api = fakeApi()
+    api.removeWebPushSubscription.mockRejectedValueOnce(new Error('offline'))
+    install()
+    localStorage.setItem(OWNER_KEY, 'me@example.com')
+    localStorage.setItem('gadgets.webPush.endpoint', 'https://web.push.apple.com/before-refresh')
+    await expect(syncBrowserSubscription(asStub(api), new AbortController().signal)).rejects.toThrow('offline')
+    expect(api.addWebPushSubscription).not.toHaveBeenCalled()
+
+    await syncBrowserSubscription(asStub(api), new AbortController().signal)
+    expect(api.removeWebPushSubscription).toHaveBeenLastCalledWith('https://web.push.apple.com/before-refresh')
+    expect(api.addWebPushSubscription).toHaveBeenCalledTimes(1)
+  })
+
   it('stops once its session is replaced, instead of dropping a subscription for a stale identity', async () => {
     const api = fakeApi()
     const { subscription } = install()

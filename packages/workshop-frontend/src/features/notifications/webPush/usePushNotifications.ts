@@ -105,10 +105,15 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
     let cancelled = false
     const recheck = () => {
       if (cancelled) return
+      // The browser drops the subscription along with the permission, whether it was blocked or
+      // reset to "ask".
+      const dropped = () => setReady((current) => current && { ...current, existing: null })
       if (Notification.permission === 'denied') {
-        // The browser drops the subscription along with the permission.
-        setReady((current) => current && { ...current, existing: null })
+        dropped()
         setStatus('blocked')
+      } else if (status === 'on' && Notification.permission !== 'granted') {
+        dropped()
+        setStatus('off')
       } else if (status === 'blocked') {
         setStatus('off')
       }

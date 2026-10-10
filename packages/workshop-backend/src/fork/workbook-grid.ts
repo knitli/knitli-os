@@ -94,7 +94,7 @@ export function formatCellValue(value: NonNullable<CellValue>): string {
   if (typeof value === "number") return String(value);
   if (typeof value === "boolean") return value ? "true" : "false";
   let text = value.replace(LINE_TERMINATORS, " ");
-  if (text !== "" && !/[ "=]/.test(text)) return text;
+  if (text !== "" && !/[\s"=]/.test(text)) return text;
   return `"${text.replace(/"/g, '""')}"`;
 }
 

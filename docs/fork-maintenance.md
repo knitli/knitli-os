@@ -269,7 +269,8 @@ Intentional, reviewed differences from upstream. Keep this current.
   of `chatScopeNames()` and the naming chokepoint), `agent.ts` (the `attachment` binding case in
   `describeBinding`, the `readSheet` tool and its removal when no workbook is bound, the replay
   text, the `readSheet` replay case, the spawned-tool filter), `agent-compaction.ts` (the
-  `foldWorkbookBindings()` call and pending-name set), `storage-schema/overseer-storage.ts` (the
+  `foldWorkbookBindings()` call and request-name set, saved as `requestedNames` on the checkpoint and
+  backfilled for old ones in `getActiveChatCompaction()` by `fork/workbook-checkpoint.ts`), `storage-schema/overseer-storage.ts` (the
   `attachment` `ChatBindingEntry` and one spread of `workbookCollections`),
   `workshop-shared/src/api.ts` (`ChatAttachmentRef.convertedFrom`, the `readSheet` `AiToolCall`),
   `scripts/build-browser-runtime.ts` (one import), `package.json`, `.gitignore`.

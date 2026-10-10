@@ -47,6 +47,15 @@ export const MAX_WORKBOOK_UNCOMPRESSED_BYTES = 32 * 1024 * 1024;
 export const MAX_WORKBOOK_ZIP_ENTRIES = 5_000;
 
 /**
+ * Ceilings on a workbook's sheet count and the total length of its sheet names. The index lives in
+ * one Durable Object record and is repeated to the model by `listSheets`, `describeBinding` and
+ * the missing-sheet error, and a format with no per-sheet cost (thousands of empty ODS tables in
+ * one `content.xml`) would otherwise let a single populated cell carry an unbounded index.
+ */
+export const MAX_WORKBOOK_SHEETS = 1_000;
+export const MAX_WORKBOOK_SHEET_NAME_CHARS = 32 * 1024;
+
+/**
  * Ceiling on the rows one workbook materializes, counted across all of its sheets.
  *
  * The archive's size does not bound its shape: a sheet's stored extent runs to Excel's own

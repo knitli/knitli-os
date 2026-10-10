@@ -111,16 +111,17 @@ export async function stageWorkbookUpload(
     throw new Error("This spreadsheet produced too much text to attach.");
   }
 
-  host.sweepStagedChatAttachments();
   let id = crypto.randomUUID();
-  host.storage.chatAttachmentContent.put({
-    fileId: id,
-    data: summary,
-    state: { type: "staged", uploadedAt: Date.now(), mimeType: SUMMARY_MIME_TYPE, name },
-  });
-  host.storage.chatWorkbooks.put({ fileId: id, convertedFrom: mimeType, name, meta: parsed.meta });
-
+  // Everything from the first write is under the cleanup, and the row iterator is closed on any
+  // failure, including one before the first chunk is read: closing releases the parser isolate.
   try {
+    host.sweepStagedChatAttachments();
+    host.storage.chatAttachmentContent.put({
+      fileId: id,
+      data: summary,
+      state: { type: "staged", uploadedAt: Date.now(), mimeType: SUMMARY_MIME_TYPE, name },
+    });
+    host.storage.chatWorkbooks.put({ fileId: id, convertedFrom: mimeType, name, meta: parsed.meta });
     for await (let chunk of parsed.rows) {
       host.storage.chatWorkbookRows.put({
         key: chatWorkbookRowKey(id, chunk.sheetIndex, chunk.chunkIndex),
@@ -132,6 +133,7 @@ export async function stageWorkbookUpload(
       });
     }
   } catch (err) {
+    await parsed.rows[Symbol.asyncIterator]().return?.();
     host.ctx.storage.transactionSync(() => {
       host.storage.chatAttachmentContent.delete(id);
       dropWorkbook(host.storage, id);

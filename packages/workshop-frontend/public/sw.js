@@ -60,10 +60,13 @@ self.addEventListener('notificationclick', (event) => {
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
     for (const client of windows) {
-      if ('navigate' in client) {
+      if (!('navigate' in client)) continue
+      try {
         await client.focus()
         await client.navigate(url.href)
         return
+      } catch {
+        // The window went away meanwhile: try the next one, or open a new one.
       }
     }
     await self.clients.openWindow(url.href)

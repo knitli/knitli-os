@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import { hasSignOutWorkerHandoff, releaseOnSignOut, syncBrowserSubscription } from './browserSubscription'
+import { hasSignOutWorkerHandoff, registerBrowserSubscription, releaseOnSignOut, syncBrowserSubscription } from './browserSubscription'
 import { applicationServerKey } from './pushSupport'
 
 const KEY = 'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8'
@@ -74,6 +74,22 @@ describe('syncBrowserSubscription', () => {
     api.removeWebPushSubscription.mockClear()
     await syncBrowserSubscription(asStub(api), new AbortController().signal)
     expect(api.removeWebPushSubscription).not.toHaveBeenCalled()
+  })
+
+  it('still removes a stale server entry later when sign-out could not reach the server', async () => {
+    const api = fakeApi()
+    const { subscription } = install()
+    localStorage.setItem(OWNER_KEY, 'me@example.com')
+    localStorage.setItem('gadgets.webPush.endpoint', subscription.endpoint)
+    api.removeWebPushSubscription.mockRejectedValueOnce(new Error('offline'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await releaseOnSignOut(asStub(api))
+    expect(localStorage.getItem('gadgets.webPush.endpoint')).toBe(subscription.endpoint)
+
+    await registerBrowserSubscription(asStub(api), {
+      endpoint: 'https://web.push.apple.com/new', toJSON: () => ({ endpoint: 'https://web.push.apple.com/new', keys: { p256dh: 'P', auth: 'A' } }),
+    } as unknown as PushSubscription)
+    expect(api.removeWebPushSubscription).toHaveBeenLastCalledWith(subscription.endpoint)
   })
 
   it('keeps the predecessor on record, and adds nothing, while its removal keeps failing', async () => {

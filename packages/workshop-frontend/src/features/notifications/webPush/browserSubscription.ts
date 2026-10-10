@@ -25,10 +25,8 @@ const readOwner = () => {
 
 const writeOwner = (owner: string | null) => {
   try {
-    if (owner === null) {
-      localStorage.removeItem(OWNER_KEY)
-      localStorage.removeItem(ENDPOINT_KEY)
-    } else localStorage.setItem(OWNER_KEY, owner)
+    if (owner === null) localStorage.removeItem(OWNER_KEY)
+    else localStorage.setItem(OWNER_KEY, owner)
   } catch {
     // Without storage the subscription can never be proven ours, so it is dropped next visit.
   }
@@ -83,6 +81,12 @@ export const releaseBrowserSubscription = async (api: RpcStub<AuthenticatedApi>,
   await subscription.unsubscribe()
   writeOwner(null)
   await api.removeWebPushSubscription(subscription.endpoint)
+  // Kept until the server confirmed: a later registration removes a stale entry it still holds.
+  try {
+    localStorage.removeItem(ENDPOINT_KEY)
+  } catch {
+    // Nothing to forget without storage.
+  }
 }
 
 /**

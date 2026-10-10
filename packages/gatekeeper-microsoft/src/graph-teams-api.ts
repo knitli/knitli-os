@@ -736,6 +736,17 @@ type SearchWalkAdvance = {
 };
 
 /**
+ * Identity of a search hit across the whole walk. A message id is only unique within its channel
+ * or chat, so the conversation is part of the key.
+ */
+function searchHitKey(hit: TeamsSearchHitInfo): string {
+  let where = hit.location.kind === "channel"
+      ? `channel/${hit.location.teamId}/${hit.location.channelId}`
+      : hit.location.kind === "chat" ? `chat/${hit.location.chatId}` : "unknown";
+  return `${where}/${hit.messageId}`;
+}
+
+/**
  * A walk over search results.
  *
  * Search pages by offset, not by a link, so the continuation state lives here rather than in
@@ -831,8 +842,8 @@ export class TeamsSearchWalk {
       offset += SEARCH_PAGE_SIZE;
       if (!page.moreAvailable) exhausted = true;
 
-      let fresh = page.hits.filter(hit => !seen.has(hit.messageId));
-      for (let hit of fresh) seen.add(hit.messageId);
+      let fresh = page.hits.filter(hit => !seen.has(searchHitKey(hit)));
+      for (let hit of fresh) seen.add(searchHitKey(hit));
       if (fresh.length > 0) {
         this.#pending = { hits: fresh, offset, pages, exhausted, seen };
         return fresh;
@@ -985,7 +996,11 @@ export class GraphTeamsApi {
       let body: GraphCollection<W> = await this.#fetchJson<GraphCollection<W>>(next);
       for (let item of body.value ?? []) items.push(map(item));
       let link = body["@odata.nextLink"];
-      if (!link) return items;
+      // The ceiling applies to the last page too: a terminal page must not be a way past it.
+      if (!link) {
+        if (items.length > maxItems) break;
+        return items;
+      }
       next = assertGraphUrl(link);
       if (items.length >= maxItems) break;
     }
@@ -1002,8 +1017,23 @@ export class GraphTeamsApi {
         graphUrl(["me", "joinedTeams"]), teamInfoFrom, MAX_TEAMS, "joined teams");
   }
 
+  /**
+   * One team, but only if the connected user has joined it. `GET /teams/{id}` also answers for a
+   * team the account merely administers, so membership is checked against the user's own joined
+   * teams, and the answer is taken from that listing.
+   */
   async getTeam(teamId: string): Promise<TeamsTeamInfo> {
-    return teamInfoFrom(await this.#fetchJson<GraphTeam>(graphUrl(["teams", teamId])));
+    graphUrl(["teams", teamId]); // rejects an empty or relative id before any request
+    let next: string = graphUrl(["me", "joinedTeams"]);
+    for (let page = 0; page < MAX_WALK_PAGES; page++) {
+      let body: GraphCollection<GraphTeam> = await this.#fetchJson<GraphCollection<GraphTeam>>(next);
+      let match = (body.value ?? []).find(team => team.id === teamId);
+      if (match) return teamInfoFrom(match);
+      let link = body["@odata.nextLink"];
+      if (!link) break;
+      next = assertGraphUrl(link);
+    }
+    throw new GraphApiError(404, "notFound", "That team is not one this account has joined.");
   }
 
   /**

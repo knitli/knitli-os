@@ -190,6 +190,28 @@ describe("pagination", () => {
     expect(calls).toHaveLength(10);
   });
 
+  it("holds the item cap on the last page too", async () => {
+    const chunk = (from: number, count: number) => Array.from({ length: count }, (_, index) => ({
+      id: `channel-${from + index}`, displayName: "General", membershipType: "standard",
+    }));
+    const link = "https://graph.microsoft.com/v1.0/teams/team-1/channels?$skiptoken=next";
+    // 200 channels is within the ceiling, whichever page ends the listing.
+    let pages: object[] = [{ value: chunk(0, 100), "@odata.nextLink": link }, { value: chunk(100, 100) }];
+    let index = 0;
+    stubFetch(() => jsonResponse(pages[index++]));
+    await expect(newApi().listChannels("team-1")).resolves.toHaveLength(200);
+
+    // 201 arriving on a terminal page must not slip past it.
+    pages = [
+      { value: chunk(0, 100), "@odata.nextLink": link },
+      { value: chunk(100, 100), "@odata.nextLink": link },
+      { value: chunk(200, 1) },
+    ];
+    index = 0;
+    await expect(newApi().listChannels("team-1"))
+      .rejects.toThrow(/more channels in this team than this can list/);
+  });
+
   it("refuses to answer with a listing truncated at the item cap", async () => {
     const page = Array.from({ length: 100 }, (_, index) => ({
       id: `channel-${index}`, displayName: "General", membershipType: "standard",
@@ -203,6 +225,40 @@ describe("pagination", () => {
       .rejects.toThrow(/more channels in this team than this can list/);
     // The item cap bites before the request cap does.
     expect(calls).toHaveLength(2);
+  });
+});
+
+describe("getTeam", () => {
+  it("returns a team the account has joined", async () => {
+    const calls = stubFetch(() => jsonResponse({
+      value: [{ id: "team-0", displayName: "Other" }, { id: "team-1", displayName: "Joined" }],
+    }));
+
+    const team = await newApi().getTeam("team-1");
+
+    expect(team.displayName).toBe("Joined");
+    expect(new URL(calls[0].url).pathname).toBe("/v1.0/me/joinedTeams");
+  });
+
+  it("refuses a team the account has not joined, without ever reading the team itself", async () => {
+    // A Teams service admin can read any team directly, so only the joined list is trusted.
+    const calls = stubFetch(() => jsonResponse({ value: [{ id: "team-0", displayName: "Other" }] }));
+
+    await expect(newApi().getTeam("team-9")).rejects.toThrow(/not one this account has joined/);
+
+    expect(calls.every(call => !new URL(call.url).pathname.startsWith("/v1.0/teams/"))).toBe(true);
+  });
+
+  it("finds a team on a later page", async () => {
+    const pages = [
+      { value: [{ id: "team-0", displayName: "A" }],
+        "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/joinedTeams?$skiptoken=next" },
+      { value: [{ id: "team-1", displayName: "B" }] },
+    ];
+    let index = 0;
+    stubFetch(() => jsonResponse(pages[index++]));
+
+    await expect(newApi().getTeam("team-1")).resolves.toMatchObject({ id: "team-1" });
   });
 });
 
@@ -457,6 +513,26 @@ describe("search results", () => {
     expect(JSON.parse(String(calls[1].init.body)).requests[0].from).toBe(25);
     // Exhausted by moreResultsAvailable: no third request.
     expect(calls).toHaveLength(2);
+  });
+
+  it("keeps two hits that share a message id in different conversations", async () => {
+    const pages = [
+      searchResponse([{ id: "m-1", chat: "chat-1" }], true),
+      searchResponse([{ id: "m-1", chat: "chat-2" }, { id: "m-1", channel: ["team-1", "channel-1"] },
+                      { id: "m-1", chat: "chat-1" }], false),
+    ];
+    let index = 0;
+    stubFetch(() => jsonResponse(pages[index++]));
+
+    const walk = newApi().openMessageSearch("quarterly");
+
+    expect((await walk.peekPage())!.map(hit => hit.location)).toEqual([{ kind: "chat", chatId: "chat-1" }]);
+    walk.commitPage();
+    // Only the repeat of the first conversation's message is dropped.
+    expect((await walk.peekPage())!.map(hit => hit.location)).toEqual([
+      { kind: "chat", chatId: "chat-2" },
+      { kind: "channel", teamId: "team-1", channelId: "channel-1" },
+    ]);
   });
 
   it("leaves the walk where it was when a page is never committed", async () => {

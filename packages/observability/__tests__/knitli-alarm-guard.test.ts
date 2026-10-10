@@ -4,6 +4,7 @@ import {
   alarmBackoffMs,
   alarmsDisabled,
   guardedAlarm,
+  guardedAlarmFor,
   haltIfAlarmsDisabled,
   scheduleAlarm,
   type AlarmGuardRecord,
@@ -158,6 +159,19 @@ describe("alarm guard", () => {
       .filter(([fields]) => (fields as { event?: string }).event === "alarm.circuit.open");
     expect(opens).toHaveLength(1);
     expect(opens[0]![0]).toEqual(expect.objectContaining({ alarmKey: "test", count: 6 }));
+  });
+
+  it("guardedAlarmFor honours the kill switch and a raised maxPerHour", async () => {
+    const run = vi.fn(ok);
+    for (let i = 0; i < 150; i++) await guardedAlarmFor(state, {}, "k", run, { maxPerHour: 200 });
+    expect(run).toHaveBeenCalledTimes(150);
+    // The default cap still applies without the option, and defers rather than drops.
+    for (let i = 0; i < 125; i++) await guardedAlarmFor(state, {}, "d", run);
+    expect(run).toHaveBeenCalledTimes(150 + 120);
+    expect(state.alarm).toBe((Math.floor(Date.now() / HOUR) + 1) * HOUR); // real clock: no `now` option
+    state.alarm = T0 + 5;
+    await guardedAlarmFor(state, { ALARMS_DISABLED: "true" }, "k", run);
+    expect(state.alarm).toBeNull();
   });
 
   it("deferWhenOpen re-arms for the next hour, never sooner", async () => {

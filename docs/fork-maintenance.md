@@ -956,7 +956,7 @@ ids are facet-local, not Activity ids.
   deletes the alarm when the Worker var `ALARMS_DISABLED` is `"true"`. The four handlers that
   re-arm (`OverseerDurableObject`, `ScheduleDriver`, Google `ChatHookDriver` and `GmailHookDriver`)
   call
-  `guardedAlarmFor(ctx, env, key, run)` instead: at most 120 runs per hour (the count is persisted on every run, so eviction cannot reset it), and a throwing run is
+  `guardedAlarmFor(ctx, env, key, run)` instead: at most 120 runs per hour, or 36,000 for the scheduler, whose legitimate peak is 500 one-minute schedules (the count is persisted on every run, so eviction cannot reset it), and a throwing run is
   replaced by an exponential-backoff alarm instead of being rethrown to the platform. The
   scheduler's "reports and rethrows alarm infrastructure failures" test now asserts the backoff
   alarm instead.

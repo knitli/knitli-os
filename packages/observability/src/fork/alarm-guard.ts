@@ -206,13 +206,16 @@ export async function guardedAlarm(
 /**
  * The seam upstream `alarm()` handlers call: {@link guardedAlarm} with the `ALARMS_DISABLED` kill
  * switch read from `env` and `deferWhenOpen` on, so a tripped breaker pauses the alarm for the hour
- * rather than dropping the work. `key` is as in {@link GuardedAlarmOptions}.
+ * rather than dropping the work. `key` and `maxPerHour` are as in {@link GuardedAlarmOptions}; raise
+ * `maxPerHour` for an alarm whose legitimate workload exceeds the default of 120 runs per hour.
  */
 export function guardedAlarmFor(
   state: AlarmGuardState,
   env: object,
   key: string,
   run: () => Promise<void>,
+  { maxPerHour }: Pick<GuardedAlarmOptions, "maxPerHour"> = {},
 ): Promise<void> {
-  return guardedAlarm(state, { key, disabled: alarmsDisabled(env), deferWhenOpen: true }, run);
+  return guardedAlarm(
+    state, { key, disabled: alarmsDisabled(env), deferWhenOpen: true, maxPerHour }, run);
 }

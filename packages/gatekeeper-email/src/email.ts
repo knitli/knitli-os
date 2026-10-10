@@ -72,6 +72,8 @@ type Env = Cloudflare.Env & {
   // Domain the mailbox addresses live on (where Email Routing delivers to this worker). Omit to
   // use BASE_URL's hostname.
   EMAIL_DOMAIN?: string,
+  // Mailbox-name prefix that may send email (with EMAIL_DOMAIN); sending stays off while unset.
+  EMAIL_SEND_PREFIX?: string,
   CF_ACCESS_ISS?: string,
   CF_ACCESS_AUD?: string,
 }
@@ -567,7 +569,7 @@ type EmailHookTarget = RpcTarget & EmailHook;
 export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplProps>
     implements Gatekeeper<EmailSession> {
 
-  #send = createEmailSend(this.ctx.storage.kv, this.env.SEND_EMAIL);
+  #send = createEmailSend(this.ctx.storage.kv, this.env);
 
   async describe(): Promise<ResourceDescription> {
     let emailName = this.ctx.props.emailName;

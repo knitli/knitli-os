@@ -4,12 +4,14 @@ import { describe, expect, it } from "vitest";
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { ActionJournal, type TaggedAction } from "@gadgets/gatekeeper-kit/actions";
 import {
-  checkSendQuota, createEmailSend, emailActions, MAX_RECIPIENTS_PER_HOUR, prepareSend,
+  assertMayDeliverFrom, checkSendQuota, createEmailSend, emailActions, MAX_RECIPIENTS_PER_HOUR, prepareSend,
   SEND_EMAIL_ACTION, type SendEmailPayload,
 } from "../../src/fork/send";
 import type { OutgoingEmail } from "../../src/types";
 
-const FROM = "agent@mail.example.com";
+const FROM = "gadget-agent@mail.example.com";
+const POLICY = { domain: "mail.example.com", mailboxPrefix: "gadget-" };
+const ENV = { EMAIL_DOMAIN: POLICY.domain, EMAIL_SEND_PREFIX: POLICY.mailboxPrefix };
 
 function mapKv() {
   const values = new Map<string, unknown>();
@@ -39,7 +41,7 @@ function setup(send: (message: EmailMessageBuilder) => Promise<EmailSendResult>,
   } } as SendEmail;
   const actions = emailActions.bind(
       new ActionJournal<TaggedAction<{ send: SendEmailPayload }>>(kv, { namespace: "email-send" }),
-      { sender, kv });
+      { sender, kv, policy: POLICY });
   const queue = {
     submitAction: async (id: number, description: ActionDescription) =>
       void submitted.set(id, description),
@@ -101,8 +103,8 @@ describe("sending email", () => {
       html: "<b>Body</b>",
       headers: { "In-Reply-To": "<orig@example.com>", "References": "<orig@example.com>" },
     });
-    expect(new Uint8Array(sent[0]!.attachments![0]!.content as ArrayBuffer)).toEqual(
-        new Uint8Array([1, 2, 3]));
+    // Base64, since the local email simulator cannot serialize binary content.
+    expect(sent[0]!.attachments![0]!.content).toBe("AQID");
 
     // Re-applying an applied action must not send it twice.
     await actions.apply(id);
@@ -138,6 +140,40 @@ describe("sending email", () => {
 const manyRecipients = (n: number, tag = "u") =>
   Array.from({ length: n }, (_, i) => `${tag}${i}@example.com`);
 
+describe("sender namespace", () => {
+  it.each<[string, string, Partial<typeof POLICY>, RegExp]>([
+    ["unset domain", FROM, { domain: undefined }, /not enabled/],
+    ["unset prefix", FROM, { mailboxPrefix: undefined }, /not enabled/],
+    ["a reserved name", "admin@mail.example.com", {}, /cannot send/],
+    ["another domain", "gadget-a@evil.example.com", {}, /cannot send/],
+  ])("refuses %s", (_name, from, override, error) => {
+    expect(() => assertMayDeliverFrom(from, { ...POLICY, ...override })).toThrow(error);
+  });
+
+  it("allows an address inside the namespace, case-insensitively", () => {
+    expect(() => assertMayDeliverFrom("Gadget-A@Mail.Example.com", POLICY)).not.toThrow();
+  });
+
+  it("refuses to queue a send from outside it, and to apply one queued before the policy changed",
+      async () => {
+    const { queue } = setup(ok);
+    const send = createEmailSend(mapKv(), { ...ENV, SEND_EMAIL: { send: ok } as SendEmail });
+    const email = { to: ["alice@example.com"], subject: "Hi", text: "x" };
+    await expect(send.submit(queue as never, email, "admin@mail.example.com")).rejects.toThrow(/cannot send/);
+    await expect(createEmailSend(mapKv(), { SEND_EMAIL: { send: ok } as SendEmail })
+      .submit(queue as never, email, FROM)).rejects.toThrow(/not enabled/);
+
+    // Same journal, tightened policy: the queued message must not go out.
+    const tightened = setup(ok);
+    const queued = await tightened.submit(email);
+    const rebound = emailActions.bind(
+        new ActionJournal<TaggedAction<{ send: SendEmailPayload }>>(tightened.kv, { namespace: "email-send" }),
+        { sender: { send: ok } as SendEmail, kv: tightened.kv, policy: { ...POLICY, mailboxPrefix: "other-" } });
+    await expect(rebound.apply(queued)).rejects.toThrow(/cannot send/);
+    expect(tightened.sent).toEqual([]);
+  });
+});
+
 describe("hourly send cap", () => {
   it("refuses sends past the cap at apply, however they were approved", async () => {
     const { sent, actions, submit } = setup(ok);
@@ -150,13 +186,29 @@ describe("hourly send cap", () => {
     expect(sent).toHaveLength(2);
   });
 
+  it("refunds the allowance when the binding rejects the message", async () => {
+    let reject = true;
+    const { sent, actions, submit } = setup(async () => {
+      if (reject) throw new Error("destination address not verified");
+      return { messageId: "<m@x.com>" };
+    });
+    const bad1 = await submit({ to: manyRecipients(50, "a"), subject: "1", text: "x" });
+    const bad2 = await submit({ to: manyRecipients(50, "b"), subject: "2", text: "x" });
+    await actions.apply(bad1).catch(() => {});
+    await actions.apply(bad2).catch(() => {});
+    reject = false;
+    const good = await submit({ to: ["alice@example.com"], subject: "3", text: "x" });
+    await actions.apply(good);
+    expect(sent).toHaveLength(1);
+  });
+
   it("refuses at submit when the cap is already spent", async () => {
     const kv = mapKv();
     const { actions, queue, submit } = setup(ok, kv);
     const id = await submit({ to: manyRecipients(50, "a"), subject: "1", text: "x" });
     await actions.apply(id);
     await actions.apply(await submit({ to: manyRecipients(50, "b"), subject: "2", text: "x" }));
-    const send = createEmailSend(kv, { send: ok } as SendEmail);
+    const send = createEmailSend(kv, { ...ENV, SEND_EMAIL: { send: ok } as SendEmail });
     await expect(send.submit(queue as never,
         { to: ["one@example.com"], subject: "3", text: "x" }, FROM))
       .rejects.toThrow(/per hour/);
@@ -219,6 +271,28 @@ describe("prepareSend", () => {
     const payload = await prepareSend(
         { ...base, from: "boss@example.com" } as OutgoingEmail, FROM);
     expect(payload.from).toEqual({ name: "", email: FROM });
+  });
+
+  it("rejects a References chain over the provider's header limit", async () => {
+    const id = (i: number) => `<${String(i).padStart(3, "0")}${"a".repeat(120)}@x.com>`;
+    const references = Array.from({ length: 17 }, (_, i) => id(i)).join(" ");
+    await expect(prepareSend({ ...base, references }, FROM)).rejects.toThrow(/longer than 2048/);
+  });
+
+  it("accepts the same bodies when no attachment metadata has to fit", async () => {
+    await expect(prepareSend({ ...base, text: "x".repeat(60 * 1024), html: "y".repeat(34 * 1024) }, FROM))
+      .resolves.toBeDefined();
+  });
+
+  it("refuses a message whose attachment metadata the approval would drop", async () => {
+    // A body that nearly fills the approval budget leaves no room for the attachment fields.
+    const email: OutgoingEmail = {
+      ...base, text: "x".repeat(60 * 1024), html: "y".repeat(34 * 1024),
+      attachments: Array.from({ length: 10 }, (_, i) => ({
+        filename: `${"n".repeat(200)}${i}.txt`, mimeType: "text/plain", content: new ArrayBuffer(1),
+      })),
+    };
+    await expect(prepareSend(email, FROM)).rejects.toThrow(/too large for its approval/);
   });
 
   it("accepts threading ids and normalizes the mime type", async () => {

@@ -23,10 +23,12 @@ import {
 } from '@gadgets/workshop-shared/gatekeeper';
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import { initiatorAllows, refuseForeignBrowser } from "@gadgets/observability/fork/connect-initiator";
+import { createEmailSend, type EmailSend } from "./fork/send";
 import {
   EmailSession,
   EmailHook,
   IncomingEmail,
+  OutgoingEmail,
   EmailAddress as EmailAddressType,
   EmailAttachment,
 } from "./types";
@@ -68,6 +70,11 @@ type Env = Cloudflare.Env & {
   // Base URL (protocol+host+optional path) at which the default fetch handler is served. Should
   // NOT include a trailing slash. Omit for localhost dev server.
   BASE_URL?: string,
+  // Domain the mailbox addresses live on (where Email Routing delivers to this worker). Omit to
+  // use BASE_URL's hostname.
+  EMAIL_DOMAIN?: string,
+  // Mailbox-name prefix that may send email (with EMAIL_DOMAIN); sending stays off while unset.
+  EMAIL_SEND_PREFIX?: string,
   CF_ACCESS_ISS?: string,
   CF_ACCESS_AUD?: string,
 }
@@ -101,7 +108,7 @@ function getEmailHost(env: Env) {
   //   routing purposes. At present the returned host isn't really used anywhere important so
   //   maybe we can get rid of this entirely, or maybe we should bring back the env var that
   //   specifies the default host.
-  return new URL(getBaseUrl(env)).hostname;
+  return env.EMAIL_DOMAIN?.trim() || new URL(getBaseUrl(env)).hostname;
 }
 
 function validateEmailName(value: string | undefined): { ok: true, emailName: string } | { ok: false, message: string } {
@@ -234,6 +241,8 @@ export default {
       text: parsed.text || null,
       html: parsed.html || null,
       attachments,
+      messageId: parsed.messageId || null,
+      references: parsed.references || null,
     };
 
     try {
@@ -508,15 +517,17 @@ class EmailSessionImpl extends RpcTarget implements EmailSession {
   #emailHost: string;
   #ctx: DurableObjectState<EmailGatekeeperImplProps>;
   #approvalQueue: RpcStub<ApprovalQueue>;
+  #send: EmailSend;
 
   constructor(emailName: string, emailHost: string,
       ctx: DurableObjectState<EmailGatekeeperImplProps>,
-      approvalQueue: RpcStub<ApprovalQueue>) {
+      approvalQueue: RpcStub<ApprovalQueue>, send: EmailSend) {
     super();
     this.#emailName = emailName;
     this.#emailHost = emailHost;
     this.#ctx = ctx;
     this.#approvalQueue = approvalQueue;
+    this.#send = send;
   }
 
   [Symbol.dispose]() {
@@ -539,6 +550,10 @@ class EmailSessionImpl extends RpcTarget implements EmailSession {
       description: `Receive emails sent to ${this.#emailName}@${this.#emailHost}`,
     });
   }
+
+  async send(email: OutgoingEmail): Promise<void> {
+    await this.#send.submit(this.#approvalQueue, email, `${this.#emailName}@${this.#emailHost}`);
+  }
 }
 
 // =======================================================================================
@@ -556,13 +571,15 @@ type EmailHookTarget = RpcTarget & EmailHook;
 export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplProps>
     implements Gatekeeper<EmailSession> {
 
+  #send = createEmailSend(this.ctx.storage.kv, this.env);
+
   async describe(): Promise<ResourceDescription> {
     let emailName = this.ctx.props.emailName;
     let host = getEmailHost(this.env);
     return {
       url: `${getBaseUrl(this.env)}/mailbox/${encodeURIComponent(emailName)}`,
       title: `${emailName}@${host}`,
-      snippet: `Receive emails sent to ${emailName}@${host}`,
+      snippet: `Send and receive emails as ${emailName}@${host}`,
       suggestedBindingName: "EMAIL",
       tsType: "EmailSession",
       hookTsType: "EmailHook",
@@ -574,28 +591,28 @@ export class EmailGatekeeperImpl extends DurableObject<Env, EmailGatekeeperImplP
   }
 
   async getAutoApprovableActions() {
-    return [];
+    return this.#send.autoApprovableKinds();
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<EmailSession> {
     let emailName = this.ctx.props.emailName;
     let host = getEmailHost(this.env);
-    return new EmailSessionImpl(emailName, host, this.ctx, approvalQueue.dup());
+    return new EmailSessionImpl(emailName, host, this.ctx, approvalQueue.dup(), this.#send);
   }
 
   // ---------------------------------------------------------------------------
 
   async applyAction(action: number): Promise<void> {
-    throw new Error("Email gatekeeper has no actions");
+    await this.#send.apply(action);
   }
 
   async rejectAction(action: number): Promise<void> {
-    // No actions to reject.
+    await this.#send.reject(action);
   }
 
   revertAction(action: number):
       Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
-    throw new Error("Email gatekeeper has no actions to revert");
+    throw new Error("Sent email cannot be recalled");
   }
 
   /**

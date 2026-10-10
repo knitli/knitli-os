@@ -253,6 +253,24 @@ describe('NotificationsSetting', () => {
     expect(button(container, 'Turn off')).toBeUndefined()
   })
 
+  it('is not stuck busy when the API is replaced while turning on', async () => {
+    const browser = installBrowser({ permission: 'default', subscribed: false })
+    let finish!: () => void
+    browser.pushManager.subscribe.mockReturnValueOnce(new Promise((resolve) => { finish = () => resolve(browser.subscription) }))
+    const container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    const first = fakeApi()
+    await act(async () => { root!.render(<NotificationsSetting api={first as unknown as RpcStub<AuthenticatedApi>} />) })
+    await act(async () => { button(container, 'Turn on')!.click() })
+
+    const second = fakeApi()
+    await act(async () => { root!.render(<NotificationsSetting api={second as unknown as RpcStub<AuthenticatedApi>} />) })
+    await act(async () => button(container, 'Turn on')!.click())
+    expect(second.addWebPushSubscription).toHaveBeenCalled()
+    await act(async () => finish())
+  })
+
   it('says so, and registers no service worker, when the deployment has no push key', async () => {
     const api = fakeApi()
     api.getWebPushPublicKey.mockResolvedValue(null)

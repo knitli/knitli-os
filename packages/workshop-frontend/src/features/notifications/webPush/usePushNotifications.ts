@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { claimBrowserSubscription, ownsBrowserSubscription, releaseBrowserSubscription } from './browserSubscription'
@@ -45,6 +45,8 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
   const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
+    sessionRef.current++
+    setBusy(false)
     let cancelled = false
     const availability = pushAvailability(currentPushEnvironment())
     if (availability !== 'supported') {
@@ -131,9 +133,21 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
     }
   }, [status])
 
+  // State writes from an action are dropped once the API (the session) has changed under it, so a
+  // late result cannot overwrite the new session's state, and it never leaves `busy` stuck.
+  const sessionRef = useRef(0)
+  const scoped = () => {
+    const mine = sessionRef.current
+    const ifCurrent = <T,>(write: (value: T) => void) => (value: T) => {
+      if (sessionRef.current === mine) write(value)
+    }
+    return { setStatus: ifCurrent(setStatus), setReady: ifCurrent(setReady), setBusy: ifCurrent(setBusy) }
+  }
+
   const enable = async () => {
     if (!ready || busy) return
-    setBusy(true)
+    const session = scoped()
+    session.setBusy(true)
     try {
       const { registration, key, owner } = ready
       let subscription = Notification.permission === 'granted' ? ready.existing : null
@@ -145,8 +159,8 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
             applicationServerKey: applicationServerKey(key),
           })
         } catch (error) {
-          if (Notification.permission === 'denied') setStatus('blocked')
-          else if (Notification.permission === 'default') setStatus('off')
+          if (Notification.permission === 'denied') session.setStatus('blocked')
+          else if (Notification.permission === 'default') session.setStatus('off')
           else throw error
           return
         }
@@ -161,36 +175,37 @@ export const usePushNotifications = (api: RpcStub<AuthenticatedApi>) => {
           await subscription.unsubscribe()
           claimBrowserSubscription(null)
         } catch {
-          setReady({ ...ready, existing: subscription })
-          setStatus('on')
+          session.setReady({ ...ready, existing: subscription })
+          session.setStatus('on')
         }
         throw error
       }
-      setReady({ ...ready, existing: subscription })
-      setStatus('on')
+      session.setReady({ ...ready, existing: subscription })
+      session.setStatus('on')
     } finally {
-      setBusy(false)
+      session.setBusy(false)
     }
   }
 
   const disable = async () => {
     if (!ready || busy) return
-    setBusy(true)
+    const session = scoped()
+    session.setBusy(true)
     try {
       try {
         await releaseBrowserSubscription(api, ready.registration.pushManager)
       } catch (error) {
         // A server failure leaves the device off; a browser failure leaves it on, with Turn off still offered.
         if (!(await ready.registration.pushManager.getSubscription())) {
-          setReady({ ...ready, existing: null })
-          setStatus('off')
+          session.setReady({ ...ready, existing: null })
+          session.setStatus('off')
         }
         throw error
       }
-      setReady({ ...ready, existing: null })
-      setStatus('off')
+      session.setReady({ ...ready, existing: null })
+      session.setStatus('off')
     } finally {
-      setBusy(false)
+      session.setBusy(false)
     }
   }
 

@@ -20,6 +20,12 @@ describe('pushAvailability', () => {
     expect(pushAvailability(env({ userAgent: IPAD, maxTouchPoints: 5, hasPushManager: false }))).toBe('install-first')
   })
 
+  it('does not send iOS older than 16.4 to the Home Screen, which could not help there', () => {
+    const old = IPHONE.replace('18_4', '16_3')
+    expect(pushAvailability(env({ userAgent: old, hasPushManager: false }))).toBe('unsupported')
+    expect(pushAvailability(env({ userAgent: IPHONE.replace('18_4', '16_4'), hasPushManager: false }))).toBe('install-first')
+  })
+
   it('is unsupported elsewhere without the Push API, including a Mac and an installed app on old iOS', () => {
     expect(pushAvailability(env({ userAgent: IPAD, maxTouchPoints: 0, hasPushManager: false }))).toBe('unsupported')
     expect(pushAvailability(env({ userAgent: IPHONE, hasPushManager: false, standalone: true }))).toBe('unsupported')

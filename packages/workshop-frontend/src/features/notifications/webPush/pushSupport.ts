@@ -31,7 +31,12 @@ export const pushAvailability = (env: PushEnvironment): PushAvailability => {
   // iPadOS reports itself as a Mac; its touch points give it away.
   const apple = /iPhone|iPad|iPod/.test(env.userAgent)
     || (/Macintosh/.test(env.userAgent) && env.maxTouchPoints > 1)
-  return apple && !env.standalone ? 'install-first' : 'unsupported'
+  if (!apple || env.standalone) return 'unsupported'
+  // Home Screen apps get Web Push from iOS/iPadOS 16.4: installing on older ones would not help.
+  // (iPadOS in desktop mode reports no version, so it is given the benefit of the doubt.)
+  const version = /OS (\d+)[_.](\d+)/.exec(env.userAgent)
+  if (version && (Number(version[1]) < 16 || (Number(version[1]) === 16 && Number(version[2]) < 4))) return 'unsupported'
+  return 'install-first'
 }
 
 /** A subscription in the shape the server stores; throws if the browser left out its keys. */

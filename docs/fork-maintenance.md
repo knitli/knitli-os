@@ -990,6 +990,7 @@ ids are facet-local, not Activity ids.
   Ported from XcityUS/xct-os (Apache-2.0), commits bca8a50221 (guard module), 7967b00e33 and
   23b2cf894a (handler wiring), 4aa392421e (coverage test).
 - **Test:** `packages/observability/__tests__/knitli-alarm-guard.test.ts` (guard behavior) and
+  `packages/gatekeeper-google/__tests__/workerd/knitli-hook-alarm-idle.test.ts` (idle hook drivers keep no guard key; one include line in `vitest.worker.config.ts` is Tier 2) and
   `scripts/fork/alarm-guard-coverage.test.ts` (each `async alarm(` method body must call the
   guard; checked per method, and fails if the guard is removed from any one). Exceptions: `schedule-driver.test.ts` is an upstream test edited for the backoff.
 - **At sync:** Tier 2 for each seam. A new upstream `alarm()` fails the coverage test until it gets

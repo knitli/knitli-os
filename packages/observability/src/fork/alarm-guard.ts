@@ -39,11 +39,13 @@ export const ALARM_GUARD_KEY_PREFIX = "alarm-guard:";
  */
 export interface AlarmGuardState {
   readonly storage: {
+    getAlarm(): Promise<number | null>;
     setAlarm(scheduledTime: number): Promise<void>;
     deleteAlarm(): Promise<void>;
     readonly kv: {
       get<T>(key: string): T | undefined;
       put<T>(key: string, value: T): void;
+      delete(key: string): boolean;
     };
   };
 }
@@ -163,7 +165,9 @@ export function alarmBackoffMs(
  *    (`alarm.gave_up`). Only an outside re-arm, such as an RPC, runs it again, and the first
  *    success resets it.
  *
- * Cost: one KV read and one KV write per run, plus a second write when the failure count changes.
+ * Cost: one KV read and one KV write per run, plus a second write when the failure count changes,
+ * and an alarm read. When a run succeeds and leaves no alarm armed the key is deleted, so an idle
+ * object returns to empty storage; a failing or given-up alarm keeps it.
  * The counters live in one small key (`alarm-guard:<key>`), overwritten in place. The run is
  * counted before `run` starts, so a run the runtime kills outright (CPU limit, eviction) still
  * advances the count and cannot hide a loop; its failure count cannot be recorded, so only the
@@ -215,7 +219,10 @@ export async function guardedAlarm(
       });
     }
   }
-  if (nextFailures !== failures) {
+  if (nextFailures === 0 && await storage.getAlarm() === null) {
+    // The alarm chain ended: nothing can loop, so leave an idle object with empty storage.
+    storage.kv.delete(storageKey);
+  } else if (nextFailures !== failures) {
     storage.kv.put<AlarmGuardRecord>(storageKey, { bucket, count, failures: nextFailures });
   }
 }

@@ -21,12 +21,14 @@ const T0 = 1_800_000_000_000 - (1_800_000_000_000 % HOUR); // the start of a clo
 /** An in-memory Durable Object slice with a fake clock and per-call write accounting. */
 class FakeState implements AlarmGuardState {
   clock = T0;
-  alarm: number | null = null;
+  // Armed by default, like an alarm that re-arms itself; tests that end the chain clear it.
+  alarm: number | null = T0 + 1_000;
   map = new Map<string, unknown>();
   writes = 0;
   alarmWrites: number[] = [];
   readonly now = () => this.clock;
   readonly storage = {
+    getAlarm: async () => this.alarm,
     setAlarm: async (at: number) => {
       this.alarm = at;
       this.alarmWrites.push(at);
@@ -287,6 +289,23 @@ describe("alarm guard", () => {
     for (let i = 0; i < 4; i++) counts.push(await state.fire({ maxPerMinute: 4 }, boom));
     expect(counts).toEqual([1, 2, 2, 0, 2, 1, 0, 0]);
     expect(state.map.size).toBeLessThanOrEqual(1);
+  });
+
+  it("removes the counter once a run succeeds and leaves no alarm armed", async () => {
+    await state.fire({}, async () => {
+      await state.storage.setAlarm(T0 + 60_000); // still armed: the key stays
+    });
+    expect(state.record("test")).toBeDefined();
+    await state.fire({}, async () => {
+      await state.storage.deleteAlarm(); // the chain ends
+    });
+    expect(state.map.size).toBe(0);
+  });
+
+  it("keeps the failure record when the alarm is given up", async () => {
+    for (let i = 0; i < 8; i++) await state.fire({}, boom);
+    expect(state.alarm).toBeNull();
+    expect(state.record("test")!.failures).toBe(8);
   });
 
   it("keeps separate counters per key", async () => {

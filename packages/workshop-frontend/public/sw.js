@@ -41,6 +41,17 @@ self.addEventListener('message', (event) => {
   )
 })
 
+// The browser replaced the subscription (new endpoint and keys). The worker has no credentials to
+// tell the server, so it wakes the open pages, whose sync re-registers the current one.
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    // Client.postMessage takes no target origin (that rule is for window.postMessage).
+    // eslint-disable-next-line unicorn/require-post-message-target-origin
+    for (const client of windows) client.postMessage({ type: 'push-subscription-changed' })
+  })())
+})
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
   const url = new URL((event.notification.data && event.notification.data.url) || '/', self.location.origin)

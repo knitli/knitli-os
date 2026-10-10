@@ -41,11 +41,26 @@ describe('WebPushSync', () => {
     expect(sync).toHaveBeenCalledTimes(2)
   })
 
-  it('tries again as soon as the window regains focus', async () => {
+  it('checks again whenever the window regains focus, even after a successful run', async () => {
     await act(async () => { window.dispatchEvent(new Event('focus')) })
     expect(sync).toHaveBeenCalledTimes(2)
     await act(async () => { window.dispatchEvent(new Event('focus')) })
+    expect(sync).toHaveBeenCalledTimes(3)
+  })
+
+  it('checks again when the service worker reports the browser refreshed the subscription', async () => {
+    const worker = new EventTarget()
+    Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: worker })
+    await act(async () => root.unmount())
+    root = createRoot(document.createElement('div'))
+    sync.mockReset()
+    sync.mockResolvedValue(undefined)
+    await act(async () => root.render(<WebPushSync />))
+    expect(sync).toHaveBeenCalledTimes(1)
+
+    await act(async () => { worker.dispatchEvent(new MessageEvent('message', { data: { type: 'push-subscription-changed' } })) })
     expect(sync).toHaveBeenCalledTimes(2)
+    delete (navigator as { serviceWorker?: unknown }).serviceWorker
   })
 
   it('stops retrying once unmounted', async () => {

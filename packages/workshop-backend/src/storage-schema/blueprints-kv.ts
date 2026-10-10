@@ -22,6 +22,7 @@
 // without creating a cycle.
 
 import type { BlueprintMetadata, BlueprintPublicInfo } from "@gadgets/workshop-shared/api";
+import { SESSION_LEASE_KEY } from "../fork/idle-lease";
 
 /** Reserved key holding the featured blueprints (see parseFeaturedBlueprints). */
 export const FEATURED_BLUEPRINTS_KEY = '.featured';
@@ -38,7 +39,7 @@ export const ADMIN_CONFIG_KEY = '.adminConfig';
  * id must refuse these first. (readBlueprintKvRecord does.)
  */
 export function isReservedBlueprintKey(id: string): boolean {
-  return id === FEATURED_BLUEPRINTS_KEY || id === ADMIN_CONFIG_KEY;
+  return id === FEATURED_BLUEPRINTS_KEY || id === ADMIN_CONFIG_KEY || id === SESSION_LEASE_KEY;
 }
 
 /** A blueprint's record, stored under its id. */

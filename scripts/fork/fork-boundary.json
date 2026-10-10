@@ -61,6 +61,14 @@
       "reason": "Regression test for the fork-owned Web Push channel (src/fork/web-push.ts)."
     },
     {
+      "path": "packages/workshop-backend/__tests__/knitli-idle-lease.test.ts",
+      "reason": "Unit test for the fork-owned client-activity lease (src/fork/idle-lease.ts); exact path because this package's vitest include is non-recursive."
+    },
+    {
+      "path": "packages/workshop-backend/__integration__/knitli-session-lease.test.ts",
+      "reason": "End-to-end test for the fork-owned client-activity lease: real /api socket, workspace and alarm."
+    },
+    {
       "path": "packages/workshop-backend/scripts/fork/",
       "reason": "Fork-owned build step that bundles the sandboxed spreadsheet parser worker; build-browser-runtime.ts calls it with one import."
     },

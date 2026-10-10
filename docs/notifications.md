@@ -119,3 +119,17 @@ The trusted deploy service injects these into the backend; the private key is a 
 
 Self-hosted deployments may omit them. Browser notifications continue to work; native device
 registration fails and the SPA reports `{type: "failed"}` to the app.
+
+## Web Push (fork)
+
+A deployment can also push to browsers. `src/fork/web-push.ts` sends VAPID-signed, aes128gcm
+encrypted Web Push messages to the browsers a user subscribed with `addWebPushSubscription`, from
+the same fallback as the platform delivery: only when no visible tab acknowledged the notification.
+Set the `WEB_PUSH_VAPID_PRIVATE_KEY` secret to a P-256 private JWK; generate one with
+
+```sh
+node -e "console.log(JSON.stringify(require('crypto').generateKeyPairSync('ec',{namedCurve:'P-256'}).privateKey.export({format:'jwk'})))"
+```
+
+The public key browsers subscribe against is derived from it and served by `getWebPushPublicKey()`.
+Without the secret (or `PUBLIC_BASE_URL`) Web Push is off. See `docs/fork-maintenance.md`.

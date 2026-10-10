@@ -230,6 +230,32 @@ wrong).
 
 Intentional, reviewed differences from upstream. Keep this current.
 
+### Web Push channel
+
+- **Where:** `packages/workshop-backend/src/fork/web-push.ts` (Tier 1) and its regression test
+  `__tests__/knitli-web-push.test.ts`. Upstream-file seams: `UserDurableObject` in `user.ts` (three
+  thin RPC methods and one `deliverWebPush()` call in `publishNotification()`), `server.ts`
+  (forwarders), `storage-schema/user-storage.ts` (`webPushSubscriptions` singleton),
+  `workshop-shared/src/api.ts` (`WebPushSubscriptionInfo` and three `AuthenticatedApi` methods),
+  `env.d.ts` (`WEB_PUSH_VAPID_PRIVATE_KEY`) and `scripts/run-dev-server.ts` (dev passthrough).
+- **What:** A browser channel (RFC 8030/8291/8292, Declarative Web Push payloads) beside the
+  platform notification service in `docs/notifications.md`. It runs in the same post-acknowledgement
+  fallback: a notification a visible tab shows is never pushed, then Web Push goes to each
+  subscribed browser before the platform delivery. Ported from michielappelman/cloudflare-os
+  (eb10ad76, 5c92f7a0); that fork's own events in `overseer.ts` and its `useReportInView` presence
+  report are deliberately not ported, as upstream already emits the events and tracks presence.
+- **Why:** Browsers and installed web apps get push with no Cloudflare-operated service or APNs.
+- **Decisions:** the VAPID identity is one deployment secret, `WEB_PUSH_VAPID_PRIVATE_KEY` (a P-256
+  private JWK as JSON; the public key is derived from it), injected by the deploy service like
+  `CFOS_INSTALL_PRIVATE_KEY` and never stored in `AdminConfig` or KV. Unset (or without
+  `PUBLIC_BASE_URL`), the channel is off: `getWebPushPublicKey()` returns null, subscribing is
+  refused and delivery is a no-op. Endpoints must be https on an allowlisted push-service host,
+  and sends use `redirect: "manual"`. At most 10 subscriptions per user (a new device displaces the oldest); sends time out after 10 s and run beside the platform delivery; 404/410 prunes one.
+  Payloads are fixed templates plus the chat title bounded to 96 characters, encrypted to the
+  device.
+- **At sync:** Tier 2 for the seams only; if upstream reshapes `publishNotification()`, keep the
+  single `deliverWebPush()` call after the acknowledgement check and before the platform delivery.
+
 ### Deployment-admin connector frames
 
 - **Where:** `packages/workshop-backend/src/fork/admin-gatekeeper-apps.ts` and `packages/workshop-frontend/src/features/admin/gatekeeper-apps/`.
@@ -946,3 +972,21 @@ ids are facet-local, not Activity ids.
   override, drop ours and keep theirs; otherwise reapply the two lines in `parseArgs`.
 - **2026-10-04 sync:** upstream moved the task env declaration under `cache.env` (vp 1.0.0
   schema); the override list and test pin the nested form now. Nothing else changed.
+
+### Agent turn guards (ported from twinprime19/cloudflare-os)
+
+- **What:** a turn ends visibly after 3 consecutive steps whose tool calls all failed with
+  identical input, or at 30 steps, with a plain agent text notice committed in that step's
+  barrier. A step that stops on `length` with no text and no tool calls gets an explanatory
+  notice instead of an empty bubble. executeCode console output is capped at 32 KiB, before the
+  exception suffix, and the tool description says so.
+- **Where:** all policy is in the fork-owned `src/fork/turn-guards.ts` (Tier 1). Upstream seams:
+  `agent.ts` (`runAgent` owns a `TurnBudget`, passed as an optional `runAgentPass` parameter;
+  `finishTurn` calls `recordStep`; `turn_end` commits the notice and the length notice; one
+  `${EXECUTE_CODE_OUTPUT_ADVICE}` line in the executeCode intro) and `overseer.ts` (one
+  `capExecuteCodeOutput` call).
+- **Source:** fork commits edea30a0, ecf88cae (length notice only), 9a4fa1ad (decide in
+  `finishTurn`); Apache-2.0. Not ported: the Workers AI `reasoning_effort: low` change, because
+  `ai-models.ts` here already maps reasoning levels per model.
+- **Test:** `__tests__/knitli-turn-guards.test.ts` (Tier 1).
+- **At sync:** Tier 2. Upstream has no step cap; if it adds one, fold it into `TurnBudget`.

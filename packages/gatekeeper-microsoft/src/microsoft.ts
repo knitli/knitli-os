@@ -840,6 +840,12 @@ export class UserAccount extends DurableObject<Env> {
       // refreshable", and Entra publishes no lifetime for a refresh token — it is invalidated by
       // inactivity, policy, or revocation, none of which are visible in advance. Credential death
       // is reported when it happens, via credentialsExpired().
+      // The connect-timeout alarm is still armed from setCallback. A sign-in-only grant is deleted
+      // by it, so it is replaced with the short post-sign-in one before the callback, which the
+      // alarm could otherwise overtake and erase the grant the email is about to be read from.
+      if (completion.authOnly) {
+        this.ctx.storage.setAlarm(Date.now() + AUTH_GRANT_LIFETIME_MS);
+      }
       try {
         let props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
         handoff = await callback.complete(this.ctx.exports.GatekeeperUserImpl({props}));
@@ -850,8 +856,8 @@ export class UserAccount extends DurableObject<Env> {
         await this.#updateCredentials(async () => { this.#clearGrant(); });
         throw err;
       }
-      // Sign-in-only grants are transient: the caller has read the email via complete(), so
-      // schedule a prompt self-destruct.
+      // Sign-in-only grants are transient: the alarm set above removes it shortly after complete()
+      // has had the email read. Re-armed here so the window starts from completion.
       if (completion.authOnly) {
         this.ctx.storage.setAlarm(Date.now() + AUTH_GRANT_LIFETIME_MS);
       }
@@ -1051,7 +1057,9 @@ export class UserAccount extends DurableObject<Env> {
       detail?: string, rejectedToken?: string, claims?: string): Promise<void> {
     await this.#updateCredentials(async () => {
       let current = this.ctx.storage.kv.get<EntraAccessToken>("accessToken");
-      if (rejectedToken !== undefined && current && current.token !== rejectedToken) return;
+      // Current only if it is still the stored token. None stored means a replacement grant is
+      // waiting to mint one (a commit drops it), so a report about the old token is stale too.
+      if (rejectedToken !== undefined && current?.token !== rejectedToken) return;
       // The current token is known-bad, so don't keep serving it from cache.
       this.ctx.storage.kv.delete("accessToken");
       this.#recordMintFailure({

@@ -315,6 +315,8 @@ type SharePointListSessionContext = {
    * returned afterwards is row content, as opposed to opening a cursor that returns none yet.
    */
   authorizeRows(description: ObservationDescription, revealsRows: boolean): Promise<void>;
+  /** Whether any observer is tracked, i.e. whether row reads will be blocked. */
+  hasObservers(): boolean;
 };
 
 // ── SharePointItemCursorImpl ────────────────────────────────────────
@@ -447,18 +449,23 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
 
     // Validated before the approval prompt, so a bad column or an unfilterable type fails here
     // rather than on the first next() — nobody should be asked to authorize a query that cannot run.
-    if (select) {
-      for (let name of select) {
-        if (!columns.some(column => column.name === name)) {
-          throw new Error(
-              `Unknown column "${echoName(name)}". Use internal column names from getColumns().`);
+    try {
+      if (select) {
+        for (let name of select) {
+          if (!columns.some(column => column.name === name)) {
+            throw new Error(
+                `Unknown column "${echoName(name)}". Use internal column names from getColumns().`);
+          }
         }
       }
+      if (select && select.length === 0) {
+        throw new Error("`select` names no columns. Omit it to read every column, or name some.");
+      }
+      buildItemsFilter(where, columns);
+    } catch (err) {
+      await this.#recordSchemaRefusal(err, "Query refused");
+      throw err;
     }
-    if (select && select.length === 0) {
-      throw new Error("`select` names no columns. Omit it to read every column, or name some.");
-    }
-    buildItemsFilter(where, columns);
 
     // No row has been returned yet, but a cursor that could never be read is better refused here.
     await this.#ctx.authorizeRows({
@@ -488,6 +495,17 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
           `"${echoName(id)}" is not a SharePoint item id. Item ids are positive whole numbers.`);
     }
 
+    // With a collaborator on the gadget, rows are off limits and so is learning which ids exist:
+    // a 404 from the lookup below would tell them. The same observer-excluding check that opening
+    // a cursor makes comes first, and reveals nothing, so it does not restrict the workspace.
+    if (this.#ctx.hasObservers()) {
+      await this.#ctx.authorizeRows({
+        title: sanitizeApprovalTitle(`Look up item ${echoName(id)} in ${this.#ctx.listName()}`),
+        description: "Check whether this SharePoint list's rows may be read.\n\n" +
+            formatApprovalField("Item id", id),
+      }, false);
+    }
+
     // Fetched before the observation is authorized: an item that does not exist reveals no row, and
     // authorizing first would latch the restricted flag and close the gadget to new collaborators
     // for a read that returned nothing. Nothing is returned until the authorization succeeds.
@@ -503,6 +521,20 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
     return item;
   }
 
+  /**
+   * Record that a refusal describing this list's columns (an unknown name, an operator a type does
+   * not take, the choices a column offers) is being handed back. The caller was not given that, so
+   * it is a read of the schema and is audited like `getColumns()`.
+   */
+  async #recordSchemaRefusal(err: unknown, what: string): Promise<void> {
+    await this.#ctx.approvalQueue.authorizeObservation({
+      title: sanitizeApprovalTitle(`${what} against the schema of ${this.#ctx.listName()}`),
+      description:
+          "A request was refused, and the refusal describes this SharePoint list's columns.\n\n" +
+          formatApprovalField("Refusal", err instanceof Error ? err.message : String(err)),
+    });
+  }
+
   async createItem(fields: Record<string, unknown>): Promise<void> {
     let validated: Record<string, unknown>;
     try {
@@ -516,12 +548,7 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
       } catch (err) {
         // A refusal names columns, required fields and the choices a column offers, which the
         // caller has not been given, so it is a read of the schema and is recorded like one.
-        await this.#ctx.approvalQueue.authorizeObservation({
-          title: sanitizeApprovalTitle(`Create refused against the schema of ${this.#ctx.listName()}`),
-          description:
-              "A create was refused, and the refusal describes this SharePoint list's columns.\n\n" +
-              formatApprovalField("Refusal", err instanceof Error ? err.message : String(err)),
-        });
+        await this.#recordSchemaRefusal(err, "Create refused");
         throw err;
       }
     }
@@ -675,6 +702,7 @@ export class SharePointListGatekeeperImpl
       hasMarkerColumn: () => this.#markerPresent,
       authorizeRows: (description, revealsRows) =>
           this.#authorizeRows(queue, description, revealsRows),
+      hasObservers: () => this.#observerIds().length > 0,
     });
   }
 

@@ -819,6 +819,20 @@ describe("mint failure taxonomy", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("ignores a late rejection while the replacement grant has no token yet", async () => {
+    // A commit that merges scopes drops the access token so the next call mints one; a report about
+    // the old token arriving before that must not mark the new credentials dead.
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-new");
+
+    await account.reportCredentialsRejected("conditional access policy", "access-old");
+
+    expect(callback.credentialsExpired).not.toHaveBeenCalled();
+    expect(context.storage.kv.get("mintFailure")).toBeUndefined();
+  });
+
   it("ignores a late rejection of a token the account has since replaced", async () => {
     // Every resource binding caches its own token, so one can report a challenge for the old
     // token after a reconnect has already made a new one live.
@@ -839,6 +853,23 @@ describe("mint failure taxonomy", () => {
 });
 
 describe("sign-in-only grants", () => {
+  it("replaces the connect-timeout alarm before the callback, which the alarm could overtake", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    fetchMock.mockImplementation(async () => jsonResponse({
+      access_token: "access-auth", expires_in: 3600,
+      scope: "openid profile email https://graph.microsoft.com/User.Read",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await connect(account, callback, { authOnly: true });
+
+    const alarmOrders = context.storage.setAlarm.mock.invocationCallOrder;
+    const completeOrder = callback.complete.mock.invocationCallOrder[0];
+    // Armed by setCallback, then replaced before complete(), then once more after it.
+    expect(alarmOrders.filter(order => order < completeOrder).length).toBeGreaterThanOrEqual(2);
+  });
+
   it("is usable for the email read and then deletes itself", async () => {
     const { context, account } = newAccount();
     const callback = fakeCallback();

@@ -282,14 +282,19 @@ describe("reads", () => {
     ]);
   });
 
-  it("refuses an unknown column before anything is authorized", async () => {
+  it("refuses an unknown column, recording the schema read its refusal reveals", async () => {
     stubFetch();
     const session = await startSession();
 
     await expect(session.getItems({ select: ["Nope"] })).rejects.toThrow(/Unknown column "Nope"/);
     await expect(session.getItems({ where: [{ column: "Owner", op: "eq", value: "x" }] }))
         .rejects.toThrow(/Owner/);
-    expect(approvals.observations).toEqual([]);
+    // Each refusal names or types a column the caller was not given, so each is audited as a read.
+    expect(approvals.observations.map(o => o.title)).toEqual([
+      expect.stringMatching(/^Query refused against the schema of /),
+      expect.stringMatching(/^Query refused against the schema of /),
+    ]);
+    expect(approvals.observations[0].containsRestrictedData).toBeUndefined();
   });
 
   it("reads one item by id and refuses an id that is not one", async () => {
@@ -429,12 +434,12 @@ describe("createItem", () => {
     await expect(cursor.next()).rejects.toThrow(/skipped 5 pages with nothing on them/);
   });
 
-  it("refuses an empty column selection before anything is authorized", async () => {
+  it("refuses an empty column selection before any row is authorized", async () => {
     stubFetch();
     const session = await startSession();
 
     await expect(session.getItems({ select: [] })).rejects.toThrow(/names no columns/);
-    expect(approvals.observations).toHaveLength(0);
+    expect(approvals.observations.every(o => !o.title.startsWith("Read "))).toBe(true);
   });
 
   it("lets a required column that has a default be left out", async () => {
@@ -952,13 +957,29 @@ describe("observers", () => {
 
       await expect(session.getItem("7")).rejects.toThrow(/observation blocked/);
       await expect(session.getItems()).rejects.toThrow(/observation blocked/);
-      // The exclusion names every tracked observer, and the read is restricted.
-      const [getItemRead, getItemsOpen] = approvals.observations;
+      // Both name every tracked observer. Neither returned a row, so neither restricts.
+      const [getItemLookup, getItemsOpen] = approvals.observations;
       expect(approvals.observations).toHaveLength(2);
-      expect(getItemRead).toMatchObject({ containsRestrictedData: true, excludeObservers: ["user-1"] });
-      // Opening a cursor reveals no row, so it names the observers but does not restrict.
+      expect(getItemLookup).toMatchObject({ excludeObservers: ["user-1"] });
       expect(getItemsOpen).toMatchObject({ excludeObservers: ["user-1"] });
+      expect(getItemLookup.containsRestrictedData).toBeUndefined();
       expect(getItemsOpen.containsRestrictedData).toBeUndefined();
+    });
+
+    it("does not tell a collaborator which item ids exist", async () => {
+      // The lookup is checked against the observers before Graph is asked, so a missing id's 404
+      // cannot be told apart from an existing one's block.
+      const calls = stubFetch(call => new URL(call.url).pathname.endsWith("/items/404")
+        ? jsonResponse({ error: { code: "itemNotFound", message: "gone" } }, 404)
+        : defaultRoute(call));
+      overseerLike(new Set(["user-1"]));
+      await admit("user-1");
+      const session = await startSession();
+
+      await expect(session.getItem("404")).rejects.toThrow(/observation blocked/);
+      await expect(session.getItem("7")).rejects.toThrow(/observation blocked/);
+
+      expect(calls.some(call => /\/items\/\d+$/.test(new URL(call.url).pathname))).toBe(false);
     });
 
     it("names every observer in the exclusion", async () => {

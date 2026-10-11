@@ -8,6 +8,7 @@ import type {
   ObserverConfigCallback,
   Overseer,
 } from '@gadgets/workshop-shared/api'
+import { isConnectionPaused, subscribeConnectionPause } from './connectionPause'
 import { reportIssue } from './errorReporting'
 import { classifyRpcError, reportDoResetError } from './rpcErrors'
 import { linkActionLog } from './useActions'
@@ -202,7 +203,7 @@ export function useWorkspaceOpen({
         // and any other failure belongs to the paths that own it, so the probe stays silent.
         const probed = overseerStub
         heartbeat = setInterval(() => {
-          if (!document.hidden) probed.getMetadata().catch(() => {})
+          if (!document.hidden && !isConnectionPaused()) probed.getMetadata().catch(() => {})
         }, WORKSPACE_HEARTBEAT_INTERVAL_MS)
 
         openWorkspaceIdRef.current = id
@@ -210,6 +211,10 @@ export function useWorkspaceOpen({
         if (connectionLost) setConnectionLost(false)
       } catch (caught) {
         if (cancelled) return
+        // A deliberate pause drops the socket under whatever this open was waiting on, so the
+        // rejection describes the pause, not the workspace: no error page, no report. The re-render
+        // that follows re-issues openGadget, which queues on the parked connection until resume.
+        if (isConnectionPaused()) return
         console.error('Failed to load gadget:', caught)
 
         // TODO: Give invalid-share-key and observer failures stable codes so this remaining legacy
@@ -255,6 +260,16 @@ export function useWorkspaceOpen({
       disposeAttempt()
     }
   }, [id, authenticatedApi, reloadNonce])
+
+  // An unanswered observer dialog is not work: the server is parked inside openGadget waiting on
+  // this client, holding the workspace open, so the idle pause may land under it. Cancel the dialog
+  // then, as its own Cancel button would; resuming re-opens the workspace, which asks again.
+  useEffect(() => {
+    if (!observerConfig) return
+    return subscribeConnectionPause(() => {
+      if (isConnectionPaused()) observerConfig.reject(new Error(OBSERVER_CANCELLED))
+    })
+  }, [observerConfig])
 
   return {
     overseer,

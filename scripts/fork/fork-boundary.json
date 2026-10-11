@@ -81,6 +81,34 @@
       "reason": "End-to-end test for the fork-owned client-activity lease: real /api socket, workspace and alarm."
     },
     {
+      "path": "packages/workshop-frontend/src/connectionPause.ts",
+      "reason": "Fork-owned socket-pause state for idle tabs (idle lease UI half); no upstream counterpart."
+    },
+    {
+      "path": "packages/workshop-frontend/src/connectionPause.test.ts",
+      "reason": "Regression test for the fork-owned socket-pause state."
+    },
+    {
+      "path": "packages/workshop-frontend/src/useConnectionPaused.ts",
+      "reason": "Fork-owned React mirror of the socket-pause flag."
+    },
+    {
+      "path": "packages/workshop-frontend/src/useWorkspaceIdle.ts",
+      "reason": "Fork-owned idle detection (hidden 5 min, visible 10 min) that pauses the connection."
+    },
+    {
+      "path": "packages/workshop-frontend/src/useWorkspaceIdle.test.tsx",
+      "reason": "Regression test for the fork-owned idle detection."
+    },
+    {
+      "path": "packages/workshop-frontend/src/components/ConnectionChip.tsx",
+      "reason": "Fork-owned top-bar chip: Paused button or Reconnecting."
+    },
+    {
+      "path": "packages/workshop-frontend/src/components/ConnectionChip.test.tsx",
+      "reason": "Regression test for the fork-owned connection chip."
+    },
+    {
       "path": "packages/workshop-backend/scripts/fork/",
       "reason": "Fork-owned build step that bundles the sandboxed spreadsheet parser worker; build-browser-runtime.ts calls it with one import."
     },

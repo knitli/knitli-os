@@ -17,6 +17,7 @@
 
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
+import { SerialTaskQueue } from "@gadgets/gatekeeper-kit/serial-queue";
 import {
   ActionKind, ApprovalQueue, Cursor, Gatekeeper, GatekeeperUserVerifier, ObservationDescription,
   ResourceDescription,
@@ -709,7 +710,15 @@ export class SharePointListGatekeeperImpl
   // ---------------------------------------------------------------------------
   // The only place this gatekeeper writes to SharePoint.
 
-  async applyAction(actionId: number): Promise<void> {
+  // One apply at a time. Two overlapping approvals of the same action (two tabs) would otherwise
+  // both pass the checks below while the first is still waiting on Graph, and both write.
+  readonly #applies = new SerialTaskQueue();
+
+  applyAction(actionId: number): Promise<void> {
+    return this.#applies.run(() => this.#applyAction(actionId));
+  }
+
+  async #applyAction(actionId: number): Promise<void> {
     let pendingActions = new PendingActionStore<SharePointListAction>(this.ctx.storage.kv);
     let action = pendingActions.get(actionId);
     if (!action) {

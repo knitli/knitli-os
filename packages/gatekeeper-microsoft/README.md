@@ -56,6 +56,11 @@ Workshop is deliberately not changed to pass the binding's resource.
   credentials notice after a follow-up read, so if the account dies again in that window the stale
   acknowledgement can clear the newer expiry mark. The next failed call marks it again; closing the
   window needs the Workshop to order the two notices, which it does not.
+- **Filters on several columns are sent together.** `getItems` combines up to five conditions with
+  `and`, on one column or several. Microsoft documents limits on filtering more than one list
+  field in a request (indexing, and one field at a time on some lists); this gatekeeper does not
+  second-guess them, and a request Graph rejects comes back with Microsoft's own sentence. Filter
+  on one column, or filter the rows you read, if that happens.
 - **Date filters send the timestamp in quotes.** Graph's general `$filter` grammar writes date-time
   values without quotes, while SharePoint list items are filtered by SharePoint itself, whose
   documented examples quote them. This gatekeeper follows the SharePoint examples and has not been
@@ -490,11 +495,11 @@ identifies the cause, and guessing without it wastes a round trip.
 - [ ] **A retried reply draft does not duplicate.** Approve a reply draft, then apply the same
       action again (re-approve after a forced failure) → Drafts holds one draft, not two. Record
       whether the conversation-and-date filter on Drafts worked against Graph.
-- [ ] **A reply draft cannot inject markup.** Have the agent draft a reply whose comment contains
-      `<b>bold</b> <script>alert(1)</script>`, approve it, then open the draft in Outlook. Record
-      what you see: inert text (expected) or rendered HTML. If Graph interprets the comment as HTML,
-      the text still cannot execute in the approval UI, but say so here and escape it at the API
-      layer before this ships to anyone but you.
+- [ ] **A reply draft cannot inject markup.** Have the agent draft a reply whose text contains
+      `<b>bold</b> <a href="https://example.com">link</a>` and a line break, approve it, then open
+      the draft in Outlook. The text is sent HTML-escaped, so it must show as those literal
+      characters on separate lines, with no bold and no link. If Graph already escapes the comment
+      itself you will see `&lt;` instead; record which.
 
 ### Teams connection and behavior (via a gadget)
 

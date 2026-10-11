@@ -742,6 +742,40 @@ describe("approved actions", () => {
       .toHaveLength(2);
   });
 
+  it("sends a reply body as escaped HTML, so the draft shows what was approved", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+    const message = await firstMessage(session);
+    await message.createReplyDraft("<b>approved?</b> <a href=\"https://evil.example\">x</a> & done\nnext line");
+
+    await applyApprovedAction(approvals.actions[0].id);
+
+    const write = calls.find(call => call.url.endsWith("/createReply"))!;
+    expect(JSON.parse(String(write.init.body)).comment).toBe(
+      "&lt;b&gt;approved?&lt;/b&gt; &lt;a href=\"https://evil.example\"&gt;x&lt;/a&gt; &amp; done<br>next line");
+  });
+
+  it("makes one draft when the same approval arrives twice at once", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const calls = stubFetch(async call => {
+      if (call.url.endsWith("/createReply")) await gate;
+      return defaultRoute(call);
+    });
+    const session = await startSession();
+    const message = await firstMessage(session);
+    await message.createReplyDraft("On it.");
+    const id = approvals.actions[0].id;
+
+    const first = applyApprovedAction(id);
+    const second = applyApprovedAction(id);
+    await vi.waitFor(() => expect(calls.some(call => call.url.endsWith("/createReply"))).toBe(true));
+    release();
+    await Promise.all([first, second]);
+
+    expect(calls.filter(call => call.url.endsWith("/createReply"))).toHaveLength(1);
+  });
+
   it("applies a reply draft as a createReply call", async () => {
     const calls = stubFetch();
     const session = await startSession();

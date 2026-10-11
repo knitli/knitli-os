@@ -672,6 +672,25 @@ describe("applyAction", () => {
         .rejects.toThrow(/Unknown column "GadgetsActionId"/);
   });
 
+  it("creates one row when the same approval arrives twice at once", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const calls = stubFetch(async call => {
+      if (isItemCreate(call)) await gate;
+      return defaultRoute(call);
+    });
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+
+    const first = applyApprovedAction(1);
+    const second = applyApprovedAction(1);
+    await vi.waitFor(() => expect(creates(calls)).toHaveLength(1));
+    release();
+    await Promise.all([first, second]);
+
+    expect(creates(calls)).toHaveLength(1);
+  });
+
   it("answers a replay of an applied or rejected action as done, without creating again", async () => {
     const calls = stubFetch();
     const session = await startSession();

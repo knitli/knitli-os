@@ -89,6 +89,18 @@ export const MAX_REPLY_BODY_BYTES = 64 * 1024;
 /** How much of a reply's text a draft preview is compared on; previews are cut near 255 characters. */
 const DRAFT_MATCH_CHARS = 200;
 
+/**
+ * `comment` as the HTML Graph puts in the draft. The comment lands in an HTML body, so markup in it
+ * would be rendered, with links and all, while the approver saw it as literal text. Escaped, the
+ * draft shows exactly the characters that were approved; line breaks become `<br>` since HTML
+ * would otherwise collapse them.
+ */
+export function commentAsHtml(comment: string): string {
+  return comment
+      .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+      .replaceAll("\r\n", "\n").replaceAll("\n", "<br>");
+}
+
 function collapseWhitespace(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
@@ -747,7 +759,7 @@ export class GraphMailApi {
     let action = replyAll ? "createReplyAll" : "createReply";
     await this.#send(graphUrl(["me", "messages", messageId, action]), {
       method: "POST",
-      body: JSON.stringify({ comment }),
+      body: JSON.stringify({ comment: commentAsHtml(comment) }),
     });
   }
 }

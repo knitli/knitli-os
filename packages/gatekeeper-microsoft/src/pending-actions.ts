@@ -9,7 +9,10 @@
 
 /** Storage key prefix of the record that an action was finished, and how many are kept. */
 const FINISHED_PREFIX = "finished:action:";
-const MAX_FINISHED_ACTIONS = 200;
+const MAX_FINISHED_ACTIONS = 5000;
+
+/** How long a finished action is remembered. */
+const FINISHED_ACTION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
 /** Ceiling on queued-but-undecided actions, matching the Gmail gatekeeper. */
 export const MAX_PENDING_ACTIONS = 100;
@@ -56,16 +59,22 @@ export class PendingActionStore<Action> {
    * Remove an action that has been applied or rejected, and remember that it was. The platform may
    * retry an approval whose outcome it did not record, and an action that is already finished must
    * then answer as done, not as unknown, or an applied change stays pending in the Workshop for
-   * good. Only the most recent are kept.
+   * good.
+   *
+   * Kept by age, not by count: an approval whose outcome was lost can be retried long after newer
+   * actions have finished, so later completions must not push its record out. Anything older than
+   * `FINISHED_ACTION_TTL_MS` is dropped, and `MAX_FINISHED_ACTIONS` only guards runaway growth.
    */
   finish(id: number): void {
     this.remove(id);
-    this.#kv.put(`${FINISHED_PREFIX}${id}`, Date.now());
+    let now = Date.now();
+    this.#kv.put(`${FINISHED_PREFIX}${id}`, now);
     let finished = [...this.#kv.list<number>({ prefix: FINISHED_PREFIX })]
         .toSorted((a, b) => a[1] - b[1]);
-    for (let [key] of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED_ACTIONS))) {
-      this.#kv.delete(key);
-    }
+    let overflow = Math.max(0, finished.length - MAX_FINISHED_ACTIONS);
+    finished.forEach(([key, at], index) => {
+      if (index < overflow || now - at > FINISHED_ACTION_TTL_MS) this.#kv.delete(key);
+    });
   }
 
   /** Whether `finish(id)` was called for this action. */

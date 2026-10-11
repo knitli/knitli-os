@@ -55,7 +55,7 @@ export type ColumnDefinition = {
   multiline?: boolean;
   /** Longest value a `text` column accepts, in characters. Absent when the column sets no limit. */
   maxLength?: number;
-  /** A `person` or `lookup` column that holds more than one value. */
+  /** A `person`, `lookup` or check-box `choice` column that holds more than one value. */
   multiple?: boolean;
 }
 

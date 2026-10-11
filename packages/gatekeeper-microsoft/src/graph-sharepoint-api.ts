@@ -160,7 +160,7 @@ export type ColumnDefinition = {
   maximum?: number;
   /** Longest value a `text` column accepts, in characters, when the list sets a limit. */
   maxLength?: number;
-  /** A `person` or `lookup` column that holds more than one value. */
+  /** A `person`, `lookup` or check-box `choice` column that holds more than one value. */
   multiple?: boolean;
 };
 
@@ -220,7 +220,7 @@ type GraphColumnDefinition = {
   number?: { minimum?: number; maximum?: number };
   boolean?: unknown;
   dateTime?: { format?: string };
-  choice?: { choices?: string[]; allowTextEntry?: boolean };
+  choice?: { choices?: string[]; allowTextEntry?: boolean; displayAs?: string };
   personOrGroup?: { allowMultipleSelection?: boolean };
   lookup?: { allowMultipleValues?: boolean };
 };
@@ -312,7 +312,9 @@ function normalizeColumn(column: GraphColumnDefinition): ColumnDefinition | null
 
   let type = columnTypeOf(column);
   let choices = column.choice?.choices;
-  let multiple = column.personOrGroup?.allowMultipleSelection ?? column.lookup?.allowMultipleValues;
+  // A choice shown as check boxes holds several values, and is read and written as a list.
+  let multiple = column.personOrGroup?.allowMultipleSelection ?? column.lookup?.allowMultipleValues ??
+      (type === "choice" && column.choice?.displayAs === "checkBoxes" ? true : undefined);
   return {
     name,
     displayName: typeof column.displayName === "string" && column.displayName

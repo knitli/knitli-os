@@ -239,6 +239,17 @@ describe("listColumns", () => {
     ]);
   });
 
+  it("reports a check-box choice column as taking several values", async () => {
+    stubFetch(() => jsonResponse({ value: [
+      { name: "Tags", displayName: "Tags", choice: { choices: ["a", "b"], displayAs: "checkBoxes" } },
+      { name: "Kind", displayName: "Kind", choice: { choices: ["a", "b"], displayAs: "dropDownMenu" } },
+    ] }));
+
+    const columns = await newApi().listColumns("site-1", "list-1");
+
+    expect(columns.map(column => column.multiple)).toEqual([true, undefined]);
+  });
+
   it("keeps a number column's real bounds and drops the unbounded sentinels", async () => {
     stubFetch(() => jsonResponse({ value: [
       { name: "Qty", displayName: "Qty", number: { minimum: 1, maximum: 10 } },

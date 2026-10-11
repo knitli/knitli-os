@@ -737,7 +737,12 @@ export class OutlookMailGatekeeperImpl
     pendingActions.finish(actionId);
   }
 
-  async rejectAction(actionId: number): Promise<void | {restart?: boolean}> {
+  rejectAction(actionId: number): Promise<void | {restart?: boolean}> {
+    // Through the apply queue, so a reject and an apply of one action have a single ordered outcome.
+    return this.#applies.run(() => this.#rejectAction(actionId));
+  }
+
+  async #rejectAction(actionId: number): Promise<void> {
     const pendingActions = new PendingActionStore<OutlookMailAction>(this.ctx.storage.kv);
     if (!pendingActions.get(actionId)) {
       if (pendingActions.wasFinished(actionId)) return;

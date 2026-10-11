@@ -568,6 +568,23 @@ describe("applyAction", () => {
         && new URL(call.url).pathname.endsWith("/columns"))).toHaveLength(0);
   });
 
+  it("writes a list of choices as a string collection, which Graph has to be told", async () => {
+    const calls = stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        && (call.init.method ?? "GET") === "GET"
+      ? jsonResponse({ value: [...GRAPH_COLUMNS,
+        { name: "Tags", displayName: "Tags", choice: { choices: ["a", "b"], displayAs: "checkBoxes" } },
+        { name: "GadgetsActionId", text: {} }] })
+      : defaultRoute(call));
+    const session = await startSession();
+    await session.createItem({ Title: "x", Tags: ["a", "b"] });
+
+    await applyApprovedAction(1);
+
+    expect(JSON.parse(String(creates(calls)[0].init.body)).fields).toMatchObject({
+      Tags: ["a", "b"], "Tags@odata.type": "Collection(Edm.String)",
+    });
+  });
+
   it("will not recreate a marker column the approval did not name", async () => {
     // Queued while the list had the column, so the approval carried no schema change. Deleted
     // since, an earlier attempt's row would have lost its marker, and a new row would duplicate it.
@@ -839,6 +856,17 @@ describe("validateFields", () => {
     // A Date is an instant whose calendar day depends on a time zone it does not carry.
     expect(() => validateFields({ Due: new Date("2026-09-14T23:30:00Z") }, dateOnly))
         .toThrow(/calendar date like "2026-09-15"/);
+  });
+
+  it("takes a list of choices for a check-box column, each one checked", () => {
+    const tags: ColumnDefinition[] = [
+      { name: "Tags", displayName: "Tags", type: "choice", required: false, readOnly: false,
+        choices: ["a", "b"], multiple: true },
+    ];
+
+    expect(validateFields({ Tags: ["a", "b"] }, tags)).toEqual({ Tags: ["a", "b"] });
+    expect(() => validateFields({ Tags: "a" }, tags)).toThrow(/must be a list of them/);
+    expect(() => validateFields({ Tags: ["a", "z"] }, tags)).toThrow(/does not offer the choice "z"/);
   });
 
   it("holds a number to its column's bounds", () => {

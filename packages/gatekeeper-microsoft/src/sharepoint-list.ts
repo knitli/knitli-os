@@ -234,25 +234,39 @@ function validateValue(column: ColumnDefinition, value: unknown): unknown {
     case "dateTime":
       return validateDateTime(column, value);
     case "choice": {
-      if (typeof value !== "string") {
-        throw new Error(
-            `Column "${column.name}" expects one of its choices, but got ${describeType(value)}.`);
+      // A check-box column takes a list of choices; the others take exactly one.
+      if (column.multiple) {
+        if (!Array.isArray(value)) {
+          throw new Error(
+              `Column "${column.name}" takes several choices, so its value must be a list of them, ` +
+              `but got ${describeType(value)}.`);
+        }
+        return value.map(choice => validateChoice(column, choice));
       }
-      // A choice column whose options Graph did not report has nothing to check against; refusing
-      // every value there would make the column unusable rather than safe.
-      let choices = column.choices ?? [];
-      // A fill-in choice column accepts values outside its options.
-      if (choices.length > 0 && !column.allowTextEntry && !choices.includes(value)) {
-        throw new Error(
-            `Column "${column.name}" does not offer the choice "${echoName(value)}". Allowed: ` +
-            `${choices.join(", ")}.`);
-      }
-      return value;
+      return validateChoice(column, value);
     }
     default:
       column.type satisfies never;
       throw new Error(`Column "${column.name}" has an unrecognized type.`);
   }
+}
+
+/** One value for a choice column, checked against the choices it offers. */
+function validateChoice(column: ColumnDefinition, value: unknown): string {
+  if (typeof value !== "string") {
+    throw new Error(
+        `Column "${column.name}" expects one of its choices, but got ${describeType(value)}.`);
+  }
+  // A choice column whose options Graph did not report has nothing to check against; refusing
+  // every value there would make the column unusable rather than safe.
+  let choices = column.choices ?? [];
+  // A fill-in choice column accepts values outside its options.
+  if (choices.length > 0 && !column.allowTextEntry && !choices.includes(value)) {
+    throw new Error(
+        `Column "${column.name}" does not offer the choice "${echoName(value)}". Allowed: ` +
+        `${choices.join(", ")}.`);
+  }
+  return value;
 }
 
 function validateDateTime(column: ColumnDefinition, value: unknown): string {
@@ -753,7 +767,12 @@ export class SharePointListGatekeeperImpl
       // An earlier attempt may have created the row and lost its answer, or died before recording
       // it; that row carries this action's marker.
       if (!await api.hasItemWithMarker(siteId, listId, action.marker)) {
-        await api.createItem(siteId, listId, { ...action.fields, [MARKER_COLUMN]: action.marker });
+        // A list of choices is written as a string collection, which Graph needs to be told.
+        let typed = Object.fromEntries(Object.entries(action.fields).flatMap(([name, value]) =>
+            Array.isArray(value) && columns.find(column => column.name === name)?.multiple
+              ? [[name, value], [`${name}@odata.type`, "Collection(Edm.String)"]]
+              : [[name, value]]));
+        await api.createItem(siteId, listId, { ...typed, [MARKER_COLUMN]: action.marker });
       }
     } catch (err) {
       // A 4xx means the schema this create was validated against no longer matches the list. The
@@ -780,7 +799,12 @@ export class SharePointListGatekeeperImpl
     }
   }
 
-  async rejectAction(actionId: number): Promise<void | {restart?: boolean}> {
+  rejectAction(actionId: number): Promise<void | {restart?: boolean}> {
+    // Through the apply queue, so a reject and an apply of one action have a single ordered outcome.
+    return this.#applies.run(() => this.#rejectAction(actionId));
+  }
+
+  async #rejectAction(actionId: number): Promise<void> {
     let pendingActions = new PendingActionStore<SharePointListAction>(this.ctx.storage.kv);
     if (!pendingActions.get(actionId)) {
       if (pendingActions.wasFinished(actionId)) return;

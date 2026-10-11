@@ -547,6 +547,9 @@ the site's members can see.
       `GadgetsActionId`. Check the filter works on a list past 5,000 items, or note that it does not.
 - [ ] **The marker stays out of sight.** `getColumns()`, `getItems()` and `getItem()` never mention
       `GadgetsActionId`, and `createItem({GadgetsActionId: …})` is refused as an unknown column.
+- [ ] **A check-box choice column is written.** On a list with a "choose several" column, create a
+      row with two choices → both are stored. They are sent as a string collection with an
+      `@odata.type` annotation; record whether Graph accepted it.
 - [ ] **Types round-trip.** Write a choice, a number, a boolean, and a date → each is stored with
       the right type in SharePoint (a date lands as the moment you meant, not a day out).
 - [ ] **Sharing respects SharePoint's own access.** Share the gadget with a colleague who has site

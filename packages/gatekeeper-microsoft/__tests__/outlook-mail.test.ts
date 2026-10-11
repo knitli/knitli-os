@@ -776,6 +776,32 @@ describe("approved actions", () => {
     expect(calls.filter(call => call.url.endsWith("/createReply"))).toHaveLength(1);
   });
 
+  it("orders a rejection behind an apply of the same action that is still in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const calls = stubFetch(async call => {
+      if (call.url.endsWith("/createReply")) await gate;
+      return defaultRoute(call);
+    });
+    const session = await startSession();
+    const message = await firstMessage(session);
+    await message.createReplyDraft("On it.");
+    const id = approvals.actions[0].id;
+
+    const apply = applyApprovedAction(id);
+    await vi.waitFor(() => expect(calls.some(call => call.url.endsWith("/createReply"))).toBe(true));
+    let rejected = false;
+    const reject = gatekeeper.rejectAction(id).then(() => { rejected = true; });
+    await Promise.resolve();
+    // The rejection waits: it cannot report success while the write is still going.
+    expect(rejected).toBe(false);
+
+    release();
+    await Promise.all([apply, reject]);
+    expect(calls.filter(call => call.url.endsWith("/createReply"))).toHaveLength(1);
+    expect(context.storage.kv.get(`pending:action:${id}`)).toBeUndefined();
+  });
+
   it("applies a reply draft as a createReply call", async () => {
     const calls = stubFetch();
     const session = await startSession();

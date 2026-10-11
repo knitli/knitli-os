@@ -252,6 +252,13 @@ export async function fetchWithAuthRetry(
         return response;
       }
 
+      // A fresh token refused as well: nothing a retry can do. Reported so the account is marked
+      // dead and a reconnect offered, rather than every later call repeating the same refresh and
+      // 401. The response is still returned for the caller's own error.
+      if (refreshed && opts.onCredentialsRejected) {
+        await opts.onCredentialsRejected("unauthorized after a refresh", token).catch(() => {});
+      }
+
       if (!refreshed && replayable) {
         // Deliberately does not touch `attempt`: the refresh is one-shot, so it can add at most one
         // request to the budget rather than doubling it.

@@ -393,6 +393,37 @@ describe("error taxonomy", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it("reports credentials dead when the refreshed token is refused as well", async () => {
+    const rejected: [string, string][] = [];
+    const calls = stubFetch(() => jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, 401));
+    let issued = 0;
+    const api = new GraphMailApi(async () => `token-${++issued}`, {
+      onCredentialsRejected: async (detail, token) => { rejected.push([detail, token]); },
+    });
+
+    await expect(api.listMessages()).rejects.toThrow();
+
+    // One refresh, then the second 401 is the credentials' fault and is reported once.
+    expect(calls).toHaveLength(2);
+    expect(rejected).toEqual([["unauthorized after a refresh", "token-2"]]);
+  });
+
+  it("does not report a 401 that the refresh cured", async () => {
+    const rejected: string[] = [];
+    stubFetch(call =>
+      new Headers(call.init.headers).get("Authorization") === "Bearer token-2"
+        ? jsonResponse({ value: [MESSAGE] })
+        : jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, 401));
+    let issued = 0;
+    const api = new GraphMailApi(async () => `token-${++issued}`, {
+      onCredentialsRejected: async detail => { rejected.push(detail); },
+    });
+
+    await api.listMessages();
+
+    expect(rejected).toEqual([]);
+  });
+
   it("reports a claims-challenge 401 as credential death and does not retry", async () => {
     const rejected: string[] = [];
     const calls = stubFetch(() => jsonResponse(

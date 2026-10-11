@@ -110,6 +110,12 @@ const PERMANENT_AADSTS_CODES = new Set([
 /** Codes meaning the deployment's own client secret is wrong or lapsed, not the user's grant. */
 const CLIENT_SECRET_AADSTS_CODES = new Set([7000215, 7000222]);
 
+/** Codes meaning the deployment's client registration itself is wrong or gone. */
+const CLIENT_CONFIG_AADSTS_CODES = new Set([
+  700016, // application not found in the directory (bad CLIENT_ID, deleted registration)
+  90002,  // tenant not found (bad TENANT_ID)
+]);
+
 /**
  * OAuth error identifiers that, by definition, cannot be resolved without the user going through an
  * interactive sign-in — Conditional Access step-up, an MFA challenge, an expired session, or a
@@ -167,11 +173,16 @@ export function classifyTokenFailure(body: unknown): TokenFailure {
   const codeList = [...codes];
   const interactionRequired = INTERACTION_REQUIRED_ERRORS.has(error);
   const secretProblem = codeList.some(code => CLIENT_SECRET_AADSTS_CODES.has(code));
+  // `invalid_client` / `unauthorized_client` mean the deployment's own registration is at fault
+  // (bad ids, deleted app), so no user action can fix it — same admin-facing shape as a bad
+  // secret, keyed on the identifier as well as the codes for bodies that carry only one.
+  const configProblem = error === "invalid_client" || error === "unauthorized_client" ||
+      codeList.some(code => CLIENT_CONFIG_AADSTS_CODES.has(code));
   // `invalid_grant` is the standard "this grant is no longer good" answer (expired, revoked, replaced),
   // and Microsoft directs applications to start a new interactive authorization on it, whatever the
   // numeric code behind it, so a code not catalogued above cannot leave a dead refresh token retried.
   const invalidGrant = error === "invalid_grant";
-  const permanent = interactionRequired || invalidGrant ||
+  const permanent = interactionRequired || invalidGrant || configProblem ||
       codeList.some(code => PERMANENT_AADSTS_CODES.has(code));
   const detail = truncate(description || error || "no detail provided");
 
@@ -179,6 +190,9 @@ export function classifyTokenFailure(body: unknown): TokenFailure {
   if (secretProblem) {
     message = "This Cloudflare OS instance's Microsoft client secret is invalid or has expired. " +
         `An administrator must rotate it — reconnecting will not help (${detail})`;
+  } else if (configProblem) {
+    message = "This Cloudflare OS instance's Microsoft client registration is invalid or has been " +
+        `deleted. An administrator must fix it — reconnecting will not help (${detail})`;
   } else if (interactionRequired) {
     message = `Microsoft requires you to sign in again to satisfy an access policy (${detail}). ` +
         "Please reconnect the account.";

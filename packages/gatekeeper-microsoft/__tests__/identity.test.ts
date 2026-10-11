@@ -179,6 +179,23 @@ describe("classifyTokenFailure", () => {
     expect(failure.message).toMatch(/administrator must rotate/i);
   });
 
+  it("treats an invalid client registration as permanent with an administrator-facing message", () => {
+    // A bad CLIENT_ID/TENANT_ID or a deleted app registration: no reconnect can fix it, so it
+    // must not read as transient (which would hammer the token endpoint on every operation).
+    for (const body of [
+      { error: "invalid_client", error_codes: [700016] },
+      { error: "unauthorized_client",
+        error_description: "AADSTS700016: Application not found in the directory." },
+      { error_codes: [700016] },
+      { error_codes: [90002] },
+    ]) {
+      const failure = classifyTokenFailure(body);
+      expect(failure.permanent).toBe(true);
+      expect(failure.message).toMatch(/administrator must fix/i);
+      expect(failure.message).toMatch(/reconnecting will not help/i);
+    }
+  });
+
   it("caps provider text so an oversized description cannot become the whole error", () => {
     const failure = classifyTokenFailure({ error_description: "x".repeat(5000) });
     expect(failure.message.length).toBeLessThan(700);

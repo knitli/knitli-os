@@ -15,9 +15,12 @@
 // mailbox's writes do. `applyAction` leaves a failed action pending, so an approver can retry it or
 // reject it from the activity list.
 
-import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
+import { DurableObject, RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { SerialTaskQueue } from "@gadgets/gatekeeper-kit/serial-queue";
+import {
+  ApprovalQueueRpcTarget, SharedApprovalQueue,
+} from "@gadgets/gatekeeper-kit/shared-approval-queue";
 import {
   ActionKind, ApprovalQueue, Cursor, Gatekeeper, GatekeeperUserVerifier, ObservationDescription,
   ResourceDescription,
@@ -320,7 +323,7 @@ function describeType(value: unknown): string {
 
 type SharePointListSessionContext = {
   api: GraphSharePointApi;
-  approvalQueue: RpcStub<ApprovalQueue>;
+  approvalQueue: SharedApprovalQueue;
   pendingActions: PendingActionStore<SharePointListAction>;
   siteId: string;
   listId: string;
@@ -349,7 +352,7 @@ type SharePointListSessionContext = {
 // page it returns.
 
 @validateRpc()
-class SharePointItemCursorImpl extends RpcTarget implements Cursor<ListItem> {
+class SharePointItemCursorImpl extends ApprovalQueueRpcTarget implements Cursor<ListItem> {
   #ctx: SharePointListSessionContext;
   #firstPage: () => Promise<{ items: ListItem[]; nextLink?: string }>;
   #nextLink: string | undefined;
@@ -361,7 +364,7 @@ class SharePointItemCursorImpl extends RpcTarget implements Cursor<ListItem> {
   constructor(
       ctx: SharePointListSessionContext,
       firstPage: () => Promise<{ items: ListItem[]; nextLink?: string }>) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
     this.#firstPage = firstPage;
   }
@@ -445,11 +448,11 @@ class SharePointItemCursorImpl extends RpcTarget implements Cursor<ListItem> {
 // ── SharePointListSessionImpl ───────────────────────────────────────
 
 @validateRpc()
-class SharePointListSessionImpl extends RpcTarget implements SharePointListSession {
+class SharePointListSessionImpl extends ApprovalQueueRpcTarget implements SharePointListSession {
   #ctx: SharePointListSessionContext;
 
   constructor(ctx: SharePointListSessionContext) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
   }
 
@@ -715,7 +718,7 @@ export class SharePointListGatekeeperImpl
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<SharePointListSession> {
-    let queue = approvalQueue.dup();
+    let queue = new SharedApprovalQueue(approvalQueue.dup());
     return new SharePointListSessionImpl({
       api: this.#api(READ_RETRY_AFTER),
       approvalQueue: queue,
@@ -866,7 +869,7 @@ export class SharePointListGatekeeperImpl
    * missing from the exclusion list this call already computed.
    */
   async #authorizeRows(
-      queue: RpcStub<ApprovalQueue>, description: ObservationDescription,
+      queue: SharedApprovalQueue, description: ObservationDescription,
       revealsRows: boolean): Promise<void> {
     let observers = this.#observerIds();
     if (revealsRows) this.#rowReadsInFlight++;

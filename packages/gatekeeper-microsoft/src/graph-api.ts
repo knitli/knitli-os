@@ -90,6 +90,14 @@ export const MAX_REPLY_BODY_BYTES = 64 * 1024;
 const DRAFT_MATCH_CHARS = 200;
 
 /**
+ * Draft-search pages read before reporting no draft. Ten drafts a page, so a retry still finds the
+ * original past dozens of later drafts; past that the search stops rather than walking a
+ * pathological (or hostile, endlessly-linked) collection, and the retry creates a visibly
+ * duplicate draft instead of wedging the action behind a lookup that never ends.
+ */
+const MAX_DRAFT_PAGES = 10;
+
+/**
  * `comment` as the HTML Graph puts in the draft. The comment lands in an HTML body, so markup in it
  * would be rendered, with links and all, while the approver saw it as literal text. Escaped, the
  * draft shows exactly the characters that were approved; line breaks become `<br>` since HTML
@@ -734,22 +742,31 @@ export class GraphMailApi {
    * after `since` (an ISO timestamp). Used before replaying a draft whose first attempt may have
    * landed with its answer lost: createReply makes a new draft every time, so replaying blind
    * leaves two. The comment sits at the top of the draft, so it is what a draft's preview begins
-   * with; a comment that says nothing cannot be recognised and reports no draft.
+   * with; a comment that says nothing cannot be recognised and reports no draft. Pages past the
+   * first are followed (each link origin-checked like every other followed nextLink) so a draft
+   * is not missed for falling outside one `$top` window.
    */
   async hasReplyDraft(messageId: string, comment: string, since: string): Promise<boolean> {
     let wanted = collapseWhitespace(comment).slice(0, DRAFT_MATCH_CHARS);
     if (!wanted) return false;
     let conversationId = (await this.getMessage(messageId)).conversationId;
     if (!conversationId) return false;
-    let body = await this.#fetchJson<GraphCollection<GraphMessage>>(
-        graphUrl(["me", "mailFolders", "drafts", "messages"], {
-          $filter: `conversationId eq '${conversationId.replaceAll("'", "''")}' and ` +
-              `createdDateTime ge ${since}`,
-          $select: "id,bodyPreview",
-          $top: "10",
-        }));
-    return (body.value ?? []).some(draft =>
-        collapseWhitespace(draft.bodyPreview ?? "").startsWith(wanted));
+    let url: string | undefined = graphUrl(["me", "mailFolders", "drafts", "messages"], {
+      $filter: `conversationId eq '${conversationId.replaceAll("'", "''")}' and ` +
+          `createdDateTime ge ${since}`,
+      $select: "id,bodyPreview",
+      $top: "10",
+    });
+    for (let page = 0; url !== undefined && page < MAX_DRAFT_PAGES; page++) {
+      let body: GraphCollection<GraphMessage> =
+          await this.#fetchJson<GraphCollection<GraphMessage>>(url);
+      let match = (body.value ?? []).some(draft =>
+          collapseWhitespace(draft.bodyPreview ?? "").startsWith(wanted));
+      if (match) return true;
+      let next = body["@odata.nextLink"];
+      url = next ? assertGraphUrl(next) : undefined;
+    }
+    return false;
   }
 
   async createReplyDraft(messageId: string, comment: string, replyAll: boolean): Promise<void> {

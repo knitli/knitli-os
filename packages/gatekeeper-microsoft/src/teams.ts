@@ -27,8 +27,11 @@
 // Errors name ids, never counterpart display text — a thrown message is rendered in places an
 // approval description is not.
 
-import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
+import { DurableObject, RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
+import {
+  ApprovalQueueRpcTarget, SharedApprovalQueue,
+} from "@gadgets/gatekeeper-kit/shared-approval-queue";
 import {
   ActionKind, AgentCatalog, ApprovalQueue, Cursor, Gatekeeper, GatekeeperUserVerifier,
   ResourceDescription,
@@ -75,7 +78,7 @@ const MAX_NAME_CHARS = 80;
 
 type TeamsSessionContext = {
   api: GraphTeamsApi;
-  approvalQueue: RpcStub<ApprovalQueue>;
+  approvalQueue: SharedApprovalQueue;
 };
 
 /** One bounded line standing for a value that may be long or many-lined. */
@@ -147,7 +150,7 @@ function describeHitLines(hits: TeamsSearchHitInfo[]): string {
 // The walk below is shared by messages, members, and chats, which differ only in what an item
 // becomes and how a page is described. The part that has to be right — staging the continuation
 // until the observation is authorized — is exactly the part that must not be written three times.
-// The three `RpcTarget` classes after it are thin, and exist because the RPC argument validator
+// The three cursor classes after it are thin, and exist because the RPC argument validator
 // needs to see the concrete shape a `next()` returns; a type parameter gives it nothing to check.
 
 /** What one page of a cursor is reported as, once its entries exist. */
@@ -179,6 +182,11 @@ class TeamsPageWalk<T, E> {
   constructor(ctx: TeamsSessionContext, spec: PageCursorSpec<T, E>) {
     this.#ctx = ctx;
     this.#spec = spec;
+  }
+
+  /** The session's shared queue, so the cursor wrapping this walk can retain it. */
+  get approvalQueue(): SharedApprovalQueue {
+    return this.#ctx.approvalQueue;
   }
 
   next(): Promise<E[] | null> {
@@ -257,11 +265,11 @@ class TeamsPageWalk<T, E> {
 }
 
 @validateRpc()
-class TeamsMessageCursorImpl extends RpcTarget implements Cursor<TeamsMessageEntry> {
+class TeamsMessageCursorImpl extends ApprovalQueueRpcTarget implements Cursor<TeamsMessageEntry> {
   #walk: TeamsPageWalk<TeamsMessageInfo, TeamsMessageEntry>;
 
   constructor(walk: TeamsPageWalk<TeamsMessageInfo, TeamsMessageEntry>) {
-    super();
+    super(walk.approvalQueue);
     this.#walk = walk;
   }
 
@@ -271,11 +279,11 @@ class TeamsMessageCursorImpl extends RpcTarget implements Cursor<TeamsMessageEnt
 }
 
 @validateRpc()
-class TeamsMemberCursorImpl extends RpcTarget implements Cursor<TeamsMemberInfo> {
+class TeamsMemberCursorImpl extends ApprovalQueueRpcTarget implements Cursor<TeamsMemberInfo> {
   #walk: TeamsPageWalk<TeamsMemberInfo, TeamsMemberInfo>;
 
   constructor(walk: TeamsPageWalk<TeamsMemberInfo, TeamsMemberInfo>) {
-    super();
+    super(walk.approvalQueue);
     this.#walk = walk;
   }
 
@@ -285,11 +293,11 @@ class TeamsMemberCursorImpl extends RpcTarget implements Cursor<TeamsMemberInfo>
 }
 
 @validateRpc()
-class TeamsChatCursorImpl extends RpcTarget implements Cursor<TeamsChatEntry> {
+class TeamsChatCursorImpl extends ApprovalQueueRpcTarget implements Cursor<TeamsChatEntry> {
   #walk: TeamsPageWalk<TeamsChatInfo, TeamsChatEntry>;
 
   constructor(walk: TeamsPageWalk<TeamsChatInfo, TeamsChatEntry>) {
-    super();
+    super(walk.approvalQueue);
     this.#walk = walk;
   }
 
@@ -358,14 +366,14 @@ function chatCursor(ctx: TeamsSessionContext): Cursor<TeamsChatEntry> {
 // ── TeamsSearchCursorImpl ───────────────────────────────────────────
 
 @validateRpc()
-class TeamsSearchCursorImpl extends RpcTarget implements Cursor<TeamsSearchHitEntry> {
+class TeamsSearchCursorImpl extends ApprovalQueueRpcTarget implements Cursor<TeamsSearchHitEntry> {
   #ctx: TeamsSessionContext;
   #query: string;
   #walk: TeamsSearchWalk;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(ctx: TeamsSessionContext, query: string, walk: TeamsSearchWalk) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
     this.#query = query;
     this.#walk = walk;
@@ -413,13 +421,13 @@ class TeamsSearchCursorImpl extends RpcTarget implements Cursor<TeamsSearchHitEn
 // ── TeamsTeamStub ───────────────────────────────────────────────────
 
 @validateRpc()
-class TeamsTeamStub extends RpcTarget implements TeamsTeam {
+class TeamsTeamStub extends ApprovalQueueRpcTarget implements TeamsTeam {
   #ctx: TeamsSessionContext;
   #teamId: string;
   #cachedInfo: TeamsTeamInfo | undefined;
 
   constructor(ctx: TeamsSessionContext, teamId: string, cachedInfo?: TeamsTeamInfo) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
     this.#teamId = teamId;
     this.#cachedInfo = cachedInfo;
@@ -504,7 +512,7 @@ class TeamsTeamStub extends RpcTarget implements TeamsTeam {
 // ── TeamsChannelStub ────────────────────────────────────────────────
 
 @validateRpc()
-class TeamsChannelStub extends RpcTarget implements TeamsChannel {
+class TeamsChannelStub extends ApprovalQueueRpcTarget implements TeamsChannel {
   #ctx: TeamsSessionContext;
   #teamId: string;
   #channelId: string;
@@ -513,7 +521,7 @@ class TeamsChannelStub extends RpcTarget implements TeamsChannel {
   constructor(
       ctx: TeamsSessionContext, teamId: string, channelId: string,
       cachedInfo?: TeamsChannelInfo) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
     this.#teamId = teamId;
     this.#channelId = channelId;
@@ -557,13 +565,13 @@ class TeamsChannelStub extends RpcTarget implements TeamsChannel {
 // ── TeamsChatStub ───────────────────────────────────────────────────
 
 @validateRpc()
-class TeamsChatStub extends RpcTarget implements TeamsChat {
+class TeamsChatStub extends ApprovalQueueRpcTarget implements TeamsChat {
   #ctx: TeamsSessionContext;
   #chatId: string;
   #cachedInfo: TeamsChatInfo | undefined;
 
   constructor(ctx: TeamsSessionContext, chatId: string, cachedInfo?: TeamsChatInfo) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
     this.#chatId = chatId;
     this.#cachedInfo = cachedInfo;
@@ -616,7 +624,7 @@ class TeamsChatStub extends RpcTarget implements TeamsChat {
 // ── TeamsChannelMessageStub ─────────────────────────────────────────
 
 @validateRpc()
-class TeamsChannelMessageStub extends RpcTarget implements TeamsChannelMessage {
+class TeamsChannelMessageStub extends ApprovalQueueRpcTarget implements TeamsChannelMessage {
   #ctx: TeamsSessionContext;
   #teamId: string;
   #channelId: string;
@@ -626,7 +634,7 @@ class TeamsChannelMessageStub extends RpcTarget implements TeamsChannelMessage {
   constructor(
       ctx: TeamsSessionContext, teamId: string, channelId: string, messageId: string,
       cachedInfo?: TeamsMessageInfo) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
     this.#teamId = teamId;
     this.#channelId = channelId;
@@ -675,12 +683,12 @@ class TeamsChannelMessageStub extends RpcTarget implements TeamsChannelMessage {
 // message as readily as a channel one, and a chat message has no reply chain to offer.
 
 @validateRpc()
-class TeamsSearchHitStub extends RpcTarget implements TeamsMessage {
+class TeamsSearchHitStub extends ApprovalQueueRpcTarget implements TeamsMessage {
   #ctx: TeamsSessionContext;
   #hit: TeamsSearchHitInfo;
 
   constructor(ctx: TeamsSessionContext, hit: TeamsSearchHitInfo) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
     this.#hit = hit;
   }
@@ -701,11 +709,11 @@ class TeamsSearchHitStub extends RpcTarget implements TeamsMessage {
 // ── TeamsSessionImpl ────────────────────────────────────────────────
 
 @validateRpc()
-class TeamsSessionImpl extends RpcTarget implements TeamsSession {
+class TeamsSessionImpl extends ApprovalQueueRpcTarget implements TeamsSession {
   #ctx: TeamsSessionContext;
 
   constructor(ctx: TeamsSessionContext) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
   }
 
@@ -846,7 +854,7 @@ export class TeamsGatekeeperImpl
     // and the session keeps calling this queue long after startSession() has answered.
     return new TeamsSessionImpl({
       api: this.#api(),
-      approvalQueue: approvalQueue.dup(),
+      approvalQueue: new SharedApprovalQueue(approvalQueue.dup()),
     });
   }
 

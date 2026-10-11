@@ -255,6 +255,68 @@ describe("pagination link pinning", () => {
   });
 });
 
+describe("reply draft detection", () => {
+  const draft = (preview: string) => ({ id: `draft-${preview}`, bodyPreview: preview });
+  const nextPage = (token: string) =>
+    `https://graph.microsoft.com/v1.0/me/mailFolders/drafts/messages?$skiptoken=${token}`;
+
+  /** getMessage for the id lookup, then `pages` in order for the draft search. */
+  function stubDraftSearch(pages: unknown[]): Call[] {
+    let page = 0;
+    return stubFetch(call => call.url.includes(`/messages/${MESSAGE.id}`)
+      ? jsonResponse(MESSAGE)
+      : jsonResponse(pages[Math.min(page++, pages.length - 1)]));
+  }
+
+  it("finds the original past a first page of later drafts", async () => {
+    const later = Array.from({ length: 10 }, (_, i) => draft(`later draft ${i}`));
+    const calls = stubDraftSearch([
+      { value: later, "@odata.nextLink": nextPage("p2") },
+      { value: [draft("thanks, sending it over")] },
+    ]);
+
+    const found = await newApi().hasReplyDraft(
+        MESSAGE.id, "thanks, sending it over", "2026-08-01T09:00:00Z");
+
+    expect(found).toBe(true);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("reports no draft only after the terminal page", async () => {
+    const calls = stubDraftSearch([
+      { value: [draft("unrelated")], "@odata.nextLink": nextPage("p2") },
+      { value: [draft("also unrelated")] },
+    ]);
+
+    const found = await newApi().hasReplyDraft(MESSAGE.id, "thanks", "2026-08-01T09:00:00Z");
+
+    expect(found).toBe(false);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("stops following draft pages at the cap instead of walking forever", async () => {
+    const calls = stubDraftSearch([{
+      value: [draft("unrelated")],
+      "@odata.nextLink": nextPage("again"),
+    }]);
+
+    const found = await newApi().hasReplyDraft(MESSAGE.id, "thanks", "2026-08-01T09:00:00Z");
+
+    expect(found).toBe(false);
+    expect(calls).toHaveLength(11);
+  });
+
+  it("refuses an off-origin draft nextLink", async () => {
+    stubDraftSearch([{
+      value: [draft("unrelated")],
+      "@odata.nextLink": "https://attacker.example/v1.0/me/messages?$skiptoken=abc",
+    }]);
+
+    await expect(newApi().hasReplyDraft(MESSAGE.id, "thanks", "2026-08-01T09:00:00Z"))
+        .rejects.toThrow(/outside https:\/\/graph.microsoft.com/);
+  });
+});
+
 describe("folder traversal", () => {
   it("descends into nested folders, which the root listing omits", async () => {
     // /me/mailFolders returns only the root's children, so "Clients/Acme" is reachable only via

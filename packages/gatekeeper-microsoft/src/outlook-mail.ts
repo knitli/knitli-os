@@ -22,9 +22,12 @@
 // Every message id handled here is a Graph immutable id (see graph-api.ts). That is what lets an
 // action queued now still apply after the message has moved folders in the meantime.
 
-import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
+import { DurableObject, RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { SerialTaskQueue } from "@gadgets/gatekeeper-kit/serial-queue";
+import {
+  ApprovalQueueRpcTarget, SharedApprovalQueue,
+} from "@gadgets/gatekeeper-kit/shared-approval-queue";
 import {
   ActionKind, AgentCatalog, ApprovalQueue, Cursor, Gatekeeper,
   GatekeeperUserVerifier, ResourceDescription,
@@ -76,7 +79,7 @@ const REPLY_DRAFT_ACTION: ActionKind = { tag: "outlookReplyDraft", label: "Creat
 
 type OutlookMailSessionContext = {
   api: GraphMailApi;
-  approvalQueue: RpcStub<ApprovalQueue>;
+  approvalQueue: SharedApprovalQueue;
   pendingActions: PendingActionStore<OutlookMailAction>;
 };
 
@@ -160,7 +163,7 @@ async function submitOutlookAction(
 // separately authorizes the page it returns.
 
 @validateRpc()
-class OutlookMessageCursorImpl extends RpcTarget implements Cursor<OutlookMessageEntry> {
+class OutlookMessageCursorImpl extends ApprovalQueueRpcTarget implements Cursor<OutlookMessageEntry> {
   #ctx: OutlookMailSessionContext;
   #firstPage: () => Promise<{ items: OutlookMessageInfo[]; nextLink?: string }>;
   #nextLink: string | undefined;
@@ -180,7 +183,7 @@ class OutlookMessageCursorImpl extends RpcTarget implements Cursor<OutlookMessag
       describeScope: string,
       firstPage: () => Promise<{ items: OutlookMessageInfo[]; nextLink?: string }>,
       folderName?: string) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
     this.#firstPage = firstPage;
     this.#describeScope = describeScope;
@@ -274,13 +277,13 @@ class OutlookMessageCursorImpl extends RpcTarget implements Cursor<OutlookMessag
 // ── OutlookFolderStub ───────────────────────────────────────────────
 
 @validateRpc()
-class OutlookFolderStub extends RpcTarget implements OutlookFolder {
+class OutlookFolderStub extends ApprovalQueueRpcTarget implements OutlookFolder {
   #ctx: OutlookMailSessionContext;
   #folderId: string;
   #cachedInfo: OutlookFolderInfo | undefined;
 
   constructor(ctx: OutlookMailSessionContext, folderId: string, cachedInfo?: OutlookFolderInfo) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
     this.#folderId = folderId;
     this.#cachedInfo = cachedInfo;
@@ -320,13 +323,13 @@ class OutlookFolderStub extends RpcTarget implements OutlookFolder {
 // ── OutlookMessageStub ──────────────────────────────────────────────
 
 @validateRpc()
-class OutlookMessageStub extends RpcTarget implements OutlookMessage {
+class OutlookMessageStub extends ApprovalQueueRpcTarget implements OutlookMessage {
   #ctx: OutlookMailSessionContext;
   #messageId: string;
   #cachedInfo: OutlookMessageInfo | undefined;
 
   constructor(ctx: OutlookMailSessionContext, messageId: string, cachedInfo?: OutlookMessageInfo) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
     this.#messageId = messageId;
     this.#cachedInfo = cachedInfo;
@@ -527,11 +530,11 @@ class OutlookMessageStub extends RpcTarget implements OutlookMessage {
 // ── OutlookMailSessionImpl ──────────────────────────────────────────
 
 @validateRpc()
-class OutlookMailSessionImpl extends RpcTarget implements OutlookMailSession {
+class OutlookMailSessionImpl extends ApprovalQueueRpcTarget implements OutlookMailSession {
   #ctx: OutlookMailSessionContext;
 
   constructor(ctx: OutlookMailSessionContext) {
-    super();
+    super(ctx.approvalQueue);
     this.#ctx = ctx;
   }
 
@@ -656,7 +659,7 @@ export class OutlookMailGatekeeperImpl
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<OutlookMailSession> {
     return new OutlookMailSessionImpl({
       api: this.#api(),
-      approvalQueue: approvalQueue.dup(),
+      approvalQueue: new SharedApprovalQueue(approvalQueue.dup()),
       pendingActions: new PendingActionStore<OutlookMailAction>(this.ctx.storage.kv),
     });
   }

@@ -1,5 +1,5 @@
-import type { ApprovalQueue, ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
-import type { RpcStub } from "cloudflare:workers";
+import type { ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+import type { SharedApprovalQueue } from "@gadgets/gatekeeper-kit/shared-approval-queue";
 
 /**
  * Authorize an observation of a private Microsoft resource.
@@ -11,7 +11,7 @@ import type { RpcStub } from "cloudflare:workers";
  * return account data without the flag.
  */
 export function authorizeRestricted(
-    queue: RpcStub<ApprovalQueue>, description: ObservationDescription): Promise<void> {
+    queue: SharedApprovalQueue, description: ObservationDescription): Promise<void> {
   return queue.authorizeObservation({ ...description, containsRestrictedData: true });
 }
 
@@ -22,6 +22,6 @@ export function authorizeRestricted(
  * Each page the cursor then returns is authorized with `authorizeRestricted`.
  */
 export function authorizeCursorOpen(
-    queue: RpcStub<ApprovalQueue>, description: ObservationDescription): Promise<void> {
+    queue: SharedApprovalQueue, description: ObservationDescription): Promise<void> {
   return queue.authorizeObservation(description);
 }

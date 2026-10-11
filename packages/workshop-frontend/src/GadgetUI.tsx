@@ -3,6 +3,8 @@ import { Text, Loader, Banner } from '@cloudflare/kumo'
 import { Sparkle } from '@phosphor-icons/react'
 import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { GadgetClient, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
+import { waitWhilePaused } from './connectionPause'
+import { noteWorkspaceActivity } from './useWorkspaceIdle'
 
 // We want to inject Cap'n Web into the Gadget. Luckily it has no dependencies, so we can just take
 // the whole module and embed it. We can import the module using ?raw to get a string of the
@@ -67,6 +69,23 @@ window.addEventListener('keydown', (event) => {
     window.parent.postMessage({ type: 'escape' }, '*');
   }
 }, true);
+
+// Report real input to the parent so its idle timer does not pause the connection under a user
+// working inside the gadget. Throttled: the parent only compares timestamps every 30 seconds.
+{
+  let lastActivitySent = 0;
+  for (let type of ['pointerdown', 'keydown', 'wheel', 'touchstart', 'click']) {
+    window.addEventListener(type, (event) => {
+      // Synthetic events (dispatchEvent) are not a person. This cannot stop a gadget that posts the
+      // message itself: the frame and its code share an origin, so activity is best-effort.
+      if (!event.isTrusted) return;
+      let now = Date.now();
+      if (now - lastActivitySent < 10000) return;
+      lastActivitySent = now;
+      window.parent.postMessage({ type: 'activity' }, '*');
+    }, { capture: true, passive: true });
+  }
+}
 
 window.addEventListener('click', (event) => {
   if (!(event.target instanceof Element)) {
@@ -237,6 +256,8 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
     const reconnect = async () => {
       let timeout: ReturnType<typeof setTimeout> | undefined
       try {
+        // A deliberate pause parks the connection for minutes; the deadline below is for outages.
+        if (await waitWhilePaused() && !isCurrent()) return
         const replacementStub = await Promise.race([
           replacementPromise,
           new Promise<never>((_, reject) => {
@@ -290,20 +311,25 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
     const generation = ++loadGenerationRef.current
     const isCurrent = () => loadGenerationRef.current === generation
 
-    // A dropped RPC never settles -- e.g. the stub was disposed under us by a reconnect -- and there
-    // is nothing to catch. Rather than spin indefinitely, stop owning the load and offer a retry: the
-    // call is idempotent, and a button is a far better answer than a spinner that never resolves.
-    const giveUp = setTimeout(() => {
-      if (!isCurrent()) return
-      loadGenerationRef.current++      // so a late reply can no longer write state
-      setLoading(false)
-      setError('Timed out loading this view.')
-    }, UI_BUNDLE_LOAD_TIMEOUT_MS)
+    let giveUp: ReturnType<typeof setTimeout> | undefined
 
     const loadUiBundle = async () => {
       try {
         setLoading(true)
         setError(null)
+
+        // A deliberate pause parks the connection for minutes; the deadline below is for outages.
+        if (await waitWhilePaused() && !isCurrent()) return
+        // A dropped RPC never settles -- e.g. the stub was disposed under us by a reconnect -- and
+        // there is nothing to catch. Rather than spin indefinitely, stop owning the load and offer
+        // a retry: the call is idempotent, and a button is a far better answer than a spinner that
+        // never resolves.
+        giveUp = setTimeout(() => {
+          if (!isCurrent()) return
+          loadGenerationRef.current++      // so a late reply can no longer write state
+          setLoading(false)
+          setError('Timed out loading this view.')
+        }, UI_BUNDLE_LOAD_TIMEOUT_MS)
 
         const bundle = await gadget.getUiBundle(chatId)
         if (!isCurrent()) return
@@ -399,6 +425,9 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
         })
       } else if (event.data?.type === 'escape') {
         onIframeEscapeRef.current?.()
+      } else if (event.data?.type === 'activity') {
+        // Input inside the sandboxed frame never reaches the parent's listeners.
+        noteWorkspaceActivity()
       }
     }
 

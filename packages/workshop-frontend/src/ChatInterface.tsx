@@ -110,6 +110,8 @@ import { useAlwaysApproveTag } from "./useAlwaysApproveTag";
 import { useResolveAction } from "./useResolveAction";
 import { safeExternalUrl } from "./utils/safeExternalUrl";
 import { useAuthenticatedApi } from "./AuthContext";
+import { resumeConnection } from "./connectionPause";
+import { useHoldWorkspaceIdle } from "./useWorkspaceIdle";
 import { useVendorBranding } from "./useVendorBranding";
 import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
 import { formatFullTimestamp } from "./utils/formatTimestamp";
@@ -4172,6 +4174,7 @@ function ChatInterface({
     conversationAvailable: selectedChatId !== null && selectedModel !== null,
     submissionAvailable: !hasPendingConnectionRequest && !hasPendingAwaitedAction,
   });
+  useHoldWorkspaceIdle(voice.state.mode !== null);  // a live voice session is not idle
   const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false);
 
   const voiceStartRequest = initialVoice?.chatId;
@@ -4339,6 +4342,7 @@ function ChatInterface({
 
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
+    resumeConnection();  // the dialog locks while deleting, so a parked connection would strand it
     setIsDeleting(true);
     try {
       await overseer.deleteChat(deleteTarget.id);
@@ -4465,6 +4469,7 @@ function ChatInterface({
   const handleUpdateFromMainline = async () => {
     if (staleAcceptChatId === null) return;
     const chatId = staleAcceptChatId;
+    resumeConnection();  // the dialog locks while updating, so a parked connection would strand it
     setIsUpdatingFromMainline(true);
     try {
       const { conflictPaths } = await overseer.updateChatFromMainline(chatId);
@@ -4695,6 +4700,7 @@ function ChatInterface({
 
   // Open the gatekeeper modal pre-seeded with the agent's requested vendor/resource.
   const handleAcceptConnection = (msg: AiChatMessage & { type: "connectionRequest" }) => {
+    resumeConnection();  // deciding a request wakes a paused workspace
     setConnectionAccept({
       requestId: msg.requestId,
       vendorId: msg.vendorId,
@@ -4734,6 +4740,7 @@ function ChatInterface({
   };
 
   const handleDenyConnection = async (requestId: string) => {
+    resumeConnection();
     setProcessingConnections((prev) => new Set(prev).add(requestId));
     try {
       await overseer.denyConnectionRequest(requestId);
@@ -4812,6 +4819,7 @@ function ChatInterface({
 
   // Handle retrying the agent after an error
   const handleRetry = async () => {
+    resumeConnection();  // a deliberate retry wakes a paused workspace
     if (
       selectedChatId === null ||
       selectedModel === null

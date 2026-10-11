@@ -1,0 +1,28 @@
+{
+  "name": "@gadgets/microsoft-gatekeeper",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./src/microsoft.ts",
+  "scripts": {
+    "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
+    "deploy": "vp run --no-cache build:configurator && wrangler deploy",
+    "clean": "rm -rf dist src/generated",
+    "test:run": "vitest run"
+  },
+  "dependencies": {
+    "@gadgets/configurator-ui": "workspace:*",
+    "@gadgets/gatekeeper-kit": "workspace:*",
+    "@gadgets/observability": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
+    "capnweb": "catalog:",
+    "capnweb-validate": "catalog:"
+  },
+  "devDependencies": {
+    "@gadgets/scripts": "workspace:*",
+    "@types/node": "^26.1.0",
+    "typescript": "catalog:",
+    "typescript6": "catalog:",
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

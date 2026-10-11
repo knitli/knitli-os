@@ -1,0 +1,911 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { STAGED_CREDENTIALS_KEY } from "@gadgets/gatekeeper-kit/credential-stage";
+
+import { UserAccount } from "../src/microsoft";
+
+const TENANT = "11111111-2222-3333-4444-555555555555";
+const TOKEN_URL = `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`;
+const AUTH_SCOPES = ["openid", "profile", "email", "User.Read"];
+const IDENTITY_SCOPES = [...AUTH_SCOPES, "offline_access"];
+// The resource scopes a connection asks for per grantable resource, mirroring the vendor's table.
+const MAIL_SCOPES = ["Mail.ReadWrite"];
+const TEAMS_SCOPES = [
+  "Team.ReadBasic.All", "Channel.ReadBasic.All", "TeamMember.Read.All",
+  "ChannelMessage.Read.All", "Chat.Read",
+];
+
+const env = {
+  CLIENT_ID: "client-id",
+  CLIENT_SECRET: "client-secret",
+  TENANT_ID: TENANT,
+  BASE_URL: "https://gatekeeper.example/gatekeeper/microsoft",
+};
+
+function base64url(value: unknown): string {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+function idToken(claims: Record<string, unknown>): string {
+  return `${base64url({ alg: "RS256" })}.${base64url(claims)}.signature`;
+}
+
+function fakeContext() {
+  const values = new Map<string, unknown>();
+  return {
+    waitUntil: vi.fn(),
+    id: { toString: () => "a".repeat(64) },
+    storage: {
+      setAlarm: vi.fn(),
+      deleteAlarm: vi.fn(),
+      deleteAll: vi.fn(() => values.clear()),
+      kv: {
+        get<T>(key: string) { return values.get(key) as T | undefined; },
+        put<T>(key: string, value: T) { values.set(key, value); },
+        delete(key: string) { values.delete(key); },
+      },
+    },
+    exports: {
+      GatekeeperUserImpl: vi.fn((init: unknown) => ({ userStub: init })),
+    },
+  };
+}
+
+// The handoffs the Workshop's callback mints, which the flow's final page delivers to the browser.
+const HANDOFF = { targetOrigin: "https://workshop.example", ticket: "a".repeat(64) };
+const RECONNECT_HANDOFF = { targetOrigin: "https://workshop.example", ticket: "b".repeat(64) };
+
+function fakeCallback() {
+  return {
+    complete: vi.fn(async () => HANDOFF),
+    credentialsExpired: vi.fn(async () => {}),
+    credentialsRestored: vi.fn(async () => {}),
+    reconnectComplete: vi.fn(async (_stageId: string) => RECONNECT_HANDOFF),
+  };
+}
+
+/** The stage id the account reported to the Workshop for its most recent reconnect. */
+function stagedId(callback: ReturnType<typeof fakeCallback>): string {
+  expect(callback.reconnectComplete).toHaveBeenCalled();
+  return callback.reconnectComplete.mock.calls.at(-1)![0];
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status, headers: { "Content-Type": "application/json" },
+  });
+}
+
+function newAccount(context = fakeContext()) {
+  return { context, account: new UserAccount(context as never, env as never) };
+}
+
+/** Drive a full connect through the nonce lifecycle and return what the token endpoint saw. */
+async function connect(account: UserAccount, callback: ReturnType<typeof fakeCallback>,
+                       options: { authOnly?: boolean; scopes?: string[] } = {}) {
+  const initiationNonce = "n".repeat(64);
+  const scopes = options.scopes ?? (options.authOnly ? AUTH_SCOPES : IDENTITY_SCOPES);
+  await account.setCallback(callback as never, initiationNonce, scopes, options.authOnly ?? false);
+  const begun = await account.beginOAuthFlow(initiationNonce);
+  expect(begun).not.toBeNull();
+  return await account.acceptAuthCode("auth-code", begun!.oauthNonce);
+}
+
+/** Drive a reconnect through the same nonce lifecycle. */
+async function reconnect(account: UserAccount, nonce = "r".repeat(64)) {
+  await account.prepareReconnect(nonce, IDENTITY_SCOPES);
+  const begun = await account.beginOAuthFlow(nonce);
+  expect(begun).not.toBeNull();
+  return await account.acceptAuthCode("auth-code-2", begun!.oauthNonce);
+}
+
+let fetchMock: ReturnType<typeof vi.fn>;
+
+beforeEach(() => {
+  fetchMock = vi.fn(async () => jsonResponse({}));
+  vi.stubGlobal("fetch", fetchMock);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+/** Collect the structured log records written to `console.warn` from here on. */
+function captureWarnings(): Record<string, unknown>[] {
+  const warnings: Record<string, unknown>[] = [];
+  vi.spyOn(console, "warn").mockImplementation(
+      (...args: unknown[]) => void warnings.push(...args as Record<string, unknown>[]));
+  return warnings;
+}
+
+function lastTokenRequestBody(): URLSearchParams {
+  const call = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+  expect(call[0]).toBe(TOKEN_URL);
+  return call[1].body as URLSearchParams;
+}
+
+describe("connect flow", () => {
+  it("stores the grant and completes without reporting an expiry", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1",
+      expires_in: 3600,
+      refresh_token: "refresh-1",
+      scope: "openid profile email https://graph.microsoft.com/User.Read",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await expect(connect(account, callback)).resolves.toEqual(HANDOFF);
+
+    const body = lastTokenRequestBody();
+    expect(body.get("grant_type")).toBe("authorization_code");
+    expect(body.get("code")).toBe("auth-code");
+    expect(body.get("redirect_uri")).toBe(`${env.BASE_URL}/oauth`);
+    expect(body.get("scope")).toBe(IDENTITY_SCOPES.join(" "));
+
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-1");
+    expect(context.storage.kv.get("idTokenClaims")).toEqual({ tid: TENANT, oid: "object-1" });
+    await expect(account.getGrantScopes()).resolves.toEqual(IDENTITY_SCOPES);
+
+    // `expiresAt` means "when the credentials stop being refreshable", which Entra never reports,
+    // so complete() must be called with the user stub alone.
+    expect(callback.complete).toHaveBeenCalledTimes(1);
+    expect(callback.complete.mock.calls[0]).toHaveLength(1);
+    expect(callback.reconnectComplete).not.toHaveBeenCalled();
+  });
+
+  it("refuses a persistent connection that came back with no refresh token", async () => {
+    const { account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({ access_token: "access-1", expires_in: 3600 }));
+
+    await expect(connect(account, fakeCallback())).rejects.toThrow(/refresh token/i);
+  });
+
+  it("rejects a replayed or unknown nonce", async () => {
+    const { account } = newAccount();
+    const callback = fakeCallback();
+    await account.setCallback(callback as never, "n".repeat(64), IDENTITY_SCOPES, false);
+
+    expect(await account.beginOAuthFlow("m".repeat(64))).toBeNull();
+    const begun = await account.beginOAuthFlow("n".repeat(64));
+    expect(begun).not.toBeNull();
+    // The initiation nonce is consumed by the first use.
+    expect(await account.beginOAuthFlow("n".repeat(64))).toBeNull();
+
+    expect(await account.acceptAuthCode("auth-code", "z".repeat(64))).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1", expires_in: 3600, refresh_token: "refresh-1", scope: "openid",
+    }));
+    expect(await account.acceptAuthCode("auth-code", begun!.oauthNonce)).toEqual(HANDOFF);
+    // The OAuth nonce is single-use too.
+    expect(await account.acceptAuthCode("auth-code", begun!.oauthNonce)).toBeNull();
+  });
+
+  it("stages a reconnect's grant and makes it live only once the Workshop commits it", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1", expires_in: 3600, refresh_token: "refresh-1", scope: "openid",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+    await connect(account, callback);
+
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-2", scope: "openid",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+    expect(await reconnect(account)).toEqual(RECONNECT_HANDOFF);
+
+    // The reconnect URL is a bearer capability, so whoever finished the flow has changed nothing
+    // yet: gadgets bound to this account keep reading the token it already had.
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-1");
+    expect(callback.complete).toHaveBeenCalledTimes(1);
+    expect(callback.reconnectComplete).toHaveBeenCalledTimes(1);
+
+    await account.commitReconnect(stagedId(callback));
+
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-2");
+    // The stage is spent, so the ticket cannot be replayed and no other id can take it.
+    await expect(account.commitReconnect(stagedId(callback)))
+      .rejects.toThrow(/awaiting confirmation/i);
+  });
+
+  it("refuses a reconnect that signs in as a different Microsoft account", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1", expires_in: 3600, refresh_token: "refresh-1", scope: "openid",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+    await connect(account, callback);
+
+    // Same tenant, different directory principal: the consent screen lets the user pick any
+    // account, and adopting it would silently repoint an established connection.
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-intruder", expires_in: 3600, refresh_token: "refresh-intruder",
+      scope: "openid", id_token: idToken({ tid: TENANT, oid: "object-2" }),
+    }));
+    await expect(reconnect(account)).rejects.toThrow(/different Microsoft account/i);
+
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-1");
+    expect(context.storage.kv.get("idTokenClaims")).toEqual({ tid: TENANT, oid: "object-1" });
+    expect(callback.reconnectComplete).not.toHaveBeenCalled();
+    // The intruder's grant is not even staged, so there is nothing a later commit could activate.
+    expect(context.storage.kv.get(STAGED_CREDENTIALS_KEY)).toBeUndefined();
+  });
+
+  it("refuses a reconnect whose grant names no principal at all", async () => {
+    const { context, account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1", expires_in: 3600, refresh_token: "refresh-1", scope: "openid",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+    await connect(account, fakeCallback());
+
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-2", scope: "openid",
+    }));
+    await expect(reconnect(account)).rejects.toThrow(/different Microsoft account/i);
+
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-1");
+  });
+
+  it("refuses a reconnect on an account that never recorded a principal", async () => {
+    // Entra returns `oid` on every openid-scoped grant, so an account with none is a state we
+    // cannot verify — and an unverifiable reconnect is what this check exists to refuse.
+    const { context, account } = newAccount();
+    context.storage.kv.put("callback", fakeCallback());
+    context.storage.kv.put("refreshToken", "refresh-1");
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-2", scope: "openid",
+      id_token: idToken({ tid: TENANT, oid: "object-2" }),
+    }));
+
+    await expect(reconnect(account)).rejects.toThrow(/different Microsoft account/i);
+
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-1");
+    expect(context.storage.kv.get("idTokenClaims")).toBeUndefined();
+    expect(context.storage.kv.get(STAGED_CREDENTIALS_KEY)).toBeUndefined();
+  });
+
+  it("discards the whole grant when the Workshop cannot accept the completed connection",
+     async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    callback.complete.mockRejectedValue(new Error("workshop unreachable") as never);
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1", expires_in: 3600, refresh_token: "refresh-1", scope: "openid",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await expect(connect(account, callback)).rejects.toThrow("workshop unreachable");
+
+    // Nobody holds a usable account, so no part of the grant may survive — an access token left
+    // behind is one a concurrent mint could still publish.
+    expect(context.storage.kv.get("refreshToken")).toBeUndefined();
+    expect(context.storage.kv.get("accessToken")).toBeUndefined();
+    expect(context.storage.kv.get("idTokenClaims")).toBeUndefined();
+    expect(context.storage.kv.get("grantScopes")).toBeUndefined();
+  });
+});
+
+describe("consent coverage", () => {
+  it("names the scopes a resource came back without", async () => {
+    // A resource is usable only when every one of its scopes is granted, so a declined permission
+    // leaves it unavailable with nothing else in the system saying which one is missing.
+    const warnings = captureWarnings();
+    const { account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1",
+      expires_in: 3600,
+      refresh_token: "refresh-1",
+      scope: "openid profile email https://graph.microsoft.com/User.Read",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await expect(connect(account, fakeCallback(), {
+      scopes: [...IDENTITY_SCOPES, ...MAIL_SCOPES],
+    })).resolves.toEqual(HANDOFF);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({
+      event: "microsoft.consent.resource.ungranted",
+      resource: "https://outlook.office.com/mail/*",
+      missingScopes: ["Mail.ReadWrite"],
+    });
+  });
+
+  it("names the scopes a partly consented resource came back without", async () => {
+    // A resource is usable only when every one of its scopes is granted, so a declined permission
+    // leaves it unavailable with nothing else in the system saying which one is missing.
+    const warnings = captureWarnings();
+    const { account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1",
+      expires_in: 3600,
+      refresh_token: "refresh-1",
+      // The administrator consented to the team and channel reads and declined the message ones.
+      scope: "openid profile email https://graph.microsoft.com/User.Read " +
+          "https://graph.microsoft.com/Team.ReadBasic.All " +
+          "https://graph.microsoft.com/Channel.ReadBasic.All " +
+          "https://graph.microsoft.com/TeamMember.Read.All",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await expect(connect(account, fakeCallback(), {
+      scopes: [...IDENTITY_SCOPES, ...TEAMS_SCOPES],
+    })).resolves.toEqual(HANDOFF);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({
+      event: "microsoft.consent.resource.ungranted",
+      resource: "https://teams.microsoft.com/*",
+      missingScopes: ["ChannelMessage.Read.All", "Chat.Read"],
+    });
+  });
+
+  it("records the consented part of a partly consented resource and leaves the rest out", async () => {
+    // The Teams permissions the administrator declined must not come back on the next refresh.
+    const { account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1",
+      expires_in: 3600,
+      refresh_token: "refresh-1",
+      scope: "openid profile email https://graph.microsoft.com/User.Read " +
+          "https://graph.microsoft.com/Mail.ReadWrite " +
+          "https://graph.microsoft.com/Team.ReadBasic.All",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await connect(account, fakeCallback(), {
+      scopes: [...IDENTITY_SCOPES, ...MAIL_SCOPES, ...TEAMS_SCOPES],
+    });
+
+    expect(await account.getGrantScopes()).toEqual(
+      [...IDENTITY_SCOPES, ...MAIL_SCOPES, "Team.ReadBasic.All"]);
+  });
+
+  it("treats a token response without a scope as covering what was requested", async () => {
+    // RFC 6749 lets the server omit `scope` when it equals the request; reading that as "no
+    // resources" would send the user round the reconnect loop for a valid grant.
+    const { context, account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1",
+      expires_in: 3600,
+      refresh_token: "refresh-1",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await connect(account, fakeCallback(), { scopes: [...IDENTITY_SCOPES, ...MAIL_SCOPES] });
+
+    expect(await account.getGrantedResourceUrlPatterns())
+      .toEqual(["https://outlook.office.com/mail/*"]);
+    expect(context.storage.kv.get("grantScopes")).toEqual([...IDENTITY_SCOPES, ...MAIL_SCOPES]);
+  });
+
+  it("records only the scopes the grant covers, so a refresh never re-asks for a declined one", async () => {
+    // The recorded scopes are sent again on every refresh and reconnect. Entra fails a request
+    // naming a permission nobody consented to, which would take the consented resources down too.
+    const { context, account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1",
+      expires_in: 3600,
+      refresh_token: "refresh-1",
+      scope: "openid profile email https://graph.microsoft.com/User.Read",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await connect(account, fakeCallback(), { scopes: [...IDENTITY_SCOPES, ...MAIL_SCOPES] });
+
+    expect(await account.getGrantScopes()).toEqual(IDENTITY_SCOPES);
+    expect(context.storage.kv.get("grantScopes")).not.toContain("Mail.ReadWrite");
+  });
+
+  it("says nothing about a resource this connection never asked for", async () => {
+    // A mail-only connection is not short of the Teams permissions; it never requested them.
+    const warnings = captureWarnings();
+    const { account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1",
+      expires_in: 3600,
+      refresh_token: "refresh-1",
+      scope: "openid profile email https://graph.microsoft.com/User.Read " +
+          "https://graph.microsoft.com/Mail.ReadWrite",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await expect(connect(account, fakeCallback(), {
+      scopes: [...IDENTITY_SCOPES, ...MAIL_SCOPES],
+    })).resolves.toEqual(HANDOFF);
+
+    expect(warnings).toEqual([]);
+  });
+
+  it("says nothing for a sign-in-only grant, which asks for no resource at all", async () => {
+    const warnings = captureWarnings();
+    const { account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-auth",
+      expires_in: 3600,
+      scope: "openid profile email https://graph.microsoft.com/User.Read",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await expect(connect(account, fakeCallback(), { authOnly: true })).resolves.toEqual(HANDOFF);
+
+    expect(warnings).toEqual([]);
+  });
+});
+
+describe("alarm", () => {
+  it("deletes an account whose flow never completed", async () => {
+    const { context, account } = newAccount();
+
+    await account.alarm();
+
+    expect(context.storage.deleteAll).toHaveBeenCalled();
+  });
+
+  it("does nothing while the deployment's alarm kill switch is on", async () => {
+    const context = fakeContext();
+    const account = new UserAccount(context as never, { ...env, ALARMS_DISABLED: "true" } as never);
+
+    await account.alarm();
+
+    expect(context.storage.deleteAll).not.toHaveBeenCalled();
+  });
+});
+
+describe("overlapping reconnects", () => {
+  it("keeps what an earlier-committing reconnect added when a slower one commits", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-0");
+    context.storage.kv.put("grantScopes", [...IDENTITY_SCOPES, ...MAIL_SCOPES]);
+    context.storage.kv.put("grantedScopes", [...IDENTITY_SCOPES, ...MAIL_SCOPES]);
+    context.storage.kv.put("idTokenClaims", { tid: TENANT, oid: "object-1" });
+    const withTeams = [...IDENTITY_SCOPES, ...MAIL_SCOPES, ...TEAMS_SCOPES];
+    // Both begin from the same grant: A adds Teams, B (started earlier) still asks mail only.
+    await account.prepareReconnect("a".repeat(64), withTeams);
+    await account.prepareReconnect("b".repeat(64), [...IDENTITY_SCOPES, ...MAIL_SCOPES]);
+    const begunA = await account.beginOAuthFlow("a".repeat(64));
+    const begunB = await account.beginOAuthFlow("b".repeat(64));
+    const respond = (scopes: string[]) => jsonResponse({
+      access_token: "access", expires_in: 3600, refresh_token: "refresh",
+      scope: scopes.map(scope => `https://graph.microsoft.com/${scope}`).join(" "),
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    });
+
+    fetchMock.mockImplementation(async () => respond(withTeams));
+    await account.acceptAuthCode("code-a", begunA!.oauthNonce);
+    await account.commitReconnect(stagedId(callback));
+    fetchMock.mockImplementation(async () => respond([...IDENTITY_SCOPES, ...MAIL_SCOPES]));
+    await account.acceptAuthCode("code-b", begunB!.oauthNonce);
+    await account.commitReconnect(stagedId(callback));
+
+    // B's access token covers only mail, so it is dropped and the next call mints for the union.
+    expect(context.storage.kv.get("accessToken")).toBeUndefined();
+    // B's commit did not take Teams back.
+    expect(await account.getGrantScopes()).toEqual(expect.arrayContaining(TEAMS_SCOPES));
+    expect(await account.getGrantedResourceUrlPatterns()).toContain("https://teams.microsoft.com/*");
+  });
+
+  it("does not invalidate a reconnect that is out at Microsoft when another one starts", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("idTokenClaims", { tid: TENANT, oid: "object-1" });
+    await account.prepareReconnect("a".repeat(64), IDENTITY_SCOPES);
+    const begunA = await account.beginOAuthFlow("a".repeat(64));
+
+    await account.prepareReconnect("b".repeat(64), IDENTITY_SCOPES);
+
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-2",
+      scope: "openid profile email https://graph.microsoft.com/User.Read offline_access",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+    // A's callback arrives after B started, and still completes.
+    await expect(account.acceptAuthCode("code-a", begunA!.oauthNonce)).resolves.toEqual(RECONNECT_HANDOFF);
+    // B's link is still good as well, and each is used once.
+    await expect(account.beginOAuthFlow("b".repeat(64))).resolves.not.toBeNull();
+    await expect(account.beginOAuthFlow("b".repeat(64))).resolves.toBeNull();
+  });
+
+  it("keeps a flow's own scopes when another reconnect starts during its code exchange", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("idTokenClaims", { tid: TENANT, oid: "object-1" });
+    const wide = [...IDENTITY_SCOPES, ...MAIL_SCOPES];
+    await account.prepareReconnect("a".repeat(64), wide);
+    const begunA = await account.beginOAuthFlow("a".repeat(64));
+
+    // Reconnect B starts while A's authorization code is being exchanged. A shared scopes slot
+    // would be replaced here and then deleted by A when it finished.
+    fetchMock.mockImplementation(async () => {
+      await account.prepareReconnect("b".repeat(64), IDENTITY_SCOPES);
+      return jsonResponse({
+        access_token: "access-2", expires_in: 3600, refresh_token: "refresh-2",
+        scope: "openid profile email https://graph.microsoft.com/User.Read " +
+            "https://graph.microsoft.com/Mail.ReadWrite",
+        id_token: idToken({ tid: TENANT, oid: "object-1" }),
+      });
+    });
+    await account.acceptAuthCode("code-a", begunA!.oauthNonce);
+
+    // A exchanged, and staged, exactly what it asked for.
+    expect(lastTokenRequestBody().get("scope")).toBe(wide.join(" "));
+    await account.commitReconnect(stagedId(callback));
+    expect(await account.getGrantScopes()).toEqual(wide);
+    // B's flow still has its own request.
+    const begunB = await account.beginOAuthFlow("b".repeat(64));
+    expect(begunB!.scopes).toEqual(IDENTITY_SCOPES);
+  });
+});
+
+describe("refresh token rotation", () => {
+  it("persists the rotated refresh token in place of the one it presented", async () => {
+    const { context, account } = newAccount();
+    context.storage.kv.put("refreshToken", "refresh-old");
+    context.storage.kv.put("grantScopes", IDENTITY_SCOPES);
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-2",
+      expires_in: 3600,
+      refresh_token: "refresh-new",
+      scope: "openid profile email https://graph.microsoft.com/User.Read offline_access",
+    }));
+
+    const token = await account.getAccessToken();
+
+    expect(token.token).toBe("access-2");
+    const body = lastTokenRequestBody();
+    expect(body.get("grant_type")).toBe("refresh_token");
+    expect(body.get("refresh_token")).toBe("refresh-old");
+    expect(body.get("scope")).toBe(IDENTITY_SCOPES.join(" "));
+    // Entra retires the presented token on every mint, so keeping the old value would strand the
+    // account.
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-new");
+  });
+
+  it("serves a cached token without minting, and re-mints once it is inside the safety window",
+     async () => {
+    const { context, account } = newAccount();
+    context.storage.kv.put("refreshToken", "refresh-old");
+    context.storage.kv.put("accessToken", {
+      token: "access-cached", expires: new Date(Date.now() + 10 * 60 * 1000),
+    });
+
+    await expect(account.getAccessToken()).resolves.toMatchObject({ token: "access-cached" });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    context.storage.kv.put("accessToken", {
+      token: "access-cached", expires: new Date(Date.now() + 5 * 1000),
+    });
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-fresh", expires_in: 3600, refresh_token: "refresh-new", scope: "openid",
+    }));
+    await expect(account.getAccessToken()).resolves.toMatchObject({ token: "access-fresh" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("collapses a burst of concurrent callers into a single token exchange", async () => {
+    const { context, account } = newAccount();
+    context.storage.kv.put("refreshToken", "refresh-old");
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-new", scope: "openid",
+    }));
+
+    const tokens = await Promise.all([
+      account.getAccessToken(), account.getAccessToken(), account.getAccessToken(),
+    ]);
+
+    expect(tokens.map(token => token.token)).toEqual(["access-2", "access-2", "access-2"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Rotation happens inside the same locked section, so the racing callers cannot strand the
+    // account by presenting or storing a retired refresh token.
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-new");
+  });
+});
+
+describe("mint failure taxonomy", () => {
+  it("reports credential death once for a permanent rejection and stops asking", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    fetchMock.mockResolvedValue(jsonResponse({
+      error: "invalid_grant",
+      error_codes: [700082],
+      error_description: "AADSTS700082: The refresh token has expired due to inactivity.",
+    }, 400));
+
+    await expect(account.getAccessToken()).rejects.toThrow(/reconnect the account/i);
+    await expect(account.getAccessToken()).rejects.toThrow(/reconnect the account/i);
+
+    expect(callback.credentialsExpired).toHaveBeenCalledTimes(1);
+    // The notice is handed to the runtime, so it outlives the call that failed.
+    expect(context.waitUntil).toHaveBeenCalled();
+    // The second caller was answered from the recorded failure rather than another round trip.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("tries the death notification again after one fails, then stops once it lands", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    callback.credentialsExpired
+      .mockRejectedValueOnce(new Error("workshop unreachable"))
+      .mockResolvedValue(undefined);
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    // A fresh Response per call: a body can be read only once.
+    fetchMock.mockImplementation(async () => jsonResponse({
+      error: "invalid_grant", error_codes: [700082],
+      error_description: "AADSTS700082: The refresh token has expired due to inactivity.",
+    }, 400));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await expect(account.getAccessToken()).rejects.toThrow();
+    await vi.waitFor(() => expect(callback.credentialsExpired).toHaveBeenCalledTimes(1));
+
+    // Past the cooldown the next call asks Entra again, fails again, and notifies again.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 5 * 60 * 1000 });
+    try {
+      await expect(account.getAccessToken()).rejects.toThrow();
+      await vi.waitFor(() => expect(callback.credentialsExpired).toHaveBeenCalledTimes(2));
+
+      // It got through, so a further failure stays quiet.
+      vi.setSystemTime(Date.now() + 5 * 60 * 1000);
+      await expect(account.getAccessToken()).rejects.toThrow();
+      await Promise.resolve();
+      expect(callback.credentialsExpired).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tells the Workshop when a refused token request starts succeeding again", async () => {
+    // For example an administrator rotates the expired client secret: nothing reconnects in a
+    // browser, so the Workshop would otherwise go on offering a reconnect for a working account.
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    let broken = true;
+    fetchMock.mockImplementation(async () => broken
+      ? jsonResponse({
+        error: "invalid_client", error_codes: [7000222],
+        error_description: "AADSTS7000222: The provided client secret keys are expired.",
+      }, 400)
+      : jsonResponse({
+        access_token: "access-2", expires_in: 3600, refresh_token: "refresh-new",
+        scope: "openid profile email https://graph.microsoft.com/User.Read offline_access",
+      }));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(account.getAccessToken()).rejects.toThrow();
+    expect(callback.credentialsRestored).not.toHaveBeenCalled();
+
+    broken = false;
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 5 * 60 * 1000 });
+    try {
+      await expect(account.getAccessToken()).resolves.toMatchObject({ token: "access-2" });
+      expect(callback.credentialsRestored).toHaveBeenCalledTimes(1);
+
+      // An ordinary mint afterwards says nothing.
+      vi.setSystemTime(Date.now() + 2 * 60 * 60 * 1000);
+      await account.getAccessToken();
+      expect(callback.credentialsRestored).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the restoration notice pending until the Workshop acknowledges it", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    callback.credentialsRestored
+      .mockRejectedValueOnce(new Error("workshop unreachable"))
+      .mockResolvedValue(undefined);
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    context.storage.kv.put("mintFailure", { message: "dead", at: Date.now() - 10 * 60 * 1000 });
+    fetchMock.mockImplementation(async () => jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-new",
+      scope: "openid profile email https://graph.microsoft.com/User.Read offline_access",
+    }));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await account.getAccessToken();
+    await vi.waitFor(() => expect(callback.credentialsRestored).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(context.storage.kv.get("restorePending")).toBe(true));
+
+    // The next request is served from the cached token, and still retries the notice.
+    await vi.waitFor(async () => {
+      await account.getAccessToken();
+      expect(callback.credentialsRestored).toHaveBeenCalledTimes(2);
+    });
+    await vi.waitFor(() => expect(context.storage.kv.get("restorePending")).toBeUndefined());
+
+    await account.getAccessToken();
+    expect(callback.credentialsRestored).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not call a claims rejection restored just because the token endpoint still answers", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    context.storage.kv.put("accessToken", {
+      token: "access-live", expires: new Date(Date.now() + 30 * 60 * 1000),
+    });
+    await account.reportCredentialsRejected("conditional access policy", "access-live");
+    fetchMock.mockImplementation(async () => jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-new",
+      scope: "openid profile email https://graph.microsoft.com/User.Read offline_access",
+    }));
+
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 5 * 60 * 1000 });
+    try {
+      await account.getAccessToken();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Graph rejected the claims, not the token request, so a token request succeeding fixes nothing.
+    expect(callback.credentialsRestored).not.toHaveBeenCalled();
+  });
+
+  it("keeps retrying a transient rejection and leaves the account alive", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    fetchMock.mockResolvedValue(jsonResponse({
+      error: "temporarily_unavailable", error_codes: [90033],
+    }, 503));
+
+    await expect(account.getAccessToken()).rejects.toThrow(/try again/i);
+    await expect(account.getAccessToken()).rejects.toThrow(/try again/i);
+
+    expect(callback.credentialsExpired).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears a recorded failure when a committed reconnect supplies new credentials", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    context.storage.kv.put("idTokenClaims", { tid: TENANT, oid: "object-1" });
+    fetchMock.mockResolvedValue(jsonResponse({ error_codes: [50173] }, 400));
+    await expect(account.getAccessToken()).rejects.toThrow();
+    expect(context.storage.kv.get("mintFailure")).toBeDefined();
+
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-3", expires_in: 3600, refresh_token: "refresh-3", scope: "openid",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+    await reconnect(account);
+    // The staged grant is not the one the failure was recorded against, so the cooldown that keeps
+    // callers off the dead refresh token stands until the commit.
+    expect(context.storage.kv.get("mintFailure")).toBeDefined();
+
+    await account.commitReconnect(stagedId(callback));
+
+    expect(context.storage.kv.get("mintFailure")).toBeUndefined();
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-3");
+  });
+
+  it("treats a Graph claims challenge as credential death", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    context.storage.kv.put("accessToken", {
+      token: "access-live", expires: new Date(Date.now() + 30 * 60 * 1000),
+    });
+
+    await account.reportCredentialsRejected("conditional access policy", "access-live");
+
+    expect(callback.credentialsExpired).toHaveBeenCalledTimes(1);
+    // The rejected token must not keep being served from cache.
+    expect(context.storage.kv.get("accessToken")).toBeUndefined();
+    await expect(account.getAccessToken()).rejects.toThrow(/sign in again/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores a late rejection of a token the account has since replaced", async () => {
+    // Every resource binding caches its own token, so one can report a challenge for the old
+    // token after a reconnect has already made a new one live.
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-new");
+    context.storage.kv.put("accessToken", {
+      token: "access-new", expires: new Date(Date.now() + 30 * 60 * 1000),
+    });
+
+    await account.reportCredentialsRejected("conditional access policy", "access-old");
+
+    expect(callback.credentialsExpired).not.toHaveBeenCalled();
+    expect(context.storage.kv.get("accessToken")).toMatchObject({ token: "access-new" });
+    expect(context.storage.kv.get("mintFailure")).toBeUndefined();
+  });
+});
+
+describe("sign-in-only grants", () => {
+  it("is usable for the email read and then deletes itself", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-auth",
+      expires_in: 3600,
+      scope: "openid profile email https://graph.microsoft.com/User.Read",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+
+    await expect(connect(account, callback, { authOnly: true })).resolves.toEqual(HANDOFF);
+
+    // No refresh token was requested, so none is stored...
+    expect(lastTokenRequestBody().get("scope")).toBe(AUTH_SCOPES.join(" "));
+    expect(context.storage.kv.get("refreshToken")).toBeUndefined();
+    // ...yet the caller can still read the email with the access token from the exchange.
+    await expect(account.getAccessToken()).resolves.toMatchObject({ token: "access-auth" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const alarmAt = context.storage.setAlarm.mock.calls.at(-1)![0] as number;
+    expect(alarmAt - Date.now()).toBeLessThanOrEqual(2 * 60 * 1000);
+
+    await account.alarm();
+
+    expect(context.storage.deleteAll).toHaveBeenCalled();
+    expect(context.storage.kv.get("accessToken")).toBeUndefined();
+    expect(context.storage.kv.get("idTokenClaims")).toBeUndefined();
+  });
+
+  it("deletes an abandoned flow that never produced credentials", async () => {
+    const { context, account } = newAccount();
+    await account.setCallback(fakeCallback() as never, "n".repeat(64), IDENTITY_SCOPES, false);
+
+    await account.alarm();
+
+    expect(context.storage.deleteAll).toHaveBeenCalled();
+  });
+
+  it("leaves a completed persistent connection alone when the abandonment alarm fires", async () => {
+    const { context, account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1", expires_in: 3600, refresh_token: "refresh-1", scope: "openid",
+    }));
+    await connect(account, fakeCallback());
+
+    await account.alarm();
+
+    expect(context.storage.deleteAll).not.toHaveBeenCalled();
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-1");
+  });
+});
+
+describe("revoke", () => {
+  it("drops everything locally, since Entra offers no revocation endpoint for this flow",
+     async () => {
+    const { context, account } = newAccount();
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1", expires_in: 3600, refresh_token: "refresh-1", scope: "openid",
+    }));
+    await connect(account, fakeCallback());
+    fetchMock.mockClear();
+
+    await account.revoke();
+
+    expect(context.storage.deleteAlarm).toHaveBeenCalled();
+    expect(context.storage.deleteAll).toHaveBeenCalled();
+    expect(context.storage.kv.get("refreshToken")).toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

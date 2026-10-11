@@ -1,0 +1,652 @@
+# Microsoft 365 gatekeeper
+
+Microsoft Entra ID (Azure AD) integration for Gadgets. It serves two purposes:
+
+- **Sign-in:** when `microsoft` is in the deployment's `AUTH_GATEKEEPERS` allowlist, "Continue with
+  Microsoft" appears on the login page. Sign-in requests only the identity scopes (`openid`,
+  `profile`, `email`, `User.Read`) to read the account's **verified email**, which becomes the
+  user's identity. The sign-in grant is transient (discarded right after the email is read).
+- **Connections:** a user connects one resource at a time, and only that resource's scopes are
+  requested (plus `offline_access`):
+  - **Outlook mailbox** at `https://outlook.office.com/mail/` — `Mail.ReadWrite`, so gadgets can
+    read, organize, and draft replies to mail on the user's behalf.
+  - **Microsoft Teams** at `https://teams.microsoft.com/` — five read-only scopes, so gadgets can
+    read the teams, channels, chats, members, and messages the user can already see. Nothing in
+    this resource writes: there is no method that posts, edits, deletes, marks read, joins, or
+    leaves.
+  - **SharePoint List** at `https://*.sharepoint.com/*` — `Sites.ReadWrite.All`, so a gadget can
+    read one list's columns and items and create new items in it, each creation approved by a
+    person. See [SharePoint List](#sharepoint-list).
+
+A single Entra app registration is used for both, and it is pinned to **one tenant** — the worker
+needs `CLIENT_ID`, `CLIENT_SECRET`, and `TENANT_ID` before it will answer anything.
+
+## One resource per connect
+
+There is deliberately no connect-everything path. The Workshop contract says a connect that omits
+`resourceUrlPatterns` means every resource the vendor offers; this gatekeeper **departs from that
+on purpose**. An omitted list (what the generic "Connect Account" button sends) requests the
+sign-in identity scopes plus the **Outlook mailbox only**, which needs no administrator consent.
+Teams and SharePoint are requested only when named, which the resource picker and an agent's
+connection request do. An explicit empty list still means "none" and is refused, since a persistent
+connection cannot be made with no resource.
+
+The reason is how Entra consents: a single consent request that bundles several resources' scopes
+fails as a whole when any one of them needs an administrator who has not consented. Connecting
+resources separately means an unconsented resource fails on its own and cannot take the others with
+it. Adding a resource to an account that already has one re-requests the union of the two, so
+nothing already granted is dropped; and the scopes recorded for later refreshes cover only what
+Entra reported as actually granted, so a refresh never asks for a permission nobody consented to.
+
+## Blueprints connect the mailbox only
+
+A blueprint's Connect button asks the gatekeeper for an account without naming a resource, and an
+omitted resource list means the Outlook mailbox here (see "One resource per connect"). A blueprint
+binding for Teams or SharePoint List therefore connects an account that has the mailbox permission
+and not the Teams or Sites one, and the binding fails when it reaches Graph. Connect Teams or
+SharePoint from the Connections page, naming the resource, before using such a blueprint. The
+Workshop is deliberately not changed to pass the binding's resource.
+
+## Known limits
+
+- **Reply-draft reconciliation is approximate.** A retried draft is recognised by the reply's text, in
+  the same conversation, created after the first attempt began. Another draft that begins with the
+  same text in that conversation within a minute of it can be taken for the first attempt's.
+- **A late "restored" can overtake a newer "expired".** The Workshop acknowledges a restored-
+  credentials notice after a follow-up read, so if the account dies again in that window the stale
+  acknowledgement can clear the newer expiry mark. The next failed call marks it again; closing the
+  window needs the Workshop to order the two notices, which it does not.
+- **Date filters send the timestamp in quotes.** Graph's general `$filter` grammar writes date-time
+  values without quotes, while SharePoint list items are filtered by SharePoint itself, whose
+  documented examples quote them. This gatekeeper follows the SharePoint examples and has not been
+  checked against a live list (see the verification checklist); if a date filter is rejected or
+  compares as text, that is where to look.
+- **The account's own profile read is not retried.** The Connections listing and sign-in read the
+  profile with the account's current token and do not ask for a replacement when Microsoft has
+  invalidated it before its expiry; the resource clients do. Reconnecting heals it.
+
+## Restricted mode
+
+The mailbox and Teams refuse every observer (nothing here can show a collaborator has the same
+access), so each read of them is marked `containsRestrictedData`: once an agent has read a message
+or a chat, the workspace is in restricted mode — no public web fetches, and every action needs
+manual approval — and a gadget bound to either stays single-user. The Outlook and Teams agent
+catalogs are static for the same reason: they name no folder, team or chat, because the catalog is
+loaded into every prompt without any observation. Message bodies over 256 KiB are cut off and flagged; a message too
+large to fetch under the byte cap is refused.
+
+## Connect links are bound to the initiator
+
+The Workshop attaches the initiating person's Cloudflare Access email to every connect, reconnect
+and resource-expansion link. The `fetch` handler refuses (403, logged as
+`connect.initiator.mismatch`) a browser whose own Access assertion names anyone else, before the
+nonce or the authorization code is consumed. A deployment with no Access audience issues unbound
+links, which behave as before. See "Connect links are bound to the initiating Access identity" in
+[docs/fork-maintenance.md](../../docs/fork-maintenance.md).
+
+## Identity policy
+
+Only directory **members** on one of the tenant's **verified domains** can sign in. B2B guests
+(`userType` of `Guest`, `#EXT#` accounts, or addresses on unverified domains) are rejected by
+design: their addresses are owned by another tenant, so this tenant has not proven the email
+belongs to the person signing in. The address is lowercased and becomes the account key, so signing
+in with Microsoft resolves to the same Workshop account as any other gatekeeper that verifies the
+same address.
+
+## Microsoft Teams: the limits of this version
+
+What the Teams resource serves is the read side of the account's own membership: joined teams, their
+channels and rosters, channel messages and replies, the user's chats with their members and
+messages, and a search across them with on-demand hydration of a hit. Three limits are worth
+knowing before enabling it, because none of them is a setting a deployment can change.
+
+- **A Teams-bound gadget is single-user.** A connection covers every team, channel, and private chat
+  the connected account takes part in, and no second user can be shown to have access to all of
+  that — so `addObserver` throws, and the gadget is observable only by the account that connected
+  it. Sharing would mean verifying each observer against their own Teams membership through their
+  own delegated token and serving only the channels they belong to (private chats could never be
+  shared). That is a later change, not a configuration.
+- **A grant cannot be narrowed afterwards.** Reconnecting an account re-requests what it already
+  holds, so there is no "keep the mailbox, drop Teams". Shedding Teams means disconnecting the
+  Microsoft account altogether and connecting again naming only the mailbox.
+- **A Teams service administrator can open private channels they have not joined.** A channel is
+  checked against the team's channel listing, which Graph also serves to administrators for
+  channels they are not in, and the call that would prove membership (`ChannelMember.Read.All`) is
+  not among the permissions requested. For everyone else the listing is exactly the channels they
+  can see.
+- **A retained Teams capability is not re-checked.** Team membership is verified when a team
+  capability is handed out, not on every later call. A Teams service administrator who was a member
+  when it was minted, and is removed afterwards, can keep using that capability until the session
+  ends. This is the same administrator-only gap as private channels, accepted for the same reason.
+- **Nothing is live.** Reads happen when a gadget asks for them; no arriving message wakes anything.
+  Change notifications would need a public subscription endpoint renewed every few days, and the
+  bulk `getAllMessages` / `/delta` feeds are application permissions — neither fits a delegated,
+  on-demand gatekeeper. An agent therefore sees what it looks at, when it looks.
+
+## SharePoint List
+
+One connection is **one list**. A user introduces it by pasting the list's address; the gadget gets
+a `SharePointListSession` with four methods — `getColumns()`, `getItems()`, `getItem()`,
+`createItem()`. There is no update, no delete, no schema change, and no file or document-library
+access: the intended shape is a form gadget that appends rows to a list somebody already maintains.
+
+Every request runs on the connecting user's own delegated token, so the connection can only reach
+what that user can already open in SharePoint.
+
+### Introducing a list
+
+Paste the address of the list page itself (the `AllItems.aspx` view is fine). The query string and
+fragment are ignored — they are view state, not identity. All three site shapes resolve:
+
+```
+https://contoso.sharepoint.com/sites/HR/Lists/Requests/AllItems.aspx     → site /sites/HR
+https://contoso.sharepoint.com/teams/HR/sub/Lists/Requests/AllItems.aspx → site /teams/HR/sub
+https://contoso.sharepoint.com/Lists/Requests/AllItems.aspx              → the tenant root site
+```
+
+The "Copy link" button's share form (`https://contoso.sharepoint.com/:l:/r/sites/HR/Lists/Requests`)
+is accepted too; its other share modes (`/:l:/s/…`, `/:l:/g/…`) name a share rather than a path and
+are refused with a hint to copy the URL from the browser's address bar instead.
+
+The list is matched on the URL name after `/Lists/` (not the display name, which anyone who can edit
+the list may change). Site and list **ids** are resolved once, at introduction, so the binding keeps
+working after a rename. The binding's title is the list's display name.
+
+Three failures are worth recognizing:
+
+- `<what is wrong>. Expected a SharePoint list URL like https://<tenant>.sharepoint.com/…` — the
+  address is on a SharePoint host but does not name a list: no `/Lists/` segment, no list name after
+  it, `http` instead of `https`, or a share mode that carries no path. The first sentence says which.
+  No Graph call was made.
+- `The Microsoft gatekeeper cannot connect this URL: …` — the address is not on a SharePoint host at
+  all, so it is not one this gatekeeper connects. No Graph call was made.
+- `Could not open that SharePoint list: … Check the URL and that your account can open it.` — the
+  address parsed, but Graph would not resolve the site or the list for this account. The middle part
+  is Microsoft's own reason.
+
+### Columns a gadget can read and write
+
+`getColumns()` reports each column's **internal name** (the key `createItem()`, `select`, and
+`where` all use), display name, type, `required`, `readOnly`, a `choices` list for choice columns,
+`multiline` for a text column that takes more than one line, and `multiple` for a person or lookup
+column that holds more than one value. Hidden, system, and computed columns are not reported at all
+— except `Title`, which some lists mark read-only in a view while still requiring it on create.
+
+| Type | Read | Write |
+| --- | --- | --- |
+| `text` (incl. multiline), `number`, `boolean`, `dateTime`, `choice` | yes | yes |
+| `person`, `lookup` | yes | **no** — a numeric directory/list id this cannot look up |
+| `unsupported` (currency, calculated, hyperlink, managed metadata, geolocation, …) | yes | **no** |
+
+`createItem()` validates against the list's own schema **before** anything is submitted, so a bad
+call fails immediately instead of sitting in the approval queue. It refuses: an argument that is not
+an object; an unknown column name; a missing (or explicitly `null`) required column; a value of the
+wrong type; a `choice` outside the column's options; and any `person`, `lookup`, or `unsupported`
+column. Dates are normalized to an ISO timestamp, so neither the caller's formatting nor its time
+zone reaches SharePoint.
+
+Reads: `getItems()` returns a cursor — 25 items per page by default, 200 at most, at most 40 pages
+per cursor. Filters are structured (`{column, op, value}`, at most five clauses, combined with
+`and`); there is no way to pass a raw OData string. Every read is recorded as an observation in the
+workspace's activity, and nothing a read does can change the list.
+
+### The marker column, and retried creates
+
+A create that may have landed must not be repeated. Every `createItem()` therefore carries its own
+action id in a column named `GadgetsActionId`, and applying an action first looks that id up: if a
+row already has it (the first attempt landed but its answer was lost, or the worker died before
+recording it), the retry stops there instead of adding a second row.
+
+**This changes your list's schema.** The first approved create adds the column, a single line of
+text, indexed, if it is not there. The approval prompt for a create says so ("Schema change")
+whenever the column is absent, so it is decided there and not discovered afterwards. Everything
+else treats it as invisible: it is left out of `getColumns()`, out of the values `getItems()` and
+`getItem()` return, and a caller cannot write it. It does show in SharePoint, as "Gadgets action id".
+
+If the connection is not permitted to add columns, the action fails with a message naming the
+column: add a single line of text column with the internal name `GadgetsActionId` yourself, then
+retry the action. Microsoft documents `Sites.Manage.All` for adding a column to a list, and this connection requests
+only `Sites.ReadWrite.All`, so expect the first create on a list to fail this way unless the column
+is added by hand beforehand (a column of the list's own that shares the name, and is not an
+optional single line of text long enough for an id, is refused rather than written into). Whether
+`Sites.ReadWrite.All` is enough is checked on the first live create (see the verification
+checklist); granting `Sites.Manage.All` instead is a decision for whoever runs the deployment.
+
+The same retry problem exists for Outlook reply drafts, which Graph creates anew on every call.
+There the first attempt is recorded before the draft is made, and a retry first looks in Drafts for
+a draft in the same conversation, created since then, that begins with the same reply text; if
+there is one it stops. A reply with no text cannot be recognised that way, so a retried empty reply
+can still leave two drafts.
+
+### Approval
+
+Every `createItem()` lands in the approval queue with a fenced key/value description of the values,
+and a build collaborator approves it before the row is written. Nothing is auto-approvable: the
+source fork's "Create list items" auto-approval rule (which covered every gadget bound to the list
+in a workspace) is deliberately not ported. A binding holds at most **100** pending actions; the
+101st submission is refused with "Too many pending SharePoint list actions. Resolve existing
+actions before adding more."
+
+A create whose Graph write failed **stays pending**, so an approver can approve it again (a retry,
+for a throttle) or reject it from the workspace's **Activity** panel. Collaborators with the **use**
+role get the minimal UI and cannot see it, so a workspace shared for use needs at least one build
+collaborator who watches Activity.
+
+### Sharing a gadget
+
+A collaborator is admitted as an observer only if **their own** Microsoft account can open the list;
+the check runs on their token, not the owner's. A collaborator without site access gets "You do not
+have access to this SharePoint list." If Microsoft cannot be reached to answer the question, they
+get "Could not verify SharePoint access right now." and can be retried later.
+
+**A shared gadget can write to the list and read its schema, but nobody can read its rows.**
+SharePoint lets individual items carry their own permissions, which a check on the list cannot see,
+and every read runs on the owner's token, so showing rows to a collaborator could expose items they
+may not open. A gadget session carries no caller identity (the same session serves the owner and
+everyone using the gadget), so the read cannot be allowed for one and refused for another. What the
+Workshop offers instead is to name the observers on a read, which blocks it while any of them is
+still authorized. So:
+
+- `getColumns()` and `createItem()` work for everyone. `createItem()` still goes through approval
+  and is validated exactly as before.
+- `getItems()` and `getItem()` (and every page of a cursor) are blocked for **everyone, the owner
+  included, while any collaborator is authorized on the gadget**. The owner reads rows again when
+  the collaborators are removed.
+- Once a gadget has read rows, **no collaborator can be added** to it ("This gadget has already read
+  rows of this SharePoint list…"); the record is kept for the life of the binding.
+- Row reads are marked restricted (no public web fetches, manual approval of every action).
+
+A Workshop change that gave the session its caller would lift the owner's loss of row reads.
+
+### Known limits
+
+- **`createItem()` reports nothing about the outcome**, as the mailbox's writes do: it returns once
+  the action is queued, and returns no item id. The row appears in later reads only after approval.
+- **A column added in SharePoint can take a few minutes to show in reads.** The list's schema is
+  cached for 5 minutes per Durable Object instance, so `getColumns()` and `getItems()` may report
+  the old one until then. `createItem()` does not wait: a value refused against the cached schema is
+  checked once more against the live schema before the refusal is reported.
+- **Reads have their own throttling ceiling.** A read waits out a SharePoint `Retry-After` for at
+  most 10 s (writes get 60 s, since an approval queue rather than a caller is waiting). Past it
+  `getColumns()`, `getItems()` and `getItem()` fail with `SharePoint is throttling this connection
+  and asked to be left alone for N seconds. Try again after that.` Nothing is lost — retry after the
+  stated wait.
+- **Multi-select choice columns look single-valued.** Graph's column definition exposes no
+  multi-select flag, so such a column is described as an ordinary `choice` and only accepts one
+  string. A multi-value write is expected to be refused by SharePoint — untested, because no list
+  with such a column has been tried yet. Avoid those columns until one has.
+- **Large lists.** SharePoint's 5000-item list view threshold applies to `getItems()`: past it,
+  filtering or sorting on a column that has no index fails, and Microsoft's own sentence comes back
+  as `SharePoint rejected the request: Field 'X' cannot be referenced in filter or orderby as it is
+  not indexed`. The fix is on the SharePoint side — add an index for that column in list settings.
+- **Not yet verified against a real tenant** (check these on the first live list; they are
+  assumptions the code makes): the percent-encoded `$expand=fields($select=…)` form, quoted
+  `dateTime` literals in filters, the `$top` ceiling of 200, and root-site resolution for a
+  tenant-root list.
+
+### Rollback
+
+Withdrawing SharePoint is the same procedure every resource here uses — withdraw it in code, never
+touch the migration: see
+[Durable Object migrations, and how to back out a resource](#durable-object-migrations-and-how-to-back-out-a-resource).
+The class to keep exported is `SharePointListGatekeeperImpl` and the tag to keep is
+`v1-sharepoint-list`.
+
+De-consenting `Sites.ReadWrite.All` is a separate action in Entra (API permissions on the app
+registration) and affects nothing in this repo.
+
+## Setting up the Entra app registration
+
+### Step 1: Register the application
+
+1. Go to the [Microsoft Entra admin center](https://entra.microsoft.com) and sign in as an
+   administrator of the tenant whose users should have access.
+2. Go to **Applications** > **App registrations** > **New registration**.
+3. **Name**: anything (e.g. "Cloudflare OS").
+4. **Supported account types**: **Accounts in this organizational directory only (single tenant)**.
+   The gatekeeper builds every OAuth URL from `TENANT_ID`, and only tenant members can sign in
+   anyway, so a multi-tenant registration would only widen the app's exposure.
+5. **Redirect URI**: platform **Web** (do not use "Single-page application"), value
+   `${PUBLIC_BASE_URL}/gatekeeper/microsoft/oauth` — for local dev that is
+   `http://localhost:8787/gatekeeper/microsoft/oauth` (no trailing slash, http not https). Choosing
+   "Single-page application" instead causes sign-in to fail at code redemption with `AADSTS9002325`
+   (the gatekeeper redeems the code itself using the client secret; SPA platform mandates browser
+   PKCE, which this server-side flow does not use).
+6. Click **Register**, then copy the **Application (client) ID** and **Directory (tenant) ID** from
+   the Overview page.
+
+### Step 2: Grant the API permissions
+
+Under **API permissions** > **Add a permission** > **Microsoft Graph** > **Delegated permissions**,
+add:
+
+| Permission | Admin consent | Why |
+| --- | --- | --- |
+| `openid`, `profile`, `email` | no | sign-in and the id token claims the email is read from |
+| `offline_access` | no | refresh tokens, so a connected mailbox survives past the first hour |
+| `User.Read` | no | the signed-in user's profile, and the tenant's verified domain list |
+| `Mail.ReadWrite` | no | read messages and folders, flip read state, move messages, draft replies |
+| `Team.ReadBasic.All` | no | list the teams the user has joined, and read a team's name |
+| `Channel.ReadBasic.All` | no | list and read the channels of those teams |
+| `TeamMember.Read.All` | **yes** | read a team's roster |
+| `ChannelMessage.Read.All` | **yes** | read channel messages and their replies |
+| `Chat.Read` | no* | read the user's chats, their members, and their messages |
+| `Sites.ReadWrite.All` | **yes** | SharePoint List: read a list's columns and items, and create items |
+
+Then click **Grant admin consent for &lt;tenant&gt;** and confirm every permission reads
+**Granted**. Many tenants block user consent; without admin consent those users hit `AADSTS65001`
+("The user or administrator has not consented") on their first sign-in and can never get past it.
+
+When a resource is added in a later release, add its permissions to the registration and grant
+admin consent again; re-granting does not disturb the grants already in use, and no redeploy is
+needed for the consent itself. Because each resource connects on its own, nothing needs to be
+consented before a release ships — only before someone connects that resource.
+
+`Sites.ReadWrite.All` is broad by necessity: Graph's per-site permission (`Sites.Selected`) is
+application-only, so a *delegated* connection cannot be scoped to one site. Every request still runs
+as the signed-in user, so the connection reaches nothing that user could not already open — and a
+gadget only ever sees the single list its binding names.
+
+**Consent all of a resource's permissions or none.** A resource counts as granted only when the
+grant covers *every* one of its scopes, so a resource left unconsented is unavailable rather than
+partly working — and the symptom is a connect flow that keeps offering a reconnect link. The worker
+logs the shortfall at `warn` with `event: "microsoft.consent.resource.ungranted"`, naming the
+resource and the missing scopes; check the logs before re-running the consent. A grant records what
+it covered at the moment it was issued, so **an account that connected before the permission was
+added stays without that resource until it connects Microsoft again** — fixing the consent alone
+changes nothing for accounts already connected.
+
+**\*The "admin consent" column is Microsoft's static classification of the permission, not a
+prediction about this tenant.** Under "Secure by Default" (message center post `MC1163922`) it is
+the tenant's **consent policy** that decides what a user may agree to, and the default policy
+withholds permissions that read other people's data. A "no" row can therefore still stop at a
+prompt only an administrator can complete — `Chat.Read` most of all, since chat messages are by
+definition other people's. Granting admin consent for the whole table once makes the distinction
+moot, which is why the step above is not optional. **Record this tenant's actual posture here**
+when the permissions are added: one line saying whether a user could consent unaided, or the
+administrator had to.
+
+### Step 3: Create a client secret — and diarize its expiry
+
+Under **Certificates & secrets** > **Client secrets** > **New client secret**:
+
+1. Pick an expiry. The admin center caps new secrets at **24 months** and commonly defaults to
+   **180 days**. Longer means fewer rotations; shorter limits how long a leaked secret is useful.
+   Pick deliberately — this is not a value to accept by reflex.
+2. Click **Add** and copy the secret **Value** immediately. It is displayed once, and only the
+   Secret ID is retrievable afterwards.
+3. **Record the expiry date** somewhere your team will see it, with a reminder at least two weeks
+   ahead.
+
+> **The expiry is an outage, not a warning.** When the secret expires, Entra rejects every token
+> exchange with `AADSTS7000222`. That error is only visible inside the OAuth pop-up: the main window
+> is still waiting on the login attempt, so it spins forever. If the deployment also sets
+> `DISABLE_PASSWORD_AUTH=true` and Microsoft is the only allowlisted sign-in gatekeeper, **nobody
+> can log in at all** — including the administrator who would fix it. Rotation is an operational
+> requirement here, not hygiene.
+
+### Step 4: Rotation runbook
+
+Rotate *before* the expiry date, never after. Entra allows more than one active secret, so there is
+no gap:
+
+1. **Create** a second client secret on the same app registration (Certificates & secrets > New
+   client secret) and copy its value.
+2. **Update the deployment** to the new value — reinstall/reconfigure the gatekeeper with the new
+   `CLIENT_SECRET` (or `wrangler secret put CLIENT_SECRET` for a self-managed deploy), then confirm
+   a fresh sign-in and a connected mailbox both still work. Existing sessions are unaffected; only
+   token exchanges use the secret.
+3. **Delete** the old secret once the new one is proven. Leaving it in place keeps a second valid
+   credential alive for no reason.
+4. Record the new expiry date and reset the reminder.
+
+If the secret has already expired, the same steps apply — create a new secret and update the
+deployment. Nothing else needs re-consenting, and connected mailboxes recover on their next refresh.
+
+### Step 5: Configure the worker
+
+The gatekeeper reads three vars: `CLIENT_ID`, `CLIENT_SECRET`, `TENANT_ID`. Deployments supply them
+as secrets (the deploy wizard asks for all three; see `deploy-inputs.json`).
+
+For local dev, put the shell vars in the gitignored root `.dev.vars` (or export them);
+`run-dev-server.ts` maps them into the worker:
+
+```
+MICROSOFT_CLIENT_ID=<Application (client) ID>
+MICROSOFT_CLIENT_SECRET=<client secret value>
+TENANT_ID=<Directory (tenant) ID>
+```
+
+`MICROSOFT_CLIENT_ID` and `MICROSOFT_CLIENT_SECRET` seed the worker's `CLIENT_ID` and
+`CLIENT_SECRET`, and `TENANT_ID` is passed through as is. If any of the three is missing, the OAuth
+page renders "Microsoft Gatekeeper Not Configured" and connection attempts fail the same way.
+
+### Step 6: (Optional) Enable Microsoft sign-in
+
+To offer "Continue with Microsoft" on the login page, add `microsoft` to the deployment's
+`AUTH_GATEKEEPERS` allowlist (e.g. in the root `.dev.vars`):
+
+```
+AUTH_GATEKEEPERS=microsoft
+```
+
+See [docs/oauth-signin.md](../../docs/oauth-signin.md) for how the allowlist and
+`DISABLE_PASSWORD_AUTH` interact.
+
+## Manual verification
+
+Everything below needs a real Entra tenant, so it cannot be unit-tested. Run it once against the
+tenant before trusting a deployment, and again after any change to the auth path.
+
+Set these in the gitignored root `.dev.vars` and start the dev server (`pnpm dev-server`):
+
+```
+MICROSOFT_CLIENT_ID=<Application (client) ID>
+MICROSOFT_CLIENT_SECRET=<client secret value>
+TENANT_ID=<Directory (tenant) ID>
+AUTH_GATEKEEPERS=microsoft
+```
+
+When a step fails, capture the `AADSTS…` code from the pop-up or the worker log — it is what
+identifies the cause, and guessing without it wastes a round trip.
+
+### Sign-in
+
+- [ ] **Member happy path.** "Continue with Microsoft" → sign in as a tenant member on a verified
+      domain → lands in the Workshop. The account's email is the address, **lowercased**; signing
+      in as `First.Last@Domain.com` must produce `first.last@domain.com`, not a second account.
+- [ ] **Foreign tenant rejected.** Sign in with a Microsoft account from another tenant (or a
+      personal `outlook.com` account). Expected: refused with a visible reason, no account created.
+- [ ] **B2B guest rejected.** Same, with a guest invited into this tenant. If the tenant has no
+      guest and you will not invite one, record this item as **untested** — it is an assumption,
+      not a verified control, until somebody runs it.
+- [ ] **Misconfiguration is actionable.** Unset `TENANT_ID`, restart, retry sign-in. The
+      pop-up must show the "Microsoft Gatekeeper Not Configured" page — a user must never be left
+      watching an infinite spinner with nothing to act on. Restore the var afterwards.
+
+### Mailbox connection
+
+- [ ] **Connect.** Connections → Microsoft → the configurator frame shows "Outlook mailbox" →
+      Connect → consent for `Mail.ReadWrite`.
+- [ ] **No re-consent loop.** Reopen the configurator and connect the same mailbox again. It must
+      go straight through: the granted scopes come back resource-qualified
+      (`https://graph.microsoft.com/Mail.ReadWrite`) and must be recognized as already granted, not
+      re-requested every time.
+
+### Mailbox behavior (via a gadget)
+
+- [ ] **Reads produce observations.** List and read messages; each read shows up as an observation
+      in the approval feed, and nothing is written.
+- [ ] **Writes queue.** Mark-read, move, and reply-draft each land in the approval queue instead of
+      taking effect, and the approval description shows the real subject, sender, and draft text.
+- [ ] **Immutable ids survive a move.** Approve a move of a message to another folder, then have the
+      agent act on **the same message again** (mark it read, or draft a reply) and approve that too.
+      Both must succeed: Outlook re-keys a moved message unless the immutable-id preference holds,
+      and a broken preference shows up here as a 404 on the second action.
+- [ ] **Nested folders are reachable.** Create a subfolder in Outlook (e.g. `Clients/Acme`), then
+      ask the agent to list folders and move a message into it. The subfolder must appear —
+      Graph's root listing omits child folders, so this exercises the traversal — and the move must
+      apply.
+- [ ] **A retried reply draft does not duplicate.** Approve a reply draft, then apply the same
+      action again (re-approve after a forced failure) → Drafts holds one draft, not two. Record
+      whether the conversation-and-date filter on Drafts worked against Graph.
+- [ ] **A reply draft cannot inject markup.** Have the agent draft a reply whose comment contains
+      `<b>bold</b> <script>alert(1)</script>`, approve it, then open the draft in Outlook. Record
+      what you see: inert text (expected) or rendered HTML. If Graph interprets the comment as HTML,
+      the text still cannot execute in the approval UI, but say so here and escape it at the API
+      layer before this ships to anyone but you.
+
+### Teams connection and behavior (via a gadget)
+
+- [ ] **Consent is in place.** `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `TeamMember.Read.All`,
+      `ChannelMessage.Read.All` and `Chat.Read` (delegated) read **Granted** on the registration.
+- [ ] **Connect on its own.** Connections → Microsoft → "Microsoft Teams" → Connect. Only the five
+      Teams permissions are requested (no `Mail.ReadWrite` on the consent screen), and a mailbox
+      that was already connected keeps working.
+- [ ] **Reads produce observations.** List teams, channels and chats, and read a few messages; each
+      read shows up as an observation, and nothing in Teams changes.
+- [ ] **A search hit that is a channel reply can be opened.** Search for words that appear in a reply
+      (not a top-level post) and call `getInfo()` on its `message` → the reply comes back. Record
+      whether the search index reported the parent message id; without it the lookup falls back to
+      the top-level message path and fails with a 404.
+- [ ] **Single-user.** Share a gadget bound to Teams with a colleague → opening it is refused.
+
+### SharePoint list (via a gadget)
+
+Run this against a real list you are allowed to write to — every item it creates is a real row that
+the site's members can see.
+
+- [ ] **Consent is in place.** On the app registration this deployment uses, `Sites.ReadWrite.All`
+      (delegated) reads **Granted**. Each environment with its own registration needs its own grant,
+      before the build that requests the scope is deployed there.
+- [ ] **Connect on its own.** Connections → Microsoft → the picker offers "SharePoint List" → the frame asks
+      for a list URL, and **Connect** stays disabled until the address is plausible. Paste a
+      `/sites/…/Lists/…` URL → a binding appears, titled with the list's display name.
+- [ ] **Other site shapes resolve.** Repeat with a `/teams/…` list and with a list on the tenant
+      root site (no `/sites/` or `/teams/` segment). Both must bind.
+- [ ] **A bad address fails cleanly.** Paste a non-list URL → a readable error, no binding, and
+      nothing left half-connected.
+- [ ] **Schema is visible.** Ask the agent to describe the binding and call `getColumns()` → types,
+      required flags, and a choice column's options are all shown; hidden system columns are not.
+- [ ] **Writes queue.** Submit from a gadget → the action waits in **Activity** with a readable,
+      fenced description of the values and the gadget gets no item id; approve → the row is created.
+- [ ] **Validation happens before the queue.** Submit with a required field missing → refused
+      immediately, naming the column, with nothing left in the approval queue.
+- [ ] **The marker column is added with consent.** On a list without `GadgetsActionId`, submit a
+      create → the approval prompt shows a "Schema change" line. Approve → the column appears in the
+      list settings (single line of text, indexed) and the row is created. If the connection is
+      refused, the action fails with the manual-column message and nothing is created. Record which
+      it was.
+- [ ] **A retry does not duplicate.** Approve a create, then re-approve the same action (or stop the
+      worker between SharePoint's answer and the record, if you can) → still one row with that
+      `GadgetsActionId`. Check the filter works on a list past 5,000 items, or note that it does not.
+- [ ] **The marker stays out of sight.** `getColumns()`, `getItems()` and `getItem()` never mention
+      `GadgetsActionId`, and `createItem({GadgetsActionId: …})` is refused as an unknown column.
+- [ ] **Types round-trip.** Write a choice, a number, a boolean, and a date → each is stored with
+      the right type in SharePoint (a date lands as the moment you meant, not a day out).
+- [ ] **Sharing respects SharePoint's own access.** Share the gadget with a colleague who has site
+      access → they can use the form. Share it with someone who does not → they are refused with
+      "You do not have access to this SharePoint list."
+- [ ] **A filter on two columns.** `getItems({where: [{column: A, …}, {column: B, …}]})` on a real
+      list → record whether Graph accepts it, and whether it needs both columns indexed. Microsoft
+      documents limits on filtering several list fields in one request; this gatekeeper sends the
+      clauses together and does not reject them up front.
+- [ ] **A date filter compares dates.** `getItems({where: [{column: <a date column>, op: "ge",
+      value: "2026-01-01"}]})` on a list whose dates you know → only rows on or after that date come
+      back, for both a date-only and a date-and-time column. Record whether the quoted timestamp was
+      accepted.
+- [ ] **Filtering works on a real list.** `getItems()` with a `where` clause on an indexed column
+      and `top` of 200 → pages correctly. Record the largest `top` Graph actually honoured; on a
+      list past the 5000-item threshold, filtering an unindexed column is expected to fail with
+      Microsoft's "not indexed" sentence.
+
+### Password-auth coexistence
+
+Password accounts key on the address exactly as typed, while Microsoft sign-in lowercases it. The
+same human signing up with `Alex@contoso.com` by password and then with Microsoft would end up
+with two accounts. Deployments that set `DISABLE_PASSWORD_AUTH=true` (the expected staging shape)
+have no exposure. If a deployment keeps password auth on alongside Microsoft, verify the address
+casing your password accounts use before enabling this gatekeeper.
+
+## Troubleshooting
+
+### The login pop-up closes (or shows an error) and the main window spins forever
+
+The token exchange failed. Open the pop-up's error text before it closes, or check the worker logs:
+
+- `AADSTS7000222` — the client secret has expired. See the rotation runbook above.
+- `AADSTS7000215` — the client secret value is wrong (a Secret ID was copied instead of the Value,
+  or the secret was rotated without updating the deployment).
+- `AADSTS65001` — admin consent was never granted for the delegated permissions (Step 2), either
+  for sign-in or for the resource being connected. Only that resource fails; the others keep
+  working.
+- `AADSTS9002325` — the app's redirect URI is registered under the "Single-page application"
+  platform instead of "Web". Delete the SPA platform entry in the app registration and register the
+  URI under "Web" platform only.
+
+### "Not configured" page during authorization
+
+One of `CLIENT_ID`, `CLIENT_SECRET`, `TENANT_ID` is missing. In dev, check all three
+`MICROSOFT_*` shell vars and restart the dev server.
+
+### `AADSTS50011` / redirect URI mismatch
+
+The app registration's **Web** redirect URI must match `${PUBLIC_BASE_URL}/gatekeeper/microsoft/oauth`
+exactly — no trailing slash, and `http` (not `https`) for `localhost`.
+
+### Every Graph call fails while the account still looks connected
+
+Conditional Access — or continuous access evaluation — rejected the token's claims, and Graph
+answers `401` with `WWW-Authenticate: Bearer … error="insufficient_claims"`. Minting again cannot
+help, since the refresh token produces a token with the same claims, so the gatekeeper does not
+retry: it reports the credentials as dead, which is what raises the reconnect prompt. The user
+reconnects and satisfies whatever the policy now asks for (MFA, a compliant device). This is one
+shared request path, so Teams behaves exactly as mail does here.
+
+### Sign-in is refused for a user who exists in the directory
+
+The account is a guest, an `#EXT#` account, or its address is not on a verified domain of the
+tenant. That is the identity policy above, not a misconfiguration.
+
+### How to confirm sign-in worked
+
+After completing the sign-in flow, verify success in two places:
+
+1. **Dev server log**: watch `pnpm dev-server` output for a log line containing `gatekeeper login
+   finished` with `"outcome":"ok"` (from the component workshop.auth).
+2. **Workshop UI**: sign-in redirects to the Workshop itself (if a gadget is available) or the main
+   interface. A connected Microsoft account appears under **Gatekeepers** → **Connections** or via
+   the **/gatekeepers** endpoint. Note: the backend origin (localhost:8787) intentionally serves 404
+   for pages; the UI is on the Vite dev client (localhost:3000).
+
+## Build
+
+```
+vp run -F @gadgets/microsoft-gatekeeper build
+```
+
+## Durable Object migrations, and how to back out a resource
+
+Each resource type has its own Durable Object class, and every class is registered by a `migrations`
+tag in the `migrations` export of `cloudflare.config.ts` — `v0` for `UserAccount` and
+`OutlookMailGatekeeperImpl`, `v1` for `TeamsGatekeeperImpl`, `v1-sharepoint-list` for `SharePointListGatekeeperImpl`. `wrangler.jsonc` is generated from it (`pnpm configs:generate`). Tags are appended,
+never edited: rewriting an applied tag makes the next deploy disagree with the migration history the
+account already holds.
+
+**A deployment that has applied a tag cannot be rolled back past it.** `wrangler rollback` refuses
+to cross a Durable Object migration, and redeploying a pin from before that tag fails the same way,
+because the account's history records a class the older bundle does not declare. Recovery is
+therefore forward, not backward.
+
+**To withdraw a resource from users without redeploying an older build**, remove three things and
+ship that:
+
+1. its entry in `RESOURCE_SCOPES` (`src/microsoft.ts`) — it stops being offered, stops being
+   consented for, and disappears from the connect UI;
+2. its branch in `getGatekeeperClassFor` — no URL routes to it;
+3. its branch in `startResourceConfigurator` — no frame is served for it.
+
+**Keep the Durable Object class exported and keep its migration tag in place.** They are what the
+migration history refers to; dropping either turns the next deploy into the same mismatch a rollback
+would have caused. The resource is then invisible to users, existing objects are inert, and the
+other resources are untouched.

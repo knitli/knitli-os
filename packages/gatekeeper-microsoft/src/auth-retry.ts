@@ -1,0 +1,323 @@
+// Shared fetch helper for the Microsoft Graph API client.
+//
+// Three retry/failure concerns compose here:
+//
+//   1. Auth (401). The access token we send can be stale or invalidated before its recorded expiry
+//      — e.g. after a re-consent, an explicit revoke-then-reconnect, or the refresh-token rotation
+//      Entra performs on every mint. The token is cached in the gatekeeper Durable Object's memory
+//      and in the account's storage, so a stale-but-unexpired token would otherwise be served on
+//      every request and the 401 could not self-heal. On a 401 we mint a fresh token via
+//      `getAccessToken({ forceRefresh: true })` and retry exactly once. This is safe on any HTTP
+//      method: a 401 is rejected before the request takes effect, so a write is never applied twice.
+//      A 403 is an insufficient-permission error that a fresh token cannot fix, so it is never
+//      retried.
+//
+//   2. Claims challenges (401 + `WWW-Authenticate: ... claims=...`). Conditional Access and
+//      continuous access evaluation reject a token whose claims no longer satisfy tenant policy.
+//      Minting again cannot help: the refresh token produces another token with the same claims, so
+//      a retry would burn a token exchange and fail identically. Worse, the account looks alive —
+//      refreshes succeed while every Graph call fails — so the UI never offers a reconnect. These
+//      are therefore reported to the account authority as credential death (which is what surfaces
+//      the reconnect prompt) and returned to the caller unretried.
+//
+//   3. Transient failures (429 / 5xx / network timeout). Retried with exponential backoff plus full
+//      jitter, honoring `Retry-After` when present. A 5xx and a network timeout leave it ambiguous
+//      whether the server already applied a write, so those replay idempotent GETs only. A 429 is
+//      different: Graph rejects a throttled request before processing it, so replaying it — for any
+//      method with a replayable body — cannot duplicate a write.
+//
+// All concerns share a single attempt counter, so the worst case is a predictable `retries + 1`
+// requests: `retries` transient attempts plus at most one extra for the one-shot 401 refresh.
+
+/**
+ * Options for requesting an access token.
+ *
+ * `forceRefresh` means "do not serve me a cached token" — the caller saw a 401, so any token cached
+ * against its recorded expiry is known-bad. `staleToken` names the rejected token so a burst of
+ * concurrent 401s collapses into a single token exchange instead of one exchange per caller.
+ */
+export type AccessTokenRequest = {
+  forceRefresh?: boolean;
+  /** The token the caller just had rejected. Never log this. */
+  staleToken?: string;
+};
+
+export type AccessTokenProvider = (opts?: AccessTokenRequest) => Promise<string>;
+
+/**
+ * Told that Graph rejected the current credentials in a way no fresh token can fix. Implementations
+ * mark the account dead so the Workshop offers a reconnect; failures are swallowed by the caller so
+ * a notification problem cannot mask the underlying request error.
+ */
+export type CredentialsRejectedReporter =
+    (detail: string, rejectedToken: string, claims?: string) => Promise<void>;
+
+/**
+ * How long this client will sit out a throttling `Retry-After`, and what to do when the server asks
+ * for longer.
+ *
+ * Without a policy, a `Retry-After` is clamped to `MAX_DELAY_MS` and the request is replayed anyway.
+ * That is right for an endpoint that asks for seconds, and wrong for one that asks for a minute:
+ * replaying early lands back in the same throttle and spends another request on it. A client whose
+ * endpoints throttle in minutes therefore sets a real ceiling and fails fast beyond it — telling the
+ * caller how long to stay away is worth more than another rejected request.
+ *
+ * This applies to a 429 only. A `Retry-After` on a 5xx is a hint about an outage rather than a wait
+ * the server is enforcing, so it keeps the clamp-and-replay behavior and never fails fast: a
+ * temporary error should not be reported to the caller as throttling.
+ */
+export type RetryAfterPolicy = {
+  /** Longest server-requested wait this client will actually wait out, in milliseconds. */
+  maxWaitMs: number;
+  /**
+   * The error thrown instead of retrying, when the server asks for longer than `maxWaitMs`. Given
+   * the requested wait so it can be reported to whoever has to decide when to come back.
+   */
+  tooLong: (requestedMs: number) => Error;
+};
+
+export type FetchWithAuthRetryOptions = {
+  /**
+   * Total attempts for transient failures, including the first. Defaults to 3. The one-shot 401
+   * refresh does not consume this budget, so the worst case is `retries + 1` requests.
+   */
+  retries?: number;
+  /** Per-attempt abort timeout in milliseconds. Omitted means no timeout is imposed. */
+  timeoutMs?: number;
+  /**
+   * The request only reads, whatever its method (a search sent as a POST because its query travels
+   * in the body). Network errors and 5xx responses are then replayed as they are for a GET.
+   */
+  idempotent?: boolean;
+  /** Invoked once when a 401 carries a claims challenge. */
+  onCredentialsRejected?: CredentialsRejectedReporter;
+  /**
+   * How a long `Retry-After` is handled. Omitted keeps the clamp-and-replay behavior described on
+   * `RetryAfterPolicy`.
+   */
+  retryAfter?: RetryAfterPolicy;
+};
+
+const BASE_DELAY_MS = 500;
+const MAX_DELAY_MS = 10_000;
+
+/** Longest value copied out of a `WWW-Authenticate` challenge into a message. */
+const MAX_CHALLENGE_DETAIL_CHARS = 100;
+
+/**
+ * The short reason from a `WWW-Authenticate` claims challenge, or null when the header carries
+ * none.
+ *
+ * Graph answers a policy rejection with `Bearer ... error="insufficient_claims", claims="<base64>"`.
+ * Either marker identifies it. The `claims` blob itself is never surfaced: it is an opaque policy
+ * demand meant for a token request, not for a human, and it can be kilobytes long.
+ */
+export function claimsChallengeDetail(header: string | null | undefined): string | null {
+  if (!header) return null;
+  let hasClaims = /(^|[\s,])claims\s*=/i.test(header);
+  let insufficientClaims = /(^|[\s,])error\s*=\s*"?insufficient_claims/i.test(header);
+  if (!hasClaims && !insufficientClaims) return null;
+  let error = header.match(/(^|[\s,])error\s*=\s*"([^"]*)"/i)?.[2];
+  return (error || "insufficient_claims").slice(0, MAX_CHALLENGE_DETAIL_CHARS);
+}
+
+/** Largest claims directive kept; a real one is a few hundred bytes. */
+const MAX_CLAIMS_CHALLENGE_CHARS = 4000;
+
+/**
+ * The claims directive of a `WWW-Authenticate` challenge, as the JSON string a new authorization
+ * request carries in its `claims` parameter, or null when there is none or it is not usable.
+ *
+ * Graph sends it base64-encoded. Entra only issues a token with the claims a Conditional Access or
+ * continuous access evaluation policy demands if the interactive request repeats this directive, so
+ * a reconnect that drops it gets the same insufficient token back.
+ */
+export function claimsChallengeValue(header: string | null | undefined): string | null {
+  let encoded = header?.match(/(^|[\s,])claims\s*=\s*"([^"]*)"/i)?.[2];
+  if (!encoded) return null;
+  try {
+    let json = atob(encoded.replace(/-/g, "+").replace(/_/g, "/"));
+    JSON.parse(json);
+    return json.length <= MAX_CLAIMS_CHALLENGE_CHARS ? json : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a transient failure status is worth replaying for this method.
+ *
+ * A 5xx does not tell us whether the request took effect before the response, so it is only
+ * replayed for idempotent GETs. A 429 means the request was throttled — rejected before Graph
+ * processed it — so replaying it is safe for any method.
+ */
+function canRetry(status: number, method: string): boolean {
+  if (status === 429) return true;
+  if (status >= 500 && status <= 599) return method === "GET";
+  return false;
+}
+
+/**
+ * The wait a `Retry-After` header asks for, in milliseconds, or undefined when it asks for nothing
+ * this code can act on. Only the delta-seconds form is parsed; the HTTP-date form yields NaN and
+ * leaves the caller on exponential backoff, which is fine.
+ */
+function retryAfterMs(retryAfter: string | null): number | undefined {
+  if (!retryAfter) return undefined;
+  let seconds = parseInt(retryAfter, 10);
+  if (Number.isNaN(seconds)) return undefined;
+  return Math.max(seconds, 0) * 1000;
+}
+
+function backoffDelayMs(attempt: number, retryAfter: string | null): number {
+  // Prefer the server's Retry-After when present, capped.
+  let requested = retryAfterMs(retryAfter);
+  if (requested !== undefined) return Math.min(requested, MAX_DELAY_MS);
+  // Exponential backoff with full jitter.
+  let capped = Math.min(BASE_DELAY_MS * 2 ** attempt, MAX_DELAY_MS);
+  return Math.random() * capped;
+}
+
+/**
+ * Perform an authenticated fetch, injecting a Bearer token and applying the concerns described at
+ * the top of this file. The `Authorization` header is set from the (possibly refreshed) token on
+ * every attempt, so callers must NOT set it themselves; any other headers in `init.headers` are
+ * preserved.
+ *
+ * The response body is never consumed on the path that returns, so the caller can always read the
+ * error payload.
+ */
+export async function fetchWithAuthRetry(
+  url: string,
+  init: RequestInit,
+  getAccessToken: AccessTokenProvider,
+  opts: FetchWithAuthRetryOptions = {},
+): Promise<Response> {
+  // Whether replaying changes nothing on the server, which is what decides if an ambiguous failure
+  // (a timeout, a 5xx) may be retried.
+  let method = opts.idempotent ? "GET" : (init.method ?? "GET").toUpperCase();
+  let retries = opts.retries ?? 3;
+
+  // A request can only be replayed if its body can be sent again. A string body (what every call
+  // site uses today) re-serializes fine; a stream is consumed by the first attempt, so retrying it
+  // would send an empty or errored body. Nothing to replay is likewise fine.
+  let replayable = init.body === undefined || init.body === null || typeof init.body === "string";
+
+  // One-shot: a 401 buys exactly one refreshed retry
+  let refreshed = false;
+  let token = await getAccessToken();
+  let attempt = 0;
+
+  while (true) {
+    // A fresh timeout signal per attempt so a retry gets the full budget, combined with any
+    // caller-supplied signal.
+    let signals: AbortSignal[] = [];
+    if (opts.timeoutMs !== undefined) signals.push(AbortSignal.timeout(opts.timeoutMs));
+    if (init.signal) signals.push(init.signal);
+    let signal = signals.length > 0 ? AbortSignal.any(signals) : undefined;
+
+    let headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${token}`);
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        ...init,
+        headers,
+        ...(signal ? { signal } : {}),
+      });
+    } catch (error) {
+      // Network error or timeout: ambiguous, so retry idempotent GETs only.
+      if (replayable && method === "GET" && attempt < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, backoffDelayMs(attempt, null)));
+        attempt++;
+        continue;
+      }
+      throw error;
+    }
+
+    if (response.status === 401) {
+      let claimsDetail = claimsChallengeDetail(response.headers.get("WWW-Authenticate"));
+      if (claimsDetail) {
+        // Awaited so the account is recorded dead before the caller's error propagates: the two
+        // must not race, or the user sees "request failed" while the UI still believes the
+        // connection is healthy. A reporting failure is swallowed — it must not replace the real
+        // error with a notification error.
+        if (opts.onCredentialsRejected) {
+          await opts.onCredentialsRejected(
+              claimsDetail, token,
+              claimsChallengeValue(response.headers.get("WWW-Authenticate")) ?? undefined)
+              .catch(() => {});
+        }
+        return response;
+      }
+
+      if (!refreshed && replayable) {
+        // Deliberately does not touch `attempt`: the refresh is one-shot, so it can add at most one
+        // request to the budget rather than doubling it.
+        refreshed = true;
+        await response.body?.cancel();
+        // Naming the rejected token lets the authority collapse a concurrent burst of 401s into a
+        // single token exchange — see AccessTokenRequest.
+        token = await getAccessToken({ forceRefresh: true, staleToken: token });
+        continue;
+      }
+    }
+
+    if (replayable && canRetry(response.status, method) && attempt < retries - 1) {
+      let header = response.headers.get("Retry-After");
+      let requested = retryAfterMs(header);
+      // The ceiling is a throttling policy: only a 429 states a wait the server will hold the
+      // caller to. A 5xx stays on the default backoff, which cannot fail fast.
+      let policy = response.status === 429 ? opts.retryAfter : undefined;
+      if (policy && requested !== undefined && requested > policy.maxWaitMs) {
+        // Waiting this out would hold the caller for longer than it agreed to, and replaying sooner
+        // just re-enters the throttle, so the wait is reported instead of served.
+        await response.body?.cancel();
+        throw policy.tooLong(requested);
+      }
+      let delay = policy && requested !== undefined
+          ? Math.min(requested, policy.maxWaitMs)
+          : backoffDelayMs(attempt, header);
+      await response.body?.cancel();
+      await new Promise(resolve => setTimeout(resolve, delay));
+      attempt++;
+      continue;
+    }
+
+    return response;
+  }
+}
+
+/** Mints an access token, bypassing any cache of its own when `forceRefresh` is set. */
+export type MintedAccessToken = { token: string; expires: Date };
+
+export type MintAccessToken = (opts?: AccessTokenRequest) => Promise<MintedAccessToken>;
+
+/**
+ * How a resource gatekeeper gets its access token: from the `UserAccount`, on every call.
+ *
+ * Deliberately not memoized. Entra has no revocation endpoint to call, so disconnecting an account
+ * only destroys what the `UserAccount` holds; a token a resource Durable Object kept would stay
+ * good for the rest of its lifetime and let a capability handed out before the disconnect go on
+ * reading or applying approved writes. Asking the authority each time costs an RPC, and that
+ * authority answers from its own storage without a network round trip unless the token has to be
+ * re-minted, so the revoked account's next call fails at once.
+ *
+ * Each gatekeeper still holds one of these so the call sites keep one shape; `invalidate()` is a
+ * no-op kept for the same reason.
+ */
+export class AccessTokenCache {
+  #mint: MintAccessToken;
+
+  constructor(mint: MintAccessToken) {
+    this.#mint = mint;
+  }
+
+  async get(opts?: AccessTokenRequest): Promise<string> {
+    return (await this.#mint(opts)).token;
+  }
+
+  /** Nothing is held, so there is nothing to forget. */
+  invalidate(): void {}
+}

@@ -1,0 +1,8 @@
+// Type-checks the tests alongside the source; the production check (tsconfig.json) covers src only.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["./worker-configuration.d.ts", "node"]
+  },
+  "include": ["src", "__tests__"]
+}

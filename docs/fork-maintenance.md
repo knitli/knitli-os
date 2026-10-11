@@ -528,6 +528,35 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **Why:** Both are data-only additions to existing upstream sets — the cheapest possible shape for
   an upstream edit, and the shape to aim for elsewhere.
 
+### Microsoft 365 gatekeeper (ported from `twinprime19/cloudflare-os`, 2026-10-10)
+
+- **Where:** `packages/gatekeeper-microsoft/` (Tier 1). Upstream-file seams: two entries in
+  `scripts/run-dev-server.ts` (`SHARED_GATEKEEPER_CREDS` and `PASSTHROUGH_GATEKEEPER_VARS`), one
+  entry in `HAND_ROLLED` in `scripts/fork/connect-initiator-enforced.test.ts` (fork-owned), and the
+  regenerated `scripts/release/testdata/golden-manifest.json` plus its fixture bundle.
+- **What:** Entra ID sign-in pinned to one tenant (`TENANT_ID`, members on verified domains only),
+  an Outlook mailbox, read-only Teams and a SharePoint List, each connected on its own.
+- **Divergences from the source fork, which sync will not reconcile for us:** no connect-everything
+  path (`connectAccount` treats omitted `resourceUrlPatterns` as the Outlook mailbox only, against
+  the contract's "omitted = all resource types", and refuses an explicit `[]`; and recorded refresh scopes cover
+  only what Entra reported granted); SharePoint `createItem` always goes through approval, with
+  none of the fork's auto-apply rule or provisional-id machinery, and each create is stamped with a
+  `GadgetsActionId` marker column (added to the user's list on the first approved create) so a retry
+  finds its earlier row, with Outlook reply drafts reconciled by read-back instead; the sign-in profile hints
+  (`getAuthenticatedProfile`, `providesAuthProfile`) are not ported because the Workshop contract
+  here has no such hook; the connect-initiator guard above is applied, which the source fork lacks.
+- **SharePoint observers write, but cannot read rows:** a list-bound gadget admits collaborators who
+  can open the list, and every row read names all of them in `excludeObservers`, so rows are
+  unreadable (for the owner too) while any collaborator is authorized, and no collaborator is added
+  once rows were read. The session carries no caller identity, so the contract cannot allow a read
+  for the owner and refuse it for a collaborator. A Workshop change that passes the caller into the
+  session would let the owner keep row reads; the logic is `#authorizeRows` and `addObserver` in
+  `sharepoint-list.ts`.
+- **Why:** per-resource consent isolates an unconsented permission from the other resources; the
+  initiator guard is required of every hand-rolled gatekeeper this installation uses.
+- **At sync:** nothing to reconcile in the package (upstream has none). If upstream ships its own
+  Microsoft gatekeeper, compare scopes and identity policy before choosing one.
+
 ### Deployment worker configs are fork-managed upstream files (Tier 2)
 
 - **Where:** `cloudflare.config.ts`, `packages/workshop-backend/cloudflare.config.ts`,

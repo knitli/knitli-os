@@ -1,0 +1,1126 @@
+import { RpcStub, RpcTarget } from "capnweb";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { Gatekeeper } from "@gadgets/workshop-shared/gatekeeper";
+import type { ColumnDefinition } from "../src/graph-sharepoint-api";
+import { MicrosoftVerifier } from "../src/microsoft";
+import { SharePointListGatekeeperImpl, validateFields } from "../src/sharepoint-list";
+import type { SharePointListSession } from "../src/sharepoint-types";
+
+const DO_ID = "a".repeat(64);
+const SITE_ID = "site-1";
+const LIST_ID = "list-1";
+const LIST_URL = "https://contoso.sharepoint.com/sites/HR/Lists/Requests";
+
+type Call = { url: string; init: RequestInit };
+
+/** One column of every kind the client recognizes, as Graph sends them. */
+const GRAPH_COLUMNS = [
+  { name: "Title", displayName: "Title", required: true, text: { allowMultipleLines: false } },
+  { name: "Details", displayName: "Details", text: { allowMultipleLines: true } },
+  { name: "Qty", displayName: "Quantity", number: {} },
+  { name: "Done", displayName: "Done", boolean: {} },
+  { name: "Due", displayName: "Due date", dateTime: {} },
+  { name: "Status", displayName: "Status", choice: { choices: ["New", "Open"] } },
+  { name: "Tag", displayName: "Tag", choice: { choices: ["a", "b"], allowTextEntry: true } },
+  { name: "Owner", displayName: "Owner", personOrGroup: {} },
+  { name: "Ref", displayName: "Reference", lookup: {} },
+  { name: "Budget", displayName: "Budget", currency: {} },
+  { name: "Created", displayName: "Created", readOnly: true, dateTime: {} },
+];
+
+/** The same schema already normalised, for the pure `validateFields` tests. */
+const SCHEMA: ColumnDefinition[] = [
+  { name: "Title", displayName: "Title", type: "text", required: true, readOnly: false },
+  {
+    name: "Details", displayName: "Details", type: "text", required: false, readOnly: false,
+    multiline: true,
+  },
+  { name: "Qty", displayName: "Quantity", type: "number", required: false, readOnly: false },
+  { name: "Done", displayName: "Done", type: "boolean", required: false, readOnly: false },
+  { name: "Due", displayName: "Due date", type: "dateTime", required: false, readOnly: false },
+  {
+    name: "Status", displayName: "Status", type: "choice", required: false, readOnly: false,
+    choices: ["New", "Open"],
+  },
+  {
+    name: "Tag", displayName: "Tag", type: "choice", required: false, readOnly: false,
+    choices: ["a", "b"], allowTextEntry: true,
+  },
+  { name: "Owner", displayName: "Owner", type: "person", required: false, readOnly: false },
+  { name: "Ref", displayName: "Reference", type: "lookup", required: false, readOnly: false },
+  { name: "Budget", displayName: "Budget", type: "unsupported", required: false, readOnly: false },
+];
+
+const LIST = { id: LIST_ID, displayName: "Requests", webUrl: LIST_URL };
+
+const ITEM = {
+  id: "7",
+  webUrl: `${LIST_URL}/7_.000`,
+  fields: { "@odata.etag": "\"1\"", Title: "New laptop", Qty: 2 },
+};
+
+/** The item a create answers with, so an applied action can be told from a read. */
+const CREATED_ITEM = { id: "101", webUrl: `${LIST_URL}/101_.000`, fields: { Title: "New laptop" } };
+
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status, headers: { "Content-Type": "application/json", ...headers },
+  });
+}
+
+/** Minimal Graph routing: reads answer with canned data, a create answers with CREATED_ITEM. */
+function defaultRoute(call: Call): Response {
+  const method = (call.init.method ?? "GET").toUpperCase();
+  const path = new URL(call.url).pathname;
+
+  if (method === "POST" && path.endsWith(`/lists/${LIST_ID}/items`)) {
+    return jsonResponse(CREATED_ITEM, 201);
+  }
+  // Adding the marker column.
+  if (method === "POST" && path.endsWith(`/lists/${LIST_ID}/columns`)) {
+    return jsonResponse({ name: "GadgetsActionId" }, 201);
+  }
+  // Looking a row up by its marker: nothing has landed yet.
+  if (call.url.includes("GadgetsActionId")) return jsonResponse({ value: [] });
+  if (path.endsWith(`/lists/${LIST_ID}/columns`)) return jsonResponse({ value: GRAPH_COLUMNS });
+  if (/\/items\/[^/]+$/.test(path)) {
+    const id = path.split("/").pop()!;
+    return jsonResponse(id === CREATED_ITEM.id ? CREATED_ITEM : { ...ITEM, id });
+  }
+  if (path.endsWith(`/lists/${LIST_ID}/items`)) return jsonResponse({ value: [ITEM] });
+  if (path.endsWith(`/lists/${LIST_ID}`)) return jsonResponse(LIST);
+  throw new Error(`unexpected request: ${call.url}`);
+}
+
+function stubFetch(handler: (call: Call) => Response | Promise<Response> = defaultRoute): Call[] {
+  const calls: Call[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit = {}) => {
+    calls.push({ url, init });
+    return await handler({ url, init });
+  }));
+  return calls;
+}
+
+/** The requests that create a row, as opposed to adding the marker column. */
+function creates(calls: Call[]): Call[] {
+  return calls.filter(call => (call.init.method ?? "GET").toUpperCase() === "POST"
+      && new URL(call.url).pathname.endsWith("/items"));
+}
+
+function isItemCreate(call: Call): boolean {
+  return (call.init.method ?? "GET").toUpperCase() === "POST"
+      && new URL(call.url).pathname.endsWith("/items");
+}
+
+const reportCredentialsRejected = vi.fn(async (_detail?: string) => {});
+const getAccessToken = vi.fn(async () => ({
+  token: "access-token", expires: new Date(Date.now() + 30 * 60 * 1000),
+}));
+
+function fakeGatekeeperContext() {
+  const values = new Map<string, unknown>();
+  return {
+    props: { userObjectId: DO_ID, siteId: SITE_ID, listId: LIST_ID },
+    storage: {
+      kv: {
+        get<T>(key: string) { return values.get(key) as T | undefined; },
+        put<T>(key: string, value: T) { values.set(key, value); },
+        delete(key: string) { values.delete(key); },
+        list<T>({ prefix }: { prefix: string }) {
+          return [...values.entries()].filter(([key]) => key.startsWith(prefix)) as [string, T][];
+        },
+      },
+      // The node harness has no storage engine; the closure runs straight through, which is what
+      // makes a "crash between the two writes" a thing a test has to stage by hand.
+      transactionSync<T>(closure: () => T): T { return closure(); },
+    },
+    exports: {
+      UserAccount: {
+        idFromString: (id: string) => id,
+        get: () => ({ getAccessToken, reportCredentialsRejected }),
+      },
+    },
+  };
+}
+
+/** Stands in for the overseer's approval queue. */
+function fakeApprovalQueue() {
+  const observations: { title: string; description: string; containsRestrictedData?: boolean }[] = [];
+  const actions: { id: number; description: Record<string, unknown> }[] = [];
+  const queue = {
+    dup: () => queue,
+    authorizeObservation: vi.fn(async (description: { title: string; description: string; containsRestrictedData?: boolean }) => {
+      observations.push(description);
+    }),
+    submitAction: vi.fn(async (id: number, description: Record<string, unknown>) => {
+      actions.push({ id, description });
+    }),
+  };
+  return { queue, observations, actions };
+}
+
+let context: ReturnType<typeof fakeGatekeeperContext>;
+let gatekeeper: SharePointListGatekeeperImpl;
+let approvals: ReturnType<typeof fakeApprovalQueue>;
+
+function newGatekeeper(): SharePointListGatekeeperImpl {
+  return new SharePointListGatekeeperImpl(context as never, {} as never);
+}
+
+/**
+ * Applies an approved action the way the overseer does.
+ *
+ * This implementation omits the `cache` parameter it never uses, so the call goes through the
+ * Gatekeeper interface, which still passes one -- the RPC argument validator is derived from that
+ * interface and rejects a call without it. A list holds no git objects, so the stub wraps nothing;
+ * the validator checks only that it is a stub. It is capnweb's, not the workerd `RpcStub` the
+ * interface names, hence the cast (as for the verifier stubs below).
+ */
+function applyApprovedAction(actionId: number): Promise<void> {
+  const rpc: Gatekeeper<SharePointListSession> = gatekeeper;
+  return rpc.applyAction(actionId, new RpcStub({}) as never);
+}
+
+async function startSession(): Promise<SharePointListSession> {
+  return await gatekeeper.startSession(approvals.queue as never);
+}
+
+beforeEach(() => {
+  context = fakeGatekeeperContext();
+  gatekeeper = newGatekeeper();
+  approvals = fakeApprovalQueue();
+  reportCredentialsRejected.mockClear();
+  getAccessToken.mockClear();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("resource description", () => {
+  it("describes the list and offers no auto-approval", async () => {
+    stubFetch();
+
+    const description = await gatekeeper.describe();
+
+    expect(description).toEqual({
+      url: LIST_URL,
+      title: "Requests",
+      snippet: "SharePoint list",
+      suggestedBindingName: "SHAREPOINT_LIST",
+      tsType: "SharePointListSession",
+    });
+    // Every create is decided by a person.
+    expect(await gatekeeper.getAutoApprovableActions()).toEqual([]);
+  });
+
+  it("stops reporting a list healthy once Graph says it is gone or refused", async () => {
+    stubFetch();
+    await gatekeeper.describe();
+
+    for (const status of [403, 404]) {
+      vi.unstubAllGlobals();
+      stubFetch(() => jsonResponse({ error: { code: "denied", message: "no" } }, status));
+      // The overseer tears the binding down on a throw, which is the right end for a deleted list.
+      await expect(gatekeeper.describe()).rejects.toThrow();
+    }
+  });
+
+  it("serves the cached name when Graph fails, and only fails with nothing cached", async () => {
+    stubFetch();
+    await gatekeeper.describe();
+
+    vi.unstubAllGlobals();
+    stubFetch(() => jsonResponse({ error: { code: "serviceError" } }, 503));
+    expect((await gatekeeper.describe()).title).toBe("Requests");
+
+    // A fresh object has no cache, so the same failure at introduction time is fatal — which is
+    // what stops a binding being created for a list nobody can read.
+    context = fakeGatekeeperContext();
+    gatekeeper = newGatekeeper();
+    await expect(gatekeeper.describe()).rejects.toThrow(/temporarily unavailable/i);
+  });
+});
+
+describe("reads", () => {
+  it("authorizes the schema read and caches the columns", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+
+    const columns = await session.getColumns();
+    await session.getColumns();
+
+    expect(columns.map(column => column.name)).toEqual(
+        ["Title", "Details", "Qty", "Done", "Due", "Status", "Tag", "Owner", "Ref", "Budget"]);
+    expect(calls.filter(call => call.url.includes("/columns"))).toHaveLength(1);
+    expect(approvals.observations).toHaveLength(2);
+    expect(approvals.observations[0].title).toMatch(/^Read column schema of /);
+  });
+
+  it("builds the filter, clamps the page size, and authorizes each page", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+
+    const cursor = await session.getItems({
+      where: [{ column: "Status", op: "eq", value: "Open" }],
+      select: ["Title", "Status"],
+      top: 5000,
+    });
+    const page = await cursor.next();
+
+    expect(page).toEqual([{ id: "7", webUrl: ITEM.webUrl, fields: { Title: "New laptop", Qty: 2 } }]);
+    const itemCall = new URL(calls.find(call => call.url.includes("/items?"))!.url);
+    expect(itemCall.searchParams.get("$filter")).toBe("fields/Status eq 'Open'");
+    expect(itemCall.searchParams.get("$top")).toBe("200");
+    expect(itemCall.searchParams.get("$expand")).toBe("fields($select=Title,Status)");
+    // One for the cursor, one for the page it returned.
+    expect(approvals.observations.map(observation => observation.title)).toEqual([
+      "List items in this SharePoint list",
+      "Read 1 items from this SharePoint list",
+    ]);
+  });
+
+  it("refuses an unknown column before anything is authorized", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    await expect(session.getItems({ select: ["Nope"] })).rejects.toThrow(/Unknown column "Nope"/);
+    await expect(session.getItems({ where: [{ column: "Owner", op: "eq", value: "x" }] }))
+        .rejects.toThrow(/Owner/);
+    expect(approvals.observations).toEqual([]);
+  });
+
+  it("reads one item by id and refuses an id that is not one", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    expect((await session.getItem("7")).id).toBe("7");
+    expect(approvals.observations).toHaveLength(1);
+
+    await expect(session.getItem("7; DROP")).rejects.toThrow(/is not a SharePoint item id/);
+    await expect(session.getItem("pending-1")).rejects.toThrow(/is not a SharePoint item id/);
+    await expect(session.getItem("")).rejects.toThrow(/requires an item id/);
+    expect(approvals.observations).toHaveLength(1);
+  });
+});
+
+describe("createItem", () => {
+  it("queues the item without creating it", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+
+    await expect(session.createItem({ Title: "New laptop" })).resolves.toBeUndefined();
+
+    expect(approvals.actions).toHaveLength(1);
+    expect(creates(calls)).toHaveLength(0);
+  });
+
+  it("validates against the list's schema before anything is queued", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    await expect(session.createItem({ Details: "no title" })).rejects.toThrow(/"Title" is required/);
+
+    expect(approvals.actions).toHaveLength(0);
+  });
+
+  it("suspends the agent until the decision, since the row is not simulated", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    await session.createItem({ Title: "New laptop" });
+
+    expect(approvals.actions[0].description.awaitDecision).toBe(true);
+  });
+
+  it("refuses an oversized text value before anything is queued", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        ? jsonResponse({ value: [
+            { name: "Title", displayName: "Title", required: true, text: { maxLength: 10 } },
+          ] })
+        : defaultRoute(call));
+    const session = await startSession();
+
+    await expect(session.createItem({ Title: "x".repeat(11) }))
+        .rejects.toThrow(/accepts at most 10 characters, but got 11/);
+    expect(approvals.actions).toHaveLength(0);
+
+    await session.createItem({ Title: "x".repeat(10) });
+    expect(approvals.actions).toHaveLength(1);
+  });
+
+  it("re-reads the schema before refusing a column the cache does not know", async () => {
+    let added = false;
+    const calls = stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        ? jsonResponse({ value: added
+            ? [...GRAPH_COLUMNS, { name: "Priority", displayName: "Priority", text: {} }]
+            : GRAPH_COLUMNS })
+        : defaultRoute(call));
+    const session = await startSession();
+    await session.getColumns();
+
+    added = true; // an administrator adds a column while the old schema is cached
+    await session.createItem({ Title: "New laptop", Priority: "high" });
+
+    expect(approvals.actions).toHaveLength(1);
+    expect(calls.filter(call => call.url.includes("/columns"))).toHaveLength(2);
+  });
+
+  it("still refuses a column the live schema does not have either", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    await expect(session.createItem({ Title: "x", Nope: 1 })).rejects.toThrow(/Unknown column "Nope"/);
+  });
+
+  it("re-reads the schema once the cached one is a few minutes old", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls = stubFetch();
+      const session = await startSession();
+      await session.getColumns();
+      await session.getColumns();
+      expect(calls.filter(call => call.url.includes("/columns"))).toHaveLength(1);
+
+      vi.advanceTimersByTime(6 * 60 * 1000);
+      await session.getColumns();
+
+      expect(calls.filter(call => call.url.includes("/columns"))).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads every page of the list's columns", async () => {
+    // A required column on a later page must be known, or an invalid create is approved and then
+    // fails at apply time.
+    const calls = stubFetch(call => {
+      if (!new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)) return defaultRoute(call);
+      return new URL(call.url).searchParams.has("$skiptoken")
+        ? jsonResponse({ value: [{ name: "Region", displayName: "Region", required: true, text: {} }] })
+        : jsonResponse({
+          value: GRAPH_COLUMNS,
+          "@odata.nextLink":
+            `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${LIST_ID}/columns?$skiptoken=2`,
+        });
+    });
+    const session = await startSession();
+
+    const columns = await session.getColumns();
+
+    expect(columns.map(column => column.name)).toContain("Region");
+    expect(calls.filter(call => call.url.includes("/columns"))).toHaveLength(2);
+    await expect(session.createItem({ Title: "x" })).rejects.toThrow(/"Region" is required/);
+  });
+
+  it("does not report the end of the list while Graph still offers pages", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/items`)
+      ? jsonResponse({
+        value: [],
+        "@odata.nextLink":
+          `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${LIST_ID}/items?$skiptoken=more`,
+      })
+      : defaultRoute(call));
+    const session = await startSession();
+    const cursor = await session.getItems();
+
+    await expect(cursor.next()).rejects.toThrow(/skipped 5 pages with nothing on them/);
+  });
+
+  it("refuses an empty column selection before anything is authorized", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    await expect(session.getItems({ select: [] })).rejects.toThrow(/names no columns/);
+    expect(approvals.observations).toHaveLength(0);
+  });
+
+  it("lets a required column that has a default be left out", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+      ? jsonResponse({ value: [
+        { name: "Title", displayName: "Title", required: true, text: {} },
+        { name: "Stage", displayName: "Stage", required: true, defaultValue: { value: "New" },
+          text: {} },
+      ] })
+      : defaultRoute(call));
+    const session = await startSession();
+
+    await session.createItem({ Title: "x" });
+
+    expect(approvals.actions).toHaveLength(1);
+    await expect(session.createItem({ Stage: "Open" })).rejects.toThrow(/"Title" is required/);
+  });
+
+  it("does not latch the row observation for an item that does not exist", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith("/items/404")
+      ? jsonResponse({ error: { code: "itemNotFound", message: "gone" } }, 404)
+      : defaultRoute(call));
+    const session = await startSession();
+
+    await expect(session.getItem("404")).rejects.toThrow();
+
+    // Nothing was revealed, so nothing was authorized or marked restricted, and a collaborator may
+    // still be admitted.
+    expect(approvals.observations).toHaveLength(0);
+    const verifier = new RpcStub(new (class extends RpcTarget {
+      async hasListAccess(): Promise<boolean> { return true; }
+    })());
+    await expect(gatekeeper.addObserver("user-1", verifier as never)).resolves.toBeUndefined();
+  });
+
+  it("refuses a page of items too large to read, naming how to shrink it", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/items`)
+      ? jsonResponse({ value: [{ id: "1", fields: { Details: "x".repeat(5 * 1024 * 1024) } }] })
+      : defaultRoute(call));
+    const session = await startSession();
+    const cursor = await session.getItems();
+
+    await expect(cursor.next()).rejects.toThrow(/too large to read here/);
+    expect(approvals.observations.filter(o => o.title.startsWith("Read "))).toHaveLength(0);
+  });
+
+  it("records the schema read a refused create reveals, and only then", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    // The refusal lists the choices the column offers, which the caller was never given.
+    await expect(session.createItem({ Title: "x", Status: "Closed" }))
+        .rejects.toThrow(/Allowed: New, Open/);
+
+    expect(approvals.observations).toHaveLength(1);
+    expect(approvals.observations[0].title).toMatch(/^Create refused against the schema of /);
+    expect(approvals.observations[0].description).toContain("Allowed: New, Open");
+
+    approvals.observations.length = 0;
+    await session.createItem({ Title: "fine" });
+    expect(approvals.observations).toHaveLength(0);
+  });
+
+  it("drops the pending action when the queue refuses the submission", async () => {
+    stubFetch();
+    approvals.queue.submitAction.mockRejectedValueOnce(new Error("queue is down"));
+    const session = await startSession();
+
+    await expect(session.createItem({ Title: "New laptop" })).rejects.toThrow("queue is down");
+
+    // Nothing is left behind, and the next submission gets a fresh id's slot.
+    await expect(applyApprovedAction(1)).rejects.toThrow(/Unknown pending/);
+  });
+
+  it("refuses a new submission once the pending cap is reached", async () => {
+    stubFetch();
+    const session = await startSession();
+
+    for (let i = 0; i < 100; i++) await session.createItem({ Title: `Item ${i}` });
+
+    await expect(session.createItem({ Title: "One too many" }))
+        .rejects.toThrow(/Too many pending SharePoint list actions/);
+  });
+});
+
+describe("applyAction", () => {
+  it("creates the approved item and clears the pending action", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+
+    await applyApprovedAction(1);
+
+    expect(creates(calls)).toHaveLength(1);
+    expect(JSON.parse(String(creates(calls)[0].init.body)).fields).toMatchObject({
+      Title: "New laptop", GadgetsActionId: expect.any(String),
+    });
+    expect(context.storage.kv.get("pending:action:1")).toBeUndefined();
+  });
+
+  it("adds the marker column on the approval that described it, once", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+    await session.createItem({ Title: "one" });
+    await applyApprovedAction(1);
+
+    const columnPosts = () => calls.filter(call => (call.init.method ?? "GET") === "POST"
+        && new URL(call.url).pathname.endsWith("/columns"));
+    expect(columnPosts()).toHaveLength(1);
+    expect(JSON.parse(String(columnPosts()[0].init.body))).toMatchObject({
+      name: "GadgetsActionId", indexed: true, text: { allowMultipleLines: false },
+    });
+
+    // Now the list has it, so the next create adds nothing.
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        && (call.init.method ?? "GET") === "GET"
+      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] })
+      : defaultRoute(call));
+    const again = stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        && (call.init.method ?? "GET") === "GET"
+      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] })
+      : defaultRoute(call));
+    await session.createItem({ Title: "two" });
+    await applyApprovedAction(2);
+    expect(again.filter(call => (call.init.method ?? "GET") === "POST"
+        && new URL(call.url).pathname.endsWith("/columns"))).toHaveLength(0);
+  });
+
+  it("will not recreate a marker column the approval did not name", async () => {
+    // Queued while the list had the column, so the approval carried no schema change. Deleted
+    // since, an earlier attempt's row would have lost its marker, and a new row would duplicate it.
+    let hasMarker = true;
+    const calls = stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        && (call.init.method ?? "GET") === "GET"
+      ? jsonResponse({ value: hasMarker
+        ? [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] : GRAPH_COLUMNS })
+      : defaultRoute(call));
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+    hasMarker = false;
+
+    await expect(applyApprovedAction(1)).rejects.toThrow(/has been removed from the list/);
+
+    expect(creates(calls)).toHaveLength(0);
+    expect(calls.some(call => (call.init.method ?? "GET") === "POST"
+        && call.url.includes("/columns"))).toBe(false);
+  });
+
+  it("finds its own earlier row on a retry instead of creating a second", async () => {
+    // The first attempt landed and its answer was lost: the marker lookup now finds the row.
+    const calls = stubFetch(call => call.url.includes("GadgetsActionId")
+      ? jsonResponse({ value: [{ id: "101", fields: { GadgetsActionId: "x" } }] })
+      : defaultRoute(call));
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+
+    await applyApprovedAction(1);
+
+    expect(creates(calls)).toHaveLength(0);
+    expect(context.storage.kv.get("pending:action:1")).toBeUndefined();
+  });
+
+  it("looks the row up by this action's own marker, the same one it then stamps", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+    const marker = (context.storage.kv.get("pending:action:1") as { marker: string }).marker;
+
+    await applyApprovedAction(1);
+
+    const lookup = calls.find(call => call.url.includes("GadgetsActionId"))!;
+    expect(decodeURIComponent(lookup.url)).toContain(`fields/GadgetsActionId eq '${marker}'`);
+    expect(JSON.parse(String(creates(calls)[0].init.body)).fields.GadgetsActionId).toBe(marker);
+  });
+
+  it("will not write into a column of the list's own that shares the marker's name", async () => {
+    const calls = stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        && (call.init.method ?? "GET") === "GET"
+      ? jsonResponse({ value: [...GRAPH_COLUMNS,
+        { name: "GadgetsActionId", displayName: "Notes", text: { allowMultipleLines: true } }] })
+      : defaultRoute(call));
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+
+    await expect(applyApprovedAction(1)).rejects.toThrow(/cannot be used to recognise retried creates/);
+
+    expect(creates(calls)).toHaveLength(0);
+  });
+
+  it("tells the user how to add the column by hand when the connection may not", async () => {
+    const calls = stubFetch(call => (call.init.method ?? "GET") === "POST"
+        && new URL(call.url).pathname.endsWith("/columns")
+      ? jsonResponse({ error: { code: "accessDenied", message: "no" } }, 403)
+      : defaultRoute(call));
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+
+    await expect(applyApprovedAction(1)).rejects.toThrow(/Add a single line of text column/);
+
+    expect(creates(calls)).toHaveLength(0);
+    expect(context.storage.kv.get("pending:action:1")).toBeDefined();
+  });
+
+  it("asks for only the schema's fields when reading one item", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+
+    await session.getItem("7");
+
+    const read = calls.find(call => new URL(call.url).pathname.endsWith("/items/7"))!;
+    const expand = new URL(read.url).searchParams.get("$expand")!;
+    expect(expand).toMatch(/^fields\(\$select=Title,/);
+    // The hidden and bookkeeping columns the schema leaves out are never requested.
+    expect(expand).not.toContain("GadgetsActionId");
+    expect(expand).not.toContain("Created");
+  });
+
+  it("keeps the marker out of everything the caller sees", async () => {
+    const withMarker = [...GRAPH_COLUMNS, { name: "GadgetsActionId", displayName: "x", text: {} }];
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+      ? jsonResponse({ value: withMarker })
+      : new URL(call.url).pathname.endsWith("/items/7")
+        ? jsonResponse({ ...ITEM, fields: { ...ITEM.fields, GadgetsActionId: "secret" } })
+        : defaultRoute(call));
+    const session = await startSession();
+
+    expect((await session.getColumns()).map(column => column.name)).not.toContain("GadgetsActionId");
+    expect((await session.getItem("7")).fields).not.toHaveProperty("GadgetsActionId");
+    await expect(session.createItem({ Title: "x", GadgetsActionId: "forged" }))
+        .rejects.toThrow(/Unknown column "GadgetsActionId"/);
+  });
+
+  it("answers a replay of an applied or rejected action as done, without creating again", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+    await session.createItem({ Title: "one" });
+    await session.createItem({ Title: "two" });
+    await applyApprovedAction(1);
+    await gatekeeper.rejectAction(2);
+    const created = creates(calls).length;
+
+    await expect(applyApprovedAction(1)).resolves.toBeUndefined();
+    await expect(gatekeeper.rejectAction(2)).resolves.toBeUndefined();
+    await expect(applyApprovedAction(2)).resolves.toBeUndefined();
+
+    expect(creates(calls)).toHaveLength(created);
+    await expect(applyApprovedAction(999)).rejects.toThrow(/Unknown pending/);
+  });
+
+  it("rethrows a failed create and leaves the action pending for a retry", async () => {
+    stubFetch(call => isItemCreate(call)
+        ? jsonResponse({ error: { code: "activityLimitReached" } }, 429)
+        : defaultRoute(call));
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+
+    await expect(applyApprovedAction(1)).rejects.toThrow(/throttling/i);
+
+    expect(context.storage.kv.get("pending:action:1")).toBeDefined();
+  });
+
+  it("forgets the cached schema when a create is refused", async () => {
+    const calls = stubFetch(call => isItemCreate(call)
+        ? jsonResponse({ error: { code: "invalidRequest", message: "Field 'Title' is invalid" } }, 400)
+        : defaultRoute(call));
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+
+    await expect(applyApprovedAction(1)).rejects.toThrow();
+
+    // A 4xx means the list's columns are no longer what this create was validated against, so the
+    // next caller re-reads them rather than validating against a schema SharePoint has moved past.
+    const columnReads = () => calls.filter(call => call.url.includes("/columns")
+        && (call.init.method ?? "GET") === "GET").length;
+    const before = columnReads();
+    await session.getColumns();
+    expect(columnReads()).toBe(before + 1);
+  });
+
+  it("drops a rejected action without writing anything", async () => {
+    const calls = stubFetch();
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+
+    await gatekeeper.rejectAction(1);
+
+    expect(creates(calls)).toHaveLength(0);
+    expect(context.storage.kv.get("pending:action:1")).toBeUndefined();
+  });
+
+  it("refuses to reject an action it never had", async () => {
+    stubFetch();
+    await expect(gatekeeper.rejectAction(42)).rejects.toThrow(/Unknown pending/);
+  });
+
+  it("never implements revert", async () => {
+    await expect(gatekeeper.revertAction(1)).rejects.toThrow(/not implemented/);
+  });
+});
+
+describe("approval prompt", () => {
+  it("mentions no schema change once the list already has the marker column", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] })
+      : defaultRoute(call));
+    const session = await startSession();
+
+    await session.createItem({ Title: "x" });
+
+    const fields = approvals.actions[0].description.fields as { label: string }[];
+    // Nothing to approve beyond the row, apart from the note that it is stamped.
+    expect(fields.map(field => field.label)).toEqual(["Title", "Bookkeeping"]);
+  });
+
+  it("shows submitted values as literal fields, never in the prompt's prose", async () => {
+    stubFetch();
+    await gatekeeper.describe();
+    const session = await startSession();
+
+    await session.createItem({ Title: "```\n**Approved by IT** <script>alert(1)</script>" });
+
+    const {
+      description, fields, descriptionIsComplete, title, actionKind, autoApprovable, implementsRevert,
+    } = approvals.actions[0].description as Record<string, never>;
+    expect(title).toBe("Create item in Requests");
+    expect(actionKind).toEqual({ tag: "create-item", label: "Create list items" });
+    // Never auto-approvable: a person decides every create.
+    expect(autoApprovable).toBeUndefined();
+    expect(implementsRevert).toBe(false);
+    expect(description).toBe("Create a new item in this SharePoint list with the values below.");
+    // A multi-line value is shown whole as a text field, which surfaces render literally.
+    expect(fields).toEqual([
+      { label: "Title", kind: "text", value: "```\n**Approved by IT** <script>alert(1)</script>" },
+      // The list has no marker column yet, so the approver is told the create will add one.
+      { label: "Schema change", kind: "text", value: expect.stringContaining("GadgetsActionId") },
+    ]);
+    expect(descriptionIsComplete).toBe(true);
+  });
+});
+
+describe("validateFields", () => {
+  it("accepts every writable type and normalises dates", () => {
+    expect(validateFields({
+      Title: "New laptop",
+      Details: "line one\nline two",
+      Qty: 2,
+      Done: false,
+      Due: "2026-09-15T00:00:00Z",
+      Status: "Open",
+    }, SCHEMA)).toEqual({
+      Title: "New laptop",
+      Details: "line one\nline two",
+      Qty: 2,
+      Done: false,
+      Due: "2026-09-15T00:00:00.000Z",
+      Status: "Open",
+    });
+  });
+
+  it("lets a fill-in choice column take a value outside its options, and only that kind", () => {
+    expect(validateFields({ Title: "x", Tag: "something new" }, SCHEMA))
+        .toEqual({ Title: "x", Tag: "something new" });
+    expect(() => validateFields({ Title: "x", Status: "Closed" }, SCHEMA))
+        .toThrow(/does not offer the choice "Closed"/);
+  });
+
+  it("writes a date-only column only a calendar date, never an instant", () => {
+    const dateOnly: ColumnDefinition[] = [
+      { name: "Due", displayName: "Due", type: "dateTime", required: false, readOnly: false,
+        dateOnly: true },
+    ];
+
+    expect(validateFields({ Due: "2026-09-15" }, dateOnly).Due).toBe("2026-09-15T00:00:00.000Z");
+    // An offset timestamp would be converted to UTC and could land on the neighbouring day.
+    expect(() => validateFields({ Due: "2026-09-15T23:30:00-05:00" }, dateOnly))
+        .toThrow(/calendar date like "2026-09-15"/);
+    expect(() => validateFields({ Due: "2026-02-30" }, dateOnly)).toThrow(/calendar date/);
+    // A Date is an instant whose calendar day depends on a time zone it does not carry.
+    expect(() => validateFields({ Due: new Date("2026-09-14T23:30:00Z") }, dateOnly))
+        .toThrow(/calendar date like "2026-09-15"/);
+  });
+
+  it("holds a number to its column's bounds", () => {
+    const bounded: ColumnDefinition[] = [
+      { name: "Qty", displayName: "Qty", type: "number", required: false, readOnly: false,
+        minimum: 1, maximum: 10 },
+    ];
+
+    expect(validateFields({ Qty: 1 }, bounded)).toEqual({ Qty: 1 });
+    expect(validateFields({ Qty: 10 }, bounded)).toEqual({ Qty: 10 });
+    expect(() => validateFields({ Qty: 0 }, bounded)).toThrow(/accepts at least 1, but got 0/);
+    expect(() => validateFields({ Qty: 11 }, bounded)).toThrow(/accepts at most 10, but got 11/);
+  });
+
+  it("refuses ambiguous or impossible dates instead of normalising them", () => {
+    expect(() => validateFields({ Title: "x", Due: "03/04/2026" }, SCHEMA)).toThrow(/expects a date/);
+    expect(() => validateFields({ Title: "x", Due: "2026-02-30" }, SCHEMA)).toThrow(/expects a date/);
+    expect(validateFields({ Title: "x", Due: "2026-02-28" }, SCHEMA).Due)
+      .toBe("2026-02-28T00:00:00.000Z");
+  });
+
+  it("names the column in every refusal", () => {
+    const cases: [Record<string, unknown>, RegExp][] = [
+      [{ Title: "x", Nope: 1 }, /Unknown column "Nope"/],
+      [{ Qty: 1 }, /Column "Title" is required/],
+      [{ Title: "x", Qty: "two" }, /Column "Qty" expects a finite number, but got text/],
+      [{ Title: "x", Qty: Number.NaN }, /Column "Qty" expects a finite number/],
+      [{ Title: "x", Done: "yes" }, /Column "Done" expects true or false, but got text/],
+      [{ Title: "x", Due: "not a date" }, /Column "Due" expects a date/],
+      [{ Title: 7 }, /Column "Title" expects text, but got a number/],
+      [{ Title: "x", Status: "Closed" }, /Column "Status" does not offer the choice "Closed"/],
+      [{ Title: "x", Status: 1 }, /Column "Status" expects one of its choices/],
+      [{ Title: "x", Tag: 1 }, /Column "Tag" expects one of its choices/],
+      [{ Title: "x", Owner: "bob@example.com" }, /Column "Owner" is a person column/],
+      [{ Title: "x", Ref: 3 }, /Column "Ref" is a lookup column/],
+      [{ Title: "x", Budget: 10 }, /Column "Budget" has a type this connection can read but not/],
+    ];
+    for (const [fields, message] of cases) {
+      expect(() => validateFields(fields, SCHEMA), JSON.stringify(fields)).toThrow(message);
+    }
+  });
+
+  it("treats a cleared required column as missing and ignores undefined", () => {
+    expect(() => validateFields({ Title: null }, SCHEMA)).toThrow(/Column "Title" is required/);
+    expect(validateFields({ Title: "x", Qty: undefined, Status: null }, SCHEMA))
+        .toEqual({ Title: "x", Status: null });
+  });
+
+  it("refuses anything that is not an object of column values", () => {
+    expect(() => validateFields([] as never, SCHEMA)).toThrow(/takes an object of column values/);
+    expect(() => validateFields(null as never, SCHEMA)).toThrow(/takes an object of column values/);
+  });
+});
+
+describe("observers", () => {
+  /** The verifier the overseer mints for the collaborator being added, and its answer. */
+  class TestVerifier extends RpcTarget {
+    calls: [string, string][] = [];
+
+    constructor(readonly answer: () => boolean) { super(); }
+
+    async hasListAccess(siteId: string, listId: string): Promise<boolean> {
+      this.calls.push([siteId, listId]);
+      return this.answer();
+    }
+  }
+
+  it("admits a collaborator who can open the list, on their own token", async () => {
+    const verifier = new TestVerifier(() => true);
+
+    await expect(gatekeeper.addObserver("user-1", new RpcStub(verifier) as never))
+        .resolves.toBeUndefined();
+
+    // The ids of this binding's list, asked of the observer's own verifier -- never of the owner's.
+    expect(verifier.calls).toEqual([[SITE_ID, LIST_ID]]);
+  });
+
+  it("denies a collaborator who cannot", async () => {
+    const verifier = new TestVerifier(() => false);
+
+    await expect(gatekeeper.addObserver("user-1", new RpcStub(verifier) as never))
+        .rejects.toThrow("You do not have access to this SharePoint list.");
+  });
+
+  it("passes the verifier's own display-safe error through", async () => {
+    const verifier = new TestVerifier(() => {
+      throw new Error("Could not verify SharePoint access right now.");
+    });
+
+    await expect(gatekeeper.addObserver("user-1", new RpcStub(verifier) as never))
+        .rejects.toThrow("Could not verify SharePoint access right now.");
+  });
+
+  it("forgets an observer without asking anyone", async () => {
+    await expect(gatekeeper.removeObserver("user-1")).resolves.toBeUndefined();
+  });
+
+  describe("rows are never shown to a collaborator", () => {
+    /**
+     * Behaves as the overseer does for `excludeObservers`: an observation naming an observer who is
+     * still authorized is refused. `authorized` is the set of observers still in the sharing graph.
+     */
+    function overseerLike(authorized: Set<string>) {
+      approvals.queue.authorizeObservation.mockImplementation(async description => {
+        approvals.observations.push(description);
+        const excluded = (description as { excludeObservers?: string[] }).excludeObservers ?? [];
+        if (excluded.some(id => authorized.has(id))) {
+          throw new Error("observation blocked: an excluded observer is still authorized");
+        }
+      });
+    }
+
+    async function admit(id: string): Promise<void> {
+      await gatekeeper.addObserver(id, new RpcStub(new TestVerifier(() => true)) as never);
+    }
+
+    it("lets a shared gadget read the schema and submit items", async () => {
+      stubFetch();
+      const authorized = new Set(["user-1"]);
+      overseerLike(authorized);
+      await admit("user-1");
+      const session = await startSession();
+
+      await expect(session.getColumns()).resolves.toBeDefined();
+      await expect(session.createItem({ Title: "New laptop" })).resolves.toBeUndefined();
+
+      expect(approvals.actions).toHaveLength(1);
+    });
+
+    it("blocks every row read while an observer is authorized", async () => {
+      stubFetch();
+      overseerLike(new Set(["user-1"]));
+      await admit("user-1");
+      const session = await startSession();
+
+      await expect(session.getItem("7")).rejects.toThrow(/observation blocked/);
+      await expect(session.getItems()).rejects.toThrow(/observation blocked/);
+      // The exclusion names every tracked observer, and the read is restricted.
+      const [getItemRead, getItemsOpen] = approvals.observations;
+      expect(approvals.observations).toHaveLength(2);
+      expect(getItemRead).toMatchObject({ containsRestrictedData: true, excludeObservers: ["user-1"] });
+      // Opening a cursor reveals no row, so it names the observers but does not restrict.
+      expect(getItemsOpen).toMatchObject({ excludeObservers: ["user-1"] });
+      expect(getItemsOpen.containsRestrictedData).toBeUndefined();
+    });
+
+    it("names every observer in the exclusion", async () => {
+      stubFetch();
+      overseerLike(new Set(["user-1", "user-2"]));
+      await admit("user-1");
+      await admit("user-2");
+      const session = await startSession();
+
+      await expect(session.getItem("7")).rejects.toThrow(/observation blocked/);
+
+      expect(approvals.observations[0]).toMatchObject({ excludeObservers: ["user-1", "user-2"] });
+    });
+
+    it("lets the owner read rows again once the observer is removed", async () => {
+      stubFetch();
+      overseerLike(new Set(["user-1"]));
+      await admit("user-1");
+      const session = await startSession();
+      await expect(session.getItem("7")).rejects.toThrow(/observation blocked/);
+
+      await gatekeeper.removeObserver("user-1");
+
+      await expect(session.getItem("7")).resolves.toMatchObject({ id: "7" });
+      const cursor = await session.getItems();
+      expect((await cursor.next())!.length).toBeGreaterThan(0);
+    });
+
+    it("lets the owner read rows when nobody was ever admitted, with no exclusion", async () => {
+      stubFetch();
+      const session = await startSession();
+
+      await session.getItem("7");
+
+      expect(approvals.observations[0]).toMatchObject({ containsRestrictedData: true });
+      expect(approvals.observations[0]).not.toHaveProperty("excludeObservers");
+    });
+
+    it("refuses a collaborator once rows have been read", async () => {
+      stubFetch();
+      const session = await startSession();
+      await session.getItem("7");
+
+      await expect(admit("user-1")).rejects.toThrow(/already read rows of this SharePoint list/);
+    });
+
+    it("refuses a collaborator while a row read is still being authorized", async () => {
+      stubFetch();
+      let release!: () => void;
+      approvals.queue.authorizeObservation.mockImplementationOnce(
+        () => new Promise<void>(resolve => { release = resolve; }));
+      const session = await startSession();
+      const read = session.getItem("7");
+      await vi.waitFor(() => expect(approvals.queue.authorizeObservation).toHaveBeenCalled());
+
+      await expect(admit("user-1")).rejects.toThrow(/already read rows/);
+
+      release();
+      await read;
+    });
+
+    it("does not put the workspace in restricted mode for a cursor that is never read", async () => {
+      stubFetch();
+      const session = await startSession();
+
+      await session.getItems();
+
+      expect(approvals.observations).toHaveLength(1);
+      expect(approvals.observations[0].containsRestrictedData).toBeUndefined();
+    });
+
+    it("does not count opening a cursor as reading rows", async () => {
+      stubFetch();
+      const session = await startSession();
+      await session.getItems();
+
+      await expect(admit("user-1")).resolves.toBeUndefined();
+    });
+
+    it("remembers a read across a Durable Object restart", async () => {
+      stubFetch();
+      const session = await startSession();
+      await session.getItem("7");
+
+      gatekeeper = newGatekeeper();
+
+      await expect(admit("user-1")).rejects.toThrow(/already read rows/);
+    });
+  });
+});
+
+describe("MicrosoftVerifier.hasListAccess", () => {
+  // Lives with the SharePoint tests because the list gatekeeper is its only caller: the verifier is
+  // otherwise an empty capability, and this method exists to answer its addObserver.
+  function verifierFor(status: number) {
+    stubFetch(() => status === 200
+        ? jsonResponse(LIST)
+        : jsonResponse({ error: { code: "denied", message: "no" } }, status));
+    return new MicrosoftVerifier({
+      props: { userObjectId: DO_ID },
+      exports: {
+        UserAccount: {
+          idFromString: (id: string) => id,
+          get: () => ({ getAccessToken, reportCredentialsRejected }),
+        },
+      },
+    } as never, {} as never);
+  }
+
+  it("forwards the claims directive of a challenge, so the reconnect can repeat it", async () => {
+    stubFetch(() => new Response("{}", {
+      status: 401,
+      headers: { "WWW-Authenticate": `Bearer error="insufficient_claims", claims="${btoa('{"a":1}')}"` },
+    }));
+    const verifier = new MicrosoftVerifier({
+      props: { userObjectId: DO_ID },
+      exports: {
+        UserAccount: {
+          idFromString: (id: string) => id,
+          get: () => ({ getAccessToken, reportCredentialsRejected }),
+        },
+      },
+    } as never, {} as never);
+
+    await expect(verifier.hasListAccess(SITE_ID, LIST_ID)).rejects.toThrow();
+
+    expect(reportCredentialsRejected).toHaveBeenCalledWith(
+      "insufficient_claims", expect.any(String), '{"a":1}');
+  });
+
+  it("reports a claims challenge to the account", async () => {
+    stubFetch(() => new Response("{}", {
+      status: 401,
+      headers: { "WWW-Authenticate": 'Bearer error="insufficient_claims", claims="eyJhIjoxfQ=="' },
+    }));
+    const verifier = new MicrosoftVerifier({
+      props: { userObjectId: DO_ID },
+      exports: {
+        UserAccount: {
+          idFromString: (id: string) => id,
+          get: () => ({ getAccessToken, reportCredentialsRejected }),
+        },
+      },
+    } as never, {} as never);
+
+    await expect(verifier.hasListAccess(SITE_ID, LIST_ID)).rejects.toThrow();
+
+    expect(reportCredentialsRejected).toHaveBeenCalledWith("insufficient_claims", expect.any(String), '{"a":1}');
+  });
+
+  it("admits an account that can read the list", async () => {
+    await expect(verifierFor(200).hasListAccess(SITE_ID, LIST_ID)).resolves.toBe(true);
+  });
+
+  it("treats refused and invisible as the same no", async () => {
+    await expect(verifierFor(403).hasListAccess(SITE_ID, LIST_ID)).resolves.toBe(false);
+    vi.unstubAllGlobals();
+    await expect(verifierFor(404).hasListAccess(SITE_ID, LIST_ID)).resolves.toBe(false);
+  });
+
+  it("reports an outage without leaking ids or provider text", async () => {
+    await expect(verifierFor(500).hasListAccess(SITE_ID, LIST_ID))
+        .rejects.toThrow("Could not verify SharePoint access right now.");
+  });
+});

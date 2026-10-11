@@ -26,6 +26,7 @@ import {
   fetchVerifiedDomains, grantCoversScopes, normalizeScope, refreshAccessToken, resolveVerifiedEmail,
 } from "./microsoft-api";
 import type { OutlookMailGatekeeperImplProps } from "./outlook-mail";
+import { UNAUTHORIZED_AFTER_REFRESH } from "./auth-retry";
 import { GraphApiError } from "./graph-api";
 import { GraphSharePointApi } from "./graph-sharepoint-api";
 import type { SharePointListGatekeeperImplProps } from "./sharepoint-list";
@@ -1067,7 +1068,7 @@ export class UserAccount extends DurableObject<Env> {
         codes: [],
         message: "Microsoft requires this account to sign in again" +
             (detail ? ` (${detail})` : "") + ". Please reconnect the account.",
-      }, true, claims);
+      }, detail !== UNAUTHORIZED_AFTER_REFRESH, claims);
     });
   }
 

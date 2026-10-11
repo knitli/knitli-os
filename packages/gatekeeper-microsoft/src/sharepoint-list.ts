@@ -339,6 +339,8 @@ type SharePointListSessionContext = {
   authorizeRows(description: ObservationDescription, revealsRows: boolean): Promise<void>;
   /** Whether any observer is tracked, i.e. whether row reads will be blocked. */
   hasObservers(): boolean;
+  /** Runs a lookup that may reveal rows, during which no observer can be admitted. */
+  probing<T>(lookup: () => Promise<T>): Promise<T>;
 };
 
 // ── SharePointItemCursorImpl ────────────────────────────────────────
@@ -531,8 +533,10 @@ class SharePointListSessionImpl extends RpcTarget implements SharePointListSessi
     // Fetched before the observation is authorized: an item that does not exist reveals no row, and
     // authorizing first would latch the restricted flag and close the gadget to new collaborators
     // for a read that returned nothing. Nothing is returned until the authorization succeeds.
-    let item = await this.#ctx.api.getItem(
-        this.#ctx.siteId, this.#ctx.listId, id, await this.#ctx.columns());
+    // The lookup itself counts as reading, so a collaborator cannot be admitted while it is out and
+    // then be told by its 404 which ids exist.
+    let item = await this.#ctx.probing(async () => this.#ctx.api.getItem(
+        this.#ctx.siteId, this.#ctx.listId, id, await this.#ctx.columns()));
 
     await this.#ctx.authorizeRows({
       title: sanitizeApprovalTitle(`Read item ${echoName(id)} from ${this.#ctx.listName()}`),
@@ -725,6 +729,14 @@ export class SharePointListGatekeeperImpl
       authorizeRows: (description, revealsRows) =>
           this.#authorizeRows(queue, description, revealsRows),
       hasObservers: () => this.#observerIds().length > 0,
+      probing: async lookup => {
+        this.#rowReadsInFlight++;
+        try {
+          return await lookup();
+        } finally {
+          this.#rowReadsInFlight--;
+        }
+      },
     });
   }
 
@@ -744,7 +756,7 @@ export class SharePointListGatekeeperImpl
     let action = pendingActions.get(actionId);
     if (!action) {
       // Already applied or rejected: the platform is retrying an approval it never recorded.
-      if (pendingActions.wasFinished(actionId)) return;
+      if (pendingActions.replayAnswersDone(actionId, "applied")) return;
       throw new Error(`Unknown pending SharePoint list action: ${actionId}`);
     }
 
@@ -789,7 +801,7 @@ export class SharePointListGatekeeperImpl
       }
       throw err;
     }
-    pendingActions.finish(actionId);
+    pendingActions.finish(actionId, "applied");
   }
 
   async #addMarkerColumn(api: GraphSharePointApi): Promise<void> {
@@ -814,10 +826,10 @@ export class SharePointListGatekeeperImpl
   async #rejectAction(actionId: number): Promise<void> {
     let pendingActions = new PendingActionStore<SharePointListAction>(this.ctx.storage.kv);
     if (!pendingActions.get(actionId)) {
-      if (pendingActions.wasFinished(actionId)) return;
+      if (pendingActions.replayAnswersDone(actionId, "rejected")) return;
       throw new Error(`Unknown pending SharePoint list action: ${actionId}`);
     }
-    pendingActions.finish(actionId);
+    pendingActions.finish(actionId, "rejected");
   }
 
   async revertAction(_action: number):

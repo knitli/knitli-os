@@ -735,6 +735,31 @@ describe("mint failure taxonomy", () => {
     expect(callback.credentialsRestored).toHaveBeenCalledTimes(2);
   });
 
+  it("does call a plain second 401 restored once the token request works again", async () => {
+    // Unlike a claims challenge, this says nothing about a policy, so recovery is real recovery.
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    context.storage.kv.put("accessToken", {
+      token: "access-live", expires: new Date(Date.now() + 30 * 60 * 1000),
+    });
+    await account.reportCredentialsRejected("unauthorized after a refresh", "access-live");
+    fetchMock.mockImplementation(async () => jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-new",
+      scope: "openid profile email https://graph.microsoft.com/User.Read offline_access",
+    }));
+
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 5 * 60 * 1000 });
+    try {
+      await account.getAccessToken();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(callback.credentialsRestored).toHaveBeenCalledTimes(1);
+  });
+
   it("does not call a claims rejection restored just because the token endpoint still answers", async () => {
     const { context, account } = newAccount();
     const callback = fakeCallback();

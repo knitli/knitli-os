@@ -17,6 +17,11 @@ const FINISHED_ACTION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 /** Ceiling on queued-but-undecided actions, matching the Gmail gatekeeper. */
 export const MAX_PENDING_ACTIONS = 100;
 
+/** How an action ended: it was carried out, or declined. */
+export type ActionOutcome = "applied" | "rejected";
+
+type FinishedRecord = { at: number; outcome: ActionOutcome };
+
 export class PendingActionStore<Action> {
   #kv: DurableObjectStorage["kv"];
 
@@ -65,11 +70,12 @@ export class PendingActionStore<Action> {
    * actions have finished, so later completions must not push its record out. Anything older than
    * `FINISHED_ACTION_TTL_MS` is dropped, and `MAX_FINISHED_ACTIONS` only guards runaway growth.
    */
-  finish(id: number): void {
+  finish(id: number, outcome: ActionOutcome): void {
     this.remove(id);
     let now = Date.now();
-    this.#kv.put(`${FINISHED_PREFIX}${id}`, now);
-    let finished = [...this.#kv.list<number>({ prefix: FINISHED_PREFIX })]
+    this.#kv.put<FinishedRecord>(`${FINISHED_PREFIX}${id}`, { at: now, outcome });
+    let finished = [...this.#kv.list<FinishedRecord | number>({ prefix: FINISHED_PREFIX })]
+        .map(([key, record]) => [key, typeof record === "number" ? record : record.at] as const)
         .toSorted((a, b) => a[1] - b[1]);
     let overflow = Math.max(0, finished.length - MAX_FINISHED_ACTIONS);
     finished.forEach(([key, at], index) => {
@@ -77,8 +83,24 @@ export class PendingActionStore<Action> {
     });
   }
 
-  /** Whether `finish(id)` was called for this action. */
+  /** Whether `finish(id, …)` was called for this action. */
   wasFinished(id: number): boolean {
-    return this.#kv.get<number>(`${FINISHED_PREFIX}${id}`) !== undefined;
+    return this.#kv.get(`${FINISHED_PREFIX}${id}`) !== undefined;
+  }
+
+  /**
+   * How a replayed apply or reject of a finished action should answer. True: it already ended the
+   * way this call asks, so answer as done. False: it was never known here. Throws when it ended the
+   * other way, since reporting success would claim a mutation that did not happen, or deny one that
+   * did. A record from before outcomes were kept matches either.
+   */
+  replayAnswersDone(id: number, wanted: ActionOutcome): boolean {
+    let record = this.#kv.get<FinishedRecord | number>(`${FINISHED_PREFIX}${id}`);
+    if (record === undefined) return false;
+    let outcome = typeof record === "number" ? undefined : record.outcome;
+    if (outcome !== undefined && outcome !== wanted) {
+      throw new Error(`Action ${id} was already ${outcome}, so it cannot now be ${wanted}.`);
+    }
+    return true;
   }
 }

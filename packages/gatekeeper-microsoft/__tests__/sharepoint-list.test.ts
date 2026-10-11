@@ -719,7 +719,9 @@ describe("applyAction", () => {
 
     await expect(applyApprovedAction(1)).resolves.toBeUndefined();
     await expect(gatekeeper.rejectAction(2)).resolves.toBeUndefined();
-    await expect(applyApprovedAction(2)).resolves.toBeUndefined();
+    // The opposite decision is not "done": the row exists, or it was declined, and the answer says so.
+    await expect(applyApprovedAction(2)).rejects.toThrow(/already rejected/);
+    await expect(gatekeeper.rejectAction(1)).rejects.toThrow(/already applied/);
 
     expect(creates(calls)).toHaveLength(created);
     await expect(applyApprovedAction(999)).rejects.toThrow(/Unknown pending/);
@@ -1050,6 +1052,29 @@ describe("observers", () => {
       await expect(session.getItem("7")).rejects.toThrow(/observation blocked/);
 
       expect(calls.some(call => /\/items\/\d+$/.test(new URL(call.url).pathname))).toBe(false);
+    });
+
+    it("admits no collaborator while a lookup that could reveal a row is out", async () => {
+      // With nobody tracked there is no preflight, so the lookup itself has to hold admission off:
+      // otherwise a collaborator admitted mid-lookup would be told by its 404 which ids exist.
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      stubFetch(async call => {
+        if (new URL(call.url).pathname.endsWith("/items/404")) {
+          await gate;
+          return jsonResponse({ error: { code: "itemNotFound", message: "gone" } }, 404);
+        }
+        return defaultRoute(call);
+      });
+      const session = await startSession();
+
+      const probe = session.getItem("404").catch(err => err);
+      await vi.waitFor(() => expect(getAccessToken).toHaveBeenCalled());
+      await expect(admit("user-1")).rejects.toThrow(/already read rows/);
+
+      release();
+      await probe;
+      await expect(admit("user-1")).resolves.toBeUndefined();
     });
 
     it("names every observer in the exclusion", async () => {

@@ -790,14 +790,17 @@ describe("approved actions", () => {
 
     const apply = applyApprovedAction(id);
     await vi.waitFor(() => expect(calls.some(call => call.url.endsWith("/createReply"))).toBe(true));
-    let rejected = false;
-    const reject = gatekeeper.rejectAction(id).then(() => { rejected = true; });
+    let settled = false;
+    const reject = gatekeeper.rejectAction(id).then(() => "done", err => String(err))
+      .finally(() => { settled = true; });
     await Promise.resolve();
-    // The rejection waits: it cannot report success while the write is still going.
-    expect(rejected).toBe(false);
+    // The rejection waits: it cannot answer while the write is still going.
+    expect(settled).toBe(false);
 
     release();
-    await Promise.all([apply, reject]);
+    await apply;
+    // The apply won, so the rejection is told so rather than reporting a success it did not have.
+    await expect(reject).resolves.toMatch(/already applied/);
     expect(calls.filter(call => call.url.endsWith("/createReply"))).toHaveLength(1);
     expect(context.storage.kv.get(`pending:action:${id}`)).toBeUndefined();
   });

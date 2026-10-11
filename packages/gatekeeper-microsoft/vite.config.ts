@@ -11,6 +11,12 @@ export default {
         ...withTests.run.tasks.build,
         command: ["tsc", "tsc -p tsconfig.test.json"],
       },
+      // The tests import the worker, which imports the generated configurator bundles, so a clean
+      // checkout has to build them first.
+      test: {
+        ...withTests.run.tasks.test,
+        dependsOn: ["build:configurator"],
+      },
     },
   },
 };

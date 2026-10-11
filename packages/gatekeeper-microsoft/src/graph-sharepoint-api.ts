@@ -34,10 +34,11 @@ import {
 
 /**
  * How this worker identifies itself to SharePoint Online, in the `NONISV|Company|App/Version` form
- * Microsoft documents for internal line-of-business apps. Undecorated traffic is deprioritized when
+ * Microsoft documents for internal line-of-business apps, naming this product and its maker rather
+ * than a deployment: every installation is the same application. Undecorated traffic is deprioritized when
  * the service is under load, so this is set on every request rather than per call site.
  */
-export const SHAREPOINT_USER_AGENT = "NONISV|Contoso|CloudflareOS/1.0";
+export const SHAREPOINT_USER_AGENT = "NONISV|Knitli|KnitliOS/1.0";
 
 /** Items Graph is asked for per page, and the ceiling a caller can raise it to. */
 export const DEFAULT_ITEM_PAGE_SIZE = 25;

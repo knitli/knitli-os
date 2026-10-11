@@ -121,6 +121,9 @@ export function claimsChallengeDetail(header: string | null | undefined): string
   return (error || "insufficient_claims").slice(0, MAX_CHALLENGE_DETAIL_CHARS);
 }
 
+/** The `detail` of a rejection report for a plain 401 on a freshly refreshed token. */
+export const UNAUTHORIZED_AFTER_REFRESH = "unauthorized after a refresh";
+
 /** Largest claims directive kept; a real one is a few hundred bytes. */
 const MAX_CLAIMS_CHALLENGE_CHARS = 4000;
 
@@ -256,7 +259,7 @@ export async function fetchWithAuthRetry(
       // dead and a reconnect offered, rather than every later call repeating the same refresh and
       // 401. The response is still returned for the caller's own error.
       if (refreshed && opts.onCredentialsRejected) {
-        await opts.onCredentialsRejected("unauthorized after a refresh", token).catch(() => {});
+        await opts.onCredentialsRejected(UNAUTHORIZED_AFTER_REFRESH, token).catch(() => {});
       }
 
       if (!refreshed && replayable) {

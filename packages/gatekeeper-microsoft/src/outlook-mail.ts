@@ -698,7 +698,7 @@ export class OutlookMailGatekeeperImpl
     const action = pendingActions.get(actionId);
     if (!action) {
       // Already applied or rejected: the platform is retrying an approval it never recorded.
-      if (pendingActions.wasFinished(actionId)) return;
+      if (pendingActions.replayAnswersDone(actionId, "applied")) return;
       throw new Error(`Unknown pending Outlook action: ${actionId}`);
     }
 
@@ -734,7 +734,7 @@ export class OutlookMailGatekeeperImpl
         throw new Error(`unknown action type: ${(action as {type: string}).type}`);
     }
 
-    pendingActions.finish(actionId);
+    pendingActions.finish(actionId, "applied");
   }
 
   rejectAction(actionId: number): Promise<void | {restart?: boolean}> {
@@ -745,10 +745,10 @@ export class OutlookMailGatekeeperImpl
   async #rejectAction(actionId: number): Promise<void> {
     const pendingActions = new PendingActionStore<OutlookMailAction>(this.ctx.storage.kv);
     if (!pendingActions.get(actionId)) {
-      if (pendingActions.wasFinished(actionId)) return;
+      if (pendingActions.replayAnswersDone(actionId, "rejected")) return;
       throw new Error(`Unknown pending Outlook action: ${actionId}`);
     }
-    pendingActions.finish(actionId);
+    pendingActions.finish(actionId, "rejected");
   }
 
   async revertAction(_action: number):

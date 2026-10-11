@@ -6,6 +6,8 @@
 // Nothing in this file may log tokens. Error text from Entra is safe to surface (it carries AADSTS
 // codes, not credentials) but is length-capped before it reaches a message a user can see.
 
+import { readBytesCapped } from "@gadgets/gatekeeper-kit/response-body";
+
 const LOGIN_HOST = "https://login.microsoftonline.com";
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
@@ -491,9 +493,11 @@ async function fetchGraphImage<T extends string>(
       await response.body?.cancel();
       return null;
     }
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength === 0 || buffer.byteLength > maxBytes) return null;
-    return { data: new Uint8Array(buffer), mediaType };
+    // Read under the limit, so a body with no declared length is cut off when it passes it instead
+    // of being buffered whole first.
+    const data = await readBytesCapped(response, maxBytes);
+    if (data.byteLength === 0) return null;
+    return { data, mediaType };
   } catch {
     return null;
   }

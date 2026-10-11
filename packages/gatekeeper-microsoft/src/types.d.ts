@@ -108,8 +108,9 @@ export interface OutlookMailSession {
    * `hasAttachments:true`, `received>=2026-01-01`. Terms may be combined with `AND`/`OR`/`NOT`.
    * Double quotes are not accepted, since the query is itself sent as a quoted KQL string.
    *
-   * Results come back in relevance order, NOT newest-first: Microsoft Graph refuses to sort a
-   * search. Use `listMessages()` when recency matters.
+   * Results come back ordered by the date the message was sent, newest first, as Microsoft Graph
+   * returns them for a search; it cannot rank them by relevance, so narrow the query instead of
+   * expecting the best match first.
    */
   search(query: string): Promise<Cursor<OutlookMessageEntry>>;
 

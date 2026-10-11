@@ -114,7 +114,14 @@ function describeCreateItem(
   let builder = buildDescription("Create a new item in this SharePoint list with the values below.");
   let entries = Object.entries(fields);
   if (entries.length === 0) builder.prose("_This item sets no column values._");
-  for (let [name, value] of entries) builder.inline(name, displayValue(value));
+  for (let [name, value] of entries) {
+    // Each shape reads differently, so a value cannot be mistaken for another: a list is a list of
+    // separate items (not one comma-joined string), and clearing a column is its own line, whose
+    // label cannot be a column name since it has a space in it.
+    if (value === null) builder.inline(`Clear ${name}`, "yes");
+    else if (Array.isArray(value)) builder.list(name, value.map(item => displayValue(item)));
+    else builder.inline(name, displayValue(value));
+  }
   // A change to the user's own list, so it is part of what is being approved, not a side effect.
   if (addsMarkerColumn) {
     builder.inline("Schema change",

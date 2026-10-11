@@ -285,6 +285,23 @@ describe("getTeam", () => {
     await expect(newApi().listJoinedTeams()).rejects.toThrow();
   });
 
+  it("finds a known team past the enumeration ceiling, and says so when it cannot look further", async () => {
+    let page = 0;
+    const calls = stubFetch(() => jsonResponse(page++ === 14
+      ? { value: [{ id: "team-far", displayName: "Far" }] }
+      : { value: [{ id: `team-${page}`, displayName: "x" }],
+          "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/joinedTeams?$skiptoken=n" }));
+
+    await expect(newApi().getTeam("team-far")).resolves.toMatchObject({ id: "team-far" });
+    expect(calls.length).toBe(15);
+
+    // A listing that never ends is reported as too big to check, not as "not a member".
+    vi.unstubAllGlobals();
+    stubFetch(() => jsonResponse({ value: [{ id: "x", displayName: "x" }],
+      "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/joinedTeams?$skiptoken=n" }));
+    await expect(newApi().getTeam("never")).rejects.toThrow(/too many teams or channels/);
+  });
+
   it("finds a team on a later page", async () => {
     const pages = [
       { value: [{ id: "team-0", displayName: "A" }],
@@ -622,6 +639,29 @@ describe("search results", () => {
     expect(JSON.parse(String(calls[1].init.body)).requests[0].from).toBe(25);
     // Exhausted by moreResultsAvailable: no third request.
     expect(calls).toHaveLength(2);
+  });
+
+  it("keeps two hits of unknown location that share a message id but are different messages", async () => {
+    const hit = (created: string) => ({
+      hitId: "h", summary: "s",
+      resource: { id: "m-1", createdDateTime: created, from: { user: { id: "u", displayName: "U" } } },
+    });
+    const page = (hits: object[], more: boolean) =>
+      ({ value: [{ hitsContainers: [{ moreResultsAvailable: more, hits }] }] });
+    const pages = [
+      page([hit("2026-08-01T10:00:00Z")], true),
+      page([hit("2026-08-01T10:00:00Z"), hit("2026-08-02T10:00:00Z")], false),
+    ];
+    let index = 0;
+    stubFetch(() => jsonResponse(pages[index++]));
+
+    const walk = newApi().openMessageSearch("quarterly");
+
+    expect((await walk.peekPage())!).toHaveLength(1);
+    walk.commitPage();
+    // The repeat of the first is dropped; the other message that merely shares an id is not.
+    expect((await walk.peekPage())!.map(h => h.createdAt.toISOString()))
+      .toEqual(["2026-08-02T10:00:00.000Z"]);
   });
 
   it("keeps two hits that share a message id in different conversations", async () => {

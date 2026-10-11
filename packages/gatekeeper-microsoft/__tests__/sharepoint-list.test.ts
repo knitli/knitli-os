@@ -790,6 +790,29 @@ describe("approval prompt", () => {
     expect(fields.map(field => field.label)).toEqual(["Title", "Bookkeeping"]);
   });
 
+  it("shows a cleared column and a list of choices in forms a string cannot imitate", async () => {
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+      ? jsonResponse({ value: [...GRAPH_COLUMNS,
+        { name: "Tags", displayName: "Tags", choice: { choices: ["a,b", "a", "b"], displayAs: "checkBoxes" } },
+        { name: "GadgetsActionId", text: {} }] })
+      : defaultRoute(call));
+    const session = await startSession();
+
+    await session.createItem({ Title: "x", Details: null, Tags: ["a,b"] });
+    await session.createItem({ Title: "x", Details: "(cleared)", Tags: ["a", "b"] });
+
+    const fields = (index: number) =>
+      approvals.actions[index].description.fields as { label: string; kind: string; items?: string[]; value?: string }[];
+    expect(fields(0)).toEqual(expect.arrayContaining([
+      { label: "Clear Details", kind: "inline", value: "yes" },
+      { label: "Tags", kind: "list", items: ["a,b"] },
+    ]));
+    expect(fields(1)).toEqual(expect.arrayContaining([
+      { label: "Details", kind: "inline", value: "(cleared)" },
+      { label: "Tags", kind: "list", items: ["a", "b"] },
+    ]));
+  });
+
   it("shows submitted values as literal fields, never in the prompt's prose", async () => {
     stubFetch();
     await gatekeeper.describe();

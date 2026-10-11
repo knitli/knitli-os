@@ -120,6 +120,23 @@ function photo(byteLength: number, contentType = "image/jpeg"): Response {
 }
 
 describe("profile photo size ladder", () => {
+  it("stops reading a photo that declares no length once it passes the limit", async () => {
+    let pulled = 0;
+    const calls = stubFetch(() => new Response(new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 64 * 1024;
+        controller.enqueue(new Uint8Array(64 * 1024));
+        if (pulled > 64 * 1024 * 1024) controller.close();
+      },
+    }), { headers: { "Content-Type": "image/jpeg" } }));
+
+    await expect(fetchProfilePhoto("access-token")).resolves.toBeNull();
+
+    // Every rung was cut off at the limit, nowhere near the 64 MiB the stream would have supplied.
+    expect(pulled).toBeLessThan(4 * 1024 * 1024);
+    expect(calls.length).toBeGreaterThan(0);
+  });
+
   it("asks for the avatar-sized rendition first and stops there", async () => {
     const calls = stubFetch(() => photo(1024));
 

@@ -47,6 +47,15 @@ const MAX_TEAMS = 200;
 const MAX_CHANNELS = 200;
 const MAX_WALK_PAGES = 10;
 
+/**
+ * Pages scanned to find one known team or channel in a membership listing. Far above the ceiling
+ * `listTeams()` and `listChannels()` refuse to enumerate past, so a lookup by id still works for an
+ * account those cannot list; reaching it is reported as such, never as "not a member".
+ */
+const MAX_MEMBERSHIP_PAGES = 200;
+const MEMBERSHIP_SCAN_LIMIT_MESSAGE =
+    "This account belongs to too many teams or channels to check one by id. Ask an administrator.";
+
 /** Longest KQL search string accepted from an agent. */
 const MAX_SEARCH_QUERY_CHARS = 400;
 
@@ -748,7 +757,10 @@ function searchHitKey(hit: TeamsSearchHitInfo): string {
   let where = hit.location.kind === "channel"
       ? `channel/${hit.location.teamId}/${hit.location.channelId}`
       : hit.location.kind === "chat" ? `chat/${hit.location.chatId}` : "unknown";
-  return `${where}/${hit.messageId}`;
+  // With no conversation to tell two messages apart by, what else the hit carries has to.
+  let extra = hit.location.kind === "unknown"
+      ? `/${hit.createdAt.valueOf()}/${hit.from?.id ?? hit.from?.displayName ?? ""}` : "";
+  return `${where}/${hit.messageId}${extra}`;
 }
 
 /**
@@ -1070,7 +1082,7 @@ export class GraphTeamsApi {
   /** Walks a team collection until the team turns up, without a ceiling error when it does not. */
   async #findTeam(url: string, teamId: string): Promise<TeamsTeamInfo | undefined> {
     let next: string = url;
-    for (let page = 0; page < MAX_WALK_PAGES; page++) {
+    for (let page = 0; page < MAX_MEMBERSHIP_PAGES; page++) {
       let body: GraphCollection<GraphTeam> = await this.#fetchJson<GraphCollection<GraphTeam>>(next);
       let match = (body.value ?? []).find(team => team.id === teamId);
       if (match) return teamInfoFrom(match);
@@ -1078,7 +1090,8 @@ export class GraphTeamsApi {
       if (!link) return undefined;
       next = assertGraphUrl(link);
     }
-    return undefined;
+    // Not "not a member": the scan gave up, and saying so would be a false answer.
+    throw new Error(MEMBERSHIP_SCAN_LIMIT_MESSAGE);
   }
 
   /**
@@ -1101,16 +1114,18 @@ export class GraphTeamsApi {
   async getChannel(teamId: string, channelId: string): Promise<TeamsChannelInfo> {
     graphUrl(["teams", teamId, "channels", channelId]); // rejects an empty or relative id up front
     let next: string = graphUrl(["teams", teamId, "channels"]);
-    for (let page = 0; page < MAX_WALK_PAGES; page++) {
+    for (let page = 0; page < MAX_MEMBERSHIP_PAGES; page++) {
       let body: GraphCollection<GraphChannel> =
           await this.#fetchJson<GraphCollection<GraphChannel>>(next);
       let match = (body.value ?? []).find(channel => channel.id === channelId);
       if (match) return channelInfoFrom(teamId, match);
       let link = body["@odata.nextLink"];
-      if (!link) break;
+      if (!link) {
+        throw new GraphApiError(404, "notFound", "That channel is not one this account can see.");
+      }
       next = assertGraphUrl(link);
     }
-    throw new GraphApiError(404, "notFound", "That channel is not one this account can see.");
+    throw new Error(MEMBERSHIP_SCAN_LIMIT_MESSAGE);
   }
 
   async listTeamMembers(teamId: string): Promise<GraphPage<TeamsMemberInfo>> {

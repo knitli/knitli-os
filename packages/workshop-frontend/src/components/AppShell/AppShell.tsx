@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouterState } from '@tanstack/react-router'
 import { List, X } from '@phosphor-icons/react'
 import TopBarNotice from '../../TopBarNotice'
-import ReconnectingChip from '../ReconnectingChip'
+import ConnectionChip from '../ConnectionChip'
 import { useConnectionLost } from '../../RpcContext'
 import Sidebar from './Sidebar'
 import CommandPalette from './CommandPalette'
@@ -158,7 +158,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
               hidden, leaving this the only in-flow child, which `justify-between` would park on the
               left. */}
           <div className="ml-auto flex items-center gap-2">
-            {connectionLost && <ReconnectingChip />}
+            <ConnectionChip lost={connectionLost} />
             <span aria-hidden="true" className="h-11 w-11 md:hidden" />
           </div>
         </div>

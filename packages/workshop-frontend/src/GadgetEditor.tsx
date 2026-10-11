@@ -64,7 +64,9 @@ import TopBarNotice from './TopBarNotice'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from './components/WorkshopControls'
 import { useActionEntries, useActions } from './useActions'
 import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
-import ReconnectingChip from './components/ReconnectingChip'
+import ConnectionChip from './components/ConnectionChip'
+import { useWorkspaceIdle } from './useWorkspaceIdle'
+import { resumeConnection } from './connectionPause'
 import WorkspaceOpenErrorPage from './components/WorkspaceOpenErrorPage'
 import { useWorkspaceOpen } from './useWorkspaceOpen'
 import { reportIssue } from './errorReporting'
@@ -705,6 +707,10 @@ export default function GadgetEditor() {
   const pinInitialChatSelection =
     singleInitialChat && !hasCommittedCode && !userNavigatedToList
   const effectiveSelectedChatId = selectedChatId ?? (pinInitialChatSelection ? 0 : null)
+  // Idle tabs drop their socket so the workspace's Durable Objects can go idle, never mid-stream.
+  // Nothing resumes by itself: sending, deciding an action, or the Paused chip does. isAgentActive goes stale when the chat list replaces the chat (no chat reports in), so it only
+  // counts while a chat is selected.
+  useWorkspaceIdle(isAgentActive && effectiveSelectedChatId !== null)
   const { request: voiceStartRequest, consume: consumeVoiceStart } = useInitialVoiceChat(id, effectiveSelectedChatId)
 
   // ── workpiece selection ──────────────────────────────────────────────────────
@@ -1420,6 +1426,7 @@ export default function GadgetEditor() {
 
   const handleDeleteConfirm = async () => {
     if (!overseer) return
+    resumeConnection()  // the dialog locks while deleting, so a parked connection would strand it
     setIsDeleting(true)
     try {
       await overseer.stub.deleteSelf()
@@ -1474,6 +1481,8 @@ export default function GadgetEditor() {
         <div className="flex flex-col items-center gap-3">
           <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
           <p className="text-sm text-kumo-subtle">Loading workspace…</p>
+          {/* A pause can land before the workspace opened; this branch has no top bar for the chip. */}
+          <ConnectionChip lost={false} />
         </div>
         {observerConfig && (
           <ObserverConfigModal
@@ -1499,6 +1508,7 @@ export default function GadgetEditor() {
         metadata={metadata}
         authenticatedApi={authenticatedApi}
         currentUserId={userInfo?.id ?? null}
+        connectionLost={showReconnecting}
       />
     )
   }
@@ -1613,7 +1623,7 @@ export default function GadgetEditor() {
             restricted={metadata?.containsRestrictedData === true}
           />
 
-          {showReconnecting && <ReconnectingChip />}
+          <ConnectionChip lost={showReconnecting} />
 
           <WorkshopIconButton
             onClick={() => setShareModalOpen(true)}
@@ -1671,7 +1681,7 @@ export default function GadgetEditor() {
 
         </div>
         <div className="ml-1 flex shrink-0 items-center gap-2">
-          <span className="md:hidden">{showReconnecting && <ReconnectingChip />}</span>
+          <span className="md:hidden"><ConnectionChip lost={showReconnecting} /></span>
           {/* Desktop reaches Export from the gadget pane's tab bar, which is hidden on phones. */}
           <span className="md:hidden">
             <GadgetExportMenu
@@ -2069,6 +2079,10 @@ export default function GadgetEditor() {
                     Press <kbd className="rounded border border-kumo-line bg-kumo-elevated px-1.5 py-0.5 text-[11px] font-medium">Esc</kbd> to exit full screen
                   </div>
                 </div>
+              )}
+              {/* The fullscreen overlay covers the top bar, which is where the chip normally lives. */}
+              {isGadgetFullscreen && (
+                <div className="absolute right-4 top-4 z-10"><ConnectionChip lost={showReconnecting} /></div>
               )}
             </div>
 

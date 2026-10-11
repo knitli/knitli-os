@@ -516,7 +516,8 @@ describe("search query validation", () => {
 });
 
 function searchResponse(
-    hits: { id: string; channel?: [string, string]; chat?: string; summary?: string }[],
+    hits: { id: string; channel?: [string, string]; chat?: string; summary?: string;
+             replyToId?: string }[],
     moreResultsAvailable = false) {
   return {
     value: [{
@@ -536,6 +537,7 @@ function searchResponse(
             webUrl: `https://teams.microsoft.com/l/message/${hit.id}`,
             ...(hit.channel ? { channelIdentity: { teamId: hit.channel[0], channelId: hit.channel[1] } } : {}),
             ...(hit.chat ? { chatId: hit.chat } : {}),
+            ...(hit.replyToId ? { replyToId: hit.replyToId } : {}),
           },
         })),
       }],
@@ -544,6 +546,25 @@ function searchResponse(
 }
 
 describe("search results", () => {
+  it("reads a channel reply hit through the message it answers", async () => {
+    const calls = stubFetch(call => new URL(call.url).pathname.endsWith("/search/query")
+      ? jsonResponse(searchResponse([
+        { id: "reply-1", channel: ["team-1", "channel-1"], replyToId: "parent-9" },
+        { id: "top-1", channel: ["team-1", "channel-1"] },
+      ]))
+      : jsonResponse(CHANNEL_MESSAGE));
+    const api = newApi();
+    const { hits } = await api.searchMessages("quarterly");
+
+    await api.getSearchHitMessage(hits[0]);
+    await api.getSearchHitMessage(hits[1]);
+
+    expect(new URL(calls[1].url).pathname)
+      .toBe("/v1.0/teams/team-1/channels/channel-1/messages/parent-9/replies/reply-1");
+    expect(new URL(calls[2].url).pathname)
+      .toBe("/v1.0/teams/team-1/channels/channel-1/messages/top-1");
+  });
+
   it("maps a hit to metadata only, with the location the index reported", async () => {
     stubFetch(() => jsonResponse(searchResponse([
       { id: "m-1", channel: ["team-1", "channel-1"] },

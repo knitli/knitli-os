@@ -505,6 +505,10 @@ identifies the cause, and guessing without it wastes a round trip.
       that was already connected keeps working.
 - [ ] **Reads produce observations.** List teams, channels and chats, and read a few messages; each
       read shows up as an observation, and nothing in Teams changes.
+- [ ] **A search hit that is a channel reply can be opened.** Search for words that appear in a reply
+      (not a top-level post) and call `getInfo()` on its `message` → the reply comes back. Record
+      whether the search index reported the parent message id; without it the lookup falls back to
+      the top-level message path and fails with a 404.
 - [ ] **Single-user.** Share a gadget bound to Teams with a colleague → opening it is refused.
 
 ### SharePoint list (via a gadget)

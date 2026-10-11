@@ -880,6 +880,10 @@ export class UserAccount extends DurableObject<Env> {
       if (overtaken) {
         let granted = this.ctx.storage.kv.get<string[]>("grantedScopes") ?? [];
         this.ctx.storage.kv.put<string[]>("grantedScopes", unionScopes(priorGranted, granted));
+        // The access token that came with this grant covers only this flow's scopes, but the
+        // records now say more. Dropped, so the next call mints one for the merged set rather than
+        // getting a 403 from a resource the records call granted.
+        this.ctx.storage.kv.delete("accessToken");
       }
       this.#bumpGrantEpoch();
       // These credentials are new, so any recorded permanent failure no longer applies — and
@@ -1405,8 +1409,8 @@ export class MicrosoftVerifier extends WorkerEntrypoint<Env, MicrosoftVerifierPr
     return new GraphSharePointApi(
         async opts => (await this.#account().getAccessToken(opts)).token,
         {
-          onCredentialsRejected: (detail, rejectedToken) =>
-              this.#account().reportCredentialsRejected(detail, rejectedToken),
+          onCredentialsRejected: (detail, rejectedToken, claims) =>
+              this.#account().reportCredentialsRejected(detail, rejectedToken, claims),
         });
   }
 

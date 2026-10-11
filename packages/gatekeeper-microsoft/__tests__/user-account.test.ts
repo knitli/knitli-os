@@ -488,6 +488,8 @@ describe("overlapping reconnects", () => {
     await account.acceptAuthCode("code-b", begunB!.oauthNonce);
     await account.commitReconnect(stagedId(callback));
 
+    // B's access token covers only mail, so it is dropped and the next call mints for the union.
+    expect(context.storage.kv.get("accessToken")).toBeUndefined();
     // B's commit did not take Teams back.
     expect(await account.getGrantScopes()).toEqual(expect.arrayContaining(TEAMS_SCOPES));
     expect(await account.getGrantedResourceUrlPatterns()).toContain("https://teams.microsoft.com/*");

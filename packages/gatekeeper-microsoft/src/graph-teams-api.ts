@@ -155,6 +155,8 @@ export type GraphChatMessage = {
   channelIdentity?: { teamId?: string; channelId?: string };
   /** Present on chat messages, for the same reason. */
   chatId?: string;
+  /** Set on a channel reply: the id of the top-level message it answers. */
+  replyToId?: string;
 };
 
 type GraphSearchHit = {
@@ -402,7 +404,10 @@ function messageInfoFrom(message: GraphChatMessage): TeamsMessageInfo {
 function hitLocationFrom(resource: GraphChatMessage): TeamsSearchHitLocation {
   let teamId = text(resource.channelIdentity?.teamId);
   let channelId = text(resource.channelIdentity?.channelId);
-  if (teamId && channelId) return { kind: "channel", teamId, channelId };
+  if (teamId && channelId) {
+    let replyToId = text(resource.replyToId);
+    return { kind: "channel", teamId, channelId, ...(replyToId ? { replyToId } : {}) };
+  }
   let chatId = text(resource.chatId);
   if (chatId) return { kind: "chat", chatId };
   return { kind: "unknown" };
@@ -1135,6 +1140,14 @@ export class GraphTeamsApi {
             { $top: top(TEAMS_MESSAGE_PAGE_SIZE) }));
   }
 
+  async getChannelReply(
+      teamId: string, channelId: string, parentId: string, replyId: string)
+      : Promise<TeamsMessageInfo> {
+    return messageInfoFrom(await this.#fetchJson<GraphChatMessage>(
+        graphUrl(["teams", teamId, "channels", channelId, "messages", parentId, "replies",
+                  replyId])));
+  }
+
   async getChannelMessage(teamId: string, channelId: string, messageId: string)
       : Promise<TeamsMessageInfo> {
     return messageInfoFrom(await this.#fetchJson<GraphChatMessage>(
@@ -1253,7 +1266,11 @@ export class GraphTeamsApi {
     let location = hit.location;
     switch (location.kind) {
       case "channel":
-        return await this.getChannelMessage(location.teamId, location.channelId, hit.messageId);
+        // A reply is only addressable through the message it answers.
+        return location.replyToId
+            ? await this.getChannelReply(
+                location.teamId, location.channelId, location.replyToId, hit.messageId)
+            : await this.getChannelMessage(location.teamId, location.channelId, hit.messageId);
       case "chat":
         return await this.getChatMessage(location.chatId, hit.messageId);
       case "unknown":

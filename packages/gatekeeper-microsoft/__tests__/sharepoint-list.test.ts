@@ -1068,6 +1068,27 @@ describe("MicrosoftVerifier.hasListAccess", () => {
     } as never, {} as never);
   }
 
+  it("forwards the claims directive of a challenge, so the reconnect can repeat it", async () => {
+    stubFetch(() => new Response("{}", {
+      status: 401,
+      headers: { "WWW-Authenticate": `Bearer error="insufficient_claims", claims="${btoa('{"a":1}')}"` },
+    }));
+    const verifier = new MicrosoftVerifier({
+      props: { userObjectId: DO_ID },
+      exports: {
+        UserAccount: {
+          idFromString: (id: string) => id,
+          get: () => ({ getAccessToken, reportCredentialsRejected }),
+        },
+      },
+    } as never, {} as never);
+
+    await expect(verifier.hasListAccess(SITE_ID, LIST_ID)).rejects.toThrow();
+
+    expect(reportCredentialsRejected).toHaveBeenCalledWith(
+      "insufficient_claims", expect.any(String), '{"a":1}');
+  });
+
   it("reports a claims challenge to the account", async () => {
     stubFetch(() => new Response("{}", {
       status: 401,
@@ -1085,7 +1106,7 @@ describe("MicrosoftVerifier.hasListAccess", () => {
 
     await expect(verifier.hasListAccess(SITE_ID, LIST_ID)).rejects.toThrow();
 
-    expect(reportCredentialsRejected).toHaveBeenCalledWith("insufficient_claims", expect.any(String));
+    expect(reportCredentialsRejected).toHaveBeenCalledWith("insufficient_claims", expect.any(String), '{"a":1}');
   });
 
   it("admits an account that can read the list", async () => {

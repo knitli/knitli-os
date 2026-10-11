@@ -160,6 +160,8 @@ export type TeamsSearchHitLocation =
       kind: "channel";
       teamId: string;
       channelId: string;
+      /** Set when the hit is a reply: the id of the top-level message it answers. */
+      replyToId?: string;
     }
   | {
       kind: "chat";

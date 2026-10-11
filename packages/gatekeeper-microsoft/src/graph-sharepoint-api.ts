@@ -98,16 +98,19 @@ function isLookupBacked(column: ColumnDefinition): boolean {
 
 /**
  * Why `column`, found under the marker's name, cannot be the marker, or null when it can be: it
- * must be a single line of text that is not required and holds a 36-character id. A list's own
- * column that happens to share the name must never be written to.
+ * must be a single line of text that is not required, holds a 36-character id, and carries the
+ * description `createMarkerColumn` stamps. A list's own column that happens to share the name
+ * must never be written to.
  */
 export function markerColumnProblem(column: ColumnDefinition): string | null {
   let fits = column.type === "text" && !column.multiline && !column.required && !column.readOnly &&
-      (column.maxLength === undefined || column.maxLength >= 36);
+      (column.maxLength === undefined || column.maxLength >= 36) &&
+      column.description === MARKER_COLUMN_DESCRIPTION;
   return fits ? null
-      : `The list already has a column named ${MARKER_COLUMN} that is not a single line of ` +
-        "optional text long enough for an id, so it cannot be used to recognise retried creates. " +
-        "Rename or remove it.";
+      : `The list already has a column named ${MARKER_COLUMN} that this connection did not ` +
+        "create — it is not an optional single line of text long enough for an id carrying " +
+        "the marker description — so it cannot be used to recognise retried creates. Rename " +
+        "or remove it.";
 }
 
 /**
@@ -163,7 +166,17 @@ export type ColumnDefinition = {
   maxLength?: number;
   /** A `person`, `lookup` or check-box `choice` column that holds more than one value. */
   multiple?: boolean;
+  /** The column's description, when it has one. Only the marker check reads this. */
+  description?: string;
 };
+
+/**
+ * The description `createMarkerColumn` stamps on the column it adds. An existing
+ * `GadgetsActionId` column is only reused when it carries this stamp: a same-named text column
+ * an owner added for their own purposes must never have action markers written into it.
+ */
+export const MARKER_COLUMN_DESCRIPTION =
+    "Added by Gadgets so a retried create can recognise its own earlier row.";
 
 /** One list item: the listItem's own properties plus its expanded `fields`. */
 export type ListItem = {
@@ -212,6 +225,7 @@ type GraphResource = {
 type GraphColumnDefinition = {
   name?: string;
   displayName?: string;
+  description?: string;
   hidden?: boolean;
   readOnly?: boolean;
   required?: boolean;
@@ -341,6 +355,8 @@ function normalizeColumn(column: GraphColumnDefinition): ColumnDefinition | null
     ...(type === "text" && Number.isInteger(column.text?.maxLength) && column.text!.maxLength! > 0
         ? { maxLength: column.text!.maxLength } : {}),
     ...(multiple === true ? { multiple: true } : {}),
+    ...(typeof column.description === "string" && column.description
+        ? { description: column.description } : {}),
   };
 }
 
@@ -784,7 +800,7 @@ export class GraphSharePointApi {
           body: JSON.stringify({
             name: MARKER_COLUMN,
             displayName: "Gadgets action id",
-            description: "Added by Gadgets so a retried create can recognise its own earlier row.",
+            description: MARKER_COLUMN_DESCRIPTION,
             indexed: true,
             text: { allowMultipleLines: false, maxLength: 64 },
           }),

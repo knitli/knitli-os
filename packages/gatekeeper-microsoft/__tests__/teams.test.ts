@@ -313,6 +313,32 @@ describe("reads", () => {
     ]);
   });
 
+  it("holds no queue reference for entries a refused page never returns", async () => {
+    stubFetch();
+    // Page targets are built only after their observation authorizes: had they been built first,
+    // each would retain the shared queue, and the refusal below would strand those references —
+    // disposing the session, stubs, and cursor would then leave the dup undisposed.
+    const disposed = vi.fn();
+    (approvals.queue as unknown as Record<symbol, unknown>)[Symbol.dispose] = disposed;
+    const refusePages = () => approvals.queue.authorizeObservation.mockImplementation(
+        async description => {
+          if (description.title.startsWith("Read ")) throw new Error("overseer refused the page");
+          approvals.observations.push(description);
+        });
+
+    const session = await startSession();
+    const teams = await session.listTeams();
+    const channels = await teams[0].team.listChannels();
+    const cursor = await channels[0].channel.listMessages();
+    refusePages();
+    await expect(cursor.next()).rejects.toThrow("overseer refused the page");
+
+    for (const target of [session, teams[0].team, channels[0].channel, cursor]) {
+      (target as unknown as { [Symbol.dispose](): void })[Symbol.dispose]();
+    }
+    expect(disposed).toHaveBeenCalledOnce();
+  });
+
   it("walks chats to members and messages, authorizing every read", async () => {
     const calls = stubFetch();
     const session = await startSession();
@@ -580,6 +606,24 @@ describe("search", () => {
     ]);
     // Nothing is fetched for a hit until it is hydrated, and the search itself is the only POST.
     expect(calls.filter(call => (call.init.method ?? "GET") === "POST")).toHaveLength(1);
+  });
+
+  it("holds no queue reference for hits a refused page never returns", async () => {
+    stubFetch();
+    const disposed = vi.fn();
+    (approvals.queue as unknown as Record<symbol, unknown>)[Symbol.dispose] = disposed;
+
+    const session = await startSession();
+    const cursor = await session.search("quarterly numbers");
+    approvals.queue.authorizeObservation.mockImplementation(async description => {
+      if (description.title.startsWith("Read ")) throw new Error("overseer refused the page");
+      approvals.observations.push(description);
+    });
+    await expect(cursor.next()).rejects.toThrow("overseer refused the page");
+
+    (session as unknown as { [Symbol.dispose](): void })[Symbol.dispose]();
+    (cursor as unknown as { [Symbol.dispose](): void })[Symbol.dispose]();
+    expect(disposed).toHaveBeenCalledOnce();
   });
 
   it("fails loudly on a hit whose conversation the index did not report", async () => {

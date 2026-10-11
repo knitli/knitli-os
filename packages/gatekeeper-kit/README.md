@@ -85,6 +85,7 @@ import {
 | `./action-files` | Bounded, integrity-checked action-file storage. | A queued action carries file bytes. Store only its `ActionFileReference` in the action. |
 | `./action-description` | Approval-text builder: prose plus exact typed fields under one byte budget, and the `descriptionIsComplete` claim. | An action's `describe` renders what it will write or send. |
 | `./simulation` | Pending-action replay and provisional-ID mapping. | An action continues with simulation and later reads must include its projected effect. |
+| `./shared-approval-queue` | One reference-counted approval-queue stub shared by a session and every capability it mints, disposed when the last holder is released. | A session hands out stubs or cursors that outlive the call that made them. |
 | `./observers` | Observer admission strategies and per-read authorization. | A gatekeeper implements its required observer methods. |
 | `./oauth-client` | OAuth 2.0 token-endpoint client, PKCE, and refresh adapter. | A gatekeeper exchanges, refreshes, or revokes OAuth 2.0 tokens. |
 | `./preview-oauth` | Signed OAuth state and stable-to-preview callback relay. | Preview Workers share one callback registered with the OAuth provider. |

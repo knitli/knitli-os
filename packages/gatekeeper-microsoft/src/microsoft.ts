@@ -26,7 +26,9 @@ import {
   fetchVerifiedDomains, grantCoversScopes, normalizeScope, refreshAccessToken, resolveVerifiedEmail,
 } from "./microsoft-api";
 import type { OutlookMailGatekeeperImplProps } from "./outlook-mail";
-import { UNAUTHORIZED_AFTER_REFRESH } from "./auth-retry";
+import {
+  UNAUTHORIZED_AFTER_REFRESH, type AccessTokenProvider, type CredentialsRejectedReporter,
+} from "./auth-retry";
 import { GraphApiError } from "./graph-api";
 import { GraphSharePointApi } from "./graph-sharepoint-api";
 import type { SharePointListGatekeeperImplProps } from "./sharepoint-list";
@@ -1109,8 +1111,12 @@ export class UserAccount extends DurableObject<Env> {
       return cached.domains;
     }
 
-    let token = await this.getAccessToken();
-    let domains = await fetchVerifiedDomains(token.token, AbortSignal.timeout(GRAPH_TIMEOUT_MS));
+    let domains = await fetchVerifiedDomains(
+        async opts => (await this.getAccessToken(opts)).token, {
+          signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS), timeoutMs: GRAPH_TIMEOUT_MS,
+          onCredentialsRejected: (detail, rejectedToken, claims) =>
+              this.reportCredentialsRejected(detail, rejectedToken, claims),
+        });
     // An empty answer is never cached: it would deny every sign-in for a day on the strength of one
     // odd response.
     if (domains.length > 0) {
@@ -1174,15 +1180,30 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
         });
   }
 
+  /** Token provider plus rejection reporter for the identity reads, sharing one account stub. */
+  #identityReads(account: DurableObjectStub<UserAccount>): {
+    getAccessToken: AccessTokenProvider;
+    onCredentialsRejected: CredentialsRejectedReporter;
+  } {
+    return {
+      getAccessToken: async opts => (await account.getAccessToken(opts)).token,
+      onCredentialsRejected: (detail, rejectedToken, claims) =>
+          account.reportCredentialsRejected(detail, rejectedToken, claims),
+    };
+  }
+
   async describe(): Promise<AccountDescription> {
     let account = this.#account();
     let grantedResourcesPromise = account.getGrantedResourceUrlPatterns();
-    let token = await account.getAccessToken();
+    let reads = this.#identityReads(account);
+    let readOpts = (signal: AbortSignal) => ({
+      signal, timeoutMs: GRAPH_TIMEOUT_MS, onCredentialsRejected: reads.onCredentialsRejected,
+    });
     // Accounts without a photo are common, and a missing avatar is not a reason to fail the whole
     // description, so the logo stands in.
     let [profile, avatarUrl, grantedResourceUrlPatterns] = await Promise.all([
-      fetchGraphProfile(token.token, AbortSignal.timeout(GRAPH_TIMEOUT_MS)),
-      fetchAvatarDataUrl(token.token, AbortSignal.timeout(GRAPH_TIMEOUT_MS)),
+      fetchGraphProfile(reads.getAccessToken, readOpts(AbortSignal.timeout(GRAPH_TIMEOUT_MS))),
+      fetchAvatarDataUrl(reads.getAccessToken, readOpts(AbortSignal.timeout(GRAPH_TIMEOUT_MS))),
       grantedResourcesPromise,
     ]);
 
@@ -1202,13 +1223,15 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     // non-2xx response — treat any failure as "no email available".
     try {
       let account = this.#account();
-      let token = await account.getAccessToken();
-      if (!token) return null;
+      let reads = this.#identityReads(account);
 
       let [claims, verifiedDomains, profile] = await Promise.all([
         account.getIdTokenClaims(),
         account.getVerifiedDomains(),
-        fetchGraphProfile(token.token, AbortSignal.timeout(GRAPH_TIMEOUT_MS)),
+        fetchGraphProfile(reads.getAccessToken, {
+          signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS), timeoutMs: GRAPH_TIMEOUT_MS,
+          onCredentialsRejected: reads.onCredentialsRejected,
+        }),
       ]);
 
       return resolveVerifiedEmail(profile, claims, verifiedDomains, this.env.TENANT_ID ?? "");

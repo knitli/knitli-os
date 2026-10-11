@@ -196,6 +196,37 @@ describe("describe", () => {
     });
   });
 
+  it("refreshes once when Graph rejects the cached token, then reads with the new one", async () => {
+    // A stale cached token must heal, not fail the call: the identity reads share the resource
+    // clients' refresh-once-then-report path rather than sending one bare token.
+    context.storage.kv.put("refreshToken", "refresh-1");
+    let profileCalls = 0;
+    const tokenCalls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.includes("login.microsoftonline.com")) {
+        tokenCalls.push(url);
+        return new Response(JSON.stringify({
+          access_token: "access-2", expires_in: 3600, refresh_token: "refresh-2",
+        }), { headers: { "Content-Type": "application/json" } });
+      }
+      if (url.includes("/me/photo")) return new Response(null, { status: 404 });
+      if (url.includes("/me")) {
+        profileCalls++;
+        if (profileCalls === 1) return new Response("unauthorized", { status: 401 });
+        return new Response(JSON.stringify(MEMBER_PROFILE), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }));
+
+    const description = await user.describe();
+
+    expect(description.displayName).toBe("Alex Morgan");
+    expect(tokenCalls).toHaveLength(1);
+    expect(profileCalls).toBe(2);
+  });
+
   it("falls back to the logo for a media type outside the image allowlist", async () => {
     // The type is copied into a URL the Workshop renders, so anything but a plain raster image is
     // treated exactly like "no photo" rather than passed through.

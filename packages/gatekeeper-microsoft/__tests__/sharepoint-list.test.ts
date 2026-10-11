@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Gatekeeper } from "@gadgets/workshop-shared/gatekeeper";
 import type { ColumnDefinition } from "../src/graph-sharepoint-api";
+import { MARKER_COLUMN_DESCRIPTION } from "../src/graph-sharepoint-api";
 import { MicrosoftVerifier } from "../src/microsoft";
 import { SharePointListGatekeeperImpl, validateFields } from "../src/sharepoint-list";
 import type { SharePointListSession } from "../src/sharepoint-types";
@@ -556,11 +557,11 @@ describe("applyAction", () => {
     // Now the list has it, so the next create adds nothing.
     stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
         && (call.init.method ?? "GET") === "GET"
-      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] })
+      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {}, description: MARKER_COLUMN_DESCRIPTION }] })
       : defaultRoute(call));
     const again = stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
         && (call.init.method ?? "GET") === "GET"
-      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] })
+      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {}, description: MARKER_COLUMN_DESCRIPTION }] })
       : defaultRoute(call));
     await session.createItem({ Title: "two" });
     await applyApprovedAction(2);
@@ -573,7 +574,7 @@ describe("applyAction", () => {
         && (call.init.method ?? "GET") === "GET"
       ? jsonResponse({ value: [...GRAPH_COLUMNS,
         { name: "Tags", displayName: "Tags", choice: { choices: ["a", "b"], displayAs: "checkBoxes" } },
-        { name: "GadgetsActionId", text: {} }] })
+        { name: "GadgetsActionId", text: {}, description: MARKER_COLUMN_DESCRIPTION }] })
       : defaultRoute(call));
     const session = await startSession();
     await session.createItem({ Title: "x", Tags: ["a", "b"] });
@@ -592,7 +593,7 @@ describe("applyAction", () => {
     const calls = stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
         && (call.init.method ?? "GET") === "GET"
       ? jsonResponse({ value: hasMarker
-        ? [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] : GRAPH_COLUMNS })
+        ? [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {}, description: MARKER_COLUMN_DESCRIPTION }] : GRAPH_COLUMNS })
       : defaultRoute(call));
     const session = await startSession();
     await session.createItem({ Title: "New laptop" });
@@ -603,6 +604,19 @@ describe("applyAction", () => {
     expect(creates(calls)).toHaveLength(0);
     expect(calls.some(call => (call.init.method ?? "GET") === "POST"
         && call.url.includes("/columns"))).toBe(false);
+  });
+
+  it("refuses to write markers into a same-named column it did not create", async () => {
+    // Right shape, but the list owner's own column: no description stamp, so the apply must fail
+    // rather than record action markers in someone else's data.
+    stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
+        && (call.init.method ?? "GET") === "GET"
+      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] })
+      : defaultRoute(call));
+    const session = await startSession();
+    await session.createItem({ Title: "New laptop" });
+
+    await expect(applyApprovedAction(1)).rejects.toThrow(/did not create/);
   });
 
   it("finds its own earlier row on a retry instead of creating a second", async () => {
@@ -781,7 +795,7 @@ describe("applyAction", () => {
 describe("approval prompt", () => {
   it("mentions no schema change once the list already has the marker column", async () => {
     stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
-      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {} }] })
+      ? jsonResponse({ value: [...GRAPH_COLUMNS, { name: "GadgetsActionId", text: {}, description: MARKER_COLUMN_DESCRIPTION }] })
       : defaultRoute(call));
     const session = await startSession();
 
@@ -796,7 +810,7 @@ describe("approval prompt", () => {
     stubFetch(call => new URL(call.url).pathname.endsWith(`/lists/${LIST_ID}/columns`)
       ? jsonResponse({ value: [...GRAPH_COLUMNS,
         { name: "Tags", displayName: "Tags", choice: { choices: ["a,b", "a", "b"], displayAs: "checkBoxes" } },
-        { name: "GadgetsActionId", text: {} }] })
+        { name: "GadgetsActionId", text: {}, description: MARKER_COLUMN_DESCRIPTION }] })
       : defaultRoute(call));
     const session = await startSession();
 
@@ -892,6 +906,27 @@ describe("validateFields", () => {
     expect(validateFields({ Tags: ["a", "b"] }, tags)).toEqual({ Tags: ["a", "b"] });
     expect(() => validateFields({ Tags: "a" }, tags)).toThrow(/must be a list of them/);
     expect(() => validateFields({ Tags: ["a", "z"] }, tags)).toThrow(/does not offer the choice "z"/);
+  });
+
+  it("treats empty text and an empty check-box selection as missing for required columns", () => {
+    const schema: ColumnDefinition[] = [
+      { name: "Title", displayName: "Title", type: "text", required: true, readOnly: false },
+      { name: "Tags", displayName: "Tags", type: "choice", required: true, readOnly: false,
+        choices: ["a", "b"], multiple: true },
+    ];
+
+    // SharePoint would refuse these at apply time, where a failed create stays pending and holds
+    // up the queue — so they are refused here, as if left out.
+    expect(() => validateFields({ Title: "", Tags: ["a"] }, schema))
+        .toThrow(/"Title" is required/);
+    expect(() => validateFields({ Title: "x", Tags: [] }, schema)).toThrow(/"Tags" is required/);
+    expect(validateFields({ Title: "x", Tags: ["a"] }, schema))
+        .toEqual({ Title: "x", Tags: ["a"] });
+    // Falsy but meaningful values still count.
+    expect(validateFields({ Title: "x", Tags: ["a"], Qty: 0 }, [
+      ...schema,
+      { name: "Qty", displayName: "Qty", type: "number", required: true, readOnly: false },
+    ]).Qty).toBe(0);
   });
 
   it("holds a number to its column's bounds", () => {

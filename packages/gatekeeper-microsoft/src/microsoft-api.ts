@@ -7,6 +7,9 @@
 // codes, not credentials) but is length-capped before it reaches a message a user can see.
 
 import { readBytesCapped } from "@gadgets/gatekeeper-kit/response-body";
+import {
+  fetchWithAuthRetry, type AccessTokenProvider, type CredentialsRejectedReporter,
+} from "./auth-retry";
 
 const LOGIN_HOST = "https://login.microsoftonline.com";
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
@@ -384,17 +387,35 @@ export type GraphUserProfile = {
   userType?: unknown;
 };
 
-async function graphGet(path: string, accessToken: string, signal?: AbortSignal): Promise<Response> {
-  return await fetch(`${GRAPH_BASE}${path}`, {
+/**
+ * Options for an identity read: who mints tokens, who hears about a rejected grant, and the
+ * budgets. Reads go through the same refresh-once-then-report path as every other Graph call, so
+ * a stale cached token heals instead of failing the call, and a dead grant is reported rather
+ * than retried forever.
+ */
+export type IdentityReadOptions = {
+  signal?: AbortSignal;
+  onCredentialsRejected?: CredentialsRejectedReporter;
+  timeoutMs?: number;
+};
+
+async function graphGet(
+    path: string, getAccessToken: AccessTokenProvider,
+    opts: IdentityReadOptions = {}): Promise<Response> {
+  return await fetchWithAuthRetry(`${GRAPH_BASE}${path}`, {
     method: "GET",
-    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-    ...(signal ? { signal } : {}),
+    headers: { Accept: "application/json" },
+    ...(opts.signal ? { signal: opts.signal } : {}),
+  }, getAccessToken, {
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    ...(opts.onCredentialsRejected ? { onCredentialsRejected: opts.onCredentialsRejected } : {}),
   });
 }
 
 async function graphGetJson(
-    path: string, accessToken: string, signal?: AbortSignal): Promise<unknown> {
-  const response = await graphGet(path, accessToken, signal);
+    path: string, getAccessToken: AccessTokenProvider,
+    opts: IdentityReadOptions = {}): Promise<unknown> {
+  const response = await graphGet(path, getAccessToken, opts);
   if (!response.ok) {
     await response.body?.cancel();
     throw new Error(`Microsoft Graph request failed: ${response.status} ${response.statusText}`);
@@ -409,9 +430,10 @@ async function graphGetJson(
  * indistinguishable from a tenant member (see `resolveVerifiedEmail`).
  */
 export async function fetchGraphProfile(
-    accessToken: string, signal?: AbortSignal): Promise<GraphUserProfile> {
+    getAccessToken: AccessTokenProvider, opts: IdentityReadOptions = {},
+): Promise<GraphUserProfile> {
   const body = await graphGetJson(
-      "/me?$select=id,displayName,mail,userPrincipalName,userType", accessToken, signal);
+      "/me?$select=id,displayName,mail,userPrincipalName,userType", getAccessToken, opts);
   return (body ?? {}) as GraphUserProfile;
 }
 
@@ -424,10 +446,10 @@ export async function fetchGraphProfile(
  * that permission, which is fine — this is the only one wanted.
  */
 export async function fetchVerifiedDomains(
-    accessToken: string, signal?: AbortSignal): Promise<string[]> {
-  const body = await graphGetJson("/organization?$select=verifiedDomains", accessToken, signal) as {
-    value?: unknown;
-  };
+    getAccessToken: AccessTokenProvider, opts: IdentityReadOptions = {},
+): Promise<string[]> {
+  const body = await graphGetJson(
+      "/organization?$select=verifiedDomains", getAccessToken, opts) as { value?: unknown };
   const organizations = Array.isArray(body.value) ? body.value : [];
   const domains = new Set<string>();
   for (const organization of organizations) {
@@ -483,12 +505,12 @@ function mediaTypeOf(header: string | null): string | null {
  */
 async function fetchGraphImage<T extends string>(
     path: string,
-    accessToken: string,
+    getAccessToken: AccessTokenProvider,
     accepts: (mediaType: string) => mediaType is T,
     maxBytes: number,
-    signal?: AbortSignal): Promise<{ data: Uint8Array; mediaType: T } | null> {
+    opts: IdentityReadOptions = {}): Promise<{ data: Uint8Array; mediaType: T } | null> {
   try {
-    const response = await graphGet(path, accessToken, signal);
+    const response = await graphGet(path, getAccessToken, opts);
     if (!response.ok) {
       await response.body?.cancel();
       return null;
@@ -534,9 +556,10 @@ function toBase64(bytes: Uint8Array): string {
  * unrecognized media type takes that same fallback.
  */
 export async function fetchAvatarDataUrl(
-    accessToken: string, signal?: AbortSignal): Promise<string | null> {
+    getAccessToken: AccessTokenProvider, opts: IdentityReadOptions = {},
+): Promise<string | null> {
   const image = await fetchGraphImage(
-      "/me/photos/48x48/$value", accessToken, isAllowedAvatarType, MAX_AVATAR_BYTES, signal);
+      "/me/photos/48x48/$value", getAccessToken, isAllowedAvatarType, MAX_AVATAR_BYTES, opts);
   return image && `data:${image.mediaType};base64,${toBase64(image.data)}`;
 }
 
@@ -571,9 +594,12 @@ const PROFILE_PHOTO_PATHS = [
  */
 export async function fetchProfilePhoto(
     accessToken: string, signal?: AbortSignal): Promise<ProfilePhoto | null> {
+  // A sign-in hint, fetched before any account exists to refresh from: the provider is the one
+  // token by construction, so a 401 costs one repeated request and then reads as "no photo".
+  let getAccessToken: AccessTokenProvider = async () => accessToken;
   for (const path of PROFILE_PHOTO_PATHS) {
     const image = await fetchGraphImage(
-        path, accessToken, isProfilePhotoType, MAX_PROFILE_PHOTO_BYTES, signal);
+        path, getAccessToken, isProfilePhotoType, MAX_PROFILE_PHOTO_BYTES, { signal });
     if (image) return { data: image.data, mimeType: image.mediaType };
   }
   return null;

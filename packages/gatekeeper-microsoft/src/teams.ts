@@ -166,7 +166,12 @@ type PageCursorSpec<T, E> = {
    */
   nextPage: (nextLink: string) => Promise<GraphPage<T>>;
   toEntries: (items: T[]) => E[];
-  describePage: (entries: E[]) => PageObservation;
+  /**
+   * The page's observation, described from the items — not the entries. Entries carry targets
+   * that retain the session's shared queue, so they are built only after this authorizes; a
+   * target built for an entry that is never returned would hold its reference forever.
+   */
+  describePage: (items: T[]) => PageObservation;
 };
 
 /** The staged walk over a link-paged Graph collection. Not itself exposed over RPC. */
@@ -253,14 +258,13 @@ class TeamsPageWalk<T, E> {
       return null;
     }
 
-    let entries = this.#spec.toEntries(page.items);
-    await authorizeRestricted(this.#ctx.approvalQueue, this.#spec.describePage(entries));
+    await authorizeRestricted(this.#ctx.approvalQueue, this.#spec.describePage(page.items));
 
     this.#started = started;
     this.#nextLink = nextLink;
     this.#pages = pages;
     if (!page.nextLink) this.#exhausted = true;
-    return entries;
+    return this.#spec.toEntries(page.items);
   }
 }
 
@@ -318,11 +322,11 @@ function messageCursor(
       info,
       ...(toMessage ? { message: toMessage(info) } : {}),
     })),
-    describePage: entries => ({
-      title: `Read ${entries.length} Microsoft Teams messages`,
+    describePage: items => ({
+      title: `Read ${items.length} Microsoft Teams messages`,
       description:
           `Fetch the next page of messages from ${scope.label}.${scopeField(scope)}\n\n` +
-          formatApprovalField("Messages", describeMessageLines(entries.map(entry => entry.info))),
+          formatApprovalField("Messages", describeMessageLines(items)),
     }),
   }));
 }
@@ -335,12 +339,12 @@ function memberCursor(
     firstPage,
     nextPage: nextLink => ctx.api.nextMemberPage(nextLink),
     toEntries: items => items,
-    describePage: entries => ({
-      title: `Read ${entries.length} Microsoft Teams members`,
+    describePage: items => ({
+      title: `Read ${items.length} Microsoft Teams members`,
       description:
           `Fetch the next page of the roster of ${scope.label}.${scopeField(scope)}\n\n` +
           formatApprovalField("Members",
-              entries.map(entry => oneLine(entry.displayName, MAX_NAME_CHARS)).join("\n")),
+              items.map(item => oneLine(item.displayName, MAX_NAME_CHARS)).join("\n")),
     }),
   }));
 }
@@ -353,12 +357,12 @@ function chatCursor(ctx: TeamsSessionContext): Cursor<TeamsChatEntry> {
       info,
       chat: new TeamsChatStub(ctx, info.id, info) as TeamsChat,
     })),
-    describePage: entries => ({
-      title: `Read ${entries.length} Microsoft Teams chats`,
+    describePage: items => ({
+      title: `Read ${items.length} Microsoft Teams chats`,
       description:
           "Fetch the next page of the connected user's Teams chats.\n\n" +
           formatApprovalField("Chats",
-              entries.map(entry => oneLine(chatLabel(entry.info), MAX_NAME_CHARS)).join("\n")),
+              items.map(item => oneLine(chatLabel(item), MAX_NAME_CHARS)).join("\n")),
     }),
   }));
 }
@@ -398,13 +402,10 @@ class TeamsSearchCursorImpl extends ApprovalQueueRpcTarget implements Cursor<Tea
     let hits = await this.#walk.peekPage();
     if (!hits) return null;
 
-    let entries = hits.map(info => ({
-      info,
-      message: new TeamsSearchHitStub(this.#ctx, info) as TeamsMessage,
-    }));
-
+    // Authorized before the stubs exist: each stub retains the session's shared queue, and a stub
+    // built for an entry that is never returned would hold its reference forever.
     await authorizeRestricted(this.#ctx.approvalQueue, {
-      title: `Read ${entries.length} Microsoft Teams search results`,
+      title: `Read ${hits.length} Microsoft Teams search results`,
       description:
           "Fetch the next page of Teams messages matching this search.\n\n" +
           `${formatApprovalField("Query", this.#query)}\n\n` +
@@ -414,7 +415,10 @@ class TeamsSearchCursorImpl extends ApprovalQueueRpcTarget implements Cursor<Tea
     // Only now does the walk move past this page. A refused authorization throws above, leaving the
     // page staged, so the caller's retry is answered with the same page rather than the one after.
     this.#walk.commitPage();
-    return entries;
+    return hits.map(info => ({
+      info,
+      message: new TeamsSearchHitStub(this.#ctx, info) as TeamsMessage,
+    }));
   }
 }
 

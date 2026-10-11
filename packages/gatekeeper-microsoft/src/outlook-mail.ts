@@ -252,25 +252,27 @@ class OutlookMessageCursorImpl extends ApprovalQueueRpcTarget implements Cursor<
       return null;
     }
 
-    const entries = page.items.map(info => ({
-      info: withPendingState(this.#ctx.pendingActions, info),
-      message: new OutlookMessageStub(this.#ctx, info.id, info) as OutlookMessage,
-    }));
+    // Authorized before the stubs exist: each stub retains the session's shared queue, and a
+    // stub built for an entry that is never returned would hold its reference forever.
+    const infos = page.items.map(info => withPendingState(this.#ctx.pendingActions, info));
 
     await authorizeRestricted(this.#ctx.approvalQueue, {
-      title: `Read ${entries.length} Outlook messages`,
+      title: `Read ${infos.length} Outlook messages`,
       description:
           `Fetch the next page of messages from ${this.#describeScope}.\n\n` +
           (this.#folderName === undefined
               ? "" : `${formatApprovalField("Folder", this.#folderName)}\n\n`) +
-          formatApprovalField("Subjects", entries.map(entry => entry.info.subject).join("\n")),
+          formatApprovalField("Subjects", infos.map(info => info.subject).join("\n")),
     });
 
     this.#started = started;
     this.#nextLink = nextLink;
     this.#pages = pages;
     if (!page.nextLink) this.#exhausted = true;
-    return entries;
+    return infos.map(info => ({
+      info,
+      message: new OutlookMessageStub(this.#ctx, info.id, info) as OutlookMessage,
+    }));
   }
 }
 

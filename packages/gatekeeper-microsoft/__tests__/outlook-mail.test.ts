@@ -264,6 +264,27 @@ describe("reads", () => {
     }
   });
 
+  it("holds no queue reference for entries a refused page never returns", async () => {
+    stubFetch();
+    // Page targets are built only after their observation authorizes: had they been built first,
+    // each would retain the shared queue, and the refusal below would strand those references —
+    // disposing the session and cursor would then leave the dup undisposed.
+    const disposed = vi.fn();
+    (approvals.queue as unknown as Record<symbol, unknown>)[Symbol.dispose] = disposed;
+    approvals.queue.authorizeObservation.mockImplementation(async description => {
+      if (approvals.observations.length === 1) throw new Error("overseer refused the page");
+      approvals.observations.push(description);
+    });
+
+    const session = await startSession();
+    const cursor = await session.listMessages();
+    await expect(cursor.next()).rejects.toThrow("overseer refused the page");
+
+    (session as unknown as { [Symbol.dispose](): void })[Symbol.dispose]();
+    (cursor as unknown as { [Symbol.dispose](): void })[Symbol.dispose]();
+    expect(disposed).toHaveBeenCalledOnce();
+  });
+
   it("leaves the workspace unrestricted when a cursor is opened and never read", async () => {
     stubFetch();
     const session = await startSession();

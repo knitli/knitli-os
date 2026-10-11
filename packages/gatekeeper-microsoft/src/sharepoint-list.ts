@@ -30,8 +30,8 @@ import { formatApprovalField, sanitizeApprovalTitle } from "./approval-text";
 import { AccessTokenCache, AccessTokenRequest, RetryAfterPolicy } from "./auth-retry";
 import { GraphApiError, truncate } from "./graph-api";
 import {
-  ColumnDefinition, GraphSharePointApi, ListItem, MARKER_COLUMN, buildItemsFilter,
-  markerColumnProblem, parseIsoDate, sharePointThrottled,
+  ColumnDefinition, GraphSharePointApi, ListItem, MARKER_COLUMN, MARKER_COLUMN_DESCRIPTION,
+  buildItemsFilter, markerColumnProblem, parseIsoDate, sharePointThrottled,
 } from "./graph-sharepoint-api";
 import { MAX_PENDING_ACTIONS, PendingActionStore } from "./pending-actions";
 import type { GetItemsOptions, SharePointListSession } from "./sharepoint-types";
@@ -179,8 +179,12 @@ export function validateFields(
     validated.push([column.name, validateValue(column, value)]);
   }
 
+  // `null` clears a column; `""` and `[]` are the empty text value and the empty check-box
+  // selection, which no other type's validated value can take the shape of. None of them
+  // satisfies a required column, so none counts as provided.
   let provided = new Set(validated
-      .filter(([, value]) => value !== null)
+      .filter(([, value]) => value !== null && value !== "" &&
+          !(Array.isArray(value) && value.length === 0))
       .map(([name]) => name));
   for (let column of columns) {
     if (!column.required || column.hasDefault) continue;
@@ -814,8 +818,9 @@ export class SharePointListGatekeeperImpl
       if (err instanceof GraphApiError && (err.status === 401 || err.status === 403)) {
         throw new Error(
             `This connection is not allowed to add the ${MARKER_COLUMN} column to the list. Add a ` +
-            `single line of text column with the internal name ${MARKER_COLUMN} yourself, then ` +
-            "retry this action.", { cause: err });
+            `single line of text column with the internal name ${MARKER_COLUMN} yourself, with ` +
+            `the description "${MARKER_COLUMN_DESCRIPTION}", then retry this action.`,
+            { cause: err });
       }
       throw err;
     }

@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { GraphApiError, graphSiteByPathUrl } from "../src/graph-api";
 import {
-  ColumnDefinition, GraphSharePointApi, SHAREPOINT_USER_AGENT, buildItemsFilter, parseIsoDate,
+  ColumnDefinition, GraphSharePointApi, MARKER_COLUMN_DESCRIPTION, SHAREPOINT_USER_AGENT,
+  buildItemsFilter, markerColumnProblem, parseIsoDate,
 } from "../src/graph-sharepoint-api";
 
 type Call = { url: string; init: RequestInit };
@@ -321,6 +322,44 @@ describe("listColumns", () => {
     expect(columns).toEqual([
       { name: "Title", displayName: "Title", type: "text", required: false, readOnly: false },
     ]);
+  });
+});
+
+describe("marker column", () => {
+  const stamped = (overrides: Partial<ColumnDefinition> = {}): ColumnDefinition => ({
+    name: "GadgetsActionId", displayName: "Gadgets action id", type: "text", required: false,
+    readOnly: false, description: MARKER_COLUMN_DESCRIPTION, ...overrides,
+  });
+
+  it("reuses only a column carrying the marker description", () => {
+    expect(markerColumnProblem(stamped())).toBeNull();
+    // Right shape, but the list owner's own column: markers must never be written into it.
+    expect(markerColumnProblem(stamped({ description: undefined }))).toMatch(/did not create/);
+    expect(markerColumnProblem(stamped({ description: "Our tracking id" }))).toMatch(/did not create/);
+    // Wrong shape even with the stamp.
+    expect(markerColumnProblem(stamped({ required: true }))).toMatch(/did not create/);
+    expect(markerColumnProblem(stamped({ type: "number" }))).toMatch(/did not create/);
+  });
+
+  it("stamps new marker columns with the description the check reads back", async () => {
+    const calls = stubFetch(() => jsonResponse({}));
+
+    await newApi().createMarkerColumn("site-1", "list-1");
+
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0].init.body as string).description).toBe(MARKER_COLUMN_DESCRIPTION);
+  });
+
+  it("surfaces column descriptions so the marker check can read them", async () => {
+    stubFetch(() => jsonResponse({ value: [
+      { name: "GadgetsActionId", displayName: "Gadgets action id", text: {},
+        description: MARKER_COLUMN_DESCRIPTION },
+    ] }));
+
+    const columns = await newApi().listColumns("site-1", "list-1");
+
+    expect(columns[0].description).toBe(MARKER_COLUMN_DESCRIPTION);
+    expect(markerColumnProblem(columns[0])).toBeNull();
   });
 });
 

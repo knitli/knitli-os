@@ -94,8 +94,11 @@ after enabling, using the kill switch for the baseline.
   inside an open modal (`role="dialog"`, `alertdialog` or `aria-modal`) resumes the connection.
   That is the one choke point for every dialog-then-RPC flow; the per-site `resumeConnection()`
   calls added earlier are redundant with it but harmless. Remaining non-modal actions issued while
-  paused (a button in a page, a gadget call) still queue until a deliberate wake, with the chip
-  visible; they are not individually listed. Wiring resume into the stub itself is deliberately not
+  paused still queue until a deliberate wake, with the chip visible. Known sites in the workspace
+  editor: saving the workspace title, saving a chat title, merging changes, toggling a hook; the
+  title field stays locked while its save is queued. Each completes on its own once the user clicks
+  the chip. This matches the fork's original design (anything but the listed deliberate actions
+  queues); the rest are not individually listed. Wiring resume into the stub itself is deliberately not
   done: background calls (heartbeat, subscriptions, the re-issued `openGadget`) would wake it, and
   the pause exists to prevent exactly that. A click in a modal also wakes for Cancel, which is the
   accepted cost.

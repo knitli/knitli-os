@@ -96,6 +96,8 @@ import {
 | `./git-objects` | Commit-id validation, raw commit-object parsing, and commit advertising (`advertiseCommits`, and `advertisePages` as a `PageHookCursor` hook). | A session returns commit ids (advertise them) or simulates reads of commits queued for push from their local bytes. |
 | `./git-diff` | Tree-to-tree diff over an injected `TreeDiffSource`, producing the unified-patch hunk shape agents see. | A pull/merge request's source branch has queued pushes and the provider cannot compute the diff yet. |
 | `./fork/alarm-guard` | Durable Object alarm guards: the `ALARMS_DISABLED` kill switch (`haltIfAlarmsDisabled`), a floored `scheduleAlarm`, and `guardedAlarmFor`, a per-minute run cap (6,000, a flood detector) with failure backoff. Re-exports `@gadgets/observability/fork/alarm-guard`. | A Durable Object defines `alarm()`. Start it with `haltIfAlarmsDisabled`, or wrap a body that re-arms itself in `guardedAlarmFor`; see `docs/alarm-audit.md`. |
+| `./fork/web-push` | Web Push on WebCrypto alone: RFC 8291 aes128gcm encryption (`encryptPushPayload`), RFC 8292 VAPID signing (`vapidAuthorization`, `vapidPublicKey`), the push-service endpoint allowlist (`checkPushEndpoint`) and key checks (`checkPushKeys`). | A gatekeeper or backend sends browser push. Run `checkPushEndpoint` on every browser-supplied endpoint before fetching it. |
+| `./fork/email-checks` | Strict outbound-mail checks: `isAddress`, `addresses`, `messageIds`, `singleLine`, `displayName`. Each throws an `Error` naming the field. | A gatekeeper builds mail headers from caller-supplied strings. Limits and policy stay with the caller. |
 
 ## Internal modules
 

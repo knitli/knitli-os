@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  checkPushEndpoint, encryptPushPayload, vapidAuthorization, vapidPublicKey,
+  checkPushEndpoint, checkPushKeys, encryptPushPayload, MAX_PUSH_PLAINTEXT, vapidAuthorization, vapidPublicKey,
 } from "../src/fork/web-push.js";
 
 const b64 = (bytes: Uint8Array) =>
@@ -28,20 +28,6 @@ const jwk = await crypto.subtle.exportKey("jwk", pair.privateKey) as JsonWebKey;
 const publicKey = b64(new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey) as ArrayBuffer));
 
 describe("web push crypto", () => {
-  it("reproduces the RFC 8291 test vector", async () => {
-    let point = unb64(RFC.asPublic);
-    let shared = { kty: "EC", crv: "P-256", x: b64(point.subarray(1, 33)), y: b64(point.subarray(33)) };
-    let algorithm = { name: "ECDH", namedCurve: "P-256" };
-    let sender = {
-      privateKey: await crypto.subtle.importKey(
-          "jwk", { ...shared, d: RFC.asPrivate }, algorithm, true, ["deriveBits"]),
-      publicKey: await crypto.subtle.importKey("jwk", shared, algorithm, true, []),
-    };
-    let body = await encryptPushPayload(
-        new TextEncoder().encode(RFC.plaintext), KEYS, { sender, salt: unb64(RFC.salt) });
-    expect(b64(body)).toBe(RFC.body);
-  });
-
   it("signs an ES256 token for the push service's origin that verifies with the public key", async () => {
     let now = Date.UTC(2026, 8, 30, 12);
     let header = await vapidAuthorization(IPHONE, { privateKey: jwk, publicKey }, BASE_URL, now);
@@ -66,6 +52,30 @@ describe("web push crypto", () => {
     expect(body.length).toBe(16 + 4 + 1 + 65 + (1 + 1 + 16));
     expect(new DataView(body.buffer).getUint32(16)).toBe(4096);
     expect(body[20]).toBe(65);
+  });
+});
+
+describe("push payload and key limits", () => {
+  const encode = (n: number) => encryptPushPayload(new Uint8Array(n), KEYS);
+
+  it("fits the largest payload in the 4096-octet body RFC 8030 guarantees, and refuses one more byte", async () => {
+    expect((await encode(MAX_PUSH_PLAINTEXT)).length).toBe(4096);
+    await expect(encode(MAX_PUSH_PLAINTEXT + 1)).rejects.toThrow(/longer than 3993 bytes/);
+  });
+
+  it("refuses keys of the wrong size or form, in encryption and on their own", async () => {
+    let short = b64(new Uint8Array([4, ...new Uint8Array(63)]));
+    let long = b64(new Uint8Array([4, ...new Uint8Array(65)]));
+    let compressed = b64(new Uint8Array([2, ...new Uint8Array(64)]));
+    let bad = [
+      { ...KEYS, p256dh: short }, { ...KEYS, p256dh: long }, { ...KEYS, p256dh: compressed },
+      { ...KEYS, auth: b64(new Uint8Array(15)) }, { ...KEYS, auth: b64(new Uint8Array(17)) },
+    ];
+    for (let keys of bad) {
+      expect(() => checkPushKeys(keys)).toThrow(/Not a valid push subscription/);
+      await expect(encryptPushPayload(new Uint8Array(1), keys)).rejects.toThrow(/Not a valid push subscription/);
+    }
+    expect(() => checkPushKeys(KEYS)).not.toThrow();
   });
 });
 
@@ -101,7 +111,12 @@ describe("checkPushEndpoint", () => {
     expect(() => checkPushEndpoint(endpoint)).toThrow();
   });
 
+  it("allows an endpoint of exactly 2048 characters", () => {
+    expect(() => checkPushEndpoint(IPHONE + "/" + "x".repeat(2048 - IPHONE.length - 1))).not.toThrow();
+  });
+
   it("refuses an endpoint over 2048 characters", () => {
     expect(() => checkPushEndpoint(`${IPHONE}/${"x".repeat(2048)}`)).toThrow(/not a known push service/);
+    expect(() => checkPushEndpoint(IPHONE + "/" + "x".repeat(2049 - IPHONE.length - 1))).toThrow(/not a known push service/);
   });
 });

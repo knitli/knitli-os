@@ -234,8 +234,10 @@ Intentional, reviewed differences from upstream. Keep this current.
 
 - **Where:** `packages/workshop-backend/src/fork/web-push.ts` (Tier 1) and its regression test
   `__tests__/knitli-web-push.test.ts`. The WebCrypto parts (RFC 8291 encryption, VAPID signing,
-  endpoint allowlist) live in `packages/gatekeeper-kit/src/fork/web-push.ts` (Tier 1, tested in
-  gatekeeper-kit) so other fork packages can reuse them. Upstream-file seams: `UserDurableObject` in `user.ts` (three
+  endpoint allowlist) live in `packages/gatekeeper-kit/src/fork/web-push.ts` (Tier 1), moved there from
+  workshop-backend so other fork packages can reuse them; their tests moved with them to
+  `packages/gatekeeper-kit/__tests__/knitli-web-push.test.ts` (and the RFC vector to
+  `__tests__/workerd/knitli-web-push.test.ts`). Upstream-file seams: `UserDurableObject` in `user.ts` (three
   thin RPC methods and one `deliverWebPush()` call in `publishNotification()`), `server.ts`
   (forwarders), `storage-schema/user-storage.ts` (`webPushSubscriptions` singleton),
   `workshop-shared/src/api.ts` (`WebPushSubscriptionInfo` and three `AuthenticatedApi` methods),
@@ -1131,7 +1133,7 @@ ids are facet-local, not Activity ids.
 
 ### Email send action (ported from michielappelman/cloudflare-os)
 
-- **Where:** `packages/gatekeeper-email/src/fork/send.ts` (Tier 1) and `__tests__/fork/send.test.ts`; the address and header checks (`isAddress`, `addresses`, `messageIds`, `singleLine`, `displayName`) live in `packages/gatekeeper-kit/src/fork/email-checks.ts` (Tier 1, tested in gatekeeper-kit); one-line seams in `src/email.ts` (`#send` field, session `send()`, `getAutoApprovableActions`, `applyAction`/`rejectAction`/`revertAction`, `EMAIL_DOMAIN`, inbound `messageId`/`references`) and additive hunks in `src/types.d.ts`. Also `SEND_EMAIL` in `cloudflare.config.ts` (and the generated `wrangler.jsonc`/`worker-configuration.d.ts`), the `send_email` passthrough in `scripts/release/manifest-lib.ts` and its golden file, `withTests` in the package's `vite.config.ts`.
+- **Where:** `packages/gatekeeper-email/src/fork/send.ts` (Tier 1) and `__tests__/fork/send.test.ts`; the address and header checks (`isAddress`, `addresses`, `messageIds`, `singleLine`, `displayName`) live in `packages/gatekeeper-kit/src/fork/email-checks.ts` (Tier 1), moved there from `send.ts` and tested in `packages/gatekeeper-kit/__tests__/knitli-email-checks.test.ts`; one-line seams in `src/email.ts` (`#send` field, session `send()`, `getAutoApprovableActions`, `applyAction`/`rejectAction`/`revertAction`, `EMAIL_DOMAIN`, inbound `messageId`/`references`) and additive hunks in `src/types.d.ts`. Also `SEND_EMAIL` in `cloudflare.config.ts` (and the generated `wrangler.jsonc`/`worker-configuration.d.ts`), the `send_email` passthrough in `scripts/release/manifest-lib.ts` and its golden file, `withTests` in the package's `vite.config.ts`.
 - **What:** `EmailSession.send()` queues an approval-backed "Send email" action (`await-decision`, `claimBeforeApply`, no revert); the kind is advertised via `getAutoApprovableActions()` and the Workshop's per-binding rule (`${gatekeeperId}:${tag}`) decides auto-apply. Source commits `162f9d7`, `a090c84`; Apache-2.0.
 - **Divergences from the source fork:** durable rolling-hour cap of 100 recipients that also binds auto-approved sends (checked at submit, charged at apply); stricter address, Message-ID, MIME type, filename and `fromName` validation; messages whose approval view would truncate are refused.
 - **Fail closed:** sending needs `EMAIL_DOMAIN` and `EMAIL_SEND_PREFIX` (administrator-set worker vars; the manifest has no input for a non-installable gatekeeper) so users cannot claim `admin@` and send as it.

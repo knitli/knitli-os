@@ -1,3 +1,5 @@
+// The crypto and the endpoint allowlist live in @gadgets/gatekeeper-kit/fork/web-push.
+//
 // Web Push (RFC 8030) delivery with message encryption (RFC 8291) and VAPID sender identification
 // (RFC 8292) on WebCrypto alone, ported from michielappelman/cloudflare-os (eb10ad76, 5c92f7a0,
 // Apache-2.0) and reshaped to sit beside the platform notification path (docs/notifications.md):
@@ -10,7 +12,7 @@
 
 import type { UserNotification } from "@gadgets/workshop-shared/api";
 import {
-  base64UrlDecode, checkPushEndpoint, encryptPushPayload, vapidAuthorization, vapidPublicKey,
+  checkPushEndpoint, checkPushKeys, encryptPushPayload, vapidAuthorization, vapidPublicKey,
   type WebPushKeys,
 } from "@gadgets/gatekeeper-kit/fork/web-push";
 import { createWorkshopLogger } from "../observability";
@@ -69,10 +71,7 @@ export function addWebPushSubscription(
     existing: WebPushSubscriptions, endpoint: string, subscription: WebPushSubscription,
 ): WebPushSubscriptions {
   checkPushEndpoint(endpoint);
-  let p256dh = base64UrlDecode(subscription.p256dh);
-  if (p256dh.length !== 65 || p256dh[0] !== 4 || base64UrlDecode(subscription.auth).length !== 16) {
-    throw new Error("Not a valid push subscription.");
-  }
+  checkPushKeys(subscription);
   // Insertion order: the first keys are the oldest subscriptions.
   let kept = Object.entries(existing).filter(([known]) => known !== endpoint)
       .slice(-(MAX_WEB_PUSH_SUBSCRIPTIONS - 1));

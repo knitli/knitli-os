@@ -17,7 +17,7 @@ export type WebPushKeys = {
  * Push services delivered to. The endpoint comes from the browser, so without this a signed-in
  * user could point the Worker's requests at any URL. A leading dot matches subdomains.
  */
-export const PUSH_SERVICE_HOSTS = [
+const PUSH_SERVICE_HOSTS = [
   ".push.apple.com",
   "fcm.googleapis.com",
   ".push.services.mozilla.com",
@@ -35,7 +35,10 @@ export function base64UrlDecode(text: string): Uint8Array {
   return Uint8Array.from(atob(base64 + "=".repeat((4 - base64.length % 4) % 4)), c => c.charCodeAt(0));
 }
 
-/** Throws unless `endpoint` is an https URL on a known push service, without credentials or port. */
+/**
+ * Throws unless `endpoint` is an https URL on a known push service, without credentials or port.
+ * Callers must run this on every browser-supplied endpoint before fetching it.
+ */
 export function checkPushEndpoint(endpoint: string): void {
   let url: URL;
   try {
@@ -49,6 +52,14 @@ export function checkPushEndpoint(endpoint: string): void {
   if (endpoint.length > 2048 || url.protocol !== "https:" || !known || url.port !== "" ||
       url.username !== "" || url.password !== "") {
     throw new Error(`Push endpoint ${url.origin} is not a known push service.`);
+  }
+}
+
+/** Throws unless `keys` are a valid user agent key pair: a 65-byte uncompressed P-256 point and a 16-byte secret. */
+export function checkPushKeys(keys: WebPushKeys): void {
+  let p256dh = base64UrlDecode(keys.p256dh);
+  if (p256dh.length !== 65 || p256dh[0] !== 4 || base64UrlDecode(keys.auth).length !== 16) {
+    throw new Error("Not a valid push subscription.");
   }
 }
 
@@ -85,14 +96,26 @@ async function rawPublicKey(key: CryptoKey): Promise<Uint8Array> {
 }
 
 /**
+ * Longest plaintext that fits one aes128gcm record in the 4096-octet body RFC 8030 section 7.2
+ * guarantees: 4096 less the 86-byte header (salt, record size, key id length, key id) and the
+ * 17 bytes of delimiter and GCM tag.
+ */
+export const MAX_PUSH_PLAINTEXT = 3993;
+
+/**
  * Encrypts `plaintext` for one subscription as an aes128gcm body (RFC 8291 section 3.4): a single
  * record, keyed from an ECDH exchange between a fresh sender key pair and the user agent's key,
  * mixed with its authentication secret. `sender` and `salt` exist for the RFC's test vector;
- * callers leave them out.
+ * callers leave them out. Throws on malformed keys or a payload over `MAX_PUSH_PLAINTEXT`. It does
+ * not vet an endpoint: run `checkPushEndpoint` before sending the result anywhere.
  */
 export async function encryptPushPayload(
     plaintext: Uint8Array, target: WebPushKeys,
     options: { sender?: CryptoKeyPair; salt?: Uint8Array } = {}): Promise<Uint8Array> {
+  checkPushKeys(target);
+  if (plaintext.length > MAX_PUSH_PLAINTEXT) {
+    throw new Error(`Push payload is longer than ${MAX_PUSH_PLAINTEXT} bytes.`);
+  }
   let uaPublic = base64UrlDecode(target.p256dh);
   let authSecret = base64UrlDecode(target.auth);
   let sender = options.sender ?? await crypto.subtle.generateKey(
@@ -103,7 +126,7 @@ export async function encryptPushPayload(
   let uaKey = await crypto.subtle.importKey(
       "raw", uaPublic, { name: "ECDH", namedCurve: "P-256" }, false, []);
   // A variable, not a literal: workers-types spells this member `$public`, but the runtime takes
-  // the standard `public` (the RFC 8291 test vector runs in workerd).
+  // the standard `public` (the RFC 8291 test vector in __tests__/workerd/knitli-web-push.test.ts runs in workerd).
   let ecdhParams = { name: "ECDH", public: uaKey };
   let ecdhSecret = new Uint8Array(await crypto.subtle.deriveBits(
       ecdhParams, sender.privateKey, 256));
@@ -127,7 +150,8 @@ export async function encryptPushPayload(
 
 /**
  * A VAPID `Authorization` header value (RFC 8292): an ES256 JWT for the push service's origin,
- * valid for 12 hours, naming `subject` as the sender's contact.
+ * valid for 12 hours, naming `subject` as the sender's contact. It trusts `endpoint`: the caller
+ * must have run `checkPushEndpoint` on it before fetching.
  */
 export async function vapidAuthorization(
     endpoint: string, identity: { privateKey: JsonWebKey; publicKey: string }, subject: string,

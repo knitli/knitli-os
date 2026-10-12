@@ -485,8 +485,20 @@
       "reason": "Fork-owned voice preview hook; hooks/ is shared with upstream so this stays file-scoped."
     },
     {
-      "path": "packages/gatekeeper-kit/src/fork/alarm-guard.ts",
-      "reason": "Gatekeeper-facing re-export of the fork-owned alarm guard (observability/src/fork/alarm-guard.ts); exact path because gatekeeper-kit has no src/fork tree."
+      "path": "packages/gatekeeper-kit/src/fork/",
+      "reason": "Fork-owned gatekeeper-kit modules (alarm-guard re-export, Web Push crypto, email checks); upstream has no src/fork tree here."
+    },
+    {
+      "path": "packages/gatekeeper-kit/__tests__/knitli-web-push.test.ts",
+      "reason": "Node tests for the fork-owned Web Push crypto in src/fork/web-push.ts (VAPID, endpoint allowlist, key and size checks); exact path because this package's vitest include is non-recursive."
+    },
+    {
+      "path": "packages/gatekeeper-kit/__tests__/workerd/knitli-web-push.test.ts",
+      "reason": "workerd test pinning the fork-owned RFC 8291 byte-exact vector under the production runtime."
+    },
+    {
+      "path": "packages/gatekeeper-kit/__tests__/knitli-email-checks.test.ts",
+      "reason": "Node tests for the fork-owned email checks in src/fork/email-checks.ts; exact path because this package's vitest include is non-recursive."
     },
     {
       "path": "packages/observability/__tests__/knitli-alarm-guard.test.ts",

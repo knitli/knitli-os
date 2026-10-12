@@ -4,8 +4,7 @@ import { RpcStub, RpcTarget } from "capnweb";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NotificationSubscriber, UserNotification } from "@gadgets/workshop-shared/api";
 import {
-  addWebPushSubscription, checkPushEndpoint, declarativePayload, encryptPushPayload,
-  MAX_WEB_PUSH_SUBSCRIPTIONS, vapidAuthorization, webPushPublicKey,
+  addWebPushSubscription, declarativePayload, MAX_WEB_PUSH_SUBSCRIPTIONS, webPushPublicKey,
 } from "../src/fork/web-push.js";
 import type { UserDurableObject } from "../src/user.js";
 
@@ -17,8 +16,6 @@ declare module "cloudflare:workers" {
 
 const b64 = (bytes: Uint8Array) =>
     btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-const unb64 = (text: string) => Uint8Array.from(
-    atob(text.replaceAll("-", "+").replaceAll("_", "/")), c => c.charCodeAt(0));
 
 // RFC 8291 Appendix A.
 const RFC = {
@@ -55,37 +52,11 @@ afterEach(() => {
 });
 
 describe("web push crypto", () => {
-  it("reproduces the RFC 8291 test vector", async () => {
-    let point = unb64(RFC.asPublic);
-    let shared = { kty: "EC", crv: "P-256", x: b64(point.subarray(1, 33)), y: b64(point.subarray(33)) };
-    let algorithm = { name: "ECDH", namedCurve: "P-256" };
-    let sender = {
-      privateKey: await crypto.subtle.importKey(
-          "jwk", { ...shared, d: RFC.asPrivate }, algorithm, true, ["deriveBits"]),
-      publicKey: await crypto.subtle.importKey("jwk", shared, algorithm, true, []),
-    };
-    let body = await encryptPushPayload(
-        new TextEncoder().encode(RFC.plaintext), KEYS, { sender, salt: unb64(RFC.salt) });
-    expect(b64(body)).toBe(RFC.body);
-  });
-
-  it("signs an ES256 token for the push service's origin that verifies with the public key", async () => {
-    let now = Date.UTC(2026, 8, 30, 12);
-    let header = await vapidAuthorization(IPHONE, { privateKey: jwk, publicKey }, BASE_URL, now);
-    let [, head, claims, signature, k] = /^vapid t=([^.]+)\.([^.]+)\.([^,]+), k=(.+)$/.exec(header)!;
-    expect(k).toBe(publicKey);
-    expect(JSON.parse(new TextDecoder().decode(unb64(claims))))
-        .toEqual({ aud: "https://web.push.apple.com", exp: now / 1000 + 12 * 3600, sub: BASE_URL });
-    expect(await crypto.subtle.verify(
-        { name: "ECDSA", hash: "SHA-256" }, pair.publicKey, unb64(signature),
-        new TextEncoder().encode(`${head}.${claims}`))).toBe(true);
-  });
-
-  it("derives the public key from the secret, and is off without one", () => {
-    expect(webPushPublicKey(CONFIGURED)).toBe(publicKey);
-    expect(webPushPublicKey(env)).toBeNull();
-    expect(webPushPublicKey({ ...CONFIGURED, WEB_PUSH_VAPID_PRIVATE_KEY: "nonsense" })).toBeNull();
-    expect(webPushPublicKey({ ...CONFIGURED, PUBLIC_BASE_URL: undefined })).toBeNull();
+  it("derives the public key from the secret, and is off without one", async () => {
+    expect(await webPushPublicKey(CONFIGURED)).toBe(publicKey);
+    expect(await webPushPublicKey(env)).toBeNull();
+    expect(await webPushPublicKey({ ...CONFIGURED, WEB_PUSH_VAPID_PRIVATE_KEY: "nonsense" })).toBeNull();
+    expect(await webPushPublicKey({ ...CONFIGURED, PUBLIC_BASE_URL: undefined })).toBeNull();
   });
 
   it("builds a fixed-template payload that carries only the bounded chat title", () => {
@@ -106,29 +77,6 @@ describe("web push crypto", () => {
 });
 
 describe("subscription validation", () => {
-  it.each([
-    "https://web.push.apple.com/x",
-    "https://us.push.apple.com/x",
-    "https://fcm.googleapis.com/fcm/send/x",
-    "https://updates.push.services.mozilla.com/wpush/v2/x",
-    "https://wns2-par02p.notify.windows.com/w/?token=x",
-  ])("accepts %s", endpoint => {
-    expect(() => checkPushEndpoint(endpoint)).not.toThrow();
-  });
-
-  it.each([
-    "http://web.push.apple.com/x",
-    "https://internal.example/x",
-    "https://web.push.apple.com.evil.example/x",
-    "https://evilnotify.windows.com.example/x",
-    "https://push.apple.com.evil.example/x",
-    "https://user:pw@fcm.googleapis.com/x",
-    "https://fcm.googleapis.com:8443/x",
-    "not a url",
-  ])("refuses %s", endpoint => {
-    expect(() => checkPushEndpoint(endpoint)).toThrow();
-  });
-
   it("refuses malformed keys", () => {
     expect(() => addWebPushSubscription({}, IPHONE, { ...KEYS, p256dh: "AAAA" })).toThrow(/valid/);
     expect(() => addWebPushSubscription({}, IPHONE, { ...KEYS, auth: "AAAA" })).toThrow(/valid/);

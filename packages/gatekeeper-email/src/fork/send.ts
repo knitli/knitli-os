@@ -14,6 +14,9 @@ import {
 } from "@gadgets/gatekeeper-kit/actions";
 import { buildDescription, sanitizeTitle } from "@gadgets/gatekeeper-kit/action-description";
 import type { ActionKind } from "@gadgets/workshop-shared/gatekeeper";
+import {
+  addresses, CONTROL, displayName, messageIds, singleLine,
+} from "@gadgets/gatekeeper-kit/fork/email-checks";
 import type { OutgoingEmail } from "../types";
 
 /** Recipients across To, Cc and Bcc, per message. */
@@ -82,58 +85,12 @@ export function assertMayDeliverFrom(from: string, policy: SendPolicy): void {
   }
 }
 
-// Deliberately strict: a bare ASCII addr-spec (RFC 5322 atext local part, LDH domain), no display
-// name, comments, whitespace or control characters, so the approver sees exactly the address the
-// mail goes to.
-const LOCAL_PART = /^[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*$/i;
-const DOMAIN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i;
-// A Message-ID as it appears in headers: `<local@domain>` in printable ASCII, never several at once.
-const MESSAGE_ID = /^<[\x21-\x3b\x3d\x3f-\x7e]+@[\x21-\x3b\x3d\x3f-\x7e]+>$/;
 const MAX_REFERENCES = 20;
 // The send_email binding rejects any custom header value over 2,048 bytes.
 const MAX_HEADER_VALUE = 2048;
 // Only top-level types a mail client treats as a plain file; multipart/message would nest MIME.
 const MIME_TYPE = /^(?:application|audio|font|image|text|video)\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
-const CONTROL = /\p{Cc}/u;
 const encoder = new TextEncoder();
-
-function isAddress(value: string): boolean {
-  let at = value.lastIndexOf("@");
-  return at > 0 && at <= 64 && value.length <= 254 &&
-      LOCAL_PART.test(value.slice(0, at)) && DOMAIN.test(value.slice(at + 1)) &&
-      value.slice(at + 1).split(".").every(label => label.length <= 63);
-}
-
-function addresses(field: string, value: string[] | undefined): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new Error(`${field} must be an array of addresses.`);
-  return value.map(address => {
-    if (typeof address !== "string" || !isAddress(address.trim())) {
-      throw new Error(`${field}: ${JSON.stringify(address)} is not a plain email address ` +
-          `such as "name@example.com".`);
-    }
-    return address.trim();
-  });
-}
-
-function messageIds(field: string, value: string | undefined, max: number): string | null {
-  if (value === undefined || value.trim() === "") return null;
-  if (typeof value !== "string") throw new Error(`${field} must be a string.`);
-  let ids = value.trim().split(/\s+/);
-  if (ids.length > max || !ids.every(id => id.length <= 255 && MESSAGE_ID.test(id))) {
-    throw new Error(`${field} must be ${max === 1 ? "a Message-ID" : "Message-IDs"} such as ` +
-        `"<abc@example.com>"${max === 1 ? "" : ` (at most ${max})`}.`);
-  }
-  return ids.join(" ");
-}
-
-function singleLine(field: string, value: string, max: number): string {
-  if (typeof value !== "string") throw new Error(`${field} must be a string.`);
-  if (/[\r\n]/.test(value)) throw new Error(`${field} must not contain line breaks.`);
-  if (CONTROL.test(value)) throw new Error(`${field} must not contain control characters.`);
-  if (value.length > max) throw new Error(`${field} is longer than ${max} characters.`);
-  return value;
-}
 
 function body(field: string, value: string | undefined): string | null {
   if (value === undefined) return null;
@@ -178,11 +135,7 @@ export async function prepareSend(
   let html = body("html", email.html);
   if (text === null && html === null) throw new Error("Provide a text or html body.");
   let replyTo = email.replyTo === undefined ? null : addresses("replyTo", [email.replyTo])[0]!;
-  let fromName = singleLine("fromName", (email.fromName ?? "").trim(), 100);
-  // A display name is the one free-form part of From; keep it from posing as an address.
-  if (/[<>@"\\]/.test(fromName) || CONTROL.test(fromName)) {
-    throw new Error(`fromName must not contain < > @ " \\ or control characters.`);
-  }
+  let fromName = displayName("fromName", (email.fromName ?? "").trim(), 100);
   let inReplyTo = messageIds("inReplyTo", email.inReplyTo, 1);
   let references = messageIds("references", email.references, MAX_REFERENCES) ?? inReplyTo;
   if (references !== null && references.length > MAX_HEADER_VALUE) {

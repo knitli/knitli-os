@@ -20,6 +20,7 @@
     "@earendil-works/pi-agent-core": "0.99.1",
     "@earendil-works/pi-ai": "0.99.1",
     "@gadgets/error-reporting": "workspace:*",
+    "@gadgets/gatekeeper-kit": "workspace:*",
     "@gadgets/mcp-shared": "workspace:*",
     "@gadgets/observability": "workspace:*",
     "@gadgets/typed-storage": "workspace:*",

@@ -19,6 +19,8 @@
     "./cursors": "./src/cursors.ts",
     "./endpoint": "./src/endpoint.ts",
     "./fork/alarm-guard": "./src/fork/alarm-guard.ts",
+    "./fork/email-checks": "./src/fork/email-checks.ts",
+    "./fork/web-push": "./src/fork/web-push.ts",
     "./git-diff": "./src/git-diff.ts",
     "./git-objects": "./src/git-objects.ts",
     "./git-transport": "./src/git-transport.ts",

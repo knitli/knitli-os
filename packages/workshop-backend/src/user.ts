@@ -366,7 +366,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async addWebPushSubscription({ endpoint, ...keys }: WebPushSubscriptionInfo): Promise<void> {
-    if (!webPushPublicKey(this.env)) throw new Error("Web Push is not enabled on this deployment.");
+    if (!await webPushPublicKey(this.env)) throw new Error("Web Push is not enabled on this deployment.");
     this.storage.webPushSubscriptions.put(
         addWebPushSubscription(this.storage.webPushSubscriptions.get(), endpoint, keys));
   }

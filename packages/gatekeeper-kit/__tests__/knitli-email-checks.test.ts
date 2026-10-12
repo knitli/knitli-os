@@ -31,6 +31,13 @@ describe("messageIds", () => {
     expect(() => messageIds("references", "a@x.com", 20)).toThrow(/Message-IDs/);
     expect(() => messageIds("inReplyTo", "<a\u0000@x.com>", 1)).toThrow(/Message-ID/);
   });
+
+  it("treats blank as absent, and refuses a non-string with a message rather than a TypeError", () => {
+    expect(messageIds("inReplyTo", "   ", 1)).toBeNull();
+    for (let bad of [42, null, {}, ["<a@x.com>"]]) {
+      expect(() => messageIds("inReplyTo", bad as unknown as string, 1)).toThrow("inReplyTo must be a string.");
+    }
+  });
 });
 
 describe("singleLine / displayName", () => {

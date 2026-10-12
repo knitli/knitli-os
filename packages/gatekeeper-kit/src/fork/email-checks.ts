@@ -35,8 +35,9 @@ export function addresses(field: string, value: string[] | undefined): string[] 
 
 /** `value` as space-joined Message-IDs (at most `max`), null when blank; throws otherwise. */
 export function messageIds(field: string, value: string | undefined, max: number): string | null {
-  if (value === undefined || value.trim() === "") return null;
+  if (value === undefined) return null;
   if (typeof value !== "string") throw new Error(`${field} must be a string.`);
+  if (value.trim() === "") return null;
   let ids = value.trim().split(/\s+/);
   if (ids.length > max || !ids.every(id => id.length <= 255 && MESSAGE_ID.test(id))) {
     throw new Error(`${field} must be ${max === 1 ? "a Message-ID" : "Message-IDs"} such as ` +

@@ -272,7 +272,7 @@ describe("connect flow", () => {
     expect(context.storage.kv.get(STAGED_CREDENTIALS_KEY)).toBeUndefined();
   });
 
-  it("discards the whole grant when the Workshop cannot accept the completed connection",
+  it("keeps the grant behind a marker when the Workshop cannot accept the completed connection",
      async () => {
     const { context, account } = newAccount();
     const callback = fakeCallback();
@@ -284,12 +284,59 @@ describe("connect flow", () => {
 
     await expect(connect(account, callback)).rejects.toThrow("workshop unreachable");
 
-    // Nobody holds a usable account, so no part of the grant may survive — an access token left
-    // behind is one a concurrent mint could still publish.
-    expect(context.storage.kv.get("refreshToken")).toBeUndefined();
-    expect(context.storage.kv.get("accessToken")).toBeUndefined();
-    expect(context.storage.kv.get("idTokenClaims")).toBeUndefined();
-    expect(context.storage.kv.get("grantScopes")).toBeUndefined();
+    // Ambiguous: the Workshop may hold a staged handoff whose response was lost, so the grant
+    // stands servable behind a marker instead of being cleared outright.
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-1");
+    expect(context.storage.kv.get("accessToken")).toBeDefined();
+    expect(context.storage.kv.get("completionUnconfirmedAt")).toBeDefined();
+    // The reaper trails the Workshop's own handoff sweep, which normally revokes first.
+    const alarmAt = context.storage.setAlarm.mock.calls.at(-1)![0] as number;
+    expect(alarmAt - Date.now()).toBeGreaterThan(2 * 60 * 1000);
+  });
+
+  it("reaps a completion still unconfirmed past the handoff window", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    callback.complete.mockRejectedValue(new Error("workshop unreachable") as never);
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1", expires_in: 3600, refresh_token: "refresh-1", scope: "openid",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+    await expect(connect(account, callback)).rejects.toThrow("workshop unreachable");
+
+    // While the window is open the grant stands for a redemption that may still arrive —
+    // past the completion fence, so this is the marker sparing it, not the fence.
+    context.storage.kv.put("grantCompletedAt", Date.now() - 2 * 60 * 1000 - 1);
+    await account.alarm();
+    expect(context.storage.deleteAll).not.toHaveBeenCalled();
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-1");
+
+    // Past it, with no redemption and no sweep revocation, the orphan goes like any abandoned flow.
+    context.storage.kv.put("completionUnconfirmedAt", Date.now() - 10 * 60 * 1000 - 1);
+    context.storage.kv.put("grantCompletedAt", Date.now() - 10 * 60 * 1000 - 1);
+    await account.alarm();
+    expect(context.storage.deleteAll).toHaveBeenCalled();
+  });
+
+  it("confirms an ambiguous completion by serving a token", async () => {
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    callback.complete.mockRejectedValue(new Error("workshop unreachable") as never);
+    fetchMock.mockResolvedValue(jsonResponse({
+      access_token: "access-1", expires_in: 3600, refresh_token: "refresh-1", scope: "openid",
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    }));
+    await expect(connect(account, callback)).rejects.toThrow("workshop unreachable");
+
+    // Somebody is using the account, so the completion landed despite the lost response.
+    await expect(account.getAccessToken()).resolves.toMatchObject({ token: "access-1" });
+    expect(context.storage.kv.get("completionUnconfirmedAt")).toBeUndefined();
+
+    // And a later alarm treats it as the live persistent grant it is.
+    context.storage.kv.put("grantCompletedAt", Date.now() - 10 * 60 * 1000 - 1);
+    await account.alarm();
+    expect(context.storage.deleteAll).not.toHaveBeenCalled();
+    expect(context.storage.kv.get("refreshToken")).toBe("refresh-1");
   });
 });
 
@@ -493,6 +540,42 @@ describe("overlapping reconnects", () => {
     // B's commit did not take Teams back.
     expect(await account.getGrantScopes()).toEqual(expect.arrayContaining(TEAMS_SCOPES));
     expect(await account.getGrantedResourceUrlPatterns()).toContain("https://teams.microsoft.com/*");
+  });
+
+  it("snapshots the current scopes and epoch together when a flow starts late", async () => {
+    // A flow that starts after another one committed must ask for the widened grant: recording the
+    // new epoch beside a stale scope list would commit as "not overtaken" and drop the addition.
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-0");
+    context.storage.kv.put("grantScopes", [...IDENTITY_SCOPES, ...MAIL_SCOPES]);
+    context.storage.kv.put("grantedScopes", [...IDENTITY_SCOPES, ...MAIL_SCOPES]);
+    context.storage.kv.put("idTokenClaims", { tid: TENANT, oid: "object-1" });
+    const withTeams = [...IDENTITY_SCOPES, ...MAIL_SCOPES, ...TEAMS_SCOPES];
+    const respond = (scopes: string[]) => jsonResponse({
+      access_token: "access", expires_in: 3600, refresh_token: "refresh",
+      scope: scopes.map(scope => `https://graph.microsoft.com/${scope}`).join(" "),
+      id_token: idToken({ tid: TENANT, oid: "object-1" }),
+    });
+
+    await account.prepareReconnect("a".repeat(64), []);
+    // A concurrent flow adds Teams and commits while A is still out.
+    await account.prepareReconnect("t".repeat(64), TEAMS_SCOPES);
+    const begunT = await account.beginOAuthFlow("t".repeat(64));
+    fetchMock.mockImplementation(async () => respond(withTeams));
+    await account.acceptAuthCode("code-t", begunT!.oauthNonce);
+    await account.commitReconnect(stagedId(callback));
+
+    // B starts after the commit: its snapshot already includes Teams beside the new epoch.
+    await account.prepareReconnect("b".repeat(64), []);
+    const begunB = await account.beginOAuthFlow("b".repeat(64));
+    expect(begunB!.scopes).toEqual(expect.arrayContaining(TEAMS_SCOPES));
+    fetchMock.mockImplementation(async () => respond(withTeams));
+    await account.acceptAuthCode("code-b", begunB!.oauthNonce);
+    await account.commitReconnect(stagedId(callback));
+    // Committed as not overtaken, from a snapshot that already held the addition.
+    expect(await account.getGrantScopes()).toEqual(expect.arrayContaining(TEAMS_SCOPES));
   });
 
   it("does not invalidate a reconnect that is out at Microsoft when another one starts", async () => {
@@ -735,6 +818,37 @@ describe("mint failure taxonomy", () => {
     expect(callback.credentialsRestored).toHaveBeenCalledTimes(2);
   });
 
+  it("sends a death recorded during a restoration flight after that flight settles", async () => {
+    // The Workshop applies notices in arrival order: an expiry landing while the restoration it
+    // overtakes is still out would be overwritten by that stale flight, showing a dead account.
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    const order: string[] = [];
+    let releaseRestore!: () => void;
+    callback.credentialsRestored.mockImplementationOnce(() => new Promise<void>(resolve => {
+      releaseRestore = () => { order.push("restored"); resolve(); };
+    }));
+    callback.credentialsExpired.mockImplementation(async () => { order.push("expired"); });
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    context.storage.kv.put("mintFailure", { message: "dead", at: Date.now() - 10 * 60 * 1000 });
+    fetchMock.mockImplementation(async () => jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-new",
+      scope: "openid profile email https://graph.microsoft.com/User.Read offline_access",
+    }));
+
+    await account.getAccessToken();
+    await vi.waitFor(() => expect(callback.credentialsRestored).toHaveBeenCalledTimes(1));
+
+    await account.reportCredentialsRejected("revoked", undefined);
+    // Recorded, but its notice waits behind the restoration flight still out.
+    expect(callback.credentialsExpired).not.toHaveBeenCalled();
+
+    releaseRestore();
+    await vi.waitFor(() => expect(callback.credentialsExpired).toHaveBeenCalledTimes(1));
+    expect(order).toEqual(["restored", "expired"]);
+  });
+
   it("does call a plain second 401 restored once the token request works again", async () => {
     // Unlike a claims challenge, this says nothing about a policy, so recovery is real recovery.
     const { context, account } = newAccount();
@@ -783,6 +897,43 @@ describe("mint failure taxonomy", () => {
 
     // Graph rejected the claims, not the token request, so a token request succeeding fixes nothing.
     expect(callback.credentialsRestored).not.toHaveBeenCalled();
+  });
+
+  it("keeps a claims challenge and its directive across a mint that succeeds", async () => {
+    // The token endpoint answers while the challenge holds, so the mint fixes nothing — but
+    // deleting the record here would let a concurrent reconnect build its authorization URL
+    // without the required `claims` parameter before Graph re-records the challenge.
+    const { context, account } = newAccount();
+    const callback = fakeCallback();
+    context.storage.kv.put("callback", callback);
+    context.storage.kv.put("refreshToken", "refresh-old");
+    context.storage.kv.put("accessToken", {
+      token: "access-live", expires: new Date(Date.now() + 30 * 60 * 1000),
+    });
+    await account.reportCredentialsRejected(
+        "conditional access policy", "access-live", "claims-directive");
+    await vi.waitFor(() => expect(callback.credentialsExpired).toHaveBeenCalledTimes(1));
+    fetchMock.mockImplementation(async () => jsonResponse({
+      access_token: "access-2", expires_in: 3600, refresh_token: "refresh-new",
+      scope: "openid profile email https://graph.microsoft.com/User.Read offline_access",
+    }));
+
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 5 * 60 * 1000 });
+    try {
+      await account.getAccessToken();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(context.storage.kv.get("mintFailure"))
+      .toMatchObject({ claims: true, claimsChallenge: "claims-directive" });
+    await account.prepareReconnect("c".repeat(64), []);
+    const begun = await account.beginOAuthFlow("c".repeat(64));
+    expect(begun!.claims).toBe("claims-directive");
+    // The death never ended, so the expiry notice is not sent again for it.
+    await account.reportCredentialsRejected("conditional access policy", undefined, "claims-new");
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(callback.credentialsExpired).toHaveBeenCalledTimes(1);
   });
 
   it("keeps retrying a transient rejection and leaves the account alive", async () => {

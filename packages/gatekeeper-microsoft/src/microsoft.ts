@@ -120,6 +120,12 @@ type CachedVerifiedDomains = {
 // so this only needs to outlast that call.
 const AUTH_GRANT_LIFETIME_MS = 2 * 60 * 1000;
 
+// How long a grant whose completion report failed is kept before the alarm reaps it as orphaned.
+// Must trail the Workshop's pending-handoff sweep (2 minutes): while a handoff the Workshop may
+// hold is still redeemable the grant it names has to stay servable, and the sweep revokes what
+// expires unredeemed — so this only fires when that best-effort revocation failed.
+const COMPLETION_CONFIRM_WINDOW_MS = 10 * 60 * 1000;
+
 // Ceilings on the round trips that run while holding the credential mutex. Each must be bounded: an
 // unbounded hang keeps the mutex, and every caller waiting for a token then queues behind it.
 const TOKEN_MINT_TIMEOUT_MS = 20 * 1000;
@@ -566,6 +572,21 @@ export class UserAccount extends DurableObject<Env> {
     return this.#credentialMutations.run(operation);
   }
 
+  // Workshop notification sends, chained in the order their causes occurred. A restoration still
+  // in flight when the credentials die again must settle before the expiry notice goes out: the
+  // Workshop applies them in arrival order, and a stale restoration landing after the expiry would
+  // show a dead account as restored. Appends are synchronous, so the send order matches the order
+  // the causes ran in; every leg is non-throwing, and the chain re-anchors resolved after each.
+  #notifyChain: Promise<void> = Promise.resolve();
+
+  #chainNotify(task: () => Promise<unknown>): void {
+    let run = this.#notifyChain.then(task, task).then(() => undefined, () => undefined);
+    this.#notifyChain = run;
+    // Registered with the runtime so the notice outlives the call that queued it: a floating RPC
+    // can be cut off when that invocation ends, leaving the account shown healthy.
+    this.ctx.waitUntil(run);
+  }
+
   #requireConfig(): OAuthConfig {
     let config = getOAuthConfig(this.env);
     if (!config) {
@@ -591,16 +612,6 @@ export class UserAccount extends DurableObject<Env> {
     if (grant.idTokenClaims) {
       this.ctx.storage.kv.put<IdTokenClaims>("idTokenClaims", grant.idTokenClaims);
     }
-  }
-
-  // Drop every piece of a grant. Callers must hold the credential mutex.
-  #clearGrant(): void {
-    this.ctx.storage.kv.delete("refreshToken");
-    this.ctx.storage.kv.delete("accessToken");
-    this.ctx.storage.kv.delete("idTokenClaims");
-    this.ctx.storage.kv.delete("grantedScopes");
-    this.ctx.storage.kv.delete("grantScopes");
-    this.ctx.storage.kv.delete("grantCompletedAt");
   }
 
   async setCallback(
@@ -664,19 +675,24 @@ export class UserAccount extends DurableObject<Env> {
    * obtains and reports it via reconnectComplete() instead of complete(); the existing refresh
    * token keeps serving until commitReconnect() makes the staged one live.
    *
-   * `requestedScopes` is the full set of OAuth scopes to request on the reauthorization.
+   * `requestedScopes` is the additional OAuth scopes the flow needs; they are unioned here with
+   * what the account already holds. Both the union and the epoch are read inside this one call, so
+   * a grant another flow commits concurrently is either fully in the snapshot (its scopes and its
+   * epoch) or fully out of it — never the new epoch beside the old scope list, which would commit
+   * as "not overtaken" and drop what that flow added.
    */
   async prepareReconnect(
       initiationNonce: string, requestedScopes: string[], initiator?: ConnectInitiator) {
+    let kv = this.ctx.storage.kv;
     this.#putNonce({
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
-      scopes: requestedScopes,
+      scopes: unionScopes(kv.get<string[]>("grantScopes") ?? IDENTITY_SCOPES, requestedScopes),
       reconnect: true,
-      epoch: this.ctx.storage.kv.get<number>(GRANT_EPOCH_KEY) ?? 0,
+      epoch: kv.get<number>(GRANT_EPOCH_KEY) ?? 0,
       // After a Conditional Access challenge, the new sign-in must carry the same demand.
-      claims: this.ctx.storage.kv.get<StoredMintFailure>("mintFailure")?.claimsChallenge,
+      claims: kv.get<StoredMintFailure>("mintFailure")?.claimsChallenge,
       initiator,
     });
   }
@@ -857,10 +873,14 @@ export class UserAccount extends DurableObject<Env> {
         let props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
         handoff = await callback.complete(this.ctx.exports.GatekeeperUserImpl({props}));
       } catch (err) {
-        // Nobody received a usable account, so the whole grant is orphaned — not just the refresh
-        // token. Leaving the access token behind would let a concurrent mint publish it for an
-        // account that never completed. Serialized like every other credential mutation.
-        await this.#updateCredentials(async () => { this.#clearGrant(); });
+        // Ambiguous: the Workshop may have staged the handoff and lost the response, in which case
+        // clearing here would strand a ticketed account with no grant. The grant stands behind an
+        // unconfirmed-completion marker instead: serving a token clears it (the account is live),
+        // and the alarm re-armed below reaps what is still unconfirmed past the handoff window.
+        // Normally the Workshop's own sweep revokes it first — this is the backstop for when that
+        // best-effort revocation failed.
+        this.ctx.storage.kv.put<number>("completionUnconfirmedAt", Date.now());
+        this.ctx.storage.setAlarm(Date.now() + COMPLETION_CONFIRM_WINDOW_MS);
         throw err;
       }
       // Sign-in-only grants are transient: the alarm set above removes it shortly after complete()
@@ -917,6 +937,13 @@ export class UserAccount extends DurableObject<Env> {
     return this.ctx.storage.kv.get<string>("refreshToken") !== undefined;
   }
 
+  // A served token proves the account is live, whatever its completion reported: the Workshop
+  // redeemed the handoff (or a later flow finished on this object), so no unconfirmed-completion
+  // marker may still condemn the grant.
+  #confirmCompletion(): void {
+    this.ctx.storage.kv.delete("completionUnconfirmedAt");
+  }
+
   /**
    * Whether the stored token still satisfies this request, i.e. can be served without minting.
    *
@@ -943,6 +970,7 @@ export class UserAccount extends DurableObject<Env> {
 
     let cached = this.ctx.storage.kv.get<EntraAccessToken>("accessToken");
     if (this.#tokenSatisfies(cached, opts)) {
+      this.#confirmCompletion();
       return cached;
     }
 
@@ -958,6 +986,7 @@ export class UserAccount extends DurableObject<Env> {
     let token = await this.#updateCredentials(async () => {
       let fresh = this.ctx.storage.kv.get<EntraAccessToken>("accessToken");
       if (this.#tokenSatisfies(fresh, opts)) {
+        this.#confirmCompletion();
         return fresh;
       }
 
@@ -1017,8 +1046,16 @@ export class UserAccount extends DurableObject<Env> {
       // Kept until the Workshop has acknowledged it, so a delivery that fails is tried again.
       recovered = recorded !== undefined && recorded.claims !== true;
       if (recovered) this.ctx.storage.kv.put<boolean>(RESTORE_PENDING_KEY, true);
-      this.ctx.storage.kv.delete("mintFailure");
-      clearCredentialExpiryLatch(this.ctx.storage.kv);
+      // A minted token proves nothing against a claims challenge — the token endpoint keeps
+      // answering while Graph keeps rejecting — so a claims-marked failure and its directive stay
+      // until an interactive reconnect commits. Deleting them here would open a window where a
+      // concurrent reconnect builds its authorization URL without the required `claims` parameter.
+      // The expiry latch stays latched for the same reason: the death never ended.
+      if (recorded?.claims !== true) {
+        this.ctx.storage.kv.delete("mintFailure");
+        clearCredentialExpiryLatch(this.ctx.storage.kv);
+      }
+      this.#confirmCompletion();
       return result.grant.accessToken;
     });
     // After the mutex is released: the callback is an outbound RPC that can re-enter this object.
@@ -1031,12 +1068,14 @@ export class UserAccount extends DurableObject<Env> {
   //
   // The notice stays pending in storage until the Workshop acknowledges it, and the next token
   // request tries again, so a delivery that fails cannot leave the account marked expired for good.
+  // Sent through the notification chain, so an expiry recorded while this flight is out lands after
+  // it rather than being overwritten by it.
   #notifyCredentialsRestored(): void {
     let kv = this.ctx.storage.kv;
     let callback = kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback || this.#restoring) return;
     this.#restoring = true;
-    this.ctx.waitUntil(callback.credentialsRestored()
+    this.#chainNotify(() => callback.credentialsRestored()
         .then(() => kv.delete(RESTORE_PENDING_KEY))
         .catch(err => {
           logger.warn("failed to notify credential restoration", {
@@ -1097,12 +1136,13 @@ export class UserAccount extends DurableObject<Env> {
   // Tried again on each permanent failure until one gets through, and then once per death: the
   // kit's latch is written only after the Workshop has been told, so a failed notification cannot
   // silence every later one, and a burst of failures shares a single notification. It is re-armed
-  // wherever a recorded failure is cleared, i.e. whenever new credentials go live.
+  // wherever a recorded failure is cleared, i.e. whenever new credentials go live. Sent through
+  // the notification chain, so it lands after any restoration flight already out rather than being
+  // overwritten by it.
   #notifyCredentialsDead(): void {
-    let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
-    // Registered with the runtime so the notice outlives the call that failed: a floating RPC can be
-    // cut off when that invocation ends, leaving the account shown healthy.
-    this.ctx.waitUntil(notifyCredentialsExpiredOnce(this.ctx.storage.kv, callback, VENDOR_ID));
+    let kv = this.ctx.storage.kv;
+    let callback = kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+    this.#chainNotify(() => notifyCredentialsExpiredOnce(kv, callback, VENDOR_ID));
   }
 
   /**
@@ -1144,6 +1184,15 @@ export class UserAccount extends DurableObject<Env> {
       // the real wipe; a missing stamp (abandoned, cleared, or pre-stamp grant) wipes as before.
       let completedAt = this.ctx.storage.kv.get<number>("grantCompletedAt") ?? 0;
       if (Date.now() - completedAt < AUTH_GRANT_LIFETIME_MS) return;
+      // A completion the Workshop may not have received keeps its grant until the handoff it may
+      // have staged expires unredeemed; past that the grant is orphaned and goes like any
+      // abandoned flow. Serving a token clears the marker, so a live account never lands here.
+      let unconfirmedAt = this.ctx.storage.kv.get<number>("completionUnconfirmedAt");
+      if (unconfirmedAt !== undefined) {
+        if (Date.now() - unconfirmedAt < COMPLETION_CONFIRM_WINDOW_MS) return;
+        this.ctx.storage.deleteAll();
+        return;
+      }
       if (!this.hasRefreshToken() || this.ctx.storage.kv.get<boolean>("authOnly")) {
         this.ctx.storage.deleteAll();
       }
@@ -1371,9 +1420,9 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   async reconnect(options?: { initiator?: ConnectInitiator }): Promise<{url: string}> {
     let account = this.#account();
     let initiationNonce = generateNonce();
-    // Re-request the scopes already granted so a plain reconnect doesn't narrow access.
-    await account.prepareReconnect(
-        initiationNonce, await account.getGrantScopes(), options?.initiator);
+    // A plain reconnect needs nothing new; the account unions its current scopes inside the same
+    // call that records the epoch, so a concurrent commit cannot slip between the two reads.
+    await account.prepareReconnect(initiationNonce, [], options?.initiator);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 
@@ -1392,10 +1441,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
       return {};
     }
 
-    // Request the union of what's already granted and what's newly needed, so the expansion never
-    // drops existing access.
-    let unionPatterns = new Set([...granted, ...resourceUrlPatterns]);
-    let requestedScopes = resourceUrlPatternsToOAuthScopes([...unionPatterns]);
+    // Only the newly needed scopes travel with the flow; the account unions them with what it
+    // already holds inside the same call that records the epoch, so the expansion never drops
+    // existing access however concurrently another flow commits.
+    let requestedScopes = resourceUrlPatternsToOAuthScopes(resourceUrlPatterns);
     let initiationNonce = generateNonce();
     await account.prepareReconnect(initiationNonce, requestedScopes, options?.initiator);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };

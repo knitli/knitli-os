@@ -72,11 +72,25 @@ describe("credential stage", () => {
     expect(discardStagedCredentials<Grant>(kv, "wrong-stage")).toBeNull();
     expect(kv.keys()).toContain(stageKey(stageId));
     expect(kv.keys()).toContain(stageKey(live));
-    // Past its TTL nothing can commit or read it, but its own flow can still dispose of it.
-    expect(peekStagedCredentials<Grant>(kv, 1_200)?.stageId).toBe(live);
+    // Past its TTL nothing can commit it, but a discard still disposes of it — as long as no
+    // reclaiming read swept it first.
     expect(discardStagedCredentials<Grant>(kv, stageId)).toEqual(GRANT);
     expect(kv.keys()).toContain(stageKey(live));
     expect(kv.keys()).not.toContain(stageKey(stageId));
+  });
+
+  it("reclaims expired stages on the next operation, keeping live concurrent ones", () => {
+    const kv = fakeKv();
+    const stale = stageCredentials(kv, { ...GRANT, accessToken: "stale" }, 1_000, 100);
+    const live = stageCredentials(kv, { ...GRANT, accessToken: "live" }, 1_000);
+
+    // An abandoned reconnect's stage is deleted by whatever stage operation runs next; the live
+    // concurrent stage is untouched and still commits.
+    expect(peekStagedCredentials<Grant>(kv, 1_200)?.stageId).toBe(live);
+    expect(kv.keys()).not.toContain(stageKey(stale));
+    expect(kv.get<string[]>(`${STAGED_CREDENTIALS_KEY}:index`)).toEqual([live]);
+    expect(commitStagedCredentials<Grant>(kv, 1_200, live)?.accessToken).toBe("live");
+    expect(commitStagedCredentials<Grant>(kv, 1_200, stale)).toBeNull();
   });
 
   it("honours a caller-chosen lifetime", () => {
@@ -85,7 +99,9 @@ describe("credential stage", () => {
 
     expect(peekStagedCredentials<Grant>(kv, 1_600)?.creds).toEqual(GRANT);
     expect(peekStagedCredentials<Grant>(kv, 1_700)).toBeNull();
-    expect(commitStagedCredentials<Grant>(kv, 1_600, stageId)).toEqual(GRANT);
+    // The expired peek reclaimed the record, so nothing is left to commit.
+    expect(commitStagedCredentials<Grant>(kv, 1_700, stageId)).toBeNull();
+    expect(kv.keys()).not.toContain(stageKey(stageId));
   });
 
   it("peeks the newest live stage without consuming, failing closed on a bad clock", () => {

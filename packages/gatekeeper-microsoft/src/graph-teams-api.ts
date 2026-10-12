@@ -422,7 +422,17 @@ function hitLocationFrom(resource: GraphChatMessage): TeamsSearchHitLocation {
   return { kind: "unknown" };
 }
 
-function searchHitInfoFrom(hit: GraphSearchHit): TeamsSearchHitInfo | undefined {
+/**
+ * A search hit with its provider key. The agent sees only `info`; `hitId` is the search result
+ * item's internal identifier, which the walk keys unknown-location hits by — a message id is only
+ * unique within its conversation, so without it two same-instant messages from one sender in
+ * different conversations the index did not locate would deduplicate each other.
+ *
+ * Exported only because `searchMessageHits` returns it; nothing outside this module names it.
+ */
+export type TeamsSearchHit = { info: TeamsSearchHitInfo; hitId: string | undefined };
+
+function searchHitFrom(hit: GraphSearchHit): TeamsSearchHit | undefined {
   let resource = hit.resource;
   let messageId = text(resource?.id);
   // Without an id the hit names no message, so there is nothing to report or hydrate.
@@ -432,15 +442,18 @@ function searchHitInfoFrom(hit: GraphSearchHit): TeamsSearchHitInfo | undefined 
   let subject = text(resource.subject);
   let webUrl = text(resource.webUrl);
   return {
-    messageId,
-    ...(from ? { from } : {}),
-    createdAt: dateFrom(resource.createdDateTime) ?? new Date(0),
-    ...(lastModifiedAt ? { lastModifiedAt } : {}),
-    // Summaries arrive with the index's own highlight markup around the matched words.
-    summary: renderTeamsText(hit.summary ?? ""),
-    ...(subject ? { subject } : {}),
-    location: hitLocationFrom(resource),
-    ...(webUrl ? { webUrl } : {}),
+    info: {
+      messageId,
+      ...(from ? { from } : {}),
+      createdAt: dateFrom(resource.createdDateTime) ?? new Date(0),
+      ...(lastModifiedAt ? { lastModifiedAt } : {}),
+      // Summaries arrive with the index's own highlight markup around the matched words.
+      summary: renderTeamsText(hit.summary ?? ""),
+      ...(subject ? { subject } : {}),
+      location: hitLocationFrom(resource),
+      ...(webUrl ? { webUrl } : {}),
+    },
+    hitId: text(hit.hitId),
   };
 }
 
@@ -751,16 +764,20 @@ type SearchWalkAdvance = {
 
 /**
  * Identity of a search hit across the whole walk. A message id is only unique within its channel
- * or chat, so the conversation is part of the key.
+ * or chat, so the conversation is part of the key — and a hit the index did not locate is keyed by
+ * the provider's own hit id, which names the result item rather than the message.
  */
-function searchHitKey(hit: TeamsSearchHitInfo): string {
-  let where = hit.location.kind === "channel"
-      ? `channel/${hit.location.teamId}/${hit.location.channelId}`
-      : hit.location.kind === "chat" ? `chat/${hit.location.chatId}` : "unknown";
-  // With no conversation to tell two messages apart by, what else the hit carries has to.
-  let extra = hit.location.kind === "unknown"
-      ? `/${hit.createdAt.valueOf()}/${hit.from?.id ?? hit.from?.displayName ?? ""}` : "";
-  return `${where}/${hit.messageId}${extra}`;
+function searchHitKey(hit: TeamsSearchHit): string {
+  let info = hit.info;
+  if (info.location.kind === "unknown" && hit.hitId !== undefined) return `unknown/${hit.hitId}`;
+  let where = info.location.kind === "channel"
+      ? `channel/${info.location.teamId}/${info.location.channelId}`
+      : info.location.kind === "chat" ? `chat/${info.location.chatId}` : "unknown";
+  // With no conversation and no provider id to tell two messages apart by, what else the hit
+  // carries has to.
+  let extra = info.location.kind === "unknown"
+      ? `/${info.createdAt.valueOf()}/${info.from?.id ?? info.from?.displayName ?? ""}` : "";
+  return `${where}/${info.messageId}${extra}`;
 }
 
 /**
@@ -843,9 +860,9 @@ export class TeamsSearchWalk {
             `This search has already returned ${MAX_SEARCH_PAGES} pages. Narrow the query instead ` +
             "of paging further.");
       }
-      let page: { hits: TeamsSearchHitInfo[]; moreAvailable: boolean };
+      let page: { hits: TeamsSearchHit[]; moreAvailable: boolean };
       try {
-        page = await this.#api.searchMessages(this.#query, offset);
+        page = await this.#api.searchMessageHits(this.#query, offset);
       } catch (error) {
         if (offset > 0 && error instanceof GraphApiError && isSearchWindowExhausted(error)) {
           this.#exhausted = true;
@@ -862,8 +879,9 @@ export class TeamsSearchWalk {
       let fresh = page.hits.filter(hit => !seen.has(searchHitKey(hit)));
       for (let hit of fresh) seen.add(searchHitKey(hit));
       if (fresh.length > 0) {
-        this.#pending = { hits: fresh, offset, pages, exhausted, seen };
-        return fresh;
+        let infos = fresh.map(hit => hit.info);
+        this.#pending = { hits: infos, offset, pages, exhausted, seen };
+        return infos;
       }
     }
 
@@ -1253,6 +1271,16 @@ export class GraphTeamsApi {
    */
   async searchMessages(query: string, from = 0)
       : Promise<{ hits: TeamsSearchHitInfo[]; moreAvailable: boolean }> {
+    let page = await this.searchMessageHits(query, from);
+    return { hits: page.hits.map(hit => hit.info), moreAvailable: page.moreAvailable };
+  }
+
+  /**
+   * One search page with the provider hit ids the walk deduplicates by. The ids stay internal:
+   * they name index result items, which an agent can neither read nor address.
+   */
+  async searchMessageHits(query: string, from = 0)
+      : Promise<{ hits: TeamsSearchHit[]; moreAvailable: boolean }> {
     let validated = validateTeamsSearchQuery(query);
     let response = await this.#fetchJson<GraphSearchResponse>(graphUrl(["search", "query"]), {
       method: "POST",
@@ -1260,8 +1288,8 @@ export class GraphTeamsApi {
     });
     let container = response.value?.[0]?.hitsContainers?.[0];
     let hits = (container?.hits ?? [])
-        .map(searchHitInfoFrom)
-        .filter((hit): hit is TeamsSearchHitInfo => hit !== undefined);
+        .map(searchHitFrom)
+        .filter((hit): hit is TeamsSearchHit => hit !== undefined);
     return { hits, moreAvailable: container?.moreResultsAvailable === true };
   }
 

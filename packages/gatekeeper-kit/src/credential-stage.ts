@@ -63,7 +63,7 @@ export function stageCredentials<T>(
   ttlMs: number = OAUTH_NONCE_LIFETIME_MS,
 ): string {
   const stageId = generateNonce();
-  const ids = loadStages(kv);
+  const ids = loadStages(kv, now);
   kv.put<StagedCredentials<T>>(stageKey(stageId), { creds, stageId, expiresAt: now + ttlMs });
   kv.put<string[]>(STAGE_INDEX_KEY, [...ids, stageId]);
   return stageId;
@@ -78,14 +78,16 @@ function isStageRecord(value: unknown): value is StagedCredentials<unknown> {
 }
 
 /**
- * Loads the index, migrating and pruning it. A record left at the legacy single key moves to its
- * own key so it still commits; index entries whose record is missing or misshapen drop out.
- * Expired records stay: their own flow can still dispose of them, and a commit deletes the one it
- * was handed on sight.
+ * Loads the index, migrating, reclaiming, and pruning it. A record left at the legacy single key
+ * moves to its own key so it still commits; index entries whose record is missing or misshapen
+ * drop out. When a clock is offered, stages past their expiry are deleted outright: no commit can
+ * take one and no flow retains its id for disposal, so keeping them would only grow storage and
+ * slow every later scan. Live concurrent stages are untouched.
  * @param kv Durable Object storage.
+ * @param now Current Unix time in milliseconds, or `undefined` to skip reclaiming.
  * @returns The ids with a readable record, oldest first.
  */
-function loadStages(kv: KvMutable): string[] {
+function loadStages(kv: KvMutable, now?: number): string[] {
   const legacy = kv.get<unknown>(STAGED_CREDENTIALS_KEY);
   if (isStageRecord(legacy)) {
     kv.put(stageKey(legacy.stageId), legacy);
@@ -95,9 +97,19 @@ function loadStages(kv: KvMutable): string[] {
   const ids = (Array.isArray(index) ? index : []).filter((id): id is string =>
       typeof id === "string");
   if (isStageRecord(legacy) && !ids.includes(legacy.stageId)) ids.push(legacy.stageId);
-  const pruned = ids.filter(id => isStageRecord(kv.get(stageKey(id))));
-  if (pruned.length > 0 || index !== undefined) kv.put<string[]>(STAGE_INDEX_KEY, pruned);
-  return pruned;
+  const live: string[] = [];
+  for (const id of ids) {
+    const record = kv.get(stageKey(id));
+    if (!isStageRecord(record)) continue;
+    // A broken clock reclaims nothing: deleting on an unreadable time could take live stages.
+    if (now !== undefined && Number.isFinite(now) && now >= record.expiresAt) {
+      kv.delete(stageKey(id));
+      continue;
+    }
+    live.push(id);
+  }
+  if (live.length > 0 || index !== undefined) kv.put<string[]>(STAGE_INDEX_KEY, live);
+  return live;
 }
 
 /**
@@ -134,7 +146,7 @@ function dropStage(kv: KvMutable, stageId: string): void {
  * @returns The newest live stage, or `null` when none is committable.
  */
 export function peekStagedCredentials<T>(kv: KvMutable, now: number): StagedCredentialsView<T> | null {
-  const ids = loadStages(kv);
+  const ids = loadStages(kv, now);
   if (!Number.isFinite(now)) return null;
   for (let i = ids.length - 1; i >= 0; i--) {
     const staged = storedStage<T>(kv, ids[i]);
@@ -163,7 +175,7 @@ export function peekStagedCredentials<T>(kv: KvMutable, now: number): StagedCred
  * ```
  */
 export function commitStagedCredentials<T>(kv: KvMutable, now: number, stageId: string): T | null {
-  loadStages(kv);
+  loadStages(kv, now);
   const staged = storedStage<T>(kv, stageId);
   if (staged === undefined) return null;
   // Plain comparison: the id is an identity, not a secret. Only the Workshop can reach
@@ -182,10 +194,13 @@ export function commitStagedCredentials<T>(kv: KvMutable, now: number, stageId: 
  * exact stage, so another flow's stage survives a cleanup this flow scheduled. A record no caller
  * could use is dropped, reporting `null`.
  *
- * Unlike a commit this ignores the stage TTL, which is what lets an abandoned stage be cleaned up
- * long after its window closed — and why the credentials it returns must never be written live.
- * Nothing has confirmed who obtained them, and `commitStagedCredentials` is the only path that may
- * activate a stage. The local deletion must happen before awaiting provider cleanup.
+ * Unlike the other readers this ignores the stage TTL, which is what lets a flow dispose the
+ * credentials it is replacing whatever their expiry — including one past it, whose grant still
+ * needs revoking. (Reclaiming happens on the stage/peek/commit paths instead, so an abandoned
+ * stage is cleaned up by the next one of those rather than lingering.) The credentials this
+ * returns must never be written live: nothing has confirmed who obtained them, and
+ * `commitStagedCredentials` is the only path that may activate a stage. The local deletion must
+ * happen before awaiting provider cleanup.
  * @param kv Durable Object storage.
  * @param stageId The exact stage to drop, for a caller that retained the id `stageCredentials` gave it.
  * @returns The dropped credentials, or `null` when nothing matched.

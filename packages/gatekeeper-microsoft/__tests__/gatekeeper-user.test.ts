@@ -519,6 +519,7 @@ describe("resource surface", () => {
 
   it("expands a mail-only grant to cover the other resources without narrowing it", async () => {
     context.storage.kv.put("grantedScopes", ["Mail.ReadWrite", "User.Read"]);
+    context.storage.kv.put("grantScopes", ["Mail.ReadWrite", "User.Read", "offline_access"]);
 
     const expansion = await user.ensureResources([TEAMS_PATTERN, SHAREPOINT_PATTERN]);
 

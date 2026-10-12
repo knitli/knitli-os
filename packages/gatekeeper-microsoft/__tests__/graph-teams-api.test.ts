@@ -641,9 +641,37 @@ describe("search results", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("keeps two hits of unknown location that share a message id but are different messages", async () => {
+  it("keys hits of unknown location by the provider hit id", async () => {
+    // Same message id, instant, and sender in conversations the index did not locate: without the
+    // provider key these are one hit, and the later result would be silently dropped.
+    const hit = (hitId: string) => ({
+      hitId, summary: "s",
+      resource: {
+        id: "m-1", createdDateTime: "2026-08-01T10:00:00Z",
+        from: { user: { id: "u", displayName: "U" } },
+      },
+    });
+    const page = (hits: object[], more: boolean) =>
+      ({ value: [{ hitsContainers: [{ moreResultsAvailable: more, hits }] }] });
+    const pages = [
+      page([hit("h-1")], true),
+      page([hit("h-1"), hit("h-2")], false),
+    ];
+    let index = 0;
+    stubFetch(() => jsonResponse(pages[index++]));
+
+    const walk = newApi().openMessageSearch("quarterly");
+
+    expect((await walk.peekPage())!).toHaveLength(1);
+    walk.commitPage();
+    // The repeat of the first result item is dropped; the other item that merely shares every
+    // message field is not.
+    expect((await walk.peekPage())!).toHaveLength(1);
+  });
+
+  it("falls back to message fields when the index omits the provider hit id", async () => {
     const hit = (created: string) => ({
-      hitId: "h", summary: "s",
+      summary: "s",
       resource: { id: "m-1", createdDateTime: created, from: { user: { id: "u", displayName: "U" } } },
     });
     const page = (hits: object[], more: boolean) =>

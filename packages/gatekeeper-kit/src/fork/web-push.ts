@@ -24,13 +24,13 @@ const PUSH_SERVICE_HOSTS = [
   ".notify.windows.com",
 ];
 
-export function base64UrlEncode(bytes: Uint8Array): string {
+function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
   for (let byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export function base64UrlDecode(text: string): Uint8Array {
+function base64UrlDecode(text: string): Uint8Array {
   let base64 = text.replace(/-/g, "+").replace(/_/g, "/");
   return Uint8Array.from(atob(base64 + "=".repeat((4 - base64.length % 4) % 4)), c => c.charCodeAt(0));
 }
@@ -64,14 +64,25 @@ export function checkPushKeys(keys: WebPushKeys): void {
 }
 
 /**
- * The base64url public key (`applicationServerKey`) for an ECDSA P-256 private JWK.
- * Throws if `jwk` is not a P-256 private key.
+ * The base64url public key (`applicationServerKey`) for an ECDSA P-256 private JWK. The whole key
+ * is validated, not just its fields: x, y and d must each be 32 bytes, and WebCrypto must accept
+ * them as one key pair, which refuses a point off the curve or a `d` that does not belong to
+ * x/y. The result is derived from the imported key, never copied from the JWK. Rejects with
+ * "Not a P-256 private JWK." on any of it.
  */
-export function vapidPublicKey(jwk: JsonWebKey): string {
-  if (jwk.kty !== "EC" || jwk.crv !== "P-256" || !jwk.x || !jwk.y || !jwk.d) {
-    throw new Error("Not a P-256 private JWK.");
+export async function vapidPublicKey(jwk: JsonWebKey): Promise<string> {
+  let invalid = new Error("Not a P-256 private JWK.");
+  if (jwk.kty !== "EC" || jwk.crv !== "P-256" || !jwk.x || !jwk.y || !jwk.d) throw invalid;
+  try {
+    for (let part of [jwk.x, jwk.y, jwk.d]) if (base64UrlDecode(part).length !== 32) throw invalid;
+    // Extractable only so the public half can be read back from the imported key.
+    let key = await crypto.subtle.importKey(
+        "jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, true, ["sign"]);
+    let { x, y } = await crypto.subtle.exportKey("jwk", key) as JsonWebKey;
+    return base64UrlEncode(new Uint8Array([4, ...base64UrlDecode(x!), ...base64UrlDecode(y!)]));
+  } catch (cause) {
+    throw new Error(invalid.message, { cause });
   }
-  return base64UrlEncode(new Uint8Array([4, ...base64UrlDecode(jwk.x), ...base64UrlDecode(jwk.y)]));
 }
 
 function concat(...parts: Uint8Array[]): Uint8Array {

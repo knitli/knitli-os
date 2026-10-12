@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encryptPushPayload } from "../../src/fork/web-push";
+import { encryptPushPayload, vapidPublicKey } from "../../src/fork/web-push";
 
 // The RFC 8291 byte-exact vector runs under workerd, the runtime production and
 // gatekeeper-messaging use: its ECDH `public` parameter is the member workers-types spells
@@ -34,5 +34,23 @@ describe("web push crypto under workerd", () => {
     let body = await encryptPushPayload(
         new TextEncoder().encode(RFC.plaintext), KEYS, { sender, salt: unb64(RFC.salt) });
     expect(b64(body)).toBe(RFC.body);
+  });
+});
+
+describe("VAPID key validation under workerd", () => {
+  const generate = async () => await crypto.subtle.exportKey("jwk", (await crypto.subtle.generateKey(
+      { name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]) as CryptoKeyPair).privateKey) as JsonWebKey;
+
+  it("refuses a valid public x/y paired with another key's d, and derives from the imported key", async () => {
+    let [a, b] = [await generate(), await generate()];
+    await expect(vapidPublicKey({ ...a, d: b.d })).rejects.toThrow(/Not a P-256 private JWK/);
+    let point = unb64(await vapidPublicKey(a));
+    expect(b64(point.subarray(1, 33))).toBe(a.x);
+    expect(b64(point.subarray(33))).toBe(a.y);
+  });
+
+  it("refuses a point that is not on the curve", async () => {
+    let a = await generate();
+    await expect(vapidPublicKey({ ...a, y: a.x })).rejects.toThrow(/Not a P-256 private JWK/);
   });
 });

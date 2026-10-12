@@ -43,13 +43,13 @@ export const MAX_WEB_PUSH_SUBSCRIPTIONS = 10;
  * private JWK as JSON) and the origin of `PUBLIC_BASE_URL` as the sender contact. Null when the
  * deployment has not configured Web Push, which turns every entry point below into a no-op.
  */
-function vapidIdentity(env: Cloudflare.Env):
-    { privateKey: JsonWebKey; publicKey: string; subject: string } | null {
+async function vapidIdentity(env: Cloudflare.Env):
+    Promise<{ privateKey: JsonWebKey; publicKey: string; subject: string } | null> {
   let { WEB_PUSH_VAPID_PRIVATE_KEY: secret, PUBLIC_BASE_URL: baseUrl } = env;
   if (!secret || !baseUrl) return null;
   try {
     let jwk = JSON.parse(secret) as JsonWebKey;
-    return { privateKey: jwk, publicKey: vapidPublicKey(jwk), subject: new URL(baseUrl).origin };
+    return { privateKey: jwk, publicKey: await vapidPublicKey(jwk), subject: new URL(baseUrl).origin };
   } catch {
     logger.error("WEB_PUSH_VAPID_PRIVATE_KEY is not a P-256 private JWK", {
       event: "web-push.config.invalid",
@@ -59,8 +59,8 @@ function vapidIdentity(env: Cloudflare.Env):
 }
 
 /** The key browsers subscribe against (`applicationServerKey`), or null when Web Push is off. */
-export function webPushPublicKey(env: Cloudflare.Env): string | null {
-  return vapidIdentity(env)?.publicKey ?? null;
+export async function webPushPublicKey(env: Cloudflare.Env): Promise<string | null> {
+  return (await vapidIdentity(env))?.publicKey ?? null;
 }
 
 /**
@@ -146,7 +146,7 @@ async function sendOne(
  */
 export async function deliverWebPush(
     env: Cloudflare.Env, store: WebPushStore, notification: UserNotification): Promise<void> {
-  let identity = vapidIdentity(env);
+  let identity = await vapidIdentity(env);
   let targets = Object.entries(store.get());
   if (!identity || targets.length === 0) return;
   let payload = declarativePayload(notification, env.PUBLIC_BASE_URL!);

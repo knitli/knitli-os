@@ -40,11 +40,19 @@ describe("web push crypto", () => {
         new TextEncoder().encode(`${head}.${claims}`))).toBe(true);
   });
 
-  it("derives the VAPID public key from a private JWK, and refuses anything else", () => {
-    expect(vapidPublicKey(jwk)).toBe(publicKey);
-    expect(() => vapidPublicKey({ kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y })).toThrow(/P-256 private/);
-    expect(() => vapidPublicKey({ ...jwk, crv: "P-384" })).toThrow(/P-256 private/);
-    expect(() => vapidPublicKey({ ...jwk, kty: "OKP" })).toThrow(/P-256 private/);
+  it("derives the VAPID public key from a private JWK, and refuses anything else", async () => {
+    expect(await vapidPublicKey(jwk)).toBe(publicKey);
+    let { d: _d, ...publicOnly } = jwk;
+    for (let bad of [publicOnly, { ...jwk, crv: "P-384" }, { ...jwk, kty: "OKP" }]) {
+      await expect(vapidPublicKey(bad)).rejects.toThrow(/Not a P-256 private JWK/);
+    }
+  });
+
+  it("refuses x, y or d that are not 32 bytes", async () => {
+    let one = b64(new Uint8Array([1]));
+    for (let field of ["x", "y", "d"] as const) {
+      await expect(vapidPublicKey({ ...jwk, [field]: one })).rejects.toThrow(/Not a P-256 private JWK/);
+    }
   });
 
   it("writes the aes128gcm header: salt, record size 4096, then the sender key id", async () => {

@@ -52,11 +52,11 @@ afterEach(() => {
 });
 
 describe("web push crypto", () => {
-  it("derives the public key from the secret, and is off without one", () => {
-    expect(webPushPublicKey(CONFIGURED)).toBe(publicKey);
-    expect(webPushPublicKey(env)).toBeNull();
-    expect(webPushPublicKey({ ...CONFIGURED, WEB_PUSH_VAPID_PRIVATE_KEY: "nonsense" })).toBeNull();
-    expect(webPushPublicKey({ ...CONFIGURED, PUBLIC_BASE_URL: undefined })).toBeNull();
+  it("derives the public key from the secret, and is off without one", async () => {
+    expect(await webPushPublicKey(CONFIGURED)).toBe(publicKey);
+    expect(await webPushPublicKey(env)).toBeNull();
+    expect(await webPushPublicKey({ ...CONFIGURED, WEB_PUSH_VAPID_PRIVATE_KEY: "nonsense" })).toBeNull();
+    expect(await webPushPublicKey({ ...CONFIGURED, PUBLIC_BASE_URL: undefined })).toBeNull();
   });
 
   it("builds a fixed-template payload that carries only the bounded chat title", () => {

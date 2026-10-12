@@ -14,7 +14,9 @@
 // path segments are percent-encoded and every query parameter goes through `URLSearchParams`.
 // Interpolating either raw would let a crafted id escape into the path or into OData syntax.
 
-import { ResponseTooLargeError, readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
+import {
+  ResponseTooLargeError, readBytesCapped, readTextCapped,
+} from "@gadgets/gatekeeper-kit/response-body";
 import {
   AccessTokenProvider, CredentialsRejectedReporter, claimsChallengeDetail, fetchWithAuthRetry,
 } from "./auth-retry";
@@ -126,8 +128,15 @@ type GraphRecipient = {
   emailAddress?: { address?: string; name?: string };
 };
 
+/**
+ * The apply-retry precondition for one message: where it is, whether it is read, and the
+ * provider revision. Kept out of the agent-facing info types: it is sync machinery, not data.
+ */
+export type MessageRevision = { folderId: string | undefined; read: boolean; changeKey: string };
+
 type GraphMessage = {
   id?: string;
+  changeKey?: string;
   subject?: string;
   from?: GraphRecipient;
   replyTo?: GraphRecipient[];
@@ -436,11 +445,17 @@ export class GraphMailApi {
     return await response.json<T>();
   }
 
-  /** Read a response body as bytes. Used only for `/$value`, which serves no JSON. */
-  async #fetchBytes(url: string): Promise<ArrayBuffer> {
+  /**
+   * Read a response body as bytes, cut off past `maxBytes`. Used only for `/$value`, which
+   * serves no JSON.
+   */
+  async #fetchBytes(url: string, maxBytes: number): Promise<ArrayBuffer> {
     let response = await this.#request(url, { headers: { Accept: "*/*" } });
     if (!response.ok) throw await this.#toError(response);
-    return await response.arrayBuffer();
+    // Streamed under the cap rather than buffered whole: attachment metadata can omit or
+    // understate the size, and a body over the cap must cost the cap, not the whole download.
+    // The helper builds an exact-size buffer, so no copy is needed.
+    return (await readBytesCapped(response, maxBytes)).buffer as ArrayBuffer;
   }
 
   async #send(url: string, init: RequestInit): Promise<void> {
@@ -611,6 +626,28 @@ export class GraphMailApi {
     return messageInfoFrom(message);
   }
 
+  /**
+   * The state an apply retry compares against: where the message is, whether it is read, and the
+   * provider revision, which changes on every write. A retry may only reapply when all three still
+   * match what the first attempt saw — otherwise the message changed after that attempt (possibly
+   * by the attempt itself, whose answer was lost, followed by the user) and replaying would undo
+   * newer edits. Separated from `getMessage` so the agent-facing info stays free of sync machinery.
+   */
+  async getMessageRevision(messageId: string): Promise<MessageRevision> {
+    let message = await this.#fetchJson<GraphMessage>(graphUrl(["me", "messages", messageId],
+        { $select: "id,parentFolderId,isRead,changeKey" }));
+    if (!message.changeKey) {
+      throw new Error(
+          `Microsoft Graph did not report a revision for message ${messageId}, so a retried ` +
+          "action cannot prove the message is unchanged. Reject it and submit it again.");
+    }
+    return {
+      folderId: message.parentFolderId,
+      read: message.isRead === true,
+      changeKey: message.changeKey,
+    };
+  }
+
   /** The message body as plain text (see the text body preference on reads). */
   async getMessageBody(messageId: string): Promise<string> {
     let response = await this.#request(
@@ -668,11 +705,8 @@ export class GraphMailApi {
    * Metadata is read first so a kind that has no bytes, or a file over the cap, costs one small
    * request instead of a download that is then thrown away. Graph's `size` counts the stored
    * (base64) form of a file attachment, so it slightly overstates the file — a file just under the
-   * cap can therefore be refused here. No compensation math: the post-download check below is the
-   * authoritative one, and refusing marginally early is the safe direction.
-   *
-   * The body is buffered rather than streamed: the size gate above has already bounded it, and
-   * Graph is a first-party origin whose declared size the callers are entitled to trust.
+   * cap can therefore be refused here. No compensation math: refusing marginally early is the safe
+   * direction, and the streaming cap below is authoritative for what actually arrives.
    */
   async getAttachmentBytes(messageId: string, attachmentId: string)
       : Promise<{ info: OutlookAttachmentInfo; content: ArrayBuffer }> {
@@ -699,13 +733,16 @@ export class GraphMailApi {
     // `$value` is written literally for the same reason the OData query options are: it is a
     // fixed segment from this file, not caller data, and percent-encoding it would ask Graph for a
     // child named "%24value". The id before it is still encoded by graphUrl().
-    let content = await this.#fetchBytes(
-        `${graphUrl(["me", "messages", messageId, "attachments", attachmentId])}/$value`);
-
-    if (content.byteLength > MAX_ATTACHMENT_BYTES) {
+    let content: ArrayBuffer;
+    try {
+      content = await this.#fetchBytes(
+          `${graphUrl(["me", "messages", messageId, "attachments", attachmentId])}/$value`,
+          MAX_ATTACHMENT_BYTES);
+    } catch (err) {
+      if (!(err instanceof ResponseTooLargeError)) throw err;
       throw new Error(
           `That attachment returned more than the ${MAX_ATTACHMENT_BYTES}-byte limit for reading ` +
-          "an attachment.");
+          "an attachment.", { cause: err });
     }
     return { info, content };
   }

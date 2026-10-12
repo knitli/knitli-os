@@ -600,6 +600,7 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.delete("idTokenClaims");
     this.ctx.storage.kv.delete("grantedScopes");
     this.ctx.storage.kv.delete("grantScopes");
+    this.ctx.storage.kv.delete("grantCompletedAt");
   }
 
   async setCallback(
@@ -821,6 +822,9 @@ export class UserAccount extends DurableObject<Env> {
 
       this.#storeGrant(grant, recordedScopes);
       this.ctx.storage.kv.put<string[]>("grantScopes", recordedScopes);
+      // When this flow completed, for the alarm below: a connect-timeout delivery already queued
+      // behind this operation must not wipe the grant it just stored.
+      this.ctx.storage.kv.put<number>("grantCompletedAt", Date.now());
       this.#bumpGrantEpoch();
       // These credentials are new, so any recorded permanent failure no longer applies.
       this.ctx.storage.kv.delete("mintFailure");
@@ -1134,6 +1138,12 @@ export class UserAccount extends DurableObject<Env> {
     // (used once to read the email for login). Serialized so the wipe cannot land in the middle of
     // a mint, leaving a freshly minted token behind on a deleted account.
     await this.#updateCredentials(async () => {
+      // A connect-timeout delivery already queued behind the completion takes this same lock, so
+      // serialization alone cannot save the grant it just stored: only wipe once the post-sign-in
+      // window has actually elapsed. The reschedule in completeOAuth arms the alarm that performs
+      // the real wipe; a missing stamp (abandoned, cleared, or pre-stamp grant) wipes as before.
+      let completedAt = this.ctx.storage.kv.get<number>("grantCompletedAt") ?? 0;
+      if (Date.now() - completedAt < AUTH_GRANT_LIFETIME_MS) return;
       if (!this.hasRefreshToken() || this.ctx.storage.kv.get<boolean>("authOnly")) {
         this.ctx.storage.deleteAll();
       }

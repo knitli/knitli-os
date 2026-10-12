@@ -99,11 +99,7 @@ export type GetItemsOptions = {
 // These are RPC stubs — all methods are async. Capabilities can be
 // passed across Worker boundaries and retain their access rights.
 
-/**
- * One SharePoint list.
- *
- * Reads return the list as it is now; creating an item is queued for a human to approve first.
- */
+/** One SharePoint list. Reads return the list as it is now. */
 export interface SharePointListSession {
   /** The list's columns: their internal names, types, choices and required flags. */
   getColumns(): Promise<ColumnDefinition[]>;
@@ -125,9 +121,7 @@ export interface SharePointListSession {
    * first: unknown columns, missing required columns, wrong value types, choices outside the
    * column's options, and person/lookup columns are all refused here.
    *
-   * Queued for approval: the item is not created until a human
-   * approves it, and it will not appear in later reads from this session before then. Returns as
-   * soon as the request is queued and reports nothing about the outcome, and no item id.
+   * The item will not appear in later reads from this session, and no item id is returned.
    */
   createItem(fields: Record<string, unknown>): Promise<void>;
 }

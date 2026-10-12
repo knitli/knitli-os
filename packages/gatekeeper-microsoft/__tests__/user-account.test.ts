@@ -917,6 +917,13 @@ describe("sign-in-only grants", () => {
     const alarmAt = context.storage.setAlarm.mock.calls.at(-1)![0] as number;
     expect(alarmAt - Date.now()).toBeLessThanOrEqual(2 * 60 * 1000);
 
+    // The wipe happens once the post-sign-in window has actually elapsed, not on a stale
+    // connect-timeout delivery racing the completion: an immediate alarm must leave the grant.
+    await account.alarm();
+    expect(context.storage.deleteAll).not.toHaveBeenCalled();
+    expect(context.storage.kv.get("accessToken")).not.toBeUndefined();
+
+    context.storage.kv.put("grantCompletedAt", Date.now() - 2 * 60 * 1000 - 1);
     await account.alarm();
 
     expect(context.storage.deleteAll).toHaveBeenCalled();

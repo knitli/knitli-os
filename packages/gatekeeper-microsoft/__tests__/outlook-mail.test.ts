@@ -13,6 +13,7 @@ type Call = { url: string; init: RequestInit };
 
 const MESSAGE = {
   id: "AAMkImmutable1",
+  changeKey: "CK1",
   subject: "Quarterly report",
   from: { emailAddress: { address: "bob@example.com", name: "Bob" } },
   toRecipients: [{ emailAddress: { address: "me@example.com" } }],
@@ -746,6 +747,103 @@ describe("approved actions", () => {
 
     expect(calls.some(call => call.url.endsWith("/move"))).toBe(false);
     expect(context.storage.kv.get(`pending:action:${approvals.actions[0].id}`)).toBeUndefined();
+  });
+
+  it("reapplies a move whose first attempt failed after recording", async () => {
+    // The first attempt recorded its reading then its write failed; the message still shows the
+    // recorded revision in the old folder, so the retry reissues the move.
+    let moves = 0;
+    stubFetch(call => {
+      if (call.url.endsWith("/move")) return ++moves === 1
+        ? jsonResponse({ error: { code: "ErrorInternalServerError", message: "boom" } }, 500)
+        : new Response(null, { status: 204 });
+      return defaultRoute(call);
+    });
+    const session = await startSession();
+    const message = await firstMessage(session);
+    await message.moveToFolder("folder-archive");
+
+    await expect(applyApprovedAction(approvals.actions[0].id)).rejects.toThrow("boom");
+    await applyApprovedAction(approvals.actions[0].id);
+
+    expect(moves).toBe(2);
+    expect(context.storage.kv.get(`pending:action:${approvals.actions[0].id}`)).toBeUndefined();
+  });
+
+  it("reports a replayed move done when the message left under the attempt's revision", async () => {
+    // The first attempt moved the message but its answer was lost; the revision it left with
+    // names the attempt, so the retry finishes without moving again.
+    let moves = 0;
+    stubFetch(call => {
+      const pathname = new URL(call.url).pathname;
+      if (/\/me\/messages\/[^/]+\/move$/.test(pathname)) return ++moves === 1
+        ? jsonResponse({ error: { code: "ErrorInternalServerError", message: "lost" } }, 500)
+        : new Response(null, { status: 204 });
+      if (/\/me\/messages\/[^/]+$/.test(pathname)) return jsonResponse(moves === 0
+        ? MESSAGE  // before any attempt: pre-move revision, old folder
+        : { ...MESSAGE, changeKey: "CK-moved", parentFolderId: "folder-archive" });
+      return defaultRoute(call);
+    });
+    const session = await startSession();
+    const message = await firstMessage(session);
+    await message.moveToFolder("folder-archive");
+
+    await expect(applyApprovedAction(approvals.actions[0].id)).rejects.toThrow("lost");
+    await applyApprovedAction(approvals.actions[0].id);
+
+    expect(moves).toBe(1);
+    expect(context.storage.kv.get(`pending:action:${approvals.actions[0].id}`)).toBeUndefined();
+  });
+
+  it("reports a replayed setRead done when the flag already matches the attempt", async () => {
+    // Same lost-answer shape for the flag: the retry sees the attempt's own state and stops.
+    let patches = 0;
+    stubFetch(call => {
+      const pathname = new URL(call.url).pathname;
+      if (/\/me\/messages\/[^/]+$/.test(pathname) && call.init.method === "PATCH") return ++patches === 1
+        ? jsonResponse({ error: { code: "ErrorInternalServerError", message: "lost" } }, 500)
+        : new Response(null, { status: 204 });
+      if (/\/me\/messages\/[^/]+$/.test(pathname)) return jsonResponse(patches === 0
+        ? MESSAGE  // unread, pre-attempt revision
+        : { ...MESSAGE, changeKey: "CK-read", isRead: true });
+      return defaultRoute(call);
+    });
+    const session = await startSession();
+    const message = await firstMessage(session);
+    await message.markRead();
+
+    await expect(applyApprovedAction(approvals.actions[0].id)).rejects.toThrow("lost");
+    await applyApprovedAction(approvals.actions[0].id);
+
+    expect(patches).toBe(1);
+    expect(context.storage.kv.get(`pending:action:${approvals.actions[0].id}`)).toBeUndefined();
+  });
+
+  it("rejects a retry when the message changed under a different hand", async () => {
+    // The message moved on to a revision no attempt recorded; reapplying would act on state
+    // the approval never saw, so the action is rejected for resubmission.
+    let moves = 0;
+    stubFetch(call => {
+      const pathname = new URL(call.url).pathname;
+      if (pathname.endsWith("/move")) return ++moves === 1
+        ? jsonResponse({ error: { code: "ErrorInternalServerError", message: "lost" } }, 500)
+        : new Response(null, { status: 204 });
+      if (/\/me\/messages\/[^/]+$/.test(pathname)) return jsonResponse(moves === 0
+        ? MESSAGE
+        : { ...MESSAGE, changeKey: "CK-stranger", parentFolderId: "folder-other" });
+      return defaultRoute(call);
+    });
+    const session = await startSession();
+    const message = await firstMessage(session);
+    await message.moveToFolder("folder-archive");
+
+    await expect(applyApprovedAction(approvals.actions[0].id)).rejects.toThrow("lost");
+    await expect(applyApprovedAction(approvals.actions[0].id)).rejects
+      .toThrow(/moved since this action's first attempt/);
+
+    expect(moves).toBe(1);
+    // Still pending: the approver rejects or resubmits from what they can now see.
+    expect(context.storage.kv.get(`pending:action:${approvals.actions[0].id}`)).toBeDefined();
   });
 
   it("re-reads a folder's counts instead of returning the snapshot it was listed with", async () => {

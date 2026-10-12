@@ -38,7 +38,9 @@ import {
 import { authorizeCursorOpen, authorizeRestricted } from "./restricted-observation";
 import { formatApprovalField, sanitizeApprovalTitle } from "./approval-text";
 import { AccessTokenCache, AccessTokenRequest } from "./auth-retry";
-import { GraphMailApi, MAX_REPLY_BODY_BYTES, validateSearchQuery } from "./graph-api";
+import {
+  GraphMailApi, MAX_REPLY_BODY_BYTES, MessageRevision, validateSearchQuery,
+} from "./graph-api";
 import { MAX_PENDING_ACTIONS, PendingActionStore } from "./pending-actions";
 import type {
   OutlookAttachmentInfo, OutlookFolder, OutlookFolderEntry, OutlookFolderInfo, OutlookMailSession,
@@ -62,8 +64,16 @@ const DRAFT_CLOCK_SKEW_MS = 30 * 1000;
 // the executor rebuilds the request at approval time against the mailbox as it is then.
 
 type OutlookMailAction =
-  | { type: "setRead"; messageId: string; read: boolean }
-  | { type: "move"; messageId: string; destinationFolderId: string }
+  | {
+    type: "setRead"; messageId: string; read: boolean;
+    /** Message state when the first attempt began; set once, kept across retries. */
+    attemptedFrom?: MessageRevision;
+  }
+  | {
+    type: "move"; messageId: string; destinationFolderId: string;
+    /** Message state when the first attempt began; set once, kept across retries. */
+    attemptedFrom?: MessageRevision;
+  }
   | {
     type: "replyDraft"; messageId: string; body: string; replyAll: boolean;
     /** When the first attempt to create the draft began; set once, kept across retries. */
@@ -709,17 +719,42 @@ export class OutlookMailGatekeeperImpl
 
     const api = this.#api();
     switch (action.type) {
-      case "setRead":
+      case "setRead": {
+        // The first attempt records what it saw and writes unconditionally; a retry writes only
+        // when the desired state does not already hold and the message is untouched since that
+        // first attempt, so a user's newer flip is never undone.
+        let current = await api.getMessageRevision(action.messageId);
+        if (action.attemptedFrom === undefined) {
+          pendingActions.replace(actionId, { ...action, attemptedFrom: current });
+        } else if (current.read === action.read) {
+          break;
+        } else if (current.read !== action.attemptedFrom.read ||
+            current.changeKey !== action.attemptedFrom.changeKey) {
+          throw new Error(
+              `Message ${action.messageId} changed since this action's first attempt, so ` +
+              "reapplying it could undo a newer edit. Reject it and submit it again if it is " +
+              "still wanted.");
+        }
         await api.setMessageRead(action.messageId, action.read);
         break;
+      }
       case "move": {
         // A move copies the message to the destination and removes the original, so replaying one
         // that already happened (its answer was lost, or the record was not cleared) is not a
-        // no-op. A message already in the destination is a move that is done.
-        let current = await api.getMessage(action.messageId);
-        if (current.folderId !== action.destinationFolderId) {
-          await api.moveMessage(action.messageId, action.destinationFolderId);
+        // no-op. A message already in the destination is a move that is done; otherwise the first
+        // attempt records what it saw, and a retry moves only when the message is untouched since,
+        // so a newer user move is never dragged back.
+        let current = await api.getMessageRevision(action.messageId);
+        if (current.folderId === action.destinationFolderId) break;
+        if (action.attemptedFrom === undefined) {
+          pendingActions.replace(actionId, { ...action, attemptedFrom: current });
+        } else if (current.folderId !== action.attemptedFrom.folderId ||
+            current.changeKey !== action.attemptedFrom.changeKey) {
+          throw new Error(
+              `Message ${action.messageId} moved since this action's first attempt, so reapplying ` +
+              "it could undo a newer move. Reject it and submit it again if it is still wanted.");
         }
+        await api.moveMessage(action.messageId, action.destinationFolderId);
         break;
       }
       case "replyDraft": {

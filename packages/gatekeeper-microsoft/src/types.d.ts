@@ -18,7 +18,7 @@ export type OutlookAddress = {
 export type OutlookMessageInfo = {
   /**
    * Stable message id. It is an immutable id: it keeps identifying the same message even after the
-   * message moves to another folder, so it stays valid across queued actions.
+   * message moves to another folder.
    */
   id: string;
   subject: string;
@@ -175,29 +175,15 @@ export interface OutlookMessage {
    */
   getAttachmentContent(attachmentId: string): Promise<ArrayBuffer>;
 
-  /**
-   * Mark this message as read.
-   *
-   * Queued for approval: nothing changes in the mailbox until a human (or an auto-approval policy)
-   * approves it. This message's `getMetadata()` and the `info` of later listings report it as read
-   * meanwhile. Returns as soon as the request is queued.
-   */
+  /** Mark this message as read. */
   markRead(): Promise<void>;
 
-  /**
-   * Mark this message as unread.
-   *
-   * Queued for approval, with the same semantics as `markRead()`.
-   */
+  /** Mark this message as unread. */
   markUnread(): Promise<void>;
 
   /**
-   * Move this message to the folder with the given id (see `listFolders()`).
-   *
-   * Queued for approval: the message stays where it is until the action is approved. Meanwhile this
-   * message's `getMetadata()` and the `info` of later listings report the new `folderId`, but folder
-   * listings still include it in the folder it is leaving. The message keeps the same id after a
-   * move.
+   * Move this message to the folder with the given id (see `listFolders()`). The message keeps
+   * the same id after a move.
    */
   moveToFolder(folderId: string): Promise<void>;
 
@@ -205,16 +191,14 @@ export interface OutlookMessage {
    * Create a draft reply to the sender (to `replyTo` when the message names one), with `body` above
    * the quoted original. `body` must not be empty.
    *
-   * Queued for approval, and nothing is ever sent: once approved, the draft appears in the
-   * mailbox's Drafts folder for the user to review and send. The draft is not readable from this
-   * session and no draft id is returned.
+   * Nothing is ever sent: the draft appears in the mailbox's Drafts folder for the user to review
+   * and send. The draft is not readable from this session and no draft id is returned.
    */
   createReplyDraft(body: string): Promise<void>;
 
   /**
-   * Create a draft reply to the sender and every other recipient.
-   *
-   * Queued for approval, with the same semantics as `createReplyDraft()`.
+   * Create a draft reply to the sender and every other recipient, with the same semantics as
+   * `createReplyDraft()`: nothing is sent, and the draft is not readable from this session.
    */
   createReplyAllDraft(body: string): Promise<void>;
 }

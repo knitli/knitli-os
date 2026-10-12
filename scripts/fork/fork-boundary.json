@@ -489,6 +489,22 @@
       "reason": "Gatekeeper-facing re-export of the fork-owned alarm guard (observability/src/fork/alarm-guard.ts); exact path because gatekeeper-kit has no src/fork tree."
     },
     {
+      "path": "packages/gatekeeper-kit/src/fork/web-push.ts",
+      "reason": "Web Push crypto (RFC 8291/8292) and the push-endpoint allowlist, extracted from workshop-backend/src/fork/web-push.ts for reuse; exact path because gatekeeper-kit has no src/fork tree."
+    },
+    {
+      "path": "packages/gatekeeper-kit/src/fork/email-checks.ts",
+      "reason": "Address and header checks extracted from gatekeeper-email/src/fork/send.ts for reuse; exact path because gatekeeper-kit has no src/fork tree."
+    },
+    {
+      "path": "packages/gatekeeper-kit/__tests__/knitli-web-push.test.ts",
+      "reason": "Tests for the extracted Web Push crypto (RFC 8291 vector, VAPID, endpoint allowlist); exact path because this package's vitest include is non-recursive."
+    },
+    {
+      "path": "packages/gatekeeper-kit/__tests__/knitli-email-checks.test.ts",
+      "reason": "Tests for the extracted email address and header checks; exact path because this package's vitest include is non-recursive."
+    },
+    {
       "path": "packages/observability/__tests__/knitli-alarm-guard.test.ts",
       "reason": "Unit tests for the fork-owned alarm guard; exact path because this package's vitest include is non-recursive."
     },

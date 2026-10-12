@@ -1189,6 +1189,9 @@ importers:
       '@gadgets/error-reporting':
         specifier: workspace:*
         version: link:../error-reporting
+      '@gadgets/gatekeeper-kit':
+        specifier: workspace:*
+        version: link:../gatekeeper-kit
       '@gadgets/mcp-shared':
         specifier: workspace:*
         version: link:../mcp-shared

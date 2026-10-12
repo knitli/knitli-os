@@ -67,7 +67,7 @@ export function checkPushKeys(keys: WebPushKeys): void {
  * The base64url public key (`applicationServerKey`) for an ECDSA P-256 private JWK. The whole key
  * is validated, not just its fields: x, y and d must each be 32 bytes, and WebCrypto must accept
  * them as one key pair, which refuses a point off the curve or a `d` that does not belong to
- * x/y. The result is derived from the imported key, never copied from the JWK. Rejects with
+ * x/y. The result is 0x04 || x || y of the validated key. Rejects with
  * "Not a P-256 private JWK." on any of it.
  */
 export async function vapidPublicKey(jwk: JsonWebKey): Promise<string> {
@@ -75,11 +75,10 @@ export async function vapidPublicKey(jwk: JsonWebKey): Promise<string> {
   if (jwk.kty !== "EC" || jwk.crv !== "P-256" || !jwk.x || !jwk.y || !jwk.d) throw invalid;
   try {
     for (let part of [jwk.x, jwk.y, jwk.d]) if (base64UrlDecode(part).length !== 32) throw invalid;
-    // Extractable only so the public half can be read back from the imported key.
-    let key = await crypto.subtle.importKey(
-        "jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, true, ["sign"]);
-    let { x, y } = await crypto.subtle.exportKey("jwk", key) as JsonWebKey;
-    return base64UrlEncode(new Uint8Array([4, ...base64UrlDecode(x!), ...base64UrlDecode(y!)]));
+    // Non-extractable, so a JWK carrying `ext: false` imports too. The import is only the check:
+    // WebCrypto refuses a point off the curve or a `d` that does not belong to x/y.
+    await crypto.subtle.importKey("jwk", jwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+    return base64UrlEncode(new Uint8Array([4, ...base64UrlDecode(jwk.x), ...base64UrlDecode(jwk.y)]));
   } catch (cause) {
     throw new Error(invalid.message, { cause });
   }

@@ -41,12 +41,19 @@ describe("VAPID key validation under workerd", () => {
   const generate = async () => await crypto.subtle.exportKey("jwk", (await crypto.subtle.generateKey(
       { name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]) as CryptoKeyPair).privateKey) as JsonWebKey;
 
-  it("refuses a valid public x/y paired with another key's d, and derives from the imported key", async () => {
+  it("refuses a valid public x/y paired with another key's d", async () => {
     let [a, b] = [await generate(), await generate()];
     await expect(vapidPublicKey({ ...a, d: b.d })).rejects.toThrow(/Not a P-256 private JWK/);
-    let point = unb64(await vapidPublicKey(a));
-    expect(b64(point.subarray(1, 33))).toBe(a.x);
-    expect(b64(point.subarray(33))).toBe(a.y);
+  });
+
+  it("derives 0x04 || x || y, and accepts ext: false", async () => {
+    let a = await generate();
+    for (let key of [a, { ...a, ext: false }]) {
+      let point = unb64(await vapidPublicKey(key));
+      expect(point[0]).toBe(4);
+      expect(b64(point.subarray(1, 33))).toBe(a.x);
+      expect(b64(point.subarray(33))).toBe(a.y);
+    }
   });
 
   it("refuses a point that is not on the curve", async () => {

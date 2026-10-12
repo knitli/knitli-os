@@ -48,6 +48,10 @@ describe("web push crypto", () => {
     }
   });
 
+  it("accepts a valid key marked ext: false, and derives the same public key", async () => {
+    expect(await vapidPublicKey({ ...jwk, ext: false })).toBe(await vapidPublicKey(jwk));
+  });
+
   it("refuses x, y or d that are not 32 bytes", async () => {
     let one = b64(new Uint8Array([1]));
     for (let field of ["x", "y", "d"] as const) {

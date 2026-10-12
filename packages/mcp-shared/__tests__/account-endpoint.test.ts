@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
+import { peekStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
 
 import { McpAuthRequiredError } from "../src/client.js";
 import {
@@ -537,13 +537,13 @@ describe("connect initiation nonce", () => {
     await expect(account.commitReconnect("0".repeat(64))).rejects.toThrow(/No reconnect is awaiting/);
     expect(context.storage.kv.get<{ access_token: string }>("tokens")?.access_token)
       .toBe("old-token");
-    expect(context.storage.kv.get("stagedCredentials")).toBeDefined();
+    expect(peekStagedCredentials(context.storage.kv, Date.now())?.stageId).toBe(stageId);
 
     await account.commitReconnect(stageId);
     expect(context.storage.kv.get<{ access_token: string }>("tokens")?.access_token)
       .toBe("access-token");
     expect(context.storage.kv.get("mcpSessionId")).toBe("session-for-access-token");
-    expect(context.storage.kv.get("stagedCredentials")).toBeUndefined();
+    expect(peekStagedCredentials(context.storage.kv, Date.now())).toBeNull();
     await expect(account.commitReconnect(stageId)).rejects.toThrow(/No reconnect is awaiting/);
   });
 
@@ -578,7 +578,7 @@ describe("connect initiation nonce", () => {
     expect(context.storage.kv.get("reconnectTokens")).toBeUndefined();
     expect(context.storage.kv.get("reconnectOauthClient")).toBeUndefined();
     expect(context.storage.kv.get("reconnectOauthDiscovery")).toBeUndefined();
-    expect(context.storage.kv.get("stagedCredentials")).toBeUndefined();
+    expect(peekStagedCredentials(context.storage.kv, Date.now())).toBeNull();
     expect(context.storage.kv.get<{ access_token: string }>("tokens")?.access_token)
       .toBe("old-token");
     expect(revoked).toEqual([
@@ -663,7 +663,7 @@ describe("connect initiation nonce", () => {
     expect(outcome.kind).toBe("redirect");
     expect(tokenRequests.filter(body => body.includes("refresh_token"))).toEqual([]);
     expect(context.storage.kv.get("tokens")).toEqual(live);
-    expect(context.storage.kv.get("stagedCredentials")).toBeUndefined();
+    expect(peekStagedCredentials(context.storage.kv, Date.now())).toBeNull();
   });
 
   it("keeps a reconnect's client, discovery and server record off the live keys until commit", async () => {

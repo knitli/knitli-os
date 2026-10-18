@@ -1678,6 +1678,9 @@ it.each<[string, (github: FakeGitHub) => () => number, number]>([
   expect(github.requests.filter(request => request === `POST ${API}/hooks`)).toHaveLength(added);
   expect(github.webhooks.size).toBe(0);
   expect(github.requests).toContain("DELETE /applications/test-client/token");
+  // Nothing of the refused hook is left on the revoked driver: no registration, no capabilities.
+  expect(await runInDurableObject(driver(account), (_instance, state) =>
+    [...state.storage.kv.list()].map(([key]) => key).filter(key => /^(reg|caps):/.test(key)))).toEqual([]);
 });
 
 it.each<[string, (account: string, triage: ReturnType<typeof binding>) => Promise<unknown>]>([

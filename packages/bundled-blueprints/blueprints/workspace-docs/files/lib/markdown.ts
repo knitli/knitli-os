@@ -41,7 +41,8 @@ export function htmlToMarkdown(html: string): string {
   const tokens = String(html).match(
     /<!--[\s\S]*?-->|<![^>]*>|<\/?[a-z](?:[^>"']|"[^"]*"|'[^']*')*>|<\/?[a-z][^>]*>|[^<]+|</gi) || [];
   // Each open list: the number its next item takes, which way it counts, and the last it wrote.
-  const lists: { type: "ul" | "ol"; next: number; step: 1 | -1; last?: number }[] = [];
+  // `html` marks a list whose numbers Markdown cannot write (below zero), kept as HTML tags instead.
+  const lists: { type: "ul" | "ol"; next: number; step: 1 | -1; last?: number; html?: true }[] = [];
   // Where the last list ended: a list opening with nothing written since would run on from it.
   let listEnd = -1;
   const openList = (list: (typeof lists)[number]) => {
@@ -230,8 +231,13 @@ export function htmlToMarkdown(html: string): string {
           inline += "](" + (destination ?? "") + ")";
           break;
         }
-        case "li": finishOpenItem(); break;
-        case "ul": case "ol": finishOpenItem(); lists.pop(); listEnd = markdown.length; break;
+        case "li": if (lists.at(-1)?.html) markdown += "\n\n</li>\n\n"; else finishOpenItem(); break;
+        case "ul": case "ol":
+          if (lists.at(-1)?.html) markdown += "\n\n</ol>\n\n";
+          else finishOpenItem();
+          lists.pop();
+          listEnd = markdown.length;
+          break;
         case "td": case "th": if (cellOpen) markdown += "\t"; cellOpen = false; break;
         case "tr": markdown += "\n"; cellOpen = false; break;
       }
@@ -261,15 +267,31 @@ export function htmlToMarkdown(html: string): string {
       case "ul": openList({ type: "ul", next: 1, step: 1 }); break;
       case "ol": {
         const reversed = readHtmlAttribute(attributes, "reversed") !== undefined;
-        const start = listNumber(readHtmlAttribute(attributes, "start"));
+        const values = itemValues(tokens, index);
+        const step = reversed ? -1 : 1;
         // A reversed list counts down from its item count unless it says where to start.
-        openList({ type: "ol", step: reversed ? -1 : 1,
-          next: start ?? (reversed ? countItems(tokens, index) : 1) });
+        const next = integer(readHtmlAttribute(attributes, "start")) ?? (reversed ? values.length : 1);
+        let number = next - step;
+        const numbers = values.map(value => number = integer(value) ?? number + step);
+        if (numbers.every(n => listNumber(String(n)) !== undefined)) {
+          openList({ type: "ol", step, next });
+          break;
+        }
+        // A number Markdown cannot write: the list stays HTML, its tags (rebuilt from the numbers
+        // alone) between blank lines, so CommonMark passes them through and reads the items within.
+        openList({ type: "ol", step, next, html: true });
+        markdown += `\n\n<ol start="${next}"${reversed ? " reversed" : ""}>\n\n`;
         break;
       }
       case "li": {
-        finishOpenItem();
         const list = lists.at(-1) || { type: "ul", next: 1, step: 1 };
+        if (list.html) {
+          const number = integer(readHtmlAttribute(attributes, "value")) ?? list.next;
+          markdown += `\n\n<li value="${number}">\n\n`;
+          list.next = number + list.step;
+          break;
+        }
+        finishOpenItem();
         // An item's own `value` renumbers it, and the items after it count on from there.
         const number = (list.type === "ol" ? listNumber(readHtmlAttribute(attributes, "value")) : undefined)
           ?? list.next;
@@ -451,19 +473,25 @@ function listNumber(value: string | undefined): number | undefined {
   return number >= 0 && number <= 999_999_999 ? number : undefined;
 }
 
-/** How many items the list opened at `tokens[open]` holds, not counting those of nested lists. */
-function countItems(tokens: string[], open: number): number {
+/** An integer attribute value as HTML reads one, or undefined. */
+function integer(value: string | undefined): number | undefined {
+  const number = Number.parseInt(value ?? "", 10);
+  return Number.isSafeInteger(number) ? number : undefined;
+}
+
+/** The `value` of each item of the list opened at `tokens[open]`, not those of nested lists. */
+function itemValues(tokens: string[], open: number): (string | undefined)[] {
   let depth = 0;
-  let items = 0;
+  const values: (string | undefined)[] = [];
   for (const token of tokens.slice(open + 1)) {
-    const tag = /^<\s*(\/?)\s*(ol|ul|li)\b/i.exec(token);
+    const tag = /^<\s*(\/?)\s*(ol|ul|li)\b([\s\S]*)>$/i.exec(token);
     if (!tag) continue;
     const list = tag[2].toLowerCase() !== "li";
     if (list && tag[1]) { if (depth-- === 0) break; }
     else if (list) depth++;
-    else if (!tag[1] && depth === 0) items++;
+    else if (!tag[1] && depth === 0) values.push(readHtmlAttribute(tag[3], "value"));
   }
-  return items;
+  return values;
 }
 
 /**
@@ -528,7 +556,8 @@ const WINDOWS_1252 = [
 
 function decodeHtml(value: string): string {
   // NUL marks a fence placeholder in the output, so a raw one reads as a browser shows it.
-  return String(value).replace(/\0/g, "\ufffd").replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (_: string, entity: string) => {
+  return String(value).replace(/\0/g, "\ufffd").replace(/&(?:(#x[0-9a-f]+|#\d+);?|(amp|lt|gt|quot|apos|nbsp);)/gi, (_: string, numeric?: string, named?: string) => {
+    const entity = (numeric ?? named)!;
     const lower = entity.toLowerCase();
     if (lower.startsWith("#")) {
       const code = lower.startsWith("#x")

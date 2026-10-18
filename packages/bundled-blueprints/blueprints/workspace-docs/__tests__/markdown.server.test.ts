@@ -148,8 +148,9 @@ describe("htmlToMarkdown", () => {
         "<blockquote>\n<pre><code>a  \n\n\n\tb\u00a0\n</code></pre>\n</blockquote>\n");
   });
 
-  it("numbers an ordered list from 1 when its start is past CommonMark's nine digits", () => {
-    expect(render(htmlToMarkdown('<ol start="1000000000000"><li>x</li></ol>'))).toBe("<ol>\n<li>x</li>\n</ol>\n");
+  it("keeps an ordered list whose start is past CommonMark's nine digits as HTML list tags", () => {
+    expect(render(htmlToMarkdown('<ol start="1000000000000"><li>x</li></ol>')))
+      .toBe('<ol start="1000000000000">\n<li value="1000000000000">\n<p>x</p>\n</li>\n</ol>\n');
   });
 
   it("keeps a ] inside a link label or alt text", () => {
@@ -209,6 +210,12 @@ describe("htmlToMarkdown", () => {
     expect(htmlToMarkdown("<table><tr><td>a<td>b</tr></table>")).toBe("a\tb\n");
     expect(render(htmlToMarkdown("<p>&#128;&#x9F;&#129; a<code></code>b</p>")))
       .toBe("<p>\u20ac\u0178\u0081 ab</p>\n");
+  });
+
+  it("keeps numbers below zero as HTML list tags, and decodes semicolonless numeric references", () => {
+    expect(render(htmlToMarkdown('<ol start="-2"><li>a</li><li onclick="x()">b</li></ol><p>&#169 test &#xa9x</p>')))
+      .toBe('<ol start="-2">\n<li value="-2">\n<p>a</p>\n</li>\n<li value="-1">\n<p>b</p>\n</li>\n</ol>\n' +
+        "<p>\u00a9 test \u00a9x</p>\n");
   });
 
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {

@@ -107,6 +107,12 @@ describe('completeUrl', () => {
     expect(completeUrl('jira.cfdata.org', '/browse/*')).toBe('jira.cfdata.org/browse/')
   })
 
+  it('completes a link with only a fragment to the query, in front of the fragment', () => {
+    const link = 'https://acme.app.netsuite.com/app/common/entity/custjob.nl#section'
+    expect(classifyMatch(link, NETSUITE_CUSTOMER)).toEqual({ type: 'prefix', suffix: '?id=' })
+    expect(completeUrl(link, '?id=')).toBe('https://acme.app.netsuite.com/app/common/entity/custjob.nl?id=#section')
+  })
+
   it("keeps the link's own query when completing its path", () => {
     const link = 'https://acme.app.netsuite.com/app?id=42'
     const match = classifyMatch(link, NETSUITE_CUSTOMER)

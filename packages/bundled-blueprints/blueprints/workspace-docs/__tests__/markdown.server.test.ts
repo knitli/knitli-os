@@ -152,6 +152,11 @@ describe("htmlToMarkdown", () => {
     expect(render(htmlToMarkdown('<ol start="1000000000000"><li>x</li></ol>'))).toBe("<ol>\n<li>x</li>\n</ol>\n");
   });
 
+  it("keeps a ] inside a link label or alt text", () => {
+    expect(render(htmlToMarkdown('<p><a href="x">a]b</a> <img src="i" alt="c]d"></p>')))
+      .toBe('<p><a href="x">a]b</a> <img src="i" alt="c]d" /></p>\n');
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

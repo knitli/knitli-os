@@ -100,8 +100,9 @@ export function classifyMatch(search: string, pattern: string): MatchClassificat
   }
 
   const [path, tail] = splitAtQuery(typed.replace(/^https?:\/\//i, ''))
-  // A link's own query stays as it is, so only a link without one completes to the pattern's.
-  const query = tail ? '' : required.query
+  // A link's own query stays as it is, so only a link without one completes to the pattern's (in
+  // front of any fragment, where completeUrl puts it).
+  const query = tail.startsWith('?') ? '' : required.query
   // A host matches in any case, as URLPattern lowercases the pattern's; a path only in its own.
   const [host, ...rest] = path.split('/')
   const segments = [host.toLowerCase(), ...rest]

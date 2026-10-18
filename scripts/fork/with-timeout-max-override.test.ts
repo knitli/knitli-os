@@ -93,11 +93,6 @@ describe("TESTS_WITH_TIMEOUT_MAX_SECONDS", () => {
     assert.equal(code, 0);
   });
 
-  it("accepts values past one day (upstream has no ceiling)", async () => {
-    const { code } = await run(0.3, "", { [VAR]: "86401" });
-    assert.equal(code, 0);
-  });
-
   // Each of these must stop before the command starts, with a message naming the variable: an
   // override that failed quietly would leave the run on the 600s it was meant to get past, and the
   // first sign would be a kill.
@@ -106,6 +101,8 @@ describe("TESTS_WITH_TIMEOUT_MAX_SECONDS", () => {
     ["0", "is zero"],
     ["-5", "is negative"],
     ["Infinity", "is not finite"],
+    ["86401", "is past the one-day ceiling"],
+    ["2592000", "would overflow the timer"],
   ] as const) {
     // POSIX-only: the process-group probe needs negative-pid signals, which Windows does not have.
     it(`rejects ${JSON.stringify(value)}, which ${reason}`, {

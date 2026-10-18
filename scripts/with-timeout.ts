@@ -85,9 +85,13 @@ function parseArgs(args: string[]): Options {
   return { idleMs, maxMs, argv };
 }
 
+/** One day: a ceiling well under the 2^31-1 ms past which `setTimeout` fires almost at once. */
+const MAX_SECONDS = 86_400;
+
 function parseSeconds(flag: string, value: string | undefined): number {
   const seconds = Number(value);
   if (!Number.isFinite(seconds) || seconds <= 0) fail(`${flag} needs a positive number of seconds`);
+  if (seconds > MAX_SECONDS) fail(`${flag} must be at most ${MAX_SECONDS} seconds (one day)`);
   return seconds * 1000;
 }
 

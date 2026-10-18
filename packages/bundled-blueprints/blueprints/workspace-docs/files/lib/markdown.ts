@@ -126,6 +126,7 @@ export function htmlToMarkdown(html: string): string {
     breaks = 0;
   };
 
+  let cellOpen = false;
   // The open element whose content the page never shows (script, style, template), and how deep.
   let hidden: { tag: string; depth: number } | undefined;
 
@@ -202,7 +203,8 @@ export function htmlToMarkdown(html: string): string {
         }
         case "code":
           if (inPre) break;
-          inline += hasForeignReference(codeHtml)
+          // An empty element shows nothing, and an empty span would show its backticks.
+          if (codeText) inline += hasForeignReference(codeHtml)
             ? "<code>" + textMarkdown(codeHtml) + "</code>" : codeSpan(codeText);
           codeText = "";
           codeHtml = "";
@@ -230,8 +232,8 @@ export function htmlToMarkdown(html: string): string {
         }
         case "li": finishOpenItem(); break;
         case "ul": case "ol": finishOpenItem(); lists.pop(); listEnd = markdown.length; break;
-        case "td": case "th": markdown += "\t"; break;
-        case "tr": markdown += "\n"; break;
+        case "td": case "th": if (cellOpen) markdown += "\t"; cellOpen = false; break;
+        case "tr": markdown += "\n"; cellOpen = false; break;
       }
       continue;
     }
@@ -253,6 +255,9 @@ export function htmlToMarkdown(html: string): string {
       case "pre": preText = ""; preHtml = ""; inPre = true; break;
       case "blockquote": markdown += "\n\n"; blockquotes.push(markdown.length); break;
       case "hr": markdown += "\n\n---\n\n"; break;
+      // HTML lets `</td>` go unwritten before the next cell, which closes it then.
+      case "td": case "th": if (cellOpen) markdown += "\t"; cellOpen = true; break;
+      case "tr": cellOpen = false; break;
       case "ul": openList({ type: "ul", next: 1, step: 1 }); break;
       case "ol": {
         const reversed = readHtmlAttribute(attributes, "reversed") !== undefined;
@@ -514,6 +519,13 @@ function withForeignReferences(html: string, write: (decoded: string) => string)
 const NAMED_ENTITIES: Record<string, string> =
   { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: "\u00a0" };
 
+/** The characters HTML reads numeric references 0x80 to 0x9F as; 0 where it keeps the code. */
+const WINDOWS_1252 = [
+  0x20ac, 0, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0,
+  0x017d, 0, 0, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x02dc, 0x2122, 0x0161,
+  0x203a, 0x0153, 0, 0x017e, 0x0178,
+];
+
 function decodeHtml(value: string): string {
   // NUL marks a fence placeholder in the output, so a raw one reads as a browser shows it.
   return String(value).replace(/\0/g, "\ufffd").replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (_: string, entity: string) => {
@@ -521,9 +533,10 @@ function decodeHtml(value: string): string {
     if (lower.startsWith("#")) {
       const code = lower.startsWith("#x")
         ? Number.parseInt(lower.slice(2), 16) : Number.parseInt(lower.slice(1), 10);
-      // As a browser does: NUL, a surrogate or past Unicode reads as the replacement character.
+      // As a browser does: NUL, a surrogate or past Unicode reads as the replacement character,
+      // and the C1 controls Windows-1252 used for printable characters read as those.
       const valid = code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff);
-      return String.fromCodePoint(valid ? code : 0xfffd);
+      return String.fromCodePoint(valid ? WINDOWS_1252[code - 0x80] || code : 0xfffd);
     }
     return NAMED_ENTITIES[lower];
   });

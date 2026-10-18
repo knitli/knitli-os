@@ -96,7 +96,10 @@ export default function SidebarGadgetRow({
             <span className="min-w-0 flex-1 truncate">{gadget.title || 'Untitled workspace'}</span>
           )}
           {muteDescription && (
-            <BellSlash size={12} alt={muteDescription} className="shrink-0 text-kumo-inactive" />
+            <>
+              <BellSlash size={12} aria-hidden className="shrink-0 text-kumo-inactive" />
+              <span className="sr-only">{muteDescription}</span>
+            </>
           )}
 
           {/* Inside the row's <Link>: stopPropagation blocks the Link's SPA handler, so preventDefault

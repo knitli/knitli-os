@@ -116,7 +116,10 @@ function AppRow({
             </h3>
           )}
           {muteDescription && (
-            <BellSlash size={12} alt={muteDescription} className="text-kumo-inactive flex-shrink-0" />
+            <>
+              <BellSlash size={12} aria-hidden className="text-kumo-inactive flex-shrink-0" />
+              <span className="sr-only">{muteDescription}</span>
+            </>
           )}
         </div>
         {gadget.owner && (

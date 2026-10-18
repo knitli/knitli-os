@@ -205,6 +205,12 @@ describe("htmlToMarkdown", () => {
         '<p>\u00a9 test \u00acit &amp; <a href="?a=1&amp;copy=2&amp;">x</a></p>\n');
   });
 
+  it("separates cells whose end tags were left out, maps C1 references, and drops empty code", () => {
+    expect(htmlToMarkdown("<table><tr><td>a<td>b</tr></table>")).toBe("a\tb\n");
+    expect(render(htmlToMarkdown("<p>&#128;&#x9F;&#129; a<code></code>b</p>")))
+      .toBe("<p>\u20ac\u0178\u0081 ab</p>\n");
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

@@ -30,6 +30,7 @@ import {
   GitHubApiError, withAccountApi,
   type GitHubApi, type GitHubRepoWebhookResponse, type GitHubWebhookDeliveryResponse, type PinnedRepo,
 } from "./github-api";
+import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { getBasePath, webhookOrigin, type Env } from "./github-env";
 import { parseWebhookEvent, type GitHubWebhookEvent, type WebhookPayload } from "./github-webhook-events";
 import { obsContext } from "./observability";
@@ -331,6 +332,7 @@ export class GitHubHookDriver extends DurableObject<Env> {
    * - delivering each queued event whose (re)try time has come, and forgetting finished ones.
    */
   async alarm(): Promise<void> {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "github.hooks")) return;
     if ((this.ctx.storage.kv.get<number>("checkAt") ?? Infinity) <= Date.now()) await this.#checkWebhooks();
     await this.#queue.run(Date.now(), (hookKey, event) => this.#deliver(hookKey, event));
     await this.#reschedule();

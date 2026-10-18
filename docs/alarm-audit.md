@@ -76,6 +76,8 @@ not connected. A completed connect or `revoke()` deletes it. When it fires the h
 | `gatekeeper-scheduler` `ScheduleDriver` | recovery alarm before each pass, then the earliest schedule time; `now` while a revoked account still has storage | a schedule whose firing fails permanently re-runs forever | `guardedAlarmFor` key `scheduler` | GUARDED. The guard's counter key is ignored when revocation cleanup checks for remaining data. A large revoked account's cleanup is one pass per alarm, well inside the cap. |
 | `gatekeeper-google` `ChatHookDriver` (`chat-hooks.ts`) | `#reschedule` to the earliest of queue retry, subscription renewal or expiry | failures are caught per message and renewal and write a later time first | `guardedAlarmFor` key `google.chat-hooks` | GUARDED |
 | `gatekeeper-google` `GmailHookDriver` (`gmail-hooks.ts`) | `#reschedule`; `syncAt` and `watch.renewAt` default to `now` when unset | a sync or watch step that throws leaves them at `now` | `guardedAlarmFor` key `google.gmail-hooks` | GUARDED |
+| `gatekeeper-github` `GitHubHookDriver` (`github-hooks.ts`) | `#reschedule` to the earliest webhook check or queued delivery retry | a failing check or delivery re-arms for its next retry | kill switch (`github.hooks`) | SAFE — the kill switch stops the work; retries remain bounded by the queue's own backoff. |
+| `gatekeeper-x` `UserAccount` (`x.ts`) | one alarm at the connect timeout from `setCallback()` | none; deletes the account if the flow never completed | kill switch (`x.account-timeout`) | SAFE |
 
 ## Flood threshold
 
@@ -103,7 +105,7 @@ per-instance state, set where the deploy service sets other instance vars, and m
 deliberately does not template those. To halt alarms an operator must set it on every Worker that
 defines an alarm: `workshop-backend`, `gatekeeper-scheduler`, `gatekeeper-google`, and the
 cloudflare, confluence, email, github, gitlab, homeassistant, linear, notion, slack, spotify,
-supabase, zoominfo, mcp and mcp-portal gatekeepers. A Worker without the var keeps running its
+supabase, x, zoominfo, mcp and mcp-portal gatekeepers. A Worker without the var keeps running its
 alarms. Whether the deploy service can set an arbitrary var on every Worker of an instance is
 outside this repository; confirm that before relying on the switch. Locally, set it in the Worker's
 `vars` in a dev config. Clearing the var and redeploying resumes everything within the hour (see

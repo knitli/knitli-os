@@ -37,6 +37,7 @@ import {
   type CredentialsWithIdentity,
   type RejectionVerdict,
 } from "@gadgets/gatekeeper-kit/credentials";
+import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { notifyCredentialsExpiredOnce } from "@gadgets/gatekeeper-kit/credential-expiry";
 import { commitStagedCredentials, discardStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
 import { probeAccess } from "@gadgets/gatekeeper-kit/http-errors";
@@ -554,6 +555,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "x.account-timeout")) return;
     // Drop the account if the connect flow never completed.
     if (!this.#creds.stored()) await this.ctx.storage.deleteAll();
   }

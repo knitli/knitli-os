@@ -135,6 +135,23 @@ describe("htmlToMarkdown", () => {
       .toBe('<p><a href="new">x</a> <img src="right.png" alt="y" /> \uFFFD\uFFFD\uFFFD</p>\n');
   });
 
+  it("keeps no-break spaces, alt text, and a ! before a link as they were", () => {
+    expect(render(htmlToMarkdown(
+      '<p>a&nbsp;&nbsp;b Wow!<a href="https://e.com/?a=1&amp;copy;=2">x</a> <img src="i.png" alt="*lit* &amp;copy;"></p>')))
+      .toBe('<p>a\u00a0\u00a0b Wow!<a href="https://e.com/?a=1&amp;copy;=2">x</a> <img src="i.png" alt="*lit* &amp;copy;" /></p>\n');
+  });
+
+  it("keeps code blocks verbatim inside list items and quotes", () => {
+    const code = "a  \n\n\n\tb&nbsp;";
+    expect(render(htmlToMarkdown(`<ul><li>item<pre>${code}</pre></li></ul><blockquote><pre>${code}</pre></blockquote>`)))
+      .toBe("<ul>\n<li>\n<p>item</p>\n<pre><code>a  \n\n\n\tb\u00a0\n</code></pre>\n</li>\n</ul>\n" +
+        "<blockquote>\n<pre><code>a  \n\n\n\tb\u00a0\n</code></pre>\n</blockquote>\n");
+  });
+
+  it("numbers an ordered list from 1 when its start is past CommonMark's nine digits", () => {
+    expect(render(htmlToMarkdown('<ol start="1000000000000"><li>x</li></ol>'))).toBe("<ol>\n<li>x</li>\n</ol>\n");
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

@@ -41,6 +41,9 @@ export function htmlToMarkdown(html: string): string {
   const items: { marker: string; start: number }[] = [];
   const links: string[] = [];
   const blockquotes: number[] = [];
+  // Fenced code blocks, each held out of the Markdown as a placeholder line until the end, so no
+  // trimming, blank-line collapsing or indenting of the text around it reaches its content.
+  const fences: string[] = [];
   // What each open formatting element says about emphasis, and the markers open in the output,
   // outermost first. Markers follow the formatting rather than the elements: they open at the
   // first content that has it and close at the next content or block that does not, before the
@@ -95,16 +98,17 @@ export function htmlToMarkdown(html: string): string {
     if (!token.startsWith("<")) {
       const text = decodeHtml(token);
       if (inPre) preText += text;
-      else if (inCode) codeText += text.replace(/\s+/g, " ");
+      else if (inCode) codeText += text.replace(/[ \t\n\r\f]+/g, " ");
       else {
-        const words = text.replace(/\s+/g, " ").replace(/([\\`*_~[\]<&])/g, "\\$1");
+        // Only ASCII whitespace collapses: a no-break space is content, as in the page.
+        const words = escapeText(text.replace(/[ \t\n\r\f]+/g, " "));
         space ||= words.startsWith(" ");
-        if (words.trim()) {
+        if (trimAscii(words)) {
           beginInline();
           // Text that opens a line must not be read back as block syntax there: a heading, list,
           // quote or fence (a hard break leaves the next line able to open one).
           const lineStart = /(^|\n) *$/.test(inline);
-          inline += lineStart ? escapeBlockMarker(words.trim()) : words.trim();
+          inline += lineStart ? escapeBlockMarker(trimAscii(words)) : trimAscii(words);
           space = words.endsWith(" ");
         }
       }
@@ -137,7 +141,7 @@ export function htmlToMarkdown(html: string): string {
           break;
         case "blockquote": {
           const start = blockquotes.pop();
-          const content = markdown.slice(start).trim().replace(/\n{3,}/g, "\n\n");
+          const content = trimAscii(markdown.slice(start)).replace(/\n{3,}/g, "\n\n");
           const quoted = content
             ? content.split("\n").map((line) => line ? "> " + line : ">").join("\n")
             : ">";
@@ -145,7 +149,14 @@ export function htmlToMarkdown(html: string): string {
           break;
         }
         case "code": if (!inPre) { inline += codeSpan(codeText); codeText = ""; inCode = false; } break;
-        case "pre": { const f = "`".repeat(Math.max(3, longestRun(preText, "`") + 1)); markdown += "\n\n" + f + "\n" + preText.replace(/\n$/, "") + "\n" + f + "\n\n"; preText = ""; inPre = false; break; }
+        case "pre": {
+          const fence = "`".repeat(Math.max(3, longestRun(preText, "`") + 1));
+          fences.push(fence + "\n" + preText.replace(/\n$/, "") + "\n" + fence);
+          markdown += "\n\n" + fencePlaceholder(fences.length - 1) + "\n\n";
+          preText = "";
+          inPre = false;
+          break;
+        }
         case "a":
           closeTo(0);
           inline += "](" + (links.pop() ?? "") + ")";
@@ -156,7 +167,7 @@ export function htmlToMarkdown(html: string): string {
         case "li": {
           const item = items.pop();
           if (!item) break;
-          const lines = markdown.slice(item.start).trim().replace(/\n{3,}/g, "\n\n").split("\n");
+          const lines = trimAscii(markdown.slice(item.start)).replace(/\n{3,}/g, "\n\n").split("\n");
           const indent = " ".repeat(item.marker.length);
           markdown = markdown.slice(0, item.start) +
             (item.marker + lines[0]).trimEnd() + "\n" +
@@ -190,7 +201,8 @@ export function htmlToMarkdown(html: string): string {
       case "ul": lists.push({ type: "ul", count: 0 }); break;
       case "ol": {
         const start = Number.parseInt(readHtmlAttribute(attributes, "start"), 10);
-        lists.push({ type: "ol", count: Number.isSafeInteger(start) && start >= 0 ? start - 1 : 0 });
+        // CommonMark reads at most nine digits as a list number.
+        lists.push({ type: "ol", count: start >= 0 && start <= 999_999_999 ? start - 1 : 0 });
         break;
       }
       case "li": {
@@ -204,13 +216,16 @@ export function htmlToMarkdown(html: string): string {
       // own; the toolbar's Bold or Italic on a whole link styles the link itself.
       case "a":
         beginInline([]);
+        // `!` right before the label would make the link an image.
+        if (inline.endsWith("!")) inline = inline.slice(0, -1) + "\\!";
         frames.push(styleEmphasis(attributes));
         links.push(linkDestination(readHtmlAttribute(attributes, "href")));
         inline += "[";
         break;
       case "img": {
         beginInline();
-        const alt = readHtmlAttribute(attributes, "alt").replace(/[\\[\]]/g, "\\$&");
+        if (inline.endsWith("!")) inline = inline.slice(0, -1) + "\\!";
+        const alt = escapeText(readHtmlAttribute(attributes, "alt").replace(/[ \t\n\r\f]+/g, " "));
         inline += "![" + alt + "](" + linkDestination(readHtmlAttribute(attributes, "src")) + ")";
         break;
       }
@@ -218,11 +233,17 @@ export function htmlToMarkdown(html: string): string {
   }
   endBlock();
 
-  const clean = markdown
+  const clean = trimAscii(markdown
     .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  return clean ? clean + "\n" : "";
+    .replace(/\n{3,}/g, "\n\n"));
+  // Each fence goes back on its placeholder's line, every line carrying the quote markers and
+  // item indent that line has; a list marker in that prefix holds only for the first line.
+  const fenced = clean.replace(/^(.*)\0(\d+)\0$/gm, (_, prefix: string, index: string) => {
+    const continued = prefix.replace(/[^> ]/g, " ");
+    return fences[Number(index)].split("\n").map((line, i) =>
+      line ? (i ? continued : prefix) + line : continued.trimEnd()).join("\n");
+  });
+  return fenced ? fenced + "\n" : "";
 }
 
 /** What a formatting element says about emphasis, or undefined for any other element. */
@@ -322,7 +343,8 @@ function readHtmlAttribute(source: string, name: string): string {
 }
 
 function decodeHtml(value: string): string {
-  return String(value).replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (_: string, entity: string) => {
+  // NUL marks a fence placeholder in the output, so a raw one reads as a browser shows it.
+  return String(value).replace(/\0/g, "\ufffd").replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (_: string, entity: string) => {
     const lower = entity.toLowerCase();
     if (lower.startsWith("#")) {
       const code = lower.startsWith("#x")
@@ -331,7 +353,7 @@ function decodeHtml(value: string): string {
       const valid = code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff);
       return String.fromCodePoint(valid ? code : 0xfffd);
     }
-    const named: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: " " };
+    const named: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: "\u00a0" };
     return named[lower];
   });
 }
@@ -357,9 +379,27 @@ function codeSpan(text: string): string {
   return delimiter + pad + text + pad + delimiter;
 }
 
-/** `url` as an inline link destination: parentheses and backslashes escaped, spaces encoded. */
+/**
+ * `url` as an inline link destination: parentheses, backslashes and `&` (which could start an
+ * entity) escaped, whitespace and angle brackets encoded.
+ */
 function linkDestination(url: string): string {
-  return url.replace(/[\\()]/g, "\\$&").replace(/[\s<>]/g, encodeURIComponent);
+  return url.replace(/[\\()&]/g, "\\$&").replace(/[\s<>]/g, encodeURIComponent);
+}
+
+/** Plain text with every character that could start inline Markdown syntax escaped. */
+function escapeText(text: string): string {
+  return text.replace(/([\\`*_~[\]<&])/g, "\\$1");
+}
+
+/** `text` without leading or trailing ASCII whitespace; a no-break space is kept. */
+function trimAscii(text: string): string {
+  return text.replace(/^[ \t\n\r\f]+|[ \t\n\r\f]+$/g, "");
+}
+
+/** The line a fenced code block holds until the end; `decodeHtml` keeps NUL out of all text. */
+function fencePlaceholder(index: number): string {
+  return `\0${index}\0`;
 }
 
 /** The longest run of `char` in `text` (0 when it never occurs). */

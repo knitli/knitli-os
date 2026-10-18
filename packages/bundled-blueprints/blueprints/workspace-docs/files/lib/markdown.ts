@@ -102,7 +102,10 @@ export function htmlToMarkdown(html: string): string {
   };
   const endBlock = () => {
     closeTo(0);
-    markdown += spellEmphasis(inline, changes);
+    // Text that opens a line must not be read back as block syntax there: a heading, list, quote
+    // or fence, however many elements spelled it (`<span>1</span>. x`); a hard break leaves the
+    // next line able to open one too.
+    markdown += spellEmphasis(inline, changes).split("\n").map(escapeBlockMarker).join("\n");
     inline = "";
     changes = [];
     space = false;
@@ -121,10 +124,7 @@ export function htmlToMarkdown(html: string): string {
         space ||= words.startsWith(" ");
         if (trimAscii(words)) {
           beginInline();
-          // Text that opens a line must not be read back as block syntax there: a heading, list,
-          // quote or fence (a hard break leaves the next line able to open one).
-          const lineStart = /(^|\n) *$/.test(inline);
-          inline += lineStart ? escapeBlockMarker(trimAscii(words)) : trimAscii(words);
+          inline += trimAscii(words);
           space = words.endsWith(" ");
         }
       }
@@ -349,12 +349,17 @@ function charClass(char: string | undefined): "space" | "punctuation" | "word" {
   return /[\p{P}\p{S}]/u.test(char) ? "punctuation" : "word";
 }
 
-/** An attribute's value as written, entities and all, or undefined when the element has none. */
+/**
+ * An attribute's value as written, entities and all, or undefined when the element has none. The
+ * attributes are read in order, a quoted value whole, so a name inside another's value (`title=
+ * "href=x"`) is not mistaken for that attribute; the first of a repeated name wins, as in HTML.
+ */
 function readRawHtmlAttribute(source: string, name: string): string | undefined {
-  // Bounded on the left, so `src` does not match inside `srcset` or `data-src`.
-  const pattern = new RegExp("(?<![\\w:-])" + name + "\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))", "i");
-  const match = pattern.exec(source);
-  return match ? match[1] ?? match[2] ?? match[3] ?? "" : undefined;
+  for (const [, key, double, single, bare] of
+      source.matchAll(/([^\s"'>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
+    if (key.toLowerCase() === name) return double ?? single ?? bare ?? "";
+  }
+  return undefined;
 }
 
 /** An attribute's decoded value, or undefined when the element has none. */

@@ -40,6 +40,21 @@ const WORD_CHOICE = /^:\w+\(([\w-]+(?:\|[\w-]+)*)\)$/
 type Requirements = { parts: string[][]; query: string; anyQuery: URLPattern }
 
 /**
+ * The hostnames a pattern's grouped hostname spells, such as `{(www|mobile).}?(x|twitter).com`:
+ * each optional `{…}?` group left out and put in, each `(a|b)` choice taken each way. The shortest
+ * spelling comes first, as the one a completion offers.
+ */
+const hostSpellings = (hostname: string): string[] => {
+  let spellings = ['']
+  for (const [, optional, choice, literal] of hostname.matchAll(/\{([^{}]*)\}\?|\(([^()]*)\)|([^{(]+)/g)) {
+    const options = optional !== undefined ? ['', ...hostSpellings(optional)]
+      : choice !== undefined ? choice.split('|') : [literal]
+    spellings = spellings.flatMap(spelling => options.map(option => spelling + option))
+  }
+  return spellings
+}
+
+/**
  * What a URL needs to match a pattern, as URLPattern normalizes it: the host and path segments up to
  * the first optional one (`:rest*`, `*?`), each as the words it accepts, then the query. A
  * {@link WORD_CHOICE} accepts each of its words; any other parameter drops its regex and `+`, so a
@@ -59,8 +74,9 @@ const requirements = (pattern: string): Requirements | null => {
   const segments = [port ? `${hostname}:${port}` : hostname, ...pathname.split('/').slice(1)]
   const optional = segments.findIndex(segment => segment !== '*' && /[?*]$/.test(segment))
   return {
-    parts: segments.slice(0, optional < 0 ? undefined : optional).map(segment =>
-      WORD_CHOICE.exec(segment)?.[1].split('|') ?? [segment.replace(/\(.*\)|\+$/g, '')]),
+    parts: segments.slice(0, optional < 0 ? undefined : optional).map((segment, i) =>
+      i === 0 && /[{(]/.test(segment) ? hostSpellings(segment)
+        : WORD_CHOICE.exec(segment)?.[1].split('|') ?? [segment.replace(/\(.*\)|\+$/g, '')]),
     query: search === '*' ? '' : `?${search.replace(/:\w+(\(.*?\))?/g, '')}`,
     anyQuery: new URLPattern({ protocol, hostname, port, pathname }),
   }
@@ -111,7 +127,9 @@ export function classifyMatch(search: string, pattern: string): MatchClassificat
     if (segment === undefined) return { type: 'prefix', suffix: `/${words.slice(i).join('/')}${query}` }
     if (part.some(word => acceptsSegment(word, segment, i === 0))) continue
     // The segment still being typed completes to a word of this part, then the rest of the pattern.
-    const word = i === segments.length - 1 && part.find(w => !w.startsWith('*') && w.startsWith(segment))
+    // A path wildcard (`*/status/:postId`) completes too, as a placeholder, once its segment begins.
+    const word = i === segments.length - 1 && part.find(w =>
+      (w === '*' && i > 0 && segment === '') || (!w.startsWith('*') && w.startsWith(segment)))
     if (!word) return { type: 'none' }
     return { type: 'prefix', suffix: [word.slice(segment.length), ...words.slice(i + 1)].join('/') + query }
   }

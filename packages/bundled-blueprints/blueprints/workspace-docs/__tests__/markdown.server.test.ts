@@ -173,6 +173,11 @@ describe("htmlToMarkdown", () => {
       .toBe("<p>1 &lt; 2</p>\n<ul>\n<li>one</li>\n<li>two\n<ul>\n<li>deep</li>\n</ul>\n</li>\n<li>three</li>\n</ul>\n");
   });
 
+  it("reads attributes outside other values, and escapes markers spelled across elements", () => {
+    expect(render(htmlToMarkdown(`<p><a title="href='wrong'" href="right">x</a></p><p><span>1</span>. plain</p>`)))
+      .toBe('<p><a href="right">x</a></p>\n<p>1. plain</p>\n');
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

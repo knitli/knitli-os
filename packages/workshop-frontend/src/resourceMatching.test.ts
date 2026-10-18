@@ -122,6 +122,27 @@ describe('completeUrl', () => {
   })
 })
 
+describe('grouped hostnames', () => {
+  const HOST = '{(www|mobile).}?(x|twitter).com'
+  const POST = `https://${HOST}/*/status/:postId{/*}?`
+  const LIST = `https://${HOST}/i/lists/:listId{/*}?`
+  const PROFILE = `https://${HOST}/:username([A-Za-z0-9_]{1,15}){/(with_replies|media)}?`
+
+  it.each([
+    ['https://x.com/', POST, '*/status/:postId'],
+    ['https://www.twitter.com/', LIST, 'i/lists/:listId'],
+    ['https://x.com/', PROFILE, ':username'],
+    ['h', LIST, 'ttps://x.com/i/lists/:listId'],
+  ])('completes %s toward %s', (typed, pattern, suffix) => {
+    expect(classifyMatch(typed, pattern)).toEqual({ type: 'prefix', suffix })
+  })
+
+  it('matches every spelling of the host, and only those', () => {
+    expect(classifyMatch('https://mobile.twitter.com/i/lists/7', LIST)).toEqual({ type: 'full' })
+    expect(classifyMatch('https://y.com/i/lists/7', LIST)).toEqual({ type: 'none' })
+  })
+})
+
 describe('getPlaceholderRanges', () => {
   it('leaves a query value that starts with a colon alone', () => {
     expect(getPlaceholderRanges('https://github.com/o/r/issues?q=:open')).toEqual([])

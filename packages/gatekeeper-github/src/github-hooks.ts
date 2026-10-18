@@ -193,14 +193,16 @@ export class GitHubHookDriver extends DurableObject<Env> {
 
   async unregister(key: string): Promise<void> {
     const kv = this.ctx.storage.kv;
-    const registration = kv.get<Registration>(registrationKey(key));
-    disposeStubs(kv.get<Capabilities>(capabilitiesKey(key)));
-    kv.delete(registrationKey(key));
-    kv.delete(capabilitiesKey(key));
-    this.#queue.cancel(key);
-    if (!registration) return;
-    const { repo } = registration;
+    // In the same queue as register(), so an enable still waiting on GitHub records its hook
+    // before this looks for it, rather than recording it after this found nothing to remove.
     await this.#webhookChanges.run(async () => {
+      const registration = kv.get<Registration>(registrationKey(key));
+      disposeStubs(kv.get<Capabilities>(capabilitiesKey(key)));
+      kv.delete(registrationKey(key));
+      kv.delete(capabilitiesKey(key));
+      this.#queue.cancel(key);
+      if (!registration) return;
+      const { repo } = registration;
       const webhook = kv.get<Webhook>(webhookKey(repo.id));
       if (!webhook) return;
       const remaining = this.#registrations(repo).map(([, other]) => other);

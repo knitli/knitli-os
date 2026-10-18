@@ -914,6 +914,25 @@ it("leaves a working webhook when a hook is enabled while the last one's is bein
   expect((await second.read()).received).toHaveLength(1);
 });
 
+it("leaves a hook disabled when it is disabled while its enable is still waiting on GitHub", async () => {
+  const github = new FakeGitHub();
+  const account = await connectAccount();
+  const hook = binding(account);
+  await hook.subscribe();
+
+  github.stallCreates = true;
+  const enabling = hook.enable();
+  await vi.waitFor(() => expect(github.stalledCreates).toBe(1));
+  const disabling = hook.disable();
+  // Time for the disable to reach the driver, which must wait for the enable rather than miss it.
+  await scheduler.wait(100);
+  github.stallCreates = false;
+  await Promise.all([enabling, disabling]);
+
+  expect([...github.webhooks.keys()]).toEqual([]);
+  expect(github.deleted).toEqual([100]);
+});
+
 it("gives each account its own webhook on a repository, and each its own events", async () => {
   const github = new FakeGitHub();
   const [ada, carol] = await Promise.all([connectAccount(), connectAccount()]);

@@ -18,7 +18,8 @@ for (const name of ["ChatHookDriver", "GmailHookDriver"] as const) {
       if (!instance.alarm) throw new Error(`${name} has no alarm()`);
       await instance.alarm();
       return {
-        keys: [...state.storage.kv.list()].map(([key]) => key),
+        // `queue:indexed` is HookDeliveryQueue's one-time index-migration marker, kept for good.
+        keys: [...state.storage.kv.list()].map(([key]) => key).filter((key) => key !== "queue:indexed"),
         alarm: await state.storage.getAlarm(),
       };
     });

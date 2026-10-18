@@ -162,29 +162,36 @@ describe("the daily read limit", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     // Bob's profile is read, and cached, while there's budget...
     unwrap(await hooks().run(name, props, [["getUser", "bob"], ["getInfo"]]));
-    await setReadsUsed(userObjectId, 50);
+    await setReadsUsed(userObjectId, 200);
     vi.setSystemTime(Date.now() + 61 * 1000);
     const asked = x.count("GET", /^\/2\/users\/me/);
     // ...so reading it again past the limit, a minute on, asks X nothing, its privacy held unknown.
     unwrap(await hooks().run(name, props, [["getUser", "bob"], ["getInfo"]]));
     expect(x.count("GET", /^\/2\/users\/me/)).toBe(asked);
-    expect(await readsUsed(userObjectId)).toBe(50);
+    expect(await readsUsed(userObjectId)).toBe(200);
   });
 
   it("refuses reads past the deployment's limit, naming when it resets", async () => {
     const { userObjectId, props, name } = await setup();
-    await setReadsUsed(userObjectId, 50);
+    await setReadsUsed(userObjectId, 200);
     expect(failure(await hooks().run(name, props, [["getProfile"]])))
-      .toBe("This X connection has used today's 50 reads; the limit resets at 00:00 UTC.");
+      .toBe("This X connection has used today's 200 reads; the limit resets at 00:00 UTC.");
+  });
+
+  it("refuses a reservation the remaining budget cannot hold, spending nothing", async () => {
+    const { userObjectId } = await setup();
+    await setReadsUsed(userObjectId, 199);
+    expect(unwrap(await hooks().account(userObjectId, "reserveReads", 10))).toMatchObject({ ok: false, limit: 200 });
+    expect(await readsUsed(userObjectId)).toBe(199);
   });
 
   it("is one budget for every binding of a connection", async () => {
     const { x, userObjectId, props } = await setup();
-    await setReadsUsed(userObjectId, 49);
+    await setReadsUsed(userObjectId, 199);
     const post = x.post(BOB, "one more");
     unwrap(await hooks().run(crypto.randomUUID(), props, [["getPost", post.id], ["getInfo"]]));
     const other: GatekeeperProps = { userObjectId, resourceKind: "post", postId: post.id };
-    expect(failure(await hooks().run(crypto.randomUUID(), other, [["listReplies"]], { pages: 1 }))).toMatch(/used today's 50 reads/);
+    expect(failure(await hooks().run(crypto.randomUUID(), other, [["listReplies"]], { pages: 1 }))).toMatch(/used today's 200 reads/);
   });
 
   it("settles a read begun before midnight against that day, not the next", async () => {
@@ -202,7 +209,7 @@ describe("the daily read limit", () => {
 
   it("resets at UTC midnight", async () => {
     const { userObjectId, props, name } = await setup();
-    await setReadsUsed(userObjectId, 50, "2000-01-01");
+    await setReadsUsed(userObjectId, 200, "2000-01-01");
     unwrap(await hooks().run(name, props, [["getProfile"]]));
     expect(await readsUsed(userObjectId)).toBe(1);
   });

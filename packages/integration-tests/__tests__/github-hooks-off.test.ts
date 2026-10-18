@@ -5,7 +5,7 @@
 import type { RpcStub } from "capnweb";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { GitHubRepo } from "../../gatekeeper-github/src/types.js";
-import { startHarness, type Harness } from "../src/harness.js";
+import { enableBoundGatekeeperResources, startHarness, type Harness } from "../src/harness.js";
 import { SCRIPTED_MODEL_ID, scriptedModelRouter } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, nextUsernames, signUp, waitFor, waitForIdleChat } from "../src/rpc-client.js";
@@ -21,6 +21,7 @@ beforeAll(async () => {
   harness = await startHarness({
     gatekeepers: [githubGatekeeper({ hooks: false })], enableGadgetExecution: true,
   });
+  await enableBoundGatekeeperResources(harness); // fork: resources are opt-in
 });
 
 afterAll(async () => {

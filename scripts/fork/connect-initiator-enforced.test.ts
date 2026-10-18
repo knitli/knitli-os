@@ -1,7 +1,7 @@
 // Each gatekeeper that hand-rolls its own account Durable Object AND is used by this installation
 // must check the connect link's initiator before it advances the flow (fork; knitli-site plan 6a).
-// Five of the fourteen are in that set; the other nine are named in OUT_OF_SCOPE below, and the
-// last test here fails if a fourteenth appears in neither list.
+// Six of the fifteen are in that set; the other nine are named in OUT_OF_SCOPE below, and the
+// last test here fails if a sixteenth appears in neither list.
 //
 // This is a STRUCTURAL guard, not a behavioural one: it reads source, so it proves the call is
 // written, not that it works. github, linear and cloudflare each have a workerd suite that proves
@@ -23,6 +23,8 @@ const HAND_ROLLED: Array<{ file: string; guarded: string[] }> = [
   { file: "packages/gatekeeper-linear/src/linear.ts", guarded: ["beginOAuthFlow", "acceptAuthCode"] },
   { file: "packages/gatekeeper-cloudflare/src/cloudflare.ts", guarded: ["beginOAuthFlow", "acceptAuthCode"] },
   { file: "packages/gatekeeper-microsoft/src/microsoft.ts", guarded: ["beginOAuthFlow", "acceptAuthCode"] },
+  // The callback's refusal route consumes the nonce too, so the guard sits above both.
+  { file: "packages/gatekeeper-x/src/x.ts", guarded: ["beginOAuthFlow", "acceptAuthCode"] },
   // No OAuth step: the connect link itself completes the account, so `complete` is the only call.
   { file: "packages/gatekeeper-email/src/email.ts", guarded: ["complete"] },
 ];

@@ -205,6 +205,10 @@
       "reason": "Connect-initiator enforcement regression for the hand-rolled Cloudflare account."
     },
     {
+      "path": "packages/gatekeeper-x/__tests__/workerd/knitli-connect-initiator.test.ts",
+      "reason": "Connect-initiator enforcement regression for the hand-rolled X account."
+    },
+    {
       "path": "packages/gatekeeper-email/src/fork/",
       "reason": "Fork-owned email send action (approval-backed, hourly-capped); the gatekeeper's email.ts carries only one-line seams into it."
     },

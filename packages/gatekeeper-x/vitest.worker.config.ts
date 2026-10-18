@@ -29,7 +29,7 @@ export default defineConfig({
           CLIENT_ID: "test-client-id",
           CLIENT_SECRET: "test-client-secret",
           BASE_URL: "http://localhost:8787/gatekeeper/x",
-          X_DAILY_READ_LIMIT: "50",
+          X_DAILY_READ_LIMIT: "200",
         },
       },
     }),

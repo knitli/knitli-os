@@ -14,6 +14,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type {
   AccountDescription,
   ConnectHandoff,
+  ConnectInitiator,
   Gatekeeper,
   GatekeeperConnectCallback,
   GatekeeperConnectOptions,
@@ -38,6 +39,7 @@ import {
   type RejectionVerdict,
 } from "@gadgets/gatekeeper-kit/credentials";
 import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
+import { initiatorAllows, refuseForeignBrowser } from "@gadgets/observability/fork/connect-initiator";
 import { notifyCredentialsExpiredOnce } from "@gadgets/gatekeeper-kit/credential-expiry";
 import { commitStagedCredentials, discardStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
 import { probeAccess } from "@gadgets/gatekeeper-kit/http-errors";
@@ -224,7 +226,11 @@ export default {
       if (!env.CLIENT_ID || !env.CLIENT_SECRET) return htmlResponse(NOT_CONFIGURED_HTML);
       const previewOAuth = previewOAuthFor(env);
       if (previewOAuth instanceof Response) return previewOAuth;
-      const begun = await accountFor(ctx, path[0])?.beginOAuthFlow(path[1], previewOAuth.redirectUri);
+      const stub = accountFor(ctx, path[0]);
+      if (stub === null) return htmlResponse(INVALID_LINK_HTML);
+      const refused = await refuseForeignBrowser(req, env, stub, logger);
+      if (refused) return refused;
+      const begun = await stub.beginOAuthFlow(path[1], previewOAuth.redirectUri);
       if (!begun) return htmlResponse(INVALID_LINK_HTML);
       const authorize = oauthClient(env).authorizationUrl({
         redirectUri: previewOAuth.redirectUri,
@@ -251,19 +257,22 @@ export default {
       const stub = accountFor(ctx, doId);
       if (stub === null) return new Response("Error: malformed state", { status: 400 });
 
-      if (url.searchParams.get("error")) {
-        // The refusal ends the attempt: its nonce is consumed so a replayed callback cannot resume it.
-        if (!await stub.consumeOAuthNonce(oauthNonce)) return htmlResponse(INVALID_LINK_HTML);
-        return htmlResponse(errorPageHtml(
-          "X authorization was not granted", "Start the connection again from the Workshop."), 400);
-      }
+      // Guards both account calls below, the refusal's nonce consumption included (fork).
+      const refused = await refuseForeignBrowser(req, env, stub, logger);
+      if (refused) return refused;
       const code = url.searchParams.get("code");
-      if (!code) return new Response("Error: no 'code' provided", { status: 400 });
-
-      const result = await stub.acceptAuthCode(code, oauthNonce);
-      if (result === null) return htmlResponse(INVALID_LINK_HTML);
-      if ("refused" in result) return htmlResponse(errorPageHtml(result.refused.title, result.refused.detail), 409);
-      return htmlResponse(connectHandoffPageHtml(result.handoff));
+      const denied = Boolean(url.searchParams.get("error"));
+      if (code && !denied) {
+        const result = await stub.acceptAuthCode(code, oauthNonce);
+        if (result === null) return htmlResponse(INVALID_LINK_HTML);
+        if ("refused" in result) return htmlResponse(errorPageHtml(result.refused.title, result.refused.detail), 409);
+        return htmlResponse(connectHandoffPageHtml(result.handoff));
+      }
+      if (!denied) return new Response("Error: no 'code' provided", { status: 400 });
+      // The refusal ends the attempt: its nonce is consumed so a replayed callback cannot resume it.
+      if (!await stub.consumeOAuthNonce(oauthNonce)) return htmlResponse(INVALID_LINK_HTML);
+      return htmlResponse(errorPageHtml(
+        "X authorization was not granted", "Start the connection again from the Workshop."), 400);
     }
 
     return new Response("Not Found", { status: 404 });
@@ -292,7 +301,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     const userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     const initiationNonce = generateNonce();
     await this.ctx.exports.UserAccount.get(userObjectId)
-      .setCallback(callback, initiationNonce, scopesFor(options?.resourceUrlPatterns));
+      .setCallback(callback, initiationNonce, scopesFor(options?.resourceUrlPatterns), options?.initiator);
     return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}` };
   }
 
@@ -328,18 +337,35 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback"), VENDOR_ID);
 
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string,
-                    requestedScopes: string[]): Promise<void> {
+                    requestedScopes: string[], initiator?: ConnectInitiator): Promise<void> {
     if (!this.#creds.stored()) await this.ctx.storage.setAlarm(Date.now() + CONNECT_TIMEOUT_MS);
     this.ctx.storage.kv.put("callback", callback);
     this.ctx.storage.kv.put<string[]>("requestedScopes", requestedScopes);
+    this.#putInitiator(initiator);
     putInitiation<Pick<ConnectAttempt, "firstConnect">>(this.ctx.storage.kv, initiationNonce, Date.now(),
       { firstConnect: true });
   }
 
   /** Arms a reconnect or `ensureResources` flow asking for `requestedScopes`. */
-  async prepareReconnect(initiationNonce: string, requestedScopes: string[]): Promise<void> {
+  async prepareReconnect(initiationNonce: string, requestedScopes: string[],
+                         initiator?: ConnectInitiator): Promise<void> {
     this.ctx.storage.kv.put<string[]>("requestedScopes", requestedScopes);
+    this.#putInitiator(initiator);
     putInitiation(this.ctx.storage.kv, initiationNonce, Date.now());
+  }
+
+  /** Binds the armed flow to whoever the Workshop issued it to; none leaves it bearer-only (fork). */
+  #putInitiator(initiator: ConnectInitiator | undefined): void {
+    if (initiator) this.ctx.storage.kv.put<ConnectInitiator>("initiator", initiator);
+    else this.ctx.storage.kv.delete("initiator");
+  }
+
+  /**
+   * Whether the browser presenting `accessEmail` may continue this connect. Same contract as
+   * `McpAccountBase.initiatorMatches` (fork).
+   */
+  async initiatorMatches(accessEmail: string | null): Promise<boolean> {
+    return initiatorAllows(this.ctx.storage.kv.get<ConnectInitiator>("initiator"), accessEmail);
   }
 
   /** Swaps the initiation nonce for the OAuth-stage nonce and mints this flow's PKCE verifier. */
@@ -535,7 +561,7 @@ export class UserAccount extends DurableObject<Env> {
     const day = new Date(now).toISOString().slice(0, 10);
     const stored = this.ctx.storage.kv.get<{ day: string; used: number }>("reads");
     const used = stored?.day === day ? stored.used : 0;
-    if (used >= limit) {
+    if (used + count > limit) {
       const midnight = new Date(`${day}T00:00:00.000Z`).getTime() + 24 * 60 * 60 * 1000;
       return { ok: false, limit, resetsAt: midnight };
     }
@@ -664,25 +690,26 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#account().revoke();
   }
 
-  async reconnect(): Promise<{ url: string }> {
+  async reconnect(options?: { initiator?: ConnectInitiator }): Promise<{ url: string }> {
     // A reconnect re-requests what the connection holds now, so it renews rather than narrows.
     const granted = grantedResourcePatterns(await this.#account().getGrantedScopes());
-    return await this.#beginReconnect(granted);
+    return await this.#beginReconnect(granted, options?.initiator);
   }
 
   async commitReconnect(stageId: string): Promise<void> {
     await this.#account().commitReconnect(stageId);
   }
 
-  async ensureResources(resourceUrlPatterns: string[]): Promise<{ url?: string }> {
+  async ensureResources(resourceUrlPatterns: string[],
+                        options?: { initiator?: ConnectInitiator }): Promise<{ url?: string }> {
     const granted = grantedResourcePatterns(await this.#account().getGrantedScopes());
     if (resourceUrlPatterns.every(pattern => granted.includes(pattern))) return {};
-    return await this.#beginReconnect([...new Set([...granted, ...resourceUrlPatterns])]);
+    return await this.#beginReconnect([...new Set([...granted, ...resourceUrlPatterns])], options?.initiator);
   }
 
-  async #beginReconnect(resourceUrlPatterns: string[]): Promise<{ url: string }> {
+  async #beginReconnect(resourceUrlPatterns: string[], initiator?: ConnectInitiator): Promise<{ url: string }> {
     const initiationNonce = generateNonce();
-    await this.#account().prepareReconnect(initiationNonce, scopesFor(resourceUrlPatterns));
+    await this.#account().prepareReconnect(initiationNonce, scopesFor(resourceUrlPatterns), initiator);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 

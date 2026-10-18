@@ -67,10 +67,12 @@ describe("TESTS_WITH_TIMEOUT_MAX_SECONDS", () => {
     assert.match(stderr, /still running for 0\.3s/);
   });
 
-  it("treats an empty value as unset", async () => {
-    // A CI expression for an unset variable expands to "", which must not be read as "no limit".
-    const { code } = await run(0.3, QUIET_FOR_1500_MS, { [VAR]: "" });
-    assert.equal(code, 124);
+  it("rejects an empty value instead of reading it as unset", async () => {
+    // Upstream's watchdog fails fast on a malformed override ("" parses to 0); the fork's
+    // former empty-as-unset reading is gone with upstream's rewrite.
+    const { code, stderr } = await run(0.3, QUIET_FOR_1500_MS, { [VAR]: "" });
+    assert.equal(code, 2);
+    assert.match(stderr, /TESTS_WITH_TIMEOUT_MAX_SECONDS/);
   });
 
   it("replaces --max with a larger value, letting a slow run finish", async () => {
@@ -91,6 +93,11 @@ describe("TESTS_WITH_TIMEOUT_MAX_SECONDS", () => {
     assert.equal(code, 0);
   });
 
+  it("accepts values past one day (upstream has no ceiling)", async () => {
+    const { code } = await run(0.3, "", { [VAR]: "86401" });
+    assert.equal(code, 0);
+  });
+
   // Each of these must stop before the command starts, with a message naming the variable: an
   // override that failed quietly would leave the run on the 600s it was meant to get past, and the
   // first sign would be a kill.
@@ -99,7 +106,6 @@ describe("TESTS_WITH_TIMEOUT_MAX_SECONDS", () => {
     ["0", "is zero"],
     ["-5", "is negative"],
     ["Infinity", "is not finite"],
-    ["86401", "is past the one-day ceiling"],
   ] as const) {
     // POSIX-only: the process-group probe needs negative-pid signals, which Windows does not have.
     it(`rejects ${JSON.stringify(value)}, which ${reason}`, {

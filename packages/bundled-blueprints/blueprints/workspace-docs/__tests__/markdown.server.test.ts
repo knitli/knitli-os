@@ -92,6 +92,21 @@ describe("htmlToMarkdown", () => {
       "<p>Run <code>a*b_c</code> or <b><code>x</code></b>, <code>one<br>line</code></p>",
     )).toBe("```\nnpm install\n```\n\nRun `a*b_c` or **`x`**, `one line`\n");
   });
+
+  // Text that happens to start like block syntax must come back as the paragraph it was.
+  it("escapes block markers that open a paragraph or a line in one", () => {
+    const html = "<p># not a heading</p><p>- not a list</p><p>&gt; not a quote</p><p>12. not a list</p>" +
+      "<p>a<br>## nor this</p><p> ``` not a fence</p>";
+    expect(render(htmlToMarkdown(html))).toBe(
+      "<p># not a heading</p>\n<p>- not a list</p>\n<p>&gt; not a quote</p>\n<p>12. not a list</p>\n" +
+      "<p>a<br />\n## nor this</p>\n<p>``` not a fence</p>\n");
+  });
+
+  it("delimits code by runs longer than the backticks inside it", () => {
+    const markdown = htmlToMarkdown("<p><code>a`b</code> <code>`x</code></p><pre>one\n```\ntwo</pre>");
+    expect(render(markdown)).toBe(
+      "<p><code>a`b</code> <code>`x</code></p>\n<pre><code>one\n```\ntwo\n</code></pre>\n");
+  });
 });
 
 /** `text` as the editor marks it up, with one span for each stretch of the same `formats`. */
@@ -126,4 +141,8 @@ function renderedFormats(markdown: string): string[] {
     }
   }
   return formats;
+}
+
+function render(markdown: string): string {
+  return new HtmlRenderer().render(new Parser().parse(markdown));
 }

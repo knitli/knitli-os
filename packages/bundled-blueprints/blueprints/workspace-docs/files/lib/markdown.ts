@@ -50,6 +50,8 @@ export function htmlToMarkdown(html: string): string {
   let changes: EmphasisChange[] = [];
   let inPre = false;
   let inCode = false;
+  let codeText = "";
+  let preText = "";
   let inHeading = false;
   // Space and `<br>`s since the last content, written only once more content follows: the editor
   // leaves a `<br>` as the sole content of an empty paragraph.
@@ -88,14 +90,17 @@ export function htmlToMarkdown(html: string): string {
   for (const token of tokens) {
     if (!token.startsWith("<")) {
       const text = decodeHtml(token);
-      if (inPre) inline += text;
-      else if (inCode) inline += text.replace(/\s+/g, " ");
+      if (inPre) preText += text;
+      else if (inCode) codeText += text.replace(/\s+/g, " ");
       else {
         const words = text.replace(/\s+/g, " ").replace(/([\\*_[\]])/g, "\\$1");
         space ||= words.startsWith(" ");
         if (words.trim()) {
           beginInline();
-          inline += words.trim();
+          // Text that opens a line must not be read back as block syntax there: a heading, list,
+          // quote or fence (a hard break leaves the next line able to open one).
+          const lineStart = /(^|\n) *$/.test(inline);
+          inline += lineStart ? escapeBlockMarker(words.trim()) : words.trim();
           space = words.endsWith(" ");
         }
       }
@@ -134,8 +139,8 @@ export function htmlToMarkdown(html: string): string {
           markdown = markdown.slice(0, start) + quoted + "\n\n";
           break;
         }
-        case "code": if (!inPre) { inline += "\x60"; inCode = false; } break;
-        case "pre": markdown += "\n\x60\x60\x60\n\n"; inPre = false; break;
+        case "code": if (!inPre) { inline += codeSpan(codeText); codeText = ""; inCode = false; } break;
+        case "pre": { const f = "`".repeat(Math.max(3, longestRun(preText, "`") + 1)); markdown += "\n\n" + f + "\n" + preText.replace(/\n$/, "") + "\n" + f + "\n\n"; preText = ""; inPre = false; break; }
         case "a":
           closeTo(0);
           inline += "](" + (links.pop() ?? "") + ")";
@@ -157,13 +162,13 @@ export function htmlToMarkdown(html: string): string {
       case "p": case "div": markdown += "\n\n"; break;
       // A heading is one line in Markdown, and code one span, so a break in either is a space.
       case "br":
-        if (inPre) inline += "\n";
-        else if (inCode) inline += " ";
+        if (inPre) preText += "\n";
+        else if (inCode) codeText += " ";
         else if (inHeading) space = true;
         else breaks++;
         break;
-      case "code": if (!inPre) { beginInline(); inline += "\x60"; inCode = true; } break;
-      case "pre": markdown += "\n\n\x60\x60\x60\n"; inPre = true; break;
+      case "code": if (!inPre) { beginInline(); codeText = ""; inCode = true; } break;
+      case "pre": preText = ""; inPre = true; break;
       case "blockquote": markdown += "\n\n"; blockquotes.push(markdown.length); break;
       case "hr": markdown += "\n\n---\n\n"; break;
       case "ul": lists.push({ type: "ul", count: 0 }); break;
@@ -304,4 +309,28 @@ function decodeHtml(value: string): string {
     const named: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: " " };
     return named[lower];
   });
+}
+
+/** `text` with the block marker it would open a line with, if any, escaped. */
+function escapeBlockMarker(text: string): string {
+  return text.replace(/^(?:#{1,6}|[-+>]|\d{1,9}[.)])(?=\s|$)|^(?:`{3}|~{3})/,
+    marker => marker.replace(/\D/, "\\$&"));
+}
+
+/**
+ * `text` as an inline code span: delimited by a backtick run longer than any inside it, and padded
+ * where it starts or ends with a backtick, which would otherwise merge into the delimiter.
+ */
+function codeSpan(text: string): string {
+  const delimiter = "`".repeat(longestRun(text, "`") + 1);
+  const pad = /^`|`$/.test(text) ? " " : "";
+  return delimiter + pad + text + pad + delimiter;
+}
+
+/** The longest run of `char` in `text` (0 when it never occurs). */
+function longestRun(text: string, char: string): number {
+  let longest = 0;
+  let current = 0;
+  for (const c of text) { current = c === char ? current + 1 : 0; longest = Math.max(longest, current); }
+  return longest;
 }

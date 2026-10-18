@@ -6,7 +6,7 @@
 import type { RpcStub } from "capnweb";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import type { AuthenticatedApi, Overseer } from "@gadgets/workshop-shared/api";
-import { startHarness, type Harness } from "../src/harness.js";
+import { enableBoundGatekeeperResources, startHarness, type Harness } from "../src/harness.js";
 import { SCRIPTED_MODEL_ID, scriptedModelRouter } from "../src/mock-model.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, nextUsernames, signUp, waitFor, waitForIdleChat } from "../src/rpc-client.js";
@@ -20,6 +20,7 @@ let harness: Harness;
 beforeAll(async () => {
   network.install();
   harness = await startHarness({ gatekeepers: [githubGatekeeper()], enableGadgetExecution: true });
+  await enableBoundGatekeeperResources(harness); // fork: resources are opt-in
 });
 
 afterAll(async () => {

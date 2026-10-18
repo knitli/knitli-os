@@ -20,6 +20,10 @@ export type Env = Cloudflare.Env & PreviewOAuthEnv & {
    * to `DEFAULT_DAILY_READ_LIMIT`.
    */
   X_DAILY_READ_LIMIT?: string;
+  /** Cloudflare Access issuer/audience for the connect-initiator guard (fork). */
+  CF_ACCESS_ISS?: string;
+  /** Cloudflare Access issuer/audience for the connect-initiator guard (fork). */
+  CF_ACCESS_AUD?: string;
 };
 
 /** Where the Worker sends API requests. */

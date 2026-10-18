@@ -142,11 +142,12 @@ jobs:
   # passed, and without it a failed or cancelled leg would skip this job.
   build-and-test:
     name: Build and test
-    needs: test
+    needs: [lint, test]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Require every test leg to pass
         env:
+          LINT_RESULT: ${{ needs.lint.result }}
           RESULT: ${{ needs.test.result }}
-        run: test "$RESULT" = success
+        run: test "$LINT_RESULT" = success && test "$RESULT" = success

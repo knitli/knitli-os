@@ -128,6 +128,7 @@ it.concurrent("a compaction lists the workspace's gadgets afresh, and later turn
   await waitForIdleChat(ws, chatId);
   expect(systemPromptOf(model.requests[3])).toEqual(systemPromptOf(resumed));
 });
+
 // Give the account's always-available resource a catalog with these skills. Set it before the
 // chat's first turn: a resource whose catalog is null once is not asked again.
 function setSkills(label: string, skills: string[]): Promise<void> {
@@ -225,4 +226,3 @@ it.concurrent("compacting after a catalog change keeps the catalogs the chat saw
   expect(JSON.stringify(messages.at(-3))).toContain("Second question");
   expect(JSON.stringify(messages.at(-1))).toContain("Travel policy");
 });
-

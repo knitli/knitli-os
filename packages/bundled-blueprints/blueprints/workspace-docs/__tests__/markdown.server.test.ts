@@ -187,6 +187,15 @@ describe("htmlToMarkdown", () => {
         "<pre><code>&copy;</code></pre>\n");
   });
 
+  it("ends raw-text elements at their first close, renumbers mid-list, and takes the last style", () => {
+    expect(render(htmlToMarkdown(
+      '<script>let s = "<script>";</script><p>shown</p><ol><li>one</li><li value="5">five</li><li>six</li></ol>' +
+      '<p><span style="font-weight:bold;font-weight:normal">plain</span> ' +
+      '<span style="font-weight:normal;font-weight:bold">bold</span></p>')))
+      .toBe('<p>shown</p>\n<ol>\n<li>one</li>\n</ol>\n<!-- -->\n<ol start="5">\n<li>five</li>\n<li>six</li>\n</ol>\n' +
+        "<p>plain <strong>bold</strong></p>\n");
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

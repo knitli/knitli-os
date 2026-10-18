@@ -5569,6 +5569,8 @@ class OverseerImpl implements AgentHooks {
       for (const path of content.get(worktree.id)?.keys() ?? []) used.add(path.split("/")[0]);
     }
 
+    // Fork: the blindfold hides every PROMPT.md, so an upload by that name takes another.
+    used.add(PROMPT_FILENAME);
     let files = new Map<string, FileContent>();
     for (let attachment of attachments) {
       // Workbooks stay parsed summaries with row pages, not workspace files: a raw spreadsheet

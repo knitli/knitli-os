@@ -41,6 +41,17 @@ const fileToolResults = (messages: Message[]) => messages.flatMap(message =>
   message.role === "toolResult" && message.toolName !== "observeUserChanges"
     ? [{toolName: message.toolName, content: message.content, isError: message.isError}] : []);
 describe("scratch worktree attachment ingress", () => {
+  it("gives an upload named PROMPT.md another name, since the blindfold hides that one", () => inKernel(crypto.randomUUID(), async impl => {
+    const user = env.TEST_USER.getByName(crypto.randomUUID()), id = crypto.randomUUID();
+    impl.storage.chatAttachmentContent.put({fileId: id, data: new TextEncoder().encode("notes\n"), state: {
+      type: "staged", uploadedAt: Date.now(), mimeType: "text/plain", name: "PROMPT.md",
+    }});
+    const chatId = await impl.newChat(user, {profile: USER}, "Read it", undefined, [{id}]);
+    const worktree = impl.getChatAgentContext(chatId).scratch!.worktreeId;
+    expect((await impl.gitCache.listCommitTreePaths(impl.getWorktreePinBase(worktree)!))
+      .map(entry => entry.path)).toEqual(["PROMPT-2.md"]);
+  }));
+
   it("normalizes legacy source metadata without overwriting an already edited scratch file", () => inKernel(crypto.randomUUID(), async impl => {
     const user = env.TEST_USER.getByName(crypto.randomUUID()), id = crypto.randomUUID();
     const original = new TextEncoder().encode("original\n");

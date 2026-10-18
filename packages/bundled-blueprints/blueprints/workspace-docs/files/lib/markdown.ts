@@ -126,7 +126,8 @@ export function htmlToMarkdown(html: string): string {
     if (hidden) {
       const tag = /^<\s*(\/?)\s*([a-z0-9]+)/i.exec(token);
       if (tag?.[2].toLowerCase() === hidden.tag) {
-        hidden.depth += tag[1] ? -1 : 1;
+        // Only a template nests; the others are raw text up to their first closing tag.
+        hidden.depth += tag[1] ? -1 : hidden.tag === "template" ? 1 : 0;
         if (hidden.depth === 0) hidden = undefined;
       }
       continue;
@@ -257,7 +258,11 @@ export function htmlToMarkdown(html: string): string {
         const list = lists.at(-1) || { type: "ul", count: 0 };
         // An item's own `value` renumbers it, and the items after it count on from there.
         const value = Number.parseInt(readHtmlAttribute(attributes, "value") ?? "", 10);
-        list.count = list.type === "ol" && value >= 0 && value <= 999_999_999 ? value : list.count + 1;
+        const renumbered = list.type === "ol" && value >= 0 && value <= 999_999_999;
+        // CommonMark reads only a list's first number, so a later item renumbered starts a list of
+        // its own, which an empty comment keeps from running on from this one.
+        if (renumbered && list.count > 0 && value !== list.count + 1) markdown += "\n<!-- -->\n\n";
+        list.count = renumbered ? value : list.count + 1;
         if (!markdown.endsWith("\n")) markdown += "\n";
         items.push({
           marker: list.type === "ol" ? list.count + ". " : "- ", start: markdown.length, depth: lists.length,
@@ -312,12 +317,14 @@ function styleEmphasis(attributes: string): Emphasis {
   const style = (readHtmlAttribute(attributes, "style") ?? "").toLowerCase();
   const emphasis: Emphasis = {};
   // `lighter` is relative (900 becomes a still-bold 700), so it says nothing.
-  const weight = /font-weight\s*:\s*(?:(bold|bolder|[6-9]00)|normal|[1-5]00)\b/.exec(style);
+  // The last declaration of a property wins, as in the cascade.
+  const last = (pattern: RegExp) => [...style.matchAll(pattern)].at(-1);
+  const weight = last(/font-weight\s*:\s*(?:(bold|bolder|[6-9]00)|normal|[1-5]00)\b/g);
   if (weight) emphasis["**"] = weight[1] !== undefined;
-  const slant = /font-style\s*:\s*(?:(italic|oblique)|normal)\b/.exec(style);
+  const slant = last(/font-style\s*:\s*(?:(italic|oblique)|normal)\b/g);
   if (slant) emphasis["*"] = slant[1] !== undefined;
   // A descendant cannot lift its ancestor's line-through, so strikethrough only turns on.
-  if (/text-decoration(-line)?\s*:[^;]*line-through/.test(style)) emphasis["~~"] = true;
+  if (last(/text-decoration(?:-line)?\s*:([^;]*)/g)?.[1].includes("line-through")) emphasis["~~"] = true;
   return emphasis;
 }
 

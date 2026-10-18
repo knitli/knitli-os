@@ -10,6 +10,7 @@ import type {
   VoicePreferences, WorkpieceId,
 } from "@gadgets/workshop-shared/api";
 import type { AccountDescription, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
+import type { DeviceSessionHandoff } from "../auth/device-session-handoff.js";
 import type { WebPushSubscriptions } from "../fork/web-push.js";
 
 export type ConnectedAccountRecord = {
@@ -56,15 +57,46 @@ export type PendingConnectFlow = {
   expiresAt: Date;
 };
 
+/**
+ * A user selected on behalf of a gatekeeper app that is currently awaiting
+ * redemption by that account. Keyed by the SHA-256 of the single-use ticket and
+ * swept by the User DO alarm after `expiresAt`.
+ */
+type PendingGatekeeperUserSelection = {
+  ticketHash: string;
+  appAccountId: number;
+  vendorId: string;
+  selectedUserId: string;
+  expiresAt: Date;
+};
+
 export type UserAiModelRecord = {
   profile: AiChatAuthorInfo;
   config: AiModelConfig;
 }
 
-type LoginSessionRecord = {
+export type LoginSessionRecord = {
   tokenId: string,  // sha256 hash of token, hex-formatted
   created: Date,
+  /** Device sessions expire server-side; legacy browser sessions have no expiry. */
+  expiresAt?: Date,
+  /** A staged device session cannot authenticate until its handoff is consumed. */
+  pendingUntil?: Date,
 }
+
+/**
+ * A device-session transfer staged by an authenticated browser. Keyed by a hash of the native
+ * app's opaque state, idempotent for that state, single-use, and swept after `expiresAt`.
+ */
+export type PendingDeviceHandoffRecord = {
+  stateHash: string;
+  ticketHash: string;
+  publicKey: string;
+  handoff: DeviceSessionHandoff;
+  expiresAt: Date;
+  /** Password/gatekeeper mode only: activated on consumption, deleted on abandoned expiry. */
+  sessionTokenId?: string;
+};
 
 /** Blueprint record stored in the user's `blueprints` collection. */
 export type BlueprintUserRecord = {
@@ -143,6 +175,12 @@ export function makeUserStorage(storage: DurableObjectStorage) {
       }),
       pendingConnectFlows: collection<PendingConnectFlow>()({
         primaryKey: "nonceHash",
+      }),
+      pendingDeviceHandoffs: collection<PendingDeviceHandoffRecord>()({
+        primaryKey: "stateHash",
+      }),
+      pendingUserSelections: collection<PendingGatekeeperUserSelection>()({
+        primaryKey: "ticketHash",
       }),
       blueprints: collection<BlueprintUserRecord>()({
         primaryKey: "id",

@@ -117,10 +117,10 @@ describe("site addressing", () => {
     // `/sites/contoso.sharepoint.com:/sites/../secret` would resolve to a different site, reached
     // with this account's bearer token.
     expect(() => graphSiteByPathUrl("contoso.sharepoint.com", "/sites/../secret"))
-      .toThrow(/empty or relative/);
+      .toThrow(/Refusing the path segment/);
     expect(() => graphSiteByPathUrl("contoso.sharepoint.com", "/sites//secret"))
-      .toThrow(/empty or relative/);
-    expect(() => graphSiteByPathUrl("", "/sites/HR")).toThrow(/empty or relative/);
+      .toThrow(/Refusing the path segment/);
+    expect(() => graphSiteByPathUrl("", "/sites/HR")).toThrow(/Refusing the path segment/);
   });
 
   it("resolves a site through that address, selecting only what a binding needs", async () => {
@@ -514,7 +514,7 @@ describe("getItem and createItem", () => {
   it("keeps an item id inside one path segment", async () => {
     const calls = stubFetch(() => jsonResponse(ITEM));
 
-    await expect(newApi().getItem("site-1", "list-1", "..", SCHEMA)).rejects.toThrow(/empty or relative/);
+    await expect(newApi().getItem("site-1", "list-1", "..", SCHEMA)).rejects.toThrow(/Refusing the path segment/);
     expect(calls).toHaveLength(0);
 
     await newApi().getItem("site-1", "list-1", "../../drives/victim", SCHEMA);

@@ -70,7 +70,7 @@ function rejectUserCalls(impl: any, error: unknown): string[] {
     setGadgetLastActive: reject("setGadgetLastActive"),
     syncWorkspaceOutputs: reject("syncWorkspaceOutputs"),
     listProvidedAccounts: reject("listProvidedAccounts"),
-    updatePinned: reject("updatePinned"),
+    listModels: reject("listModels"),
     getChatContext: reject("getChatContext"),
     whoami: reject("whoami"),
     whoamiIfExists: reject("whoamiIfExists"),
@@ -154,17 +154,18 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     let error = new Error(LOOP_LIMIT_MESSAGE);
     let calls = rejectUserCalls(impl, error);
-    // A real build client interface whose user stubs are the real impl's: setPinned goes through
+    // A real build client interface whose user stubs are the real impl's: listModels goes through
     // OverseerClientInterface.#clientUser.
     let client = await openFakeOverseer({}, { impl: {
       users: impl.users,
       wrapUserDo: (stub: unknown) => impl.wrapUserDo(stub),
     } });
 
-    await expect(client.setPinned(true)).rejects.toBe(error);
+    await expect(client.listModels()).rejects.toBe(error);
 
-    // Opening the client probes the profile for presence first (also a wrapped stub).
-    expect(calls).toEqual(["whoami", "updatePinned"]);
+    // Opening the client probes the profile first (also a wrapped stub); upstream moved
+    // pinning out of the overseer, so the probe is listModels now.
+    expect(calls).toEqual(["whoami", "listModels"]);
     expect(restarts).toEqual([RESTART_REASON]);
   }));
 

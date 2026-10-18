@@ -62,8 +62,8 @@ const auth = (whoami: () => Promise<AiChatAuthorInfo>, amIAdmin: () => Promise<b
   whoami: vi.fn<AuthenticatedApi['whoami']>(whoami), amIAdmin: vi.fn<AuthenticatedApi['amIAdmin']>(amIAdmin), getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(getAdminApi), listGadgets: async () => [],
 })
 const Probe = () => {
-  const { currentUser, isAdmin } = useAuthenticatedApi()
-  return <output data-testid="auth">{currentUser?.name ?? 'null'}:{String(isAdmin)}</output>
+  const { currentUser, isAdmin, isCurrentUserConfirmed } = useAuthenticatedApi()
+  return <output data-testid="auth">{isCurrentUserConfirmed ? (currentUser?.name ?? 'null') : 'null'}:{String(isCurrentUserConfirmed && isAdmin)}</output>
 }
 const button = (container: HTMLElement, text: string) => {
   const result = [...container.querySelectorAll('button')].find((candidate) => candidate.textContent?.startsWith(text))

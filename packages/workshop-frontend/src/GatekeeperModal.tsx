@@ -24,6 +24,8 @@ import { ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
 import ResourceConfiguratorHost from './ResourceConfiguratorHost'
+import { disposeConfiguratorFrame } from './disposeConfiguratorFrame'
+import { requestAccountResources } from './requestAccountResources'
 import {
   AgentSpawnerConfigForm,
   SpawnerEnvRow,
@@ -32,12 +34,13 @@ import {
 } from './gatekeeper-modal/AgentSpawnerConfigForm'
 import { AiModelConnectionConfig } from './gatekeeper-modal/AiModelConnectionConfig'
 import { AccountChooser, AccountOption } from './gatekeeper-modal/AccountChooser'
-import { matchesResourceUrl } from './resourceMatching'
+import { classifyMatch } from './resourceMatching'
 import { reportIssue } from './errorReporting'
 import { useSiteName } from './ServerConfigContext'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
 import { useDialogSelectPortalContainer } from './useDialogSelectPortalContainer'
 import { openConnectWindow } from './connectHandoff'
+import { AuthPopupCancelledError } from './features/native-app/authPopup'
 
 export interface GatekeeperModalProps {
   open: boolean
@@ -74,6 +77,11 @@ export interface GatekeeperModalProps {
   initialVendorId?: string
   initialResourceUrl?: string
   initialResourceUrlPattern?: string
+  /**
+   * Optional pre-seed: the connected account to select for the pre-seeded connection. Ignored when
+   * it is not a valid account of `initialVendorId` that supports that connection.
+   */
+  initialAccountId?: number
 }
 
 type ConnectionTypeId =
@@ -198,14 +206,9 @@ function isAlwaysOn(connection: ConnectionType, alwaysOnVendorIds: ReadonlySet<s
 // falling back as if the query failed.
 const OWNER_AMBIENT_TIMEOUT_MS = 5_000
 
-function disposeConfiguratorFrame(frame: ResourceConfiguratorFrame | null) {
-  const uiDisposable = frame?.ui as any
-  uiDisposable?.[Symbol.dispose]?.()
-}
-
 export default function GatekeeperModal({
   open, onClose, getOverseer, onCreated, spawnerEnvCandidates,
-  initialVendorId, initialResourceUrl, initialResourceUrlPattern,
+  initialVendorId, initialResourceUrl, initialResourceUrlPattern, initialAccountId,
 }: GatekeeperModalProps) {
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
@@ -221,6 +224,7 @@ export default function GatekeeperModal({
   const [vendors, setVendors] = useState<VendorOption[]>([])
 
   const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>([])
+  const [decisionModels, setDecisionModels] = useState<AiChatAuthorInfo[]>([])
   const [selectedModelId, setSelectedModelId] = useState<string | undefined>()
 
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null)
@@ -244,6 +248,11 @@ export default function GatekeeperModal({
   // doesn't clobber the user's edits.
   const spawnerEnvCandidatesRef = useRef(spawnerEnvCandidates)
   spawnerEnvCandidatesRef.current = spawnerEnvCandidates
+
+  // The initialAccountId still to apply this open: cleared once applied or once the user picks an
+  // account or a connection, so it never overrides a choice. Accounts arrive one at a time, so it
+  // may outlive the first account selection.
+  const pendingInitialAccountIdRef = useRef<number | null>(null)
 
   const configuratorFrameRef = useRef<ConfiguratorFrameState | null>(null)
   const configuratorCollectResourceUrlRef = useRef<(() => Promise<string>) | null>(null)
@@ -440,6 +449,7 @@ export default function GatekeeperModal({
 
     let cancelled = false
 
+    pendingInitialAccountIdRef.current = initialAccountId ?? null
     setSelectedConnectionId(null)
     setSearchText('')
     setExpandedGroups(new Set())
@@ -458,11 +468,13 @@ export default function GatekeeperModal({
     setSpawnerEnv(
       (spawnerEnvCandidatesRef.current ?? []).map(entry => ({ ...entry, enabled: true })))
 
-    authenticatedApi.listModels().then(models => {
+    Promise.all([authenticatedApi.listModels(), authenticatedApi.listModels('decision')])
+        .then(([models, decisions]) => {
       if (cancelled) return
       setAvailableModels(models)
+      setDecisionModels(decisions)
+      setSelectedModelId((models[0] ?? decisions[0])?.id)
       if (models.length > 0) {
-        setSelectedModelId(models[0].id)
         const lastSelected = localStorage.getItem('lastSelectedModel')
         if (lastSelected && models.some(m => m.id === lastSelected)) {
           setSpawnerModelId(lastSelected)
@@ -548,7 +560,7 @@ export default function GatekeeperModal({
       const matchesUrl = query.length >= 3 &&
         connection.resourceUrlPattern !== undefined &&
         connection.resourceUrlPattern !== 'https://*' &&
-        matchesResourceUrl(query, connection.resourceUrlPattern)
+        classifyMatch(query, connection.resourceUrlPattern).type !== 'none'
       return matchesText || matchesUrl
     })
   }, [addableConnections, searchText])
@@ -624,12 +636,21 @@ export default function GatekeeperModal({
 
   useEffect(() => {
     if (!selectedConnection?.vendorId) return
+    const initialAccount = selectedConnection.vendorId === initialVendorId
+      ? matchingAccounts.find(account =>
+        account.id === pendingInitialAccountIdRef.current && account.credentialsValid)
+      : undefined
+    if (initialAccount) {
+      pendingInitialAccountIdRef.current = null
+      setSelectedAccountId(initialAccount.id)
+      return
+    }
     const currentIsValid = selectedAccountId !== null
       && matchingAccounts.some(account => account.id === selectedAccountId && account.credentialsValid)
     if (currentIsValid) return
     const firstValidAccount = matchingAccounts.find(account => account.credentialsValid)
     setSelectedAccountId(firstValidAccount?.id ?? null)
-  }, [selectedConnection, matchingAccounts, selectedAccountId])
+  }, [selectedConnection, matchingAccounts, selectedAccountId, initialVendorId])
 
   useEffect(() => {
     const resourceUrlPattern = selectedConnection?.resourceUrlPattern ?? null
@@ -678,7 +699,13 @@ export default function GatekeeperModal({
     }
   }, [open, authenticatedApi, selectedConnection?.id, selectedConnection?.resourceUrlPattern, selectedAccount?.id, hasMissingResourceGrants, selectedAlwaysOn])
 
+  const handleSelectAccount = (accountId: number) => {
+    pendingInitialAccountIdRef.current = null
+    setSelectedAccountId(accountId)
+  }
+
   const handleSelectConnection = (connection: ConnectionType) => {
+    pendingInitialAccountIdRef.current = null
     setSelectedConnectionId(connection.id)
     if (!connection.vendorId) return
     const firstValidAccount = accounts.find(account => account.credentialsValid && accountSupportsConnection(account, connection))
@@ -696,15 +723,16 @@ export default function GatekeeperModal({
         toasts.add({ title: 'Service added.', variant: 'success' })
         return
       }
-      openConnectWindow(await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns))
-      toasts.add({ title: 'Complete the account connection in the pop-up window.', variant: 'success' })
+      const outcome = await openConnectWindow(await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns), authenticatedApi)
+      toasts.add({ title: outcome === 'connected' ? 'Account connected.' : 'Complete the account connection in the pop-up window.', variant: 'success' })
     } catch (error) {
+      if (error instanceof AuthPopupCancelledError) return
       console.error('Failed to initiate connection:', error)
       reportIssue('gatekeeper.connect-start', error, { gatekeeperVendorId: vendorId })
       toasts.add({
         title: connection.autoProvisionsAccount
           ? 'Could not add this service.'
-          : 'Failed to start connection flow',
+          : (error instanceof Error ? error.message : 'Could not complete connection flow'),
         variant: 'error',
       })
     } finally {
@@ -721,19 +749,16 @@ export default function GatekeeperModal({
     if (missing.length === 0) return
     setGrantingAccountId(accountId)
     try {
-      const flow = await authenticatedApi.ensureAccountResources(accountId, missing)
-      if (flow) {
-        openConnectWindow(flow)
-        toasts.add({ title: 'Grant the additional access in the pop-up window.', variant: 'success' })
-      }
-      // The popup redeems the ticket itself; the new grant arrives via subscribeConnectedAccounts(),
+      await requestAccountResources(authenticatedApi, toasts, accountId, missing)
+      // After ticket redemption the new grant arrives via subscribeConnectedAccounts(),
       // the account's flag then clears and the configurator loads automatically.
     } catch (error) {
+      if (error instanceof AuthPopupCancelledError) return
       console.error('Failed to request additional access:', error)
       reportIssue('gatekeeper.resource-grant', error, {
         gatekeeperVendorId: selectedConnection?.vendorId,
       })
-      toasts.add({ title: 'Failed to request additional access', variant: 'error' })
+      toasts.add({ title: error instanceof Error ? error.message : 'Failed to request additional access', variant: 'error' })
     } finally {
       setGrantingAccountId(null)
     }
@@ -742,14 +767,15 @@ export default function GatekeeperModal({
   const handleReconnectAccount = async (accountId: number) => {
     setReconnectingAccountId(accountId)
     try {
-      openConnectWindow(await authenticatedApi.reconnectAccount(accountId))
-      toasts.add({ title: 'Complete the account reconnect in the pop-up window.', variant: 'success' })
+      const outcome = await openConnectWindow(await authenticatedApi.reconnectAccount(accountId), authenticatedApi)
+      toasts.add({ title: outcome === 'connected' ? 'Account reconnected.' : 'Complete the account reconnect in the pop-up window.', variant: 'success' })
     } catch (error) {
+      if (error instanceof AuthPopupCancelledError) return
       console.error('Failed to initiate reconnect:', error)
       reportIssue('gatekeeper.reconnect-start', error, {
         gatekeeperVendorId: selectedConnection?.vendorId,
       })
-      toasts.add({ title: 'Failed to start reconnect flow', variant: 'error' })
+      toasts.add({ title: error instanceof Error ? error.message : 'Could not complete reconnect flow', variant: 'error' })
     } finally {
       setReconnectingAccountId(null)
     }
@@ -997,7 +1023,7 @@ export default function GatekeeperModal({
                     requiredResourceUrlPatterns={requiredResourceUrlPatterns(selectedConnection)}
                     grantingAccountId={grantingAccountId}
                     allowAdditionalAccount={!(selectedConnection.autoProvisionsAccount && matchingAccounts.length > 0)}
-                    onSelect={setSelectedAccountId}
+                    onSelect={handleSelectAccount}
                     onConnect={() => {
                       if (!selectedConnection.vendorId) return
                       const required = requiredResourceUrlPatterns(selectedConnection)
@@ -1019,6 +1045,10 @@ export default function GatekeeperModal({
                     disabled={needsAccount && !selectedAccount}
                     onCollectResourceUrlChange={handleConfiguratorCollectResourceUrlChange}
                     onSelectionReadyChange={setConfiguratorSelectionReady}
+                    onEnsureResources={configuratorFrameState
+                      ? patterns => requestAccountResources(
+                        authenticatedApi, toasts, configuratorFrameState.accountId, patterns)
+                      : undefined}
                     initialResourceUrl={prefilledResourceUrl ?? undefined}
                     resourceUrlPattern={selectedConnection.resourceUrlPattern}
                   />
@@ -1026,7 +1056,8 @@ export default function GatekeeperModal({
 
                 {selectedConnection.id === 'ai-model' && (
                   <AiModelConnectionConfig
-                    availableModels={availableModels}
+                    chatModels={availableModels}
+                    decisionModels={decisionModels}
                     selectedModelId={selectedModelId}
                     onSelectedModelIdChange={setSelectedModelId}
                     selectContainer={selectPortalContainer}

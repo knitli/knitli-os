@@ -671,7 +671,7 @@ describe("queued mutations", () => {
     const message = await firstMessage(session);
     const readsBefore = calls.length;
 
-    await expect(message.moveToFolder("..")).rejects.toThrow(/empty or relative/);
+    await expect(message.moveToFolder("..")).rejects.toThrow(/Refusing the path segment/);
 
     expect(approvals.actions).toHaveLength(0);
     // The destination lookup never left the process.

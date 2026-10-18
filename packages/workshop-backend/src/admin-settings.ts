@@ -129,7 +129,10 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     this.storage = makeAdminSettingsStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.vendors = buildGatekeeperVendorMap(env);
-    this.adminGatekeeperApps = new AdminGatekeeperApps(this.vendors);
+    this.adminGatekeeperApps = new AdminGatekeeperApps(this.vendors, () =>
+      this.ctx.exports.GatekeeperUserSelectionExchangeImpl(
+          { props: { selectorUserId: "", appAccountId: 0 } }) as unknown as
+        Fetcher<import('@gadgets/workshop-shared/gatekeeper').GatekeeperUserSelectionExchange>);
   }
 
   /**

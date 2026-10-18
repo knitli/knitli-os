@@ -48,20 +48,13 @@ describe("useComposerAttachments", () => {
     vi.unstubAllGlobals();
   });
 
-  it("clears only sent attachments and cleans up through their staging Overseer", async () => {
-    const uploadChatAttachment = vi.fn<Overseer["uploadChatAttachment"]>(
-      async () => ({ id: `upload-${++testState.nextId}` }),
+  it("uploads raw blobs with message metadata and clears only sent attachments", async () => {
+    const uploadBlob = vi.fn<Overseer["uploadBlob"]>(
+      async () => (++testState.nextId).toString(16).padStart(40, "0"),
     );
-    const deleteFromFirst = vi.fn<Overseer["deleteChatAttachment"]>(async () => {});
     const firstOverseer = {
-      uploadChatAttachment,
-      deleteChatAttachment: deleteFromFirst,
+      uploadBlob,
     } as unknown as RpcStub<Overseer>;
-    const deleteFromSecond = vi.fn<Overseer["deleteChatAttachment"]>(async () => {});
-    const secondOverseer = {
-      deleteChatAttachment: deleteFromSecond,
-    } as unknown as RpcStub<Overseer>;
-    let currentOverseer = firstOverseer;
     const onError = vi.fn<(message: string) => void>();
     let attachments: ComposerAttachment[] = [];
     let hasAttachments!: () => boolean;
@@ -72,8 +65,7 @@ describe("useComposerAttachments", () => {
     vi.stubGlobal("crypto", { randomUUID: () => `local-${++testState.nextId}` });
     const Harness = () => {
       const attachmentState = useComposerAttachments({
-        getOverseer: () => currentOverseer,
-        modelId: "model-a",
+        getOverseer: () => firstOverseer,
         onError,
       });
       attachments = attachmentState.attachments;
@@ -95,6 +87,10 @@ describe("useComposerAttachments", () => {
       expect(hasAttachments()).toBe(true);
     });
     await waitFor(() => attachments[0]?.uploadState === "ready");
+    expect(uploadBlob).toHaveBeenCalledWith(Uint8Array.of(1, 2, 3, 4));
+    expect(attachments[0].ref).toEqual({
+      oid: expect.stringMatching(/^[0-9a-f]{40}$/), mimeType: "text/plain", name: "one.txt",
+    });
     const sentSnapshot = [...attachments];
 
     await act(async () => addFiles!([
@@ -105,27 +101,19 @@ describe("useComposerAttachments", () => {
 
     expect(attachments).toHaveLength(1);
     expect(attachments[0].name).toBe("two.txt");
-    expect(deleteFromFirst).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
 
-    currentOverseer = secondOverseer;
-    act(() => {
-      removeAttachment!(attachments[0].id);
-      expect(hasAttachments()).toBe(false);
-    });
-    await waitFor(() => deleteFromFirst.mock.calls.length === 1);
-    expect(deleteFromSecond).not.toHaveBeenCalled();
+act(() => removeAttachment!(attachments[0].id));
+    expect(attachments).toHaveLength(0);
   });
 
-  it("deletes an upload that finishes after the composer unmounts", async () => {
-    let finishUpload!: (handle: { id: string }) => void;
-    const uploadChatAttachment = vi.fn<Overseer["uploadChatAttachment"]>(
+  it("ignores a blob upload that finishes after the composer unmounts", async () => {
+    let finishUpload!: (oid: string) => void;
+    const uploadBlob = vi.fn<Overseer["uploadBlob"]>(
       () => new Promise((resolve) => { finishUpload = resolve; }),
     );
-    const deleteChatAttachment = vi.fn<Overseer["deleteChatAttachment"]>(async () => {});
     const overseer = {
-      uploadChatAttachment,
-      deleteChatAttachment,
+      uploadBlob,
     } as unknown as RpcStub<Overseer>;
     let addFiles!: (files: File[]) => Promise<void>;
     vi.stubGlobal("crypto", { randomUUID: () => "local-race" });
@@ -133,7 +121,6 @@ describe("useComposerAttachments", () => {
     const Harness = () => {
       ({ addFiles } = useComposerAttachments({
         getOverseer: () => overseer,
-        modelId: "model-a",
         onError: vi.fn<(message: string) => void>(),
       }));
       return null;
@@ -144,12 +131,11 @@ describe("useComposerAttachments", () => {
     await act(async () => addFiles([
       new File(["one"], "one.txt", { type: "text/plain" }),
     ]));
-    await waitFor(() => uploadChatAttachment.mock.calls.length === 1);
+    await waitFor(() => uploadBlob.mock.calls.length === 1);
 
     await act(async () => root!.unmount());
     root = undefined;
-    await act(async () => finishUpload({ id: "late-upload" }));
-    await waitFor(() => deleteChatAttachment.mock.calls.length === 1);
-    expect(deleteChatAttachment).toHaveBeenCalledWith("late-upload");
+    await act(async () => finishUpload("1".repeat(40)));
+    expect(uploadBlob).toHaveBeenCalledTimes(1);
   });
 });

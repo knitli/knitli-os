@@ -115,6 +115,8 @@ export async function openFakeOverseer(
       finishRevocationRequiringRestart: () => {},
       scheduleAccessRestart: async (_reason: string) => {},
       // Fork: the client-activity lease open() arms and the interfaces register with.
+      rememberDecisionInitiator: () => {},
+      resumeAgentAfterDecision: () => {},
       idleLease: new IdleLease(),
       clientActivity: () => {},
       scheduleRevocationRestart() { void this.scheduleAccessRestart("Workspace access changed."); },
@@ -130,6 +132,11 @@ export async function openFakeOverseer(
       storage: Object.assign(storage, {
         containsRestrictedData: { get: () => false },
         title: { get: () => "Test Workspace" },
+        ...(("activeAgents" in (storage as object)) ? {} : {
+          activeAgents: {
+            get: () => undefined, put: () => {}, delete: () => {}, list: () => [],
+          },
+        }),
       }),
       ...opts.impl,
     },

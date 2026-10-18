@@ -77,10 +77,10 @@ describe("URL construction", () => {
     const calls = stubFetch(() => jsonResponse({}));
     const api = newApi();
 
-    await expect(api.getTeam("..")).rejects.toThrow(/empty or relative/);
-    await expect(api.getChannel("team-1", ".")).rejects.toThrow(/empty or relative/);
-    await expect(api.listChatMembers("")).rejects.toThrow(/empty or relative/);
-    await expect(api.listReplies("team-1", "channel-1", "..")).rejects.toThrow(/empty or relative/);
+    await expect(api.getTeam("..")).rejects.toThrow(/Refusing the path segment/);
+    await expect(api.getChannel("team-1", ".")).rejects.toThrow(/Refusing the path segment/);
+    await expect(api.listChatMembers("")).rejects.toThrow(/Refusing the path segment/);
+    await expect(api.listReplies("team-1", "channel-1", "..")).rejects.toThrow(/Refusing the path segment/);
 
     expect(calls).toHaveLength(0);
   });

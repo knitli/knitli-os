@@ -129,7 +129,20 @@ export function htmlToMarkdown(html: string): string {
       changes.push({ at: inline.length, marker, open: true });
     }
   };
+  // Writes the open code element, at its `</code>` or, when that was left out, at the block's end.
+  const flushCode = () => {
+    if (!inCode) return;
+    // An empty element shows nothing, and an empty span would show its backticks.
+    if (codeText) {
+      inline += hasForeignReference(codeHtml)
+        ? "<code>" + textMarkdown(codeHtml) + "</code>" : codeSpan(codeText);
+    }
+    codeText = "";
+    codeHtml = "";
+    inCode = false;
+  };
   const endBlock = () => {
+    flushCode();
     closeTo(0);
     // Text that opens a line must not be read back as block syntax there: a heading, list, quote
     // or fence, however many elements spelled it (`<span>1</span>. x`); a hard break leaves the
@@ -220,15 +233,7 @@ export function htmlToMarkdown(html: string): string {
           markdown = markdown.slice(0, start) + quoted + "\n\n";
           break;
         }
-        case "code":
-          if (inPre) break;
-          // An empty element shows nothing, and an empty span would show its backticks.
-          if (codeText) inline += hasForeignReference(codeHtml)
-            ? "<code>" + textMarkdown(codeHtml) + "</code>" : codeSpan(codeText);
-          codeText = "";
-          codeHtml = "";
-          inCode = false;
-          break;
+        case "code": if (!inPre) flushCode(); break;
         case "pre": {
           const fence = "`".repeat(Math.max(3, longestRun(preText, "`") + 1));
           // An HTML block keeps its content verbatim, references and all, up to its `</pre>`.
@@ -368,16 +373,27 @@ function emphasisOf(tag: string, attributes: string): Emphasis | undefined {
 /** What an element's inline style says about emphasis, which overrides what its tag implies. */
 function styleEmphasis(attributes: string): Emphasis {
   const style = (readHtmlAttribute(attributes, "style") ?? "").toLowerCase();
+  // Each property's value as the cascade picks it: the last `!important` declaration, else the last.
+  const declared = new Map<string, { value: string; important: boolean }>();
+  for (const declaration of style.split(";")) {
+    const colon = declaration.indexOf(":");
+    if (colon < 0) continue;
+    // The shorthand sets the line longhand, so the two are one property here.
+    const property = declaration.slice(0, colon).trim().replace(/^text-decoration$/, "text-decoration-line");
+    const raw = declaration.slice(colon + 1);
+    const important = /!\s*important\s*$/.test(raw);
+    if (declared.get(property)?.important && !important) continue;
+    declared.set(property, { value: raw.replace(/!\s*important\s*$/, "").trim(), important });
+  }
+  const value = (property: string) => declared.get(property)?.value;
   const emphasis: Emphasis = {};
   // `lighter` is relative (900 becomes a still-bold 700), so it says nothing.
-  // The last declaration of a property wins, as in the cascade.
-  const last = (pattern: RegExp) => [...style.matchAll(pattern)].at(-1);
-  const weight = last(/font-weight\s*:\s*(?:(bold|bolder|[6-9]00)|normal|[1-5]00)\b/g);
+  const weight = /^(?:(bold|bolder|[6-9]00)|normal|[1-5]00)$/.exec(value("font-weight") ?? "");
   if (weight) emphasis["**"] = weight[1] !== undefined;
-  const slant = last(/font-style\s*:\s*(?:(italic|oblique)|normal)\b/g);
+  const slant = /^(?:(italic|oblique)\b.*|normal)$/.exec(value("font-style") ?? "");
   if (slant) emphasis["*"] = slant[1] !== undefined;
   // A descendant cannot lift its ancestor's line-through, so strikethrough only turns on.
-  if (last(/text-decoration(?:-line)?\s*:([^;]*)/g)?.[1].includes("line-through")) emphasis["~~"] = true;
+  if (value("text-decoration-line")?.includes("line-through")) emphasis["~~"] = true;
   return emphasis;
 }
 

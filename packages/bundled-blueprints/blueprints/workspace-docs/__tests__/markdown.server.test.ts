@@ -225,6 +225,12 @@ describe("htmlToMarkdown", () => {
       .toBe('<p><a href="a">one</a><a href="b">two</a>three</p>\n');
   });
 
+  it("writes code whose end tag was left out, and lets !important win the cascade", () => {
+    expect(htmlToMarkdown("<p>a<code>b</p>")).toBe("a`b`\n");
+    expect(htmlToMarkdown('<p><span style="font-weight:bold!important;font-weight:normal">x</span></p>'))
+      .toBe("**x**\n");
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

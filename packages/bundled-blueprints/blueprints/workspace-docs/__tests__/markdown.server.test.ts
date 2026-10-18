@@ -120,6 +120,15 @@ describe("htmlToMarkdown", () => {
       .toBe("<ul>\n<li>\n<p>first</p>\n<p>second</p>\n</li>\n<li>\n<p>next</p>\n</li>\n</ul>\n");
   });
 
+  it("keeps a quoted >, an ordered list's start, and literal tildes", () => {
+    expect(render(htmlToMarkdown('<p><a href="https://example.com/a>b">x</a> ~~kept~~</p><ol start="5"><li>five</li></ol>')))
+      .toBe('<p><a href="https://example.com/a%3Eb">x</a> ~~kept~~</p>\n<ol start="5">\n<li>five</li>\n</ol>\n');
+  });
+
+  it("keeps a heading's trailing hashes as text", () => {
+    expect(render(htmlToMarkdown("<h2>Issue #</h2><h3>C ##</h3>"))).toBe("<h2>Issue #</h2>\n<h3>C ##</h3>\n");
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

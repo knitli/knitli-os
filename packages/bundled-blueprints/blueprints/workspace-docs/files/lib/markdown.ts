@@ -33,7 +33,9 @@ const BLOCK_TAGS: Record<string, true> = Object.fromEntries([
 
 /** Render block HTML as Markdown, ending with one newline, or as "" when it holds no content. */
 export function htmlToMarkdown(html: string): string {
-  const tokens = String(html).match(/<!--[\s\S]*?-->|<![^>]*>|<[^>]+>|[^<]+/g) || [];
+  // A quoted attribute value may hold `>`; a tag with an unbalanced quote falls back to the first.
+  const tokens = String(html)
+    .match(/<!--[\s\S]*?-->|<![^>]*>|<(?:[^>"']|"[^"]*"|'[^']*')+>|<[^>]+>|[^<]+/g) || [];
   const lists: { type: "ul" | "ol"; count: number }[] = [];
   // Each open list item's marker and where its content starts, written whole when it closes.
   const items: { marker: string; start: number }[] = [];
@@ -95,7 +97,7 @@ export function htmlToMarkdown(html: string): string {
       if (inPre) preText += text;
       else if (inCode) codeText += text.replace(/\s+/g, " ");
       else {
-        const words = text.replace(/\s+/g, " ").replace(/([\\`*_[\]<&])/g, "\\$1");
+        const words = text.replace(/\s+/g, " ").replace(/([\\`*_~[\]<&])/g, "\\$1");
         space ||= words.startsWith(" ");
         if (words.trim()) {
           beginInline();
@@ -110,7 +112,7 @@ export function htmlToMarkdown(html: string): string {
     }
     if (token.startsWith("<!--") || token.startsWith("<!")) continue;
 
-    const match = /^<\s*(\/?)\s*([a-z0-9]+)([^>]*)>/i.exec(token);
+    const match = /^<\s*(\/?)\s*([a-z0-9]+)([\s\S]*)>$/i.exec(token);
     if (!match) continue;
     const closing = match[1] === "/";
     const tag = match[2].toLowerCase();
@@ -127,7 +129,8 @@ export function htmlToMarkdown(html: string): string {
       switch (tag) {
         case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
           inHeading = false;
-          markdown += "\n\n";
+          // A trailing run of `#` after a space would be read as the heading's closing sequence.
+          markdown = markdown.replace(/(\s)(#+)$/, "$1\\$2") + "\n\n";
           break;
         case "p": case "div":
           markdown += "\n\n";
@@ -185,7 +188,11 @@ export function htmlToMarkdown(html: string): string {
       case "blockquote": markdown += "\n\n"; blockquotes.push(markdown.length); break;
       case "hr": markdown += "\n\n---\n\n"; break;
       case "ul": lists.push({ type: "ul", count: 0 }); break;
-      case "ol": lists.push({ type: "ol", count: 0 }); break;
+      case "ol": {
+        const start = Number.parseInt(readHtmlAttribute(attributes, "start"), 10);
+        lists.push({ type: "ol", count: Number.isSafeInteger(start) && start >= 0 ? start - 1 : 0 });
+        break;
+      }
       case "li": {
         const list = lists.at(-1) || { type: "ul", count: 0 };
         list.count += 1;

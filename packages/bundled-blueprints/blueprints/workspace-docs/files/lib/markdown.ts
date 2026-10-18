@@ -34,13 +34,9 @@ const BLOCK_TAGS: Record<string, true> = Object.fromEntries([
 /** Render block HTML as Markdown, ending with one newline, or as "" when it holds no content. */
 export function htmlToMarkdown(html: string): string {
   const tokens = String(html).match(/<!--[\s\S]*?-->|<![^>]*>|<[^>]+>|[^<]+/g) || [];
-  // `indent` is where a list's markers start: its parent item's content column, which CommonMark
-  // requires a nested list to reach; `content` is that column for the list's current item.
-  const lists: { type: "ul" | "ol"; count: number; indent: number; content: number }[] = [];
-  const openList = (type: "ul" | "ol") => {
-    const indent = lists.at(-1)?.content ?? 0;
-    lists.push({ type, count: 0, indent, content: indent });
-  };
+  const lists: { type: "ul" | "ol"; count: number }[] = [];
+  // Each open list item's marker and where its content starts, written whole when it closes.
+  const items: { marker: string; start: number }[] = [];
   const links: string[] = [];
   const blockquotes: number[] = [];
   // What each open formatting element says about emphasis, and the markers open in the output,
@@ -152,7 +148,18 @@ export function htmlToMarkdown(html: string): string {
           inline += "](" + (links.pop() ?? "") + ")";
           frames.pop();
           break;
-        case "li": if (!markdown.endsWith("\n")) markdown += "\n"; break;
+        // Every line after the first is indented to the marker's width, which CommonMark needs to
+        // keep an item's later paragraphs, code and nested lists inside it.
+        case "li": {
+          const item = items.pop();
+          if (!item) break;
+          const lines = markdown.slice(item.start).trim().replace(/\n{3,}/g, "\n\n").split("\n");
+          const indent = " ".repeat(item.marker.length);
+          markdown = markdown.slice(0, item.start) +
+            (item.marker + lines[0]).trimEnd() + "\n" +
+            lines.slice(1).map((line) => (line ? indent + line : line) + "\n").join("");
+          break;
+        }
         case "ul": case "ol": lists.pop(); break;
         case "td": case "th": markdown += "\t"; break;
         case "tr": markdown += "\n"; break;
@@ -177,13 +184,13 @@ export function htmlToMarkdown(html: string): string {
       case "pre": preText = ""; inPre = true; break;
       case "blockquote": markdown += "\n\n"; blockquotes.push(markdown.length); break;
       case "hr": markdown += "\n\n---\n\n"; break;
-      case "ul": case "ol": openList(tag); break;
+      case "ul": lists.push({ type: "ul", count: 0 }); break;
+      case "ol": lists.push({ type: "ol", count: 0 }); break;
       case "li": {
-        const list = lists.at(-1) || { type: "ul", count: 0, indent: 0, content: 0 };
+        const list = lists.at(-1) || { type: "ul", count: 0 };
         list.count += 1;
-        const marker = list.type === "ol" ? list.count + ". " : "- ";
-        list.content = list.indent + marker.length;
-        markdown += (markdown.endsWith("\n") ? "" : "\n") + " ".repeat(list.indent) + marker;
+        if (!markdown.endsWith("\n")) markdown += "\n";
+        items.push({ marker: list.type === "ol" ? list.count + ". " : "- ", start: markdown.length });
         break;
       }
       // Emphasis cannot pair across a link label's brackets, so the label opens and closes its

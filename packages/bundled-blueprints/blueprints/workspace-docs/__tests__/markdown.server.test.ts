@@ -115,6 +115,11 @@ describe("htmlToMarkdown", () => {
       .toContain("<li>ten\n<ul>\n<li>deep</li>\n</ul>\n</li>");
   });
 
+  it("keeps an item's later paragraphs inside it", () => {
+    expect(render(htmlToMarkdown("<ul><li><p>first</p><p>second</p></li><li>next</li></ul>")))
+      .toBe("<ul>\n<li>\n<p>first</p>\n<p>second</p>\n</li>\n<li>\n<p>next</p>\n</li>\n</ul>\n");
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

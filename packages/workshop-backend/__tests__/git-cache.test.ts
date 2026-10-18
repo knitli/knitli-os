@@ -1627,6 +1627,19 @@ describe("client-facing reads (readCommitTree / readFilesAtCommit)", () => {
     expect(t.pulls).toHaveLength(0);
   });
 
+  it("reports a file over the whole response budget as unreadable, not whole", async () => {
+    let t = makeCache();
+    let blob = await storeLocal(t.storage,
+        { type: "blob", payload: new Uint8Array(READ_FILES_RESPONSE_BUDGET + 1).fill(0x61) });
+    let tree = await storeLocal(t.storage,
+        { type: "tree", payload: treePayload([{ mode: "100644", name: "huge.txt", oid: blob }]) });
+    let commit = await storeLocal(t.storage,
+        { type: "commit", payload: commitPayload(tree, [], "huge") });
+    expect(await t.cache.readFilesAtCommit(commit, ["huge.txt"])).toStrictEqual([["huge.txt", {
+      kind: "unreadable", message: `huge.txt is too large to show (over ${READ_FILES_RESPONSE_BUDGET} bytes)`,
+    }]]);
+  });
+
   it("fails the whole call on a pull failure rather than answering per file", async () => {
     let t = await fixtureWithRemoteBlobs();
     t.sources.delete(G1);  // provenance loss: the only source is gone

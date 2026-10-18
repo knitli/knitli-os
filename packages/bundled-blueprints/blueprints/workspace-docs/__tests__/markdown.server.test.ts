@@ -107,6 +107,14 @@ describe("htmlToMarkdown", () => {
       .toBe("<p>&lt;b&gt;plain&lt;/b&gt; &amp;copy; `tick`</p>\n");
   });
 
+  it("nests a list inside an ordered item at that item's content column", () => {
+    expect(render(htmlToMarkdown("<ol><li>a<ul><li>b</li></ul></li></ol>")))
+      .toBe("<ol>\n<li>a\n<ul>\n<li>b</li>\n</ul>\n</li>\n</ol>\n");
+    const nine = "<li>x</li>".repeat(9);
+    expect(render(htmlToMarkdown(`<ol>${nine}<li>ten<ul><li>deep</li></ul></li></ol>`)))
+      .toContain("<li>ten\n<ul>\n<li>deep</li>\n</ul>\n</li>");
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

@@ -740,6 +740,9 @@ export class WorkspaceGitCache {
           let payload = await this.#readBlob(entry.oid, entry.referencedBy, path);
           if (entry.kind === "symlink") {
             out.push([path, { kind: "unreadable", message: symlinkMessage(path, payload) }]);
+          } else if (payload.byteLength > READ_FILES_RESPONSE_BUDGET) {
+            // A pack can inflate one blob far past any response; no call could ever return it.
+            out.push([path, { kind: "unreadable", message: tooLargeToShowMessage(path) }]);
           } else {
             let text = decodeBlobText(payload, path);
             bytes += payload.byteLength;
@@ -1424,6 +1427,10 @@ function symlinkMessage(path: string, target: Uint8Array): string {
 
 function submoduleMessage(path: string, target: GitOid): string {
   return `${path} is a submodule (gitlink) pointing at commit ${target}`;
+}
+
+function tooLargeToShowMessage(path: string): string {
+  return `${path} is too large to show (over ${READ_FILES_RESPONSE_BUDGET} bytes)`;
 }
 
 function tooLargeMessage(path: string): string {

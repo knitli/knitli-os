@@ -2850,7 +2850,8 @@ export type TreeNode =
  * One file's content at a commit, as returned by Overseer.readFilesAtCommit(). `text` carries
  * the file's UTF-8 content; `absent` means the path names no entry at that commit (or names a
  * directory); `unreadable` means the entry exists but cannot be presented as text -- a symlink,
- * a submodule, binary content, or a blob over the git store's per-object size cap -- and carries
+ * a submodule, binary content, a blob over the git store's per-object size cap, or text over
+ * READ_FILES_RESPONSE_BUDGET -- and carries
  * a descriptive, path-flavored message suitable for display in place of the file.
  */
 export type FileAtCommit =
@@ -2868,8 +2869,8 @@ export const MAX_READ_FILES_PER_CALL = 64;
  * Text bytes after which Overseer.readFilesAtCommit() stops decoding and omits the remaining
  * requested paths from its response (the client re-requests them). Keeps one response well
  * under the RPC message ceiling even with the UTF-16 inflation of serialized text. The first
- * file is always returned whole, however large, so every call makes progress; its size is
- * bounded only by what the git store could hold.
+ * file is always returned, so every call makes progress; a file whose text alone exceeds this
+ * budget is returned as `unreadable` rather than whole.
  */
 export const READ_FILES_RESPONSE_BUDGET = 8 * 1024 * 1024;
 

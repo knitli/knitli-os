@@ -175,6 +175,8 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
   }
 
   async #byteValue(path: string): Promise<FileContent> {
+    // Blindfold: prompt files fail exactly like missing files, as bytes too.
+    if (isPromptFileAnywhere(path)) throw new Error(`${path}: no such file`);
     const overlay = this.turn.getOverlayFiles(this.worktreeId);
     const value = overlay.get(path);
     if (value !== undefined) return value;
@@ -201,6 +203,8 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     }}, {highWaterMark: 0});
   }
   async writeBytes(path: string, content: Uint8Array): Promise<void> {
+    // Blindfold: prompt files are unwritable as bytes too (same missing-file error).
+    if (isPromptFileAnywhere(path)) throw new Error(`${path}: no such file`);
     await this.host.gitCache.assertWorktreePathWritable(this.#pinBase(), path);
     this.#pinBase();
     const value = await this.host.gitStore.writeBlob(content);

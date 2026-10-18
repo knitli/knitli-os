@@ -30,7 +30,7 @@ import {
   GitHubApiError, withAccountApi,
   type GitHubApi, type GitHubRepoWebhookResponse, type GitHubWebhookDeliveryResponse, type PinnedRepo,
 } from "./github-api";
-import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
+import { ALARM_GUARD_KEY_PREFIX, guardedAlarmFor } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { getBasePath, webhookOrigin, type Env } from "./github-env";
 import { parseWebhookEvent, type GitHubWebhookEvent, type WebhookPayload } from "./github-webhook-events";
 import { obsContext } from "./observability";
@@ -240,7 +240,8 @@ export class GitHubHookDriver extends DurableObject<Env> {
       // Listed in full before any is deleted. The webhooks, and the account that deletes them, stay
       // until they are gone.
       for (const [key, value] of Array.from(kv.list())) {
-        if (key === "account" || key.startsWith("webhook:") || key.startsWith("unrecorded:")) continue;
+        if (key === "account" || key.startsWith("webhook:") || key.startsWith("unrecorded:") ||
+            key.startsWith(ALARM_GUARD_KEY_PREFIX)) continue;
         if (key.startsWith("caps:")) disposeStubs(value as Capabilities);
         kv.delete(key);
       }
@@ -332,7 +333,12 @@ export class GitHubHookDriver extends DurableObject<Env> {
    * - delivering each queued event whose (re)try time has come, and forgetting finished ones.
    */
   async alarm(): Promise<void> {
-    if (await haltIfAlarmsDisabled(this.ctx, this.env, "github.hooks")) return;
+    // The flood-guarded alarm, as the Google hook drivers use (fork): a burst of deliveries can
+    // leave work due at once, and #reschedule() sets no floor of its own.
+    await guardedAlarmFor(this.ctx, this.env, "github.hooks", () => this.#alarmBody());
+  }
+
+  async #alarmBody(): Promise<void> {
     if ((this.ctx.storage.kv.get<number>("checkAt") ?? Infinity) <= Date.now()) await this.#checkWebhooks();
     await this.#queue.run(Date.now(), (hookKey, event) => this.#deliver(hookKey, event));
     await this.#reschedule();

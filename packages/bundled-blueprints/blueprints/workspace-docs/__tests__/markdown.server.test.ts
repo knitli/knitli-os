@@ -163,6 +163,11 @@ describe("htmlToMarkdown", () => {
       .toBe('<p>\u00a9 &amp;copy; Heading <a href="">empty</a></p>\n<pre><code>code\n</code></pre>\n');
   });
 
+  it("decodes a named reference in a destination as the page does", () => {
+    expect(render(htmlToMarkdown('<p><a href="https://e.com/?q=&copy;&amp;r=1">x</a></p>')))
+      .toBe('<p><a href="https://e.com/?q=%C2%A9&amp;r=1">x</a></p>\n');
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

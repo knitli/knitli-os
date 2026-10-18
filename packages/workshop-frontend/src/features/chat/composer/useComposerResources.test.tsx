@@ -434,6 +434,23 @@ describe("useComposerResources", () => {
     expect(configure).toBeTypeOf("function");
   });
 
+  it("replaces the occurrence the picker was opened on when the URL appears twice", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const harness = await renderHarness(async () => { throw new Error("Not a Google Sheet"); });
+    const text = `See ${description.url} and ${description.url}`;
+    act(() => {
+      harness.controls.draft.recordEdit();
+      harness.controls.draft.replaceDocument(emptyDocument(text));
+    });
+    act(() => harness.controls.resources.scanAt(text.length - 1));
+    await act(async () => harness.controls.resources.createCapsule(resolution));
+    consoleError.mockRestore();
+    act(() => harness.onError.mock.calls[0][2]!());
+    await act(async () => harness.controls.resources.attachCreated(createdGatekeeper().stub));
+
+    expect(harness.controls.draft.document.text).toBe(`See ${description.url} and Plan `);
+  });
+
   it("opens the attach modal on a failed URL and replaces it with the modal's capsule", async () => {
     const { harness, configure } = await failPaste(async () => {
       throw new Error("Not a Google Sheet");

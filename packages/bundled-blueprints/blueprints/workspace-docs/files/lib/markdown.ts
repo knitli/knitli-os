@@ -221,7 +221,7 @@ export function htmlToMarkdown(html: string): string {
       // own; the toolbar's Bold or Italic on a whole link styles the link itself.
       case "a": {
         frames.push(styleEmphasis(attributes));
-        const href = readHtmlAttribute(attributes, "href");
+        const href = readRawHtmlAttribute(attributes, "href");
         links.push(href === undefined ? null : linkDestination(href));
         if (href === undefined) break;
         beginInline([]);
@@ -234,7 +234,7 @@ export function htmlToMarkdown(html: string): string {
         beginInline();
         if (inline.endsWith("!")) inline = inline.slice(0, -1) + "\\!";
         const alt = textMarkdown(readRawHtmlAttribute(attributes, "alt") ?? "");
-        inline += "![" + alt + "](" + linkDestination(readHtmlAttribute(attributes, "src") ?? "") + ")";
+        inline += "![" + alt + "](" + linkDestination(readRawHtmlAttribute(attributes, "src") ?? "") + ")";
         break;
       }
     }
@@ -364,10 +364,15 @@ function readHtmlAttribute(source: string, name: string): string | undefined {
  * escaped and stays literal.
  */
 function textMarkdown(html: string): string {
+  return withForeignReferences(html, (part) => escapeText(part.replace(/[ \t\n\r\f]+/g, " ")));
+}
+
+/** `html` decoded and rewritten by `write`, except for named references left for CommonMark. */
+function withForeignReferences(html: string, write: (decoded: string) => string): string {
   return html.split(/(&[a-z][a-z0-9]*;)/i).map((part, i) =>
     i % 2 && !Object.hasOwn(NAMED_ENTITIES, part.slice(1, -1).toLowerCase())
       ? part
-      : escapeText(decodeHtml(part).replace(/[ \t\n\r\f]+/g, " "))).join("");
+      : write(decodeHtml(part))).join("");
 }
 
 /** The named references the editor writes; any other is left for CommonMark (see textMarkdown). */
@@ -411,11 +416,13 @@ function codeSpan(text: string): string {
 }
 
 /**
- * `url` as an inline link destination: parentheses, backslashes and `&` (which could start an
- * entity) escaped, whitespace and angle brackets encoded.
+ * A raw `href` or `src` value as an inline link destination: parentheses, backslashes and `&`
+ * (which could start an entity) escaped, whitespace and angle brackets encoded. CommonMark decodes
+ * references in a destination too, so one `decodeHtml` does not know passes through as written.
  */
-function linkDestination(url: string): string {
-  return url.replace(/[\\()&]/g, "\\$&").replace(/[\s<>]/g, encodeURIComponent);
+function linkDestination(raw: string): string {
+  return withForeignReferences(raw, (url) =>
+    url.replace(/[\\()&]/g, "\\$&").replace(/[\s<>]/g, encodeURIComponent));
 }
 
 /** Plain text with every character that could start inline Markdown syntax escaped. */

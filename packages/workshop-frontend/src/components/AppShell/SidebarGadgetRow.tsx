@@ -5,7 +5,7 @@ import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from
 import { useState, useEffect, useRef } from 'react'
 import type { GadgetMetadataWithTimestamps, NotificationMute } from '@gadgets/workshop-shared/api'
 import { WorkspaceNotificationsMenu } from '../../features/notifications/WorkspaceNotificationsMenu'
-import { describeMute } from '../../features/notifications/notificationMute'
+import { useMuteDescription } from '../../features/notifications/notificationMute'
 import { isImeComposing } from '../../keyboardEvent'
 
 function initials(title: string | undefined): string {
@@ -56,7 +56,7 @@ export default function SidebarGadgetRow({
     setRenaming(true)
   }
 
-  const muteDescription = describeMute(gadget.notificationMute)
+  const muteDescription = useMuteDescription(gadget.notificationMute)
 
   return (
     <Link

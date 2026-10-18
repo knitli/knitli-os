@@ -215,11 +215,13 @@ export const useComposerResources = ({
     );
   }, { allowPresentationChanges: true });
 
-  const openUrlInAttachModal = (sourceText: string, prefill: ComposerAttachModalPrefill) => {
+  const openUrlInAttachModal = (source: ActiveResourceUrl, prefill: ComposerAttachModalPrefill) => {
     if (attachTargetRef.current) return;
-    // A snapshot taken now, so edits made before the modal opened don't reject its capsule.
+    // A snapshot taken now, so edits made before the modal opened don't reject its capsule. The
+    // occurrence the picker was opened on while it can still be tracked, else the first copy.
     const snapshot = getDocumentSnapshot();
-    const url = findResourceUrl(sourceText, snapshot.document);
+    const url = currentResourceUrl(source, snapshot.document) ??
+      findResourceUrl(source.text, snapshot.document);
     if (!url) {
       onError(PROMPT_CHANGED_MESSAGE);
       return;
@@ -234,7 +236,7 @@ export const useComposerResources = ({
     if (!source) return;
     const operation = ++operationRef.current;
     const url = normalizeResourceUrl(source.text);
-    const configure = () => openUrlInAttachModal(source.text, { url, resolution });
+    const configure = () => openUrlInAttachModal(source, { url, resolution });
     setIsCreatingResource(true);
     try {
       const gatekeeper = await createCapsuleGatekeeper(resolution.accountId, url);

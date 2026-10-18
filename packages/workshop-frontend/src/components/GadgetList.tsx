@@ -6,7 +6,7 @@ import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from '../AuthContext'
 import { GadgetMetadataWithTimestamps, BlueprintPublicInfo, Overseer, AiChatAuthorInfo, NotificationMute } from '@gadgets/workshop-shared/api'
 import { WorkspaceNotificationsMenu } from '../features/notifications/WorkspaceNotificationsMenu'
-import { describeMute } from '../features/notifications/notificationMute'
+import { useMuteDescription } from '../features/notifications/notificationMute'
 import ShareModal from '../ShareModal'
 import { BindingBadge, getGradient as getBlueprintGradient, uniqueBindingBadges } from './BlueprintCard'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './menuStyles'
@@ -75,7 +75,7 @@ function AppRow({
     setIsRenaming(true)
   }
 
-  const muteDescription = describeMute(gadget.notificationMute)
+  const muteDescription = useMuteDescription(gadget.notificationMute)
 
   return (
     <Link

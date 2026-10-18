@@ -186,13 +186,13 @@ export function htmlToMarkdown(html: string): string {
       case "a":
         beginInline([]);
         frames.push(styleEmphasis(attributes));
-        links.push(readHtmlAttribute(attributes, "href"));
+        links.push(linkDestination(readHtmlAttribute(attributes, "href")));
         inline += "[";
         break;
       case "img": {
         beginInline();
         const alt = readHtmlAttribute(attributes, "alt").replace(/[\\[\]]/g, "\\$&");
-        inline += "![" + alt + "](" + readHtmlAttribute(attributes, "src") + ")";
+        inline += "![" + alt + "](" + linkDestination(readHtmlAttribute(attributes, "src")) + ")";
         break;
       }
     }
@@ -311,9 +311,12 @@ function decodeHtml(value: string): string {
   });
 }
 
-/** `text` with the block marker it would open a line with, if any, escaped. */
+/**
+ * `text` with the block marker it would open a line with, if any, escaped. A run of `=` or `-`
+ * is escaped wherever it leads, since alone on a line it underlines the line before as a heading.
+ */
 function escapeBlockMarker(text: string): string {
-  return text.replace(/^(?:#{1,6}|[-+>]|\d{1,9}[.)])(?=\s|$)|^(?:`{3}|~{3})/,
+  return text.replace(/^(?:#{1,6}|[-+>]|\d{1,9}[.)])(?=\s|$)|^(?:`{3}|~{3}|=+|-+)/,
     marker => marker.replace(/\D/, "\\$&"));
 }
 
@@ -325,6 +328,11 @@ function codeSpan(text: string): string {
   const delimiter = "`".repeat(longestRun(text, "`") + 1);
   const pad = /^`|`$/.test(text) ? " " : "";
   return delimiter + pad + text + pad + delimiter;
+}
+
+/** `url` as an inline link destination: parentheses and backslashes escaped, spaces encoded. */
+function linkDestination(url: string): string {
+  return url.replace(/[\\()]/g, "\\$&").replace(/[\s<>]/g, encodeURIComponent);
 }
 
 /** The longest run of `char` in `text` (0 when it never occurs). */

@@ -96,10 +96,15 @@ describe("htmlToMarkdown", () => {
   // Text that happens to start like block syntax must come back as the paragraph it was.
   it("escapes block markers that open a paragraph or a line in one", () => {
     const html = "<p># not a heading</p><p>- not a list</p><p>&gt; not a quote</p><p>12. not a list</p>" +
-      "<p>a<br>## nor this</p><p> ``` not a fence</p>";
+      "<p>a<br>## nor this</p><p> ``` not a fence</p><p>nor<br>===</p><p>this<br>---</p>";
     expect(render(htmlToMarkdown(html))).toBe(
       "<p># not a heading</p>\n<p>- not a list</p>\n<p>&gt; not a quote</p>\n<p>12. not a list</p>\n" +
-      "<p>a<br />\n## nor this</p>\n<p>``` not a fence</p>\n");
+      "<p>a<br />\n## nor this</p>\n<p>``` not a fence</p>\n<p>nor<br />\n===</p>\n<p>this<br />\n---</p>\n");
+  });
+
+  it("keeps a link's destination whole when it holds parentheses or spaces", () => {
+    expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
+      .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');
   });
 
   it("delimits code by runs longer than the backticks inside it", () => {

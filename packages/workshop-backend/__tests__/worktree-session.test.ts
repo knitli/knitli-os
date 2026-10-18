@@ -1,3 +1,4 @@
+import { MAX_FILE_PATH_LENGTH } from "@gadgets/workshop-shared/code-change";
 import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
@@ -234,6 +235,11 @@ describe("listFiles", () => {
     await expect(session.writeBytes("data.bin", new Uint8Array(MAX_GIT_OBJECT_SIZE + 1)))
       .rejects.toThrow("too large");
     expect(await new Response(await session.readBytes("data.bin")).bytes()).toEqual(Uint8Array.of(0, 255, 7));
+    // A path the change schema refuses stores no blob: git objects are never collected.
+    const objects = [...impl.storage.gitObjects.list()].length;
+    await expect(session.writeBytes("x".repeat(MAX_FILE_PATH_LENGTH + 1), Uint8Array.of(9, 9, 9)))
+      .rejects.toThrow();
+    expect([...impl.storage.gitObjects.list()].length).toBe(objects);
     await session.writeBytes("empty.bin", new Uint8Array());
     expect(await new Response(await session.readBytes("empty.bin")).bytes()).toEqual(new Uint8Array());
     await expect(session.readBytes("missing.bin")).rejects.toThrow("no such file");

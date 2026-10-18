@@ -39,7 +39,8 @@ export function htmlToMarkdown(html: string): string {
   const lists: { type: "ul" | "ol"; count: number }[] = [];
   // Each open list item's marker and where its content starts, written whole when it closes.
   const items: { marker: string; start: number }[] = [];
-  const links: string[] = [];
+  // Each open anchor's destination, or null for one with no href, which the page shows as text.
+  const links: (string | null)[] = [];
   const blockquotes: number[] = [];
   // Fenced code blocks, each held out of the Markdown as a placeholder line until the end, so no
   // trimming, blank-line collapsing or indenting of the text around it reaches its content.
@@ -97,11 +98,12 @@ export function htmlToMarkdown(html: string): string {
   for (const token of tokens) {
     if (!token.startsWith("<")) {
       const text = decodeHtml(token);
-      if (inPre) preText += text;
+      // The HTML parser drops a newline right after `<pre>`; the page never shows it.
+      if (inPre) preText += preText ? text : text.replace(/^\r?\n/, "");
       else if (inCode) codeText += text.replace(/[ \t\n\r\f]+/g, " ");
       else {
         // Only ASCII whitespace collapses: a no-break space is content, as in the page.
-        const words = escapeText(text.replace(/[ \t\n\r\f]+/g, " "));
+        const words = textMarkdown(token);
         space ||= words.startsWith(" ");
         if (trimAscii(words)) {
           beginInline();
@@ -157,11 +159,14 @@ export function htmlToMarkdown(html: string): string {
           inPre = false;
           break;
         }
-        case "a":
-          closeTo(0);
-          inline += "](" + (links.pop() ?? "") + ")";
+        case "a": {
+          const destination = links.pop();
           frames.pop();
+          if (destination === null) break;
+          closeTo(0);
+          inline += "](" + (destination ?? "") + ")";
           break;
+        }
         // Every line after the first is indented to the marker's width, which CommonMark needs to
         // keep an item's later paragraphs, code and nested lists inside it.
         case "li": {
@@ -200,7 +205,7 @@ export function htmlToMarkdown(html: string): string {
       case "hr": markdown += "\n\n---\n\n"; break;
       case "ul": lists.push({ type: "ul", count: 0 }); break;
       case "ol": {
-        const start = Number.parseInt(readHtmlAttribute(attributes, "start"), 10);
+        const start = Number.parseInt(readHtmlAttribute(attributes, "start") ?? "", 10);
         // CommonMark reads at most nine digits as a list number.
         lists.push({ type: "ol", count: start >= 0 && start <= 999_999_999 ? start - 1 : 0 });
         break;
@@ -214,19 +219,22 @@ export function htmlToMarkdown(html: string): string {
       }
       // Emphasis cannot pair across a link label's brackets, so the label opens and closes its
       // own; the toolbar's Bold or Italic on a whole link styles the link itself.
-      case "a":
+      case "a": {
+        frames.push(styleEmphasis(attributes));
+        const href = readHtmlAttribute(attributes, "href");
+        links.push(href === undefined ? null : linkDestination(href));
+        if (href === undefined) break;
         beginInline([]);
         // `!` right before the label would make the link an image.
         if (inline.endsWith("!")) inline = inline.slice(0, -1) + "\\!";
-        frames.push(styleEmphasis(attributes));
-        links.push(linkDestination(readHtmlAttribute(attributes, "href")));
         inline += "[";
         break;
+      }
       case "img": {
         beginInline();
         if (inline.endsWith("!")) inline = inline.slice(0, -1) + "\\!";
-        const alt = escapeText(readHtmlAttribute(attributes, "alt").replace(/[ \t\n\r\f]+/g, " "));
-        inline += "![" + alt + "](" + linkDestination(readHtmlAttribute(attributes, "src")) + ")";
+        const alt = textMarkdown(readRawHtmlAttribute(attributes, "alt") ?? "");
+        inline += "![" + alt + "](" + linkDestination(readHtmlAttribute(attributes, "src") ?? "") + ")";
         break;
       }
     }
@@ -254,7 +262,7 @@ function emphasisOf(tag: string, attributes: string): Emphasis | undefined {
 
 /** What an element's inline style says about emphasis, which overrides what its tag implies. */
 function styleEmphasis(attributes: string): Emphasis {
-  const style = readHtmlAttribute(attributes, "style").toLowerCase();
+  const style = (readHtmlAttribute(attributes, "style") ?? "").toLowerCase();
   const emphasis: Emphasis = {};
   // `lighter` is relative (900 becomes a still-bold 700), so it says nothing.
   const weight = /font-weight\s*:\s*(?:(bold|bolder|[6-9]00)|normal|[1-5]00)\b/.exec(style);
@@ -335,12 +343,36 @@ function charClass(char: string | undefined): "space" | "punctuation" | "word" {
   return /[\p{P}\p{S}]/u.test(char) ? "punctuation" : "word";
 }
 
-function readHtmlAttribute(source: string, name: string): string {
+/** An attribute's value as written, entities and all, or undefined when the element has none. */
+function readRawHtmlAttribute(source: string, name: string): string | undefined {
   // Bounded on the left, so `src` does not match inside `srcset` or `data-src`.
   const pattern = new RegExp("(?<![\\w:-])" + name + "\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))", "i");
   const match = pattern.exec(source);
-  return decodeHtml(match ? match[1] ?? match[2] ?? match[3] ?? "" : "");
+  return match ? match[1] ?? match[2] ?? match[3] ?? "" : undefined;
 }
+
+/** An attribute's decoded value, or undefined when the element has none. */
+function readHtmlAttribute(source: string, name: string): string | undefined {
+  const value = readRawHtmlAttribute(source, name);
+  return value === undefined ? undefined : decodeHtml(value);
+}
+
+/**
+ * HTML text as Markdown text: decoded, ASCII whitespace collapsed, and escaped. A named reference
+ * `decodeHtml` does not know is passed through as written, since CommonMark decodes every HTML5
+ * one itself (`&copy;` stays a copyright sign), while the same text spelled `&amp;copy;` is
+ * escaped and stays literal.
+ */
+function textMarkdown(html: string): string {
+  return html.split(/(&[a-z][a-z0-9]*;)/i).map((part, i) =>
+    i % 2 && !Object.hasOwn(NAMED_ENTITIES, part.slice(1, -1).toLowerCase())
+      ? part
+      : escapeText(decodeHtml(part).replace(/[ \t\n\r\f]+/g, " "))).join("");
+}
+
+/** The named references the editor writes; any other is left for CommonMark (see textMarkdown). */
+const NAMED_ENTITIES: Record<string, string> =
+  { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: "\u00a0" };
 
 function decodeHtml(value: string): string {
   // NUL marks a fence placeholder in the output, so a raw one reads as a browser shows it.
@@ -353,8 +385,7 @@ function decodeHtml(value: string): string {
       const valid = code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff);
       return String.fromCodePoint(valid ? code : 0xfffd);
     }
-    const named: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: "\u00a0" };
-    return named[lower];
+    return NAMED_ENTITIES[lower];
   });
 }
 

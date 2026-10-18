@@ -206,10 +206,13 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     // Blindfold: prompt files are unwritable as bytes too (same missing-file error).
     if (isPromptFileAnywhere(path)) throw new Error(`${path}: no such file`);
     await this.host.gitCache.assertWorktreePathWritable(this.#pinBase(), path);
+    // Validated before the blob is stored: git objects are never collected, so a change refused
+    // after the write would leave its blob behind for good. The stand-in oid has the real shape.
+    validateCodeChangeSchema({[this.worktreeId]: [[path,
+      {setBytes: {oid: "0".repeat(40), byteLength: content.byteLength}}]]});
     this.#pinBase();
     const value = await this.host.gitStore.writeBlob(content);
     const change = {setBytes: value};
-    validateCodeChangeSchema({[this.worktreeId]: [[path, change]]});
     this.#pinBase();
     this.turn.appendChange(this.worktreeId, path, change);
   }

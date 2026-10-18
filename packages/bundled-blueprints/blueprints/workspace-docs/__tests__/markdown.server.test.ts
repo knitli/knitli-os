@@ -157,6 +157,12 @@ describe("htmlToMarkdown", () => {
       .toBe('<p><a href="x">a]b</a> <img src="i" alt="c]d" /></p>\n');
   });
 
+  it("shows named references, pre's first line, and href-less anchors as the page does", () => {
+    expect(render(htmlToMarkdown(
+      '<p>&copy; &amp;copy; <a id="s">Heading</a> <a href="">empty</a></p><pre>\ncode</pre>')))
+      .toBe('<p>\u00a9 &amp;copy; Heading <a href="">empty</a></p>\n<pre><code>code\n</code></pre>\n');
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

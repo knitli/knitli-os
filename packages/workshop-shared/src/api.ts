@@ -4614,11 +4614,6 @@ export type AlwaysAvailableResource = {
 };
 
 /**
- * A previously uploaded blob to attach to a chat message, with display/model-input metadata.
- * The blob must be present in this workspace's Git store. Attachment limits and MIME signatures
- * are checked when sending. The ID-only variant accepts legacy staged uploads.
- */
-/**
  * Bytes to upload as a staged chat attachment (spreadsheets, which the server parses on the
  * way in). Other files use `Overseer.uploadBlob()` instead.
  *
@@ -4633,6 +4628,12 @@ export type ChatAttachmentUpload = {
   name?: string;
 };
 
+/**
+ * A previously uploaded blob to attach to a chat message, with display/model-input metadata.
+ * The blob must be present in this workspace's Git store. Attachment limits and MIME signatures
+ * are checked when sending. The ID-only variant names a staged upload: a spreadsheet from
+ * `uploadChatAttachment()` (fork), or a legacy one.
+ */
 export type ChatAttachmentHandle = {
   /** Immutable Git blob returned by `uploadBlob()`. */
   oid: GitOid;
@@ -4641,7 +4642,7 @@ export type ChatAttachmentHandle = {
   /** Original display filename, sanitized when sending. */
   name?: string;
 } | {
-  /** Legacy staged-upload ID; new clients use a blob OID instead. */
+  /** Staged-upload ID: a spreadsheet's from `uploadChatAttachment()`, or a legacy upload's. */
   id: string;
 };
 

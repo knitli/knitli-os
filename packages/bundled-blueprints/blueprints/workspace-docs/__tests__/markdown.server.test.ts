@@ -168,6 +168,11 @@ describe("htmlToMarkdown", () => {
       .toBe('<p><a href="https://e.com/?q=%C2%A9&amp;r=1">x</a></p>\n');
   });
 
+  it("keeps a bare < as text and closes list items whose end tags HTML lets go unwritten", () => {
+    expect(render(htmlToMarkdown("<p>1 < 2</p><ul><li>one<li>two<ul><li>deep</ul><li>three</ul>")))
+      .toBe("<p>1 &lt; 2</p>\n<ul>\n<li>one</li>\n<li>two\n<ul>\n<li>deep</li>\n</ul>\n</li>\n<li>three</li>\n</ul>\n");
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

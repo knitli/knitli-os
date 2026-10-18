@@ -34,11 +34,25 @@ const BLOCK_TAGS: Record<string, true> = Object.fromEntries([
 /** Render block HTML as Markdown, ending with one newline, or as "" when it holds no content. */
 export function htmlToMarkdown(html: string): string {
   // A quoted attribute value may hold `>`; a tag with an unbalanced quote falls back to the first.
-  const tokens = String(html)
-    .match(/<!--[\s\S]*?-->|<![^>]*>|<(?:[^>"']|"[^"]*"|'[^']*')+>|<[^>]+>|[^<]+/g) || [];
+  // A `<` that starts no tag (`1 < 2`) is text, as the browser recovers it.
+  const tokens = String(html).match(
+    /<!--[\s\S]*?-->|<![^>]*>|<\/?[a-z](?:[^>"']|"[^"]*"|'[^']*')*>|<\/?[a-z][^>]*>|[^<]+|</gi) || [];
   const lists: { type: "ul" | "ol"; count: number }[] = [];
   // Each open list item's marker and where its content starts, written whole when it closes.
-  const items: { marker: string; start: number }[] = [];
+  const items: { marker: string; start: number; depth: number }[] = [];
+  // Every line after the first is indented to the marker's width, which CommonMark needs to keep
+  // an item's later paragraphs, code and nested lists inside it.
+  const finishItem = () => {
+    const item = items.pop();
+    if (!item) return;
+    const lines = trimAscii(markdown.slice(item.start)).replace(/\n{3,}/g, "\n\n").split("\n");
+    const indent = " ".repeat(item.marker.length);
+    markdown = markdown.slice(0, item.start) +
+      (item.marker + lines[0]).trimEnd() + "\n" +
+      lines.slice(1).map((line) => (line ? indent + line : line) + "\n").join("");
+  };
+  // HTML lets `</li>` go unwritten before the next item or the list's end, which close it then.
+  const finishOpenItem = () => { if (items.at(-1)?.depth === lists.length) finishItem(); };
   // Each open anchor's destination, or null for one with no href, which the page shows as text.
   const links: (string | null)[] = [];
   const blockquotes: number[] = [];
@@ -96,7 +110,7 @@ export function htmlToMarkdown(html: string): string {
   };
 
   for (const token of tokens) {
-    if (!token.startsWith("<")) {
+    if (!token.startsWith("<") || token === "<") {
       const text = decodeHtml(token);
       // The HTML parser drops a newline right after `<pre>`; the page never shows it.
       if (inPre) preText += preText ? text : text.replace(/^\r?\n/, "");
@@ -167,19 +181,8 @@ export function htmlToMarkdown(html: string): string {
           inline += "](" + (destination ?? "") + ")";
           break;
         }
-        // Every line after the first is indented to the marker's width, which CommonMark needs to
-        // keep an item's later paragraphs, code and nested lists inside it.
-        case "li": {
-          const item = items.pop();
-          if (!item) break;
-          const lines = trimAscii(markdown.slice(item.start)).replace(/\n{3,}/g, "\n\n").split("\n");
-          const indent = " ".repeat(item.marker.length);
-          markdown = markdown.slice(0, item.start) +
-            (item.marker + lines[0]).trimEnd() + "\n" +
-            lines.slice(1).map((line) => (line ? indent + line : line) + "\n").join("");
-          break;
-        }
-        case "ul": case "ol": lists.pop(); break;
+        case "li": finishOpenItem(); break;
+        case "ul": case "ol": finishOpenItem(); lists.pop(); break;
         case "td": case "th": markdown += "\t"; break;
         case "tr": markdown += "\n"; break;
       }
@@ -211,10 +214,13 @@ export function htmlToMarkdown(html: string): string {
         break;
       }
       case "li": {
+        finishOpenItem();
         const list = lists.at(-1) || { type: "ul", count: 0 };
         list.count += 1;
         if (!markdown.endsWith("\n")) markdown += "\n";
-        items.push({ marker: list.type === "ol" ? list.count + ". " : "- ", start: markdown.length });
+        items.push({
+          marker: list.type === "ol" ? list.count + ". " : "- ", start: markdown.length, depth: lists.length,
+        });
         break;
       }
       // Emphasis cannot pair across a link label's brackets, so the label opens and closes its

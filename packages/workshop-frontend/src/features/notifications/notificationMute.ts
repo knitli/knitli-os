@@ -22,7 +22,7 @@ const MAX_TIMER_MS = 2 ** 31 - 1
  */
 export const useMuteDescription = (mute: NotificationMute | undefined): string | undefined => {
   const [checks, recheck] = useReducer((count: number) => count + 1, 0)
-  const until = mute && 'until' in mute ? mute.until.getTime() : undefined
+  const until = mute && !('indefinite' in mute) ? mute.until.getTime() : undefined
   useEffect(() => {
     if (until === undefined || until <= Date.now()) return
     const timer = setTimeout(recheck, Math.min(until - Date.now(), MAX_TIMER_MS))

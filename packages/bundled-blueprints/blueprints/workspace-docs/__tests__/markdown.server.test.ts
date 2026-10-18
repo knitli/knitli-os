@@ -178,6 +178,15 @@ describe("htmlToMarkdown", () => {
       .toBe('<p><a href="right">x</a></p>\n<p>1. plain</p>\n');
   });
 
+  it("honors item values, decodes references in code, and leaves out what the page never shows", () => {
+    expect(render(htmlToMarkdown(
+      "<ol><li value=\"5\">five</li><li>six</li></ol><p>before</p><script>alert(1)</script>" +
+      "<style>p{}</style><template><p>t</p></template><p>after <code>&copy;</code></p><pre>&copy;</pre>")))
+      .toBe('<ol start="5">\n<li>five</li>\n<li>six</li>\n</ol>\n<p>before</p>\n<p>after <code>\u00a9</code></p>\n' +
+        // An HTML block, passed through as written, which a browser shows as ©.
+        "<pre><code>&copy;</code></pre>\n");
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

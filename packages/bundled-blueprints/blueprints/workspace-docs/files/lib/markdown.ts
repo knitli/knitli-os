@@ -25,6 +25,9 @@ const ELEMENT_EMPHASIS = new Map<string, Emphasis>([
   ["span", {}], ["font", {}],
 ]);
 
+/** Elements whose content the page never renders, so the export leaves it out too. */
+const HIDDEN_TAGS = new Set(["script", "style", "template", "noscript", "title"]);
+
 /** Tags that end a run of inline content, closing its emphasis and dropping any space or break. */
 const BLOCK_TAGS: Record<string, true> = Object.fromEntries([
   "h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "blockquote", "pre", "ul", "ol", "li", "hr",
@@ -74,6 +77,10 @@ export function htmlToMarkdown(html: string): string {
   let inCode = false;
   let codeText = "";
   let preText = "";
+  // The same code as HTML, references as written: code spans and fences show references
+  // literally, so code holding one only a browser decodes is written as HTML instead.
+  let codeHtml = "";
+  let preHtml = "";
   let inHeading = false;
   // Space and `<br>`s since the last content, written only once more content follows: the editor
   // leaves a `<br>` as the sole content of an empty paragraph.
@@ -112,12 +119,29 @@ export function htmlToMarkdown(html: string): string {
     breaks = 0;
   };
 
+  // The open element whose content the page never shows (script, style, template), and how deep.
+  let hidden: { tag: string; depth: number } | undefined;
+
   for (const token of tokens) {
+    if (hidden) {
+      const tag = /^<\s*(\/?)\s*([a-z0-9]+)/i.exec(token);
+      if (tag?.[2].toLowerCase() === hidden.tag) {
+        hidden.depth += tag[1] ? -1 : 1;
+        if (hidden.depth === 0) hidden = undefined;
+      }
+      continue;
+    }
     if (!token.startsWith("<") || token === "<") {
       const text = decodeHtml(token);
+      const html = token === "<" ? "&lt;" : token;
       // The HTML parser drops a newline right after `<pre>`; the page never shows it.
-      if (inPre) preText += preText ? text : text.replace(/^\r?\n/, "");
-      else if (inCode) codeText += text.replace(/[ \t\n\r\f]+/g, " ");
+      if (inPre) {
+        preText += preText ? text : text.replace(/^\r?\n/, "");
+        preHtml += preHtml ? html : html.replace(/^\r?\n/, "");
+      } else if (inCode) {
+        codeText += text.replace(/[ \t\n\r\f]+/g, " ");
+        codeHtml += html.replace(/[ \t\n\r\f]+/g, " ");
+      }
       else {
         // Only ASCII whitespace collapses: a no-break space is content, as in the page.
         const words = textMarkdown(token);
@@ -136,6 +160,10 @@ export function htmlToMarkdown(html: string): string {
     if (!match) continue;
     const closing = match[1] === "/";
     const tag = match[2].toLowerCase();
+    if (!closing && HIDDEN_TAGS.has(tag) && !/\/\s*$/.test(match[3])) {
+      hidden = { tag, depth: 1 };
+      continue;
+    }
     const attributes = match[3];
     const emphasis = emphasisOf(tag, attributes);
     if (emphasis) {
@@ -164,12 +192,23 @@ export function htmlToMarkdown(html: string): string {
           markdown = markdown.slice(0, start) + quoted + "\n\n";
           break;
         }
-        case "code": if (!inPre) { inline += codeSpan(codeText); codeText = ""; inCode = false; } break;
+        case "code":
+          if (inPre) break;
+          inline += hasForeignReference(codeHtml)
+            ? "<code>" + textMarkdown(codeHtml) + "</code>" : codeSpan(codeText);
+          codeText = "";
+          codeHtml = "";
+          inCode = false;
+          break;
         case "pre": {
           const fence = "`".repeat(Math.max(3, longestRun(preText, "`") + 1));
-          fences.push(fence + "\n" + preText.replace(/\n$/, "") + "\n" + fence);
+          // An HTML block keeps its content verbatim, references and all, up to its `</pre>`.
+          fences.push(hasForeignReference(preHtml)
+            ? "<pre><code>" + preHtml.replace(/\n$/, "") + "</code></pre>"
+            : fence + "\n" + preText.replace(/\n$/, "") + "\n" + fence);
           markdown += "\n\n" + fencePlaceholder(fences.length - 1) + "\n\n";
           preText = "";
+          preHtml = "";
           inPre = false;
           break;
         }
@@ -197,13 +236,13 @@ export function htmlToMarkdown(html: string): string {
       case "p": case "div": markdown += "\n\n"; break;
       // A heading is one line in Markdown, and code one span, so a break in either is a space.
       case "br":
-        if (inPre) preText += "\n";
-        else if (inCode) codeText += " ";
+        if (inPre) { preText += "\n"; preHtml += "\n"; }
+        else if (inCode) { codeText += " "; codeHtml += " "; }
         else if (inHeading) space = true;
         else breaks++;
         break;
-      case "code": if (!inPre) { beginInline(); codeText = ""; inCode = true; } break;
-      case "pre": preText = ""; inPre = true; break;
+      case "code": if (!inPre) { beginInline(); codeText = ""; codeHtml = ""; inCode = true; } break;
+      case "pre": preText = ""; preHtml = ""; inPre = true; break;
       case "blockquote": markdown += "\n\n"; blockquotes.push(markdown.length); break;
       case "hr": markdown += "\n\n---\n\n"; break;
       case "ul": lists.push({ type: "ul", count: 0 }); break;
@@ -216,7 +255,9 @@ export function htmlToMarkdown(html: string): string {
       case "li": {
         finishOpenItem();
         const list = lists.at(-1) || { type: "ul", count: 0 };
-        list.count += 1;
+        // An item's own `value` renumbers it, and the items after it count on from there.
+        const value = Number.parseInt(readHtmlAttribute(attributes, "value") ?? "", 10);
+        list.count = list.type === "ol" && value >= 0 && value <= 999_999_999 ? value : list.count + 1;
         if (!markdown.endsWith("\n")) markdown += "\n";
         items.push({
           marker: list.type === "ol" ? list.count + ". " : "- ", start: markdown.length, depth: lists.length,
@@ -376,6 +417,12 @@ function readHtmlAttribute(source: string, name: string): string | undefined {
  */
 function textMarkdown(html: string): string {
   return withForeignReferences(html, (part) => escapeText(part.replace(/[ \t\n\r\f]+/g, " ")));
+}
+
+/** Whether `html` holds a named reference `decodeHtml` leaves for a browser or CommonMark. */
+function hasForeignReference(html: string): boolean {
+  return [...html.matchAll(/&([a-z][a-z0-9]*);/gi)]
+    .some(([, name]) => !Object.hasOwn(NAMED_ENTITIES, name.toLowerCase()));
 }
 
 /** `html` decoded and rewritten by `write`, except for named references left for CommonMark. */

@@ -28,10 +28,16 @@ const ELEMENT_EMPHASIS = new Map<string, Emphasis>([
 /** Elements whose content the page never renders, so the export leaves it out too. */
 const HIDDEN_TAGS = new Set(["script", "style", "template", "noscript", "title"]);
 
+/** Other block elements, which Markdown has no syntax for: each stands apart as a paragraph does. */
+const PARAGRAPH_LIKE = [
+  "address", "article", "aside", "caption", "center", "dd", "details", "dl", "dt", "fieldset",
+  "figcaption", "figure", "footer", "header", "hgroup", "legend", "main", "nav", "section", "summary",
+];
+
 /** Tags that end a run of inline content, closing its emphasis and dropping any space or break. */
 const BLOCK_TAGS: Record<string, true> = Object.fromEntries([
   "h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "blockquote", "pre", "ul", "ol", "li", "hr",
-  "table", "tr", "td", "th",
+  "table", "tr", "td", "th", ...PARAGRAPH_LIKE,
 ].map((tag) => [tag, true]));
 
 /** Render block HTML as Markdown, ending with one newline, or as "" when it holds no content. */
@@ -61,6 +67,14 @@ export function htmlToMarkdown(html: string): string {
     markdown = markdown.slice(0, item.start) +
       (item.marker + lines[0]).trimEnd() + "\n" +
       lines.slice(1).map((line) => (line ? indent + line : line) + "\n").join("");
+  };
+  const closeLink = () => {
+    if (links.length === 0) return;
+    const destination = links.pop();
+    frames.pop();
+    if (destination === null) return;
+    closeTo(0);
+    inline += "](" + (destination ?? "") + ")";
   };
   // HTML lets `</li>` go unwritten before the next item or the list's end, which close it then.
   const finishOpenItem = () => { if (items.at(-1)?.depth === lists.length) finishItem(); };
@@ -182,6 +196,10 @@ export function htmlToMarkdown(html: string): string {
       continue;
     }
     if (BLOCK_TAGS[tag]) endBlock();
+    if (PARAGRAPH_LIKE.includes(tag)) {
+      markdown += "\n\n";
+      continue;
+    }
 
     if (closing) {
       switch (tag) {
@@ -223,14 +241,8 @@ export function htmlToMarkdown(html: string): string {
           inPre = false;
           break;
         }
-        case "a": {
-          const destination = links.pop();
-          frames.pop();
-          if (destination === null) break;
-          closeTo(0);
-          inline += "](" + (destination ?? "") + ")";
-          break;
-        }
+        // An `</a>` with no anchor open (one a later `<a>` already closed) is ignored, as in HTML.
+        case "a": closeLink(); break;
         case "li": if (lists.at(-1)?.html) markdown += "\n\n</li>\n\n"; else finishOpenItem(); break;
         case "ul": case "ol":
           if (lists.at(-1)?.html) markdown += "\n\n</ol>\n\n";
@@ -311,6 +323,8 @@ export function htmlToMarkdown(html: string): string {
       // Emphasis cannot pair across a link label's brackets, so the label opens and closes its
       // own; the toolbar's Bold or Italic on a whole link styles the link itself.
       case "a": {
+        // Anchors cannot nest: a browser closes an open one before the next begins.
+        closeLink();
         frames.push(styleEmphasis(attributes));
         const href = readRawHtmlAttribute(attributes, "href", true);
         links.push(href === undefined ? null : linkDestination(href));

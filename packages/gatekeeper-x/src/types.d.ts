@@ -30,7 +30,10 @@ export type XPageOptions = {
   pageSize?: number;
 };
 
-/** Bounds for a listing ordered by time, newest first. Every bound is exclusive. */
+/**
+ * Bounds for a listing ordered by time, newest first. Every bound is exclusive except `startTime`,
+ * which, as on X, includes posts created at that very time.
+ */
 export type XTimeRangeOptions = XPageOptions & {
   /**
    * Only posts newer than this post ID. Pass the newest post ID you have already seen to fetch
@@ -40,7 +43,7 @@ export type XTimeRangeOptions = XPageOptions & {
   sinceId?: string;
   /** Only posts older than this post ID, which may be a temporary one, as for `sinceId`. */
   untilId?: string;
-  /** Only posts created after this time. */
+  /** Only posts created at or after this time. */
   startTime?: Date;
   /** Only posts created before this time. */
   endTime?: Date;

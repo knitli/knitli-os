@@ -537,8 +537,8 @@
     {
       "path": "packages/gatekeeper-x/src/types.d.ts",
       "upstreamBlob": "e2a009cb839a4088cd7f8138183296200ee0bcb5",
-      "forkBlob": "45ad5aa10c6fb7d5d8b8c98c8739d3a60c3faa3f",
-      "reason": "Served verbatim to the agent as types.txt, so its doc comments are agent-visible API text: the fork drops the approval wording that action simulation keeps out of the agent's view (PR #79 review)."
+      "forkBlob": "8ca6b7255359774663dfe3b976ecfd1ac03cd300",
+      "reason": "Served verbatim to the agent as types.txt, so its doc comments are agent-visible API text: the fork drops the approval wording that action simulation keeps out of the agent's view, and states startTime's inclusive bound as X applies it (PR #79 review)."
     }
   ],
   "reviewedSurvivors": [

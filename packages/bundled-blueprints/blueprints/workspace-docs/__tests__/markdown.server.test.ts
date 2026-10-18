@@ -218,6 +218,13 @@ describe("htmlToMarkdown", () => {
         "<p>\u00a9 test \u00a9x</p>\n");
   });
 
+  it("keeps other block elements apart, and closes an anchor when another opens", () => {
+    expect(htmlToMarkdown("<section>one</section><section>two</section><dl><dt>Term</dt><dd>Definition</dd></dl>"))
+      .toBe("one\n\ntwo\n\nTerm\n\nDefinition\n");
+    expect(render(htmlToMarkdown('<p><a href="a">one<a href="b">two</a>three</a></p>')))
+      .toBe('<p><a href="a">one</a><a href="b">two</a>three</p>\n');
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

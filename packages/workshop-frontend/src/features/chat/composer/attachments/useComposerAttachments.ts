@@ -62,6 +62,14 @@ export const useComposerAttachments = ({
       attachmentsRef.current = [];
       for (const attachment of abandoned) {
         if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+        // Staged spreadsheet uploads live server-side; drop them with the composer.
+        const stagedId = attachment.ref && "id" in attachment.ref ? attachment.ref.id : undefined;
+        if (stagedId !== undefined) {
+          void (async () => {
+            const overseer = await getOverseerRef.current();
+            await overseer.deleteChatAttachment(stagedId);
+          })().catch(() => {});
+        }
       }
     };
   }, []);

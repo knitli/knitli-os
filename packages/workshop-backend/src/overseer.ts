@@ -1240,7 +1240,14 @@ class OverseerImpl implements AgentHooks {
       }
     }
     if (approval.summary && approval.author) {
-      this.addChatMessages(record.chatId, approval.author, [{type: "message", message: approval.summary}]);
+      // Upstream's durable claim already nudged this turn; don't add a second, fork-worded
+      // approval notice on top of it.
+      const history = [...this.storage.chats.list({prefix: `${keyString(record.chatId)}.`})];
+      const lastCall = history.findLastIndex(m => m.type === "action");
+      const nudged = history.some((m, i) => i > lastCall && m.type === "agentNudge");
+      if (!nudged) {
+        this.addChatMessages(record.chatId, approval.author, [{type: "message", message: approval.summary}]);
+      }
     }
     delete record.resumeAttempts;
     this.storage.activeAgents.put(record);
@@ -5564,6 +5571,9 @@ class OverseerImpl implements AgentHooks {
 
     let files = new Map<string, FileContent>();
     for (let attachment of attachments) {
+      // Workbooks stay parsed summaries with row pages, not workspace files: a raw spreadsheet
+      // in the worktree is useless to the model (see fork/workbook-upload.ts).
+      if (attachment.oid === undefined && isChatWorkbook(this.storage, chatId, attachment.id)) continue;
       const data = attachment.oid !== undefined
         ? this.gitStore.readBlob(attachment.oid)
         : this.storage.chatAttachmentContent.get(attachment.id)?.data;

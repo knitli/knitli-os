@@ -51,6 +51,7 @@ export function AuthProvider({ children, authenticatedApi, onLogout }: AuthProvi
   }, [authenticatedApi])
 
   useEffect(() => {
+    setIsAdmin(false)
     let cancelled = false
     authenticatedApi.amIAdmin().then((admin) => {
       if (!cancelled) setIsAdmin(admin)

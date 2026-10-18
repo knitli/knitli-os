@@ -38,8 +38,10 @@ Two limits keep a gadget from running up the bill:
 
 - **A daily read limit per connection**, set by the deployment's `X_DAILY_READ_LIMIT` var: the
   billable resources one connection may read per UTC day, across every binding and gadget using it.
-  The default is 2,000 (about $10 a day at the post-read price); `0` removes the limit. Reads past
-  it fail with a message naming when it resets.
+  The default is 2,000 (about $10 a day at the post-read price); `0` removes the limit. Each read
+  reserves the most X could bill for it (six resources a row: a post, its author, and up to two
+  referenced posts with theirs) and gives back what X did not bill, so the limit is never passed. A
+  read that would not fit fails with a message naming when the limit resets.
 - **Approvals** bound writes: nothing is posted, liked or followed without a user approving it.
 
 Reads are cached briefly (a post for 5 minutes, a profile for an hour, a listing's first page for a
@@ -100,10 +102,10 @@ The reconnect was authorized by another X user than the one the connection was m
 connection stays pinned to its X user; sign in to X as that user and reconnect, or connect the other
 account separately.
 
-### "This X connection has used today's 2,000 reads; the limit resets at 00:00 UTC."
+### "This X connection has too little of today's 2,000 reads left for this; the limit resets at 00:00 UTC."
 
-The connection reached the deployment's daily read limit. Wait for the reset, or raise
-`X_DAILY_READ_LIMIT`.
+The read's worst-case cost would pass the deployment's daily read limit. Ask for a smaller page,
+wait for the reset, or raise `X_DAILY_READ_LIMIT`.
 
 ### "The X API credits for this deployment are used up, or its spending limit was reached."
 

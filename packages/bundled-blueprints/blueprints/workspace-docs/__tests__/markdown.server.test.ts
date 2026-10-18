@@ -102,6 +102,11 @@ describe("htmlToMarkdown", () => {
       "<p>a<br />\n## nor this</p>\n<p>``` not a fence</p>\n<p>nor<br />\n===</p>\n<p>this<br />\n---</p>\n");
   });
 
+  it("keeps typed HTML, entities and backticks as the text they were", () => {
+    expect(render(htmlToMarkdown("<p>&lt;b&gt;plain&lt;/b&gt; &amp;copy; `tick`</p>")))
+      .toBe("<p>&lt;b&gt;plain&lt;/b&gt; &amp;copy; `tick`</p>\n");
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

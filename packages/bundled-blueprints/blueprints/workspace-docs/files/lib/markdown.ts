@@ -93,7 +93,7 @@ export function htmlToMarkdown(html: string): string {
       if (inPre) preText += text;
       else if (inCode) codeText += text.replace(/\s+/g, " ");
       else {
-        const words = text.replace(/\s+/g, " ").replace(/([\\*_[\]])/g, "\\$1");
+        const words = text.replace(/\s+/g, " ").replace(/([\\`*_[\]<&])/g, "\\$1");
         space ||= words.startsWith(" ");
         if (words.trim()) {
           beginInline();

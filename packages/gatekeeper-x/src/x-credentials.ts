@@ -63,7 +63,7 @@ export function accountSource(exports: Cloudflare.Exports, userObjectId: string)
 export function readLimitMessage(reservation: { limit: number; resetsAt: number },
                                  whose = "This X connection"): string {
   const resets = new Date(reservation.resetsAt).toISOString().slice(11, 16);
-  return `${whose} has used today's ${reservation.limit.toLocaleString("en-US")} reads; ` +
+  return `${whose} has too little of today's ${reservation.limit.toLocaleString("en-US")} reads left for this; ` +
     `the limit resets at ${resets} UTC.`;
 }
 
@@ -74,14 +74,22 @@ export type ReadBudget = {
 };
 
 /**
- * Runs a read within the connection's daily limit: reserves `reserve` billable reads first, then
- * settles with what X returned, which is what X bills. The last read before the limit may overshoot
- * it by the rows X added beyond the reservation. A read whose answer was lost or couldn't be read
- * keeps its reservation, since X may have billed rows nobody saw; any other failure returned none.
+ * The most resources X bills per row a read asks for: a post, its author, and up to two posts it
+ * references (a reply's parent and a quoted post) with their authors. Every read is reserved at
+ * this bound, so whatever X expands still fits the limit; settling returns the rest.
+ */
+export const MAX_BILLED_PER_ROW = 6;
+
+/**
+ * Runs a read within the connection's daily limit: reserves `rows` rows' worst-case billable reads
+ * first (see `MAX_BILLED_PER_ROW`), then settles with what X returned, which is what X bills, so
+ * the limit is never overshot. A read whose answer was lost or couldn't be read keeps its
+ * reservation, since X may have billed rows nobody saw; any other failure returned none.
  * @param whose Whose connection a refusal names.
  */
-export async function withinReadLimit<T>(budget: ReadBudget, reserve: number,
+export async function withinReadLimit<T>(budget: ReadBudget, rows: number,
                                          read: () => Promise<XEnvelope<T>>, whose?: string): Promise<XEnvelope<T>> {
+  const reserve = rows * MAX_BILLED_PER_ROW;
   const reservation = await budget.reserveReads(reserve);
   if (!reservation.ok) throw new Error(readLimitMessage(reservation, whose));
   let billed = 0;

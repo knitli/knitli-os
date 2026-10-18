@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { generateNonce } from "@gadgets/gatekeeper-kit/connect-nonce";
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
 import type { XListInfo, XPostDraft, XPostInfo } from "../../src/types";
+import { MAX_BILLED_PER_ROW } from "../../src/x-credentials";
 import { scopesFor } from "../../src/x-env";
 import type { WirePost } from "../../src/x-normalize";
 import { ALICE, BOB, FakeX, accountStub, failure, hooks, json, reconnectAs, seedAccount, snowflakeAt, unwrap } from "./fake-x";
@@ -700,7 +701,7 @@ describe("Lists", () => {
     });
     const [{ actionId }] = await t.submitted();
     unwrap(await t.apply(actionId));
-    expect(reserved).toBe(100);
+    expect(reserved).toBe(100 * MAX_BILLED_PER_ROW);
   });
 
   it("won't record a change X answered with errors in place of its result", async () => {

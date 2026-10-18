@@ -1,7 +1,7 @@
 import { clearAlarmGuard, guardedAlarmFor } from "@gadgets/observability/fork/alarm-guard";
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { capExecuteCodeOutput } from "./fork/turn-guards";
-import { chatWorkbook, describeWorkbookBinding, dropWorkbook, isChatWorkbook, isSpreadsheetUpload, openWorkbookSession, readWorkbookRange, stageWorkbookUpload, workbookRefFields } from "./fork/workbook-upload";
+import { chatWorkbook, describeWorkbookBinding, dropWorkbook, isChatWorkbook, isSpreadsheetUpload, isWorkbookAttachment, openWorkbookSession, readWorkbookRange, stageWorkbookUpload, workbookRefFields } from "./fork/workbook-upload";
 import { deriveWorkbookBindings } from "./fork/workbook-names";
 import { withRequestedNames } from "./fork/workbook-checkpoint";
 import { isReasoningLevel } from "./fork/reasoning-levels";
@@ -5573,7 +5573,7 @@ class OverseerImpl implements AgentHooks {
     for (let attachment of attachments) {
       // Workbooks stay parsed summaries with row pages, not workspace files: a raw spreadsheet
       // in the worktree is useless to the model (see fork/workbook-upload.ts).
-      if (attachment.oid === undefined && isChatWorkbook(this.storage, chatId, attachment.id)) continue;
+      if (attachment.oid === undefined && isWorkbookAttachment(this.storage, chatId, attachment.id)) continue;
       const data = attachment.oid !== undefined
         ? this.gitStore.readBlob(attachment.oid)
         : this.storage.chatAttachmentContent.get(attachment.id)?.data;

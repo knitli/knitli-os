@@ -216,6 +216,7 @@ export const ChatComposer = ({
     hasAttachments,
     addFiles: prepareFiles,
     clearSentAttachments,
+    holdForSend,
     removeAttachment,
   } = useComposerAttachments({
     getOverseer,
@@ -613,11 +614,18 @@ export const ChatComposer = ({
       const { message, capsules: capsuleSpecifiers, formats: formatRefs } =
         submissionResult.submission;
 
-      await onSend(message, selectedModel?.id ?? null,
-          capsuleSpecifiers,
-          readyAttachments.length ? readyAttachments : undefined,
-          formatRefs,
-          ...(draftSend.hasSpeech ? [{ hasSpeech: true }] : []));
+      const release = holdForSend(attachmentsSnapshot);
+      let delivered = false;
+      try {
+        await onSend(message, selectedModel?.id ?? null,
+            capsuleSpecifiers,
+            readyAttachments.length ? readyAttachments : undefined,
+            formatRefs,
+            ...(draftSend.hasSpeech ? [{ hasSpeech: true }] : []));
+        delivered = true;
+      } finally {
+        release(delivered);
+      }
       clearSentAttachments(attachmentsSnapshot);
       if (!completeDraftSend(draftSend)) return;
       replaceComposerDocument({ text: "", capsules: [], formats: [], command: null });

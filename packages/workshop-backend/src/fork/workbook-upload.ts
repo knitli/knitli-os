@@ -241,6 +241,19 @@ export function readWorkbookRange(
  * attachment is gone, as it skips a deleted gadget, so a name the history still mentions costs the
  * run nothing; the agent finds out when it uses the name.
  */
+/**
+ * Whether an attachment about to be sent is a workbook. A send projects its attachments before
+ * committing them, so a staged one counts too: its workbook record is what marks it. Only says to
+ * leave it out of the workspace, so it grants nothing the send has not already checked.
+ */
+export function isWorkbookAttachment(
+    storage: Pick<OverseerStorage, "chatAttachmentContent" | "chatWorkbooks">,
+    chatId: number, id: string): boolean {
+  let content = storage.chatAttachmentContent.get(id);
+  return (content?.state.type === "staged" && storage.chatWorkbooks.get(id) !== undefined) ||
+      isChatWorkbook(storage, chatId, id);
+}
+
 export function isChatWorkbook(
     storage: Pick<OverseerStorage, "chatAttachmentContent" | "chatWorkbooks">,
     chatId: number, id: string): boolean {

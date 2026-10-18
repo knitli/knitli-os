@@ -41,6 +41,8 @@ export const useComposerAttachments = ({
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const attachmentsRef = useRef<ComposerAttachment[]>([]);
   const mountedRef = useRef(true);
+  // Attachments handed to a send in flight: that send commits or abandons them, not an unmount.
+  const sendingRef = useRef(new Set<string>());
   const getOverseerRef = useRef(getOverseer);
   const onErrorRef = useRef(onError);
   getOverseerRef.current = getOverseer;
@@ -62,17 +64,20 @@ export const useComposerAttachments = ({
       attachmentsRef.current = [];
       for (const attachment of abandoned) {
         if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-        // Staged spreadsheet uploads live server-side; drop them with the composer.
-        const stagedId = attachment.ref && "id" in attachment.ref ? attachment.ref.id : undefined;
-        if (stagedId !== undefined) {
-          void (async () => {
-            const overseer = await getOverseerRef.current();
-            await overseer.deleteChatAttachment(stagedId);
-          })().catch(() => {});
-        }
+        if (!sendingRef.current.has(attachment.id)) deleteStaged(attachment);
       }
     };
   }, []);
+
+  // Staged spreadsheet uploads live server-side; drop them with the composer.
+  const deleteStaged = (attachment: ComposerAttachment | undefined) => {
+    const stagedId = attachment?.ref && "id" in attachment.ref ? attachment.ref.id : undefined;
+    if (stagedId === undefined) return;
+    void (async () => {
+      const overseer = await getOverseerRef.current();
+      await overseer.deleteChatAttachment(stagedId);
+    })().catch(() => {});
+  };
 
   const uploadAttachment = async (
     id: string,
@@ -168,14 +173,23 @@ export const useComposerAttachments = ({
   const removeAttachment = (id: string) => {
     const attachment = attachmentsRef.current.find((item) => item.id === id);
     if (attachment?.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-    const stagedId = attachment?.ref && "id" in attachment.ref ? attachment.ref.id : undefined;
     updateAttachments((current) => current.filter((item) => item.id !== id));
-    if (stagedId !== undefined) {
-      void (async () => {
-        const overseer = await getOverseerRef.current();
-        await overseer.deleteChatAttachment(stagedId);
-      })().catch(() => {});
-    }
+    deleteStaged(attachment);
+  };
+
+  /**
+   * Hands `sent` to a send in flight, so an unmount before it settles leaves their staged uploads
+   * for the server to commit. Call the result once it settles: a send that failed after the
+   * composer unmounted drops them, since nothing is left to retry it.
+   */
+  const holdForSend = (sent: readonly ComposerAttachment[]) => {
+    for (const attachment of sent) sendingRef.current.add(attachment.id);
+    return (delivered: boolean) => {
+      for (const attachment of sent) {
+        sendingRef.current.delete(attachment.id);
+        if (!delivered && !mountedRef.current) deleteStaged(attachment);
+      }
+    };
   };
 
   const clearSentAttachments = (sent: readonly ComposerAttachment[]) => {
@@ -191,6 +205,7 @@ export const useComposerAttachments = ({
     hasAttachments: () => attachmentsRef.current.length > 0,
     addFiles,
     clearSentAttachments,
+    holdForSend,
     removeAttachment,
   };
 };

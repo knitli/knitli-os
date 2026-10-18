@@ -129,6 +129,12 @@ describe("htmlToMarkdown", () => {
     expect(render(htmlToMarkdown("<h2>Issue #</h2><h3>C ##</h3>"))).toBe("<h2>Issue #</h2>\n<h3>C ##</h3>\n");
   });
 
+  it("reads whole attribute names, and replaces numeric references outside Unicode", () => {
+    expect(render(htmlToMarkdown(
+      '<p><a data-href="old" href="new">x</a> <img srcset="wrong.png 1x" src="right.png" alt="y"> &#x110000;&#0;&#xD800;</p>')))
+      .toBe('<p><a href="new">x</a> <img src="right.png" alt="y" /> \uFFFD\uFFFD\uFFFD</p>\n');
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

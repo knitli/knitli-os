@@ -107,6 +107,36 @@ act(() => removeAttachment!(attachments[0].id));
     expect(attachments).toHaveLength(0);
   });
 
+  it.each([[true, []], [false, ["staged-1"]]])(
+      "leaves a spreadsheet held by a send to it when the composer unmounts (delivered: %s)",
+      async (delivered, deletedAfterSettle) => {
+    const deleteChatAttachment = vi.fn<Overseer["deleteChatAttachment"]>(async () => {});
+    const overseer = {
+      uploadChatAttachment: async () => ({ id: "staged-1" }),
+      deleteChatAttachment,
+    } as unknown as RpcStub<Overseer>;
+    let state!: ReturnType<typeof useComposerAttachments>;
+    vi.stubGlobal("crypto", { randomUUID: () => "local-sheet" });
+    const Harness = () => {
+      state = useComposerAttachments({ getOverseer: () => overseer, onError: vi.fn<(message: string) => void>() });
+      return null;
+    };
+    container = document.createElement("div");
+    root = createRoot(container);
+    await act(async () => root!.render(<Harness />));
+    await act(async () => state.addFiles([new File(["x"], "a.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    })]));
+    await waitFor(() => state.attachments[0]?.uploadState === "ready");
+
+    const release = state.holdForSend(state.attachments);
+    await act(async () => root!.unmount());
+    root = undefined;
+    expect(deleteChatAttachment).not.toHaveBeenCalled();
+    await act(async () => release(delivered));
+    expect(deleteChatAttachment.mock.calls.map(([id]) => id)).toEqual(deletedAfterSettle);
+  });
+
   it("ignores a blob upload that finishes after the composer unmounts", async () => {
     let finishUpload!: (oid: string) => void;
     const uploadBlob = vi.fn<Overseer["uploadBlob"]>(

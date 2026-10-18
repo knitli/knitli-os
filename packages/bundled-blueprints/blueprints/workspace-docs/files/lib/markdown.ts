@@ -315,7 +315,8 @@ function charClass(char: string | undefined): "space" | "punctuation" | "word" {
 }
 
 function readHtmlAttribute(source: string, name: string): string {
-  const pattern = new RegExp(name + "\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))", "i");
+  // Bounded on the left, so `src` does not match inside `srcset` or `data-src`.
+  const pattern = new RegExp("(?<![\\w:-])" + name + "\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))", "i");
   const match = pattern.exec(source);
   return decodeHtml(match ? match[1] ?? match[2] ?? match[3] ?? "" : "");
 }
@@ -323,8 +324,13 @@ function readHtmlAttribute(source: string, name: string): string {
 function decodeHtml(value: string): string {
   return String(value).replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (_: string, entity: string) => {
     const lower = entity.toLowerCase();
-    if (lower.startsWith("#x")) return String.fromCodePoint(Number.parseInt(lower.slice(2), 16));
-    if (lower.startsWith("#")) return String.fromCodePoint(Number.parseInt(lower.slice(1), 10));
+    if (lower.startsWith("#")) {
+      const code = lower.startsWith("#x")
+        ? Number.parseInt(lower.slice(2), 16) : Number.parseInt(lower.slice(1), 10);
+      // As a browser does: NUL, a surrogate or past Unicode reads as the replacement character.
+      const valid = code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff);
+      return String.fromCodePoint(valid ? code : 0xfffd);
+    }
     const named: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: " " };
     return named[lower];
   });

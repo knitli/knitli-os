@@ -13,12 +13,14 @@ import {
 } from "@earendil-works/pi-ai";
 import type { AiChatAuthorInfo, AiChatMessage, ChatAttachmentUpload } from "@gadgets/workshop-shared/api";
 import type { OverseerDurableObject } from "../src/overseer.js";
+import type { UserDurableObject } from "../src/user.js";
 import { runAgent } from "../src/agent";
 import { UNTRUSTED_SPREADSHEET_NOTICE, stageWorkbookUpload } from "../src/fork/workbook-upload";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
     TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
+    TEST_USER: DurableObjectNamespace<UserDurableObject>;
   }
 }
 
@@ -202,6 +204,19 @@ describe("spreadsheet attachment in the agent", () => {
     expect([...impl.storage.chatWorkbookRows.list()]).toEqual([]);
     expect([...impl.storage.chatWorkbooks.list()]).toEqual([]);
     expect([...impl.storage.chatAttachmentContent.list()]).toEqual([]);
+  }));
+
+  it("keeps a newly sent workbook out of the scratch worktree, beside a file that goes in", () =>
+      withImpl(async impl => {
+    let sheet = await stageWorkbookUpload(impl, workbook("big.xlsx", ROWS));
+    let note = crypto.randomUUID();
+    impl.storage.chatAttachmentContent.put({ fileId: note, data: new TextEncoder().encode("hi\n"),
+      state: { type: "staged", uploadedAt: Date.now(), mimeType: "text/plain", name: "notes.txt" } });
+    let user = env.TEST_USER.getByName(crypto.randomUUID());
+    let chatId = await impl.newChat(user, { profile: OWNER }, "Look", undefined, [sheet, { id: note }]);
+    let worktree = impl.getChatAgentContext(chatId).scratch!.worktreeId;
+    let paths = await impl.gitCache.listCommitTreePaths(impl.getWorktreePinBase(worktree)!);
+    expect(paths.map((entry: { path: string }) => entry.path)).toStrictEqual(["notes.txt"]);
   }));
 
   it("offers readSheet only in a chat holding a spreadsheet", () => withImpl(async impl => {

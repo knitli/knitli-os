@@ -171,7 +171,8 @@ The transport is in `src/features/native-app/authPopup.ts` (under `packages/work
    nonce, expiry and single-use checks still apply. Native cancellation/failure rejects the
    awaiting caller, and listeners expire after 30 minutes or are removed when closed/replaced.
    Connect completion uses the initiating `useAuth` owner's current connection, confirms the same
-   user, and retains the ticket across broken-transport replacement. Live-session server failures
+   user (or, if the starting connection broke before naming its user, leaves that to the ticket's
+   server-side binding), and retains the ticket across broken-transport replacement. Live-session server failures
    are surfaced without retries. Logout or a different user cannot receive the pending grant.
    `openConnectWindow` always returns a promise: `opened` on desktop, `connected` after native
    redemption. Billing refreshes only after that redemption (in addition to ordinary focus refresh).

@@ -322,11 +322,13 @@ function escapeBlockMarker(text: string): string {
 
 /**
  * `text` as an inline code span: delimited by a backtick run longer than any inside it, and padded
- * where it starts or ends with a backtick, which would otherwise merge into the delimiter.
+ * where it starts or ends with a backtick, which would otherwise merge into the delimiter, or with
+ * a space at both ends, which CommonMark would otherwise strip.
  */
 function codeSpan(text: string): string {
   const delimiter = "`".repeat(longestRun(text, "`") + 1);
-  const pad = /^`|`$/.test(text) ? " " : "";
+  // CommonMark strips one space from each end when both have one, unless the span is all spaces.
+  const pad = /^`|`$/.test(text) || (/^ [^]* $/.test(text) && text.trim() !== "") ? " " : "";
   return delimiter + pad + text + pad + delimiter;
 }
 

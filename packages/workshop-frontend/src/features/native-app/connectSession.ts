@@ -43,8 +43,16 @@ export class NativeConnectSession {
   }
 
   async complete(start: Connection, ticket: string, nonce: string, signal: AbortSignal): Promise<void> {
-    const owner = await start.identity
-    if (owner.type !== 'user') throw new Error('Sign in again to connect an account.')
+    let owner: AiChatAuthorInfo | undefined
+    try {
+      owner = await start.identity
+    } catch (error) {
+      // Lost to a broken transport, the owner stays unknown. Redeeming on a replacement is still
+      // safe: only the initiating user's Durable Object holds the ticket, so another user's
+      // session is refused server-side (docs/connect-handoff.md).
+      if (this.current === start && !start.broken) throw error
+    }
+    if (owner && owner.type !== 'user') throw new Error('Sign in again to connect an account.')
     for (;;) {
       signal.throwIfAborted()
       const connection = this.current
@@ -57,7 +65,7 @@ export class NativeConnectSession {
         const user = await connection.identity
         if (this.current !== connection || connection.broken) continue
         signal.throwIfAborted()
-        if (user.type !== 'user' || user.id !== owner.id) {
+        if (user.type !== 'user' || (owner && user.id !== owner.id)) {
           throw new Error('The signed-in user changed. Start the connection again.')
         }
         await connection.api.completeConnectHandoff(ticket, nonce)

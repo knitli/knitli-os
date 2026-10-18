@@ -55,6 +55,26 @@ describe('native connect session ownership', () => {
     expect(next.completeConnectHandoff).toHaveBeenCalledExactlyOnceWith(ticket, nonce)
   })
 
+  it('redeems on the replacement when the starting connection broke before naming its user', async () => {
+    const session = new NativeConnectSession(), first = api(), next = api()
+    let reject!: (error: Error) => void
+    session.track(first, new Promise((_, fail) => { reject = fail }))
+    const completion = nativeConnectCompletion(first, nonce)(ticket, signal())
+    first.break()
+    reject(new Error('socket lost'))
+    await flush()
+    session.track(next, Promise.resolve(person))
+    await completion
+    expect(next.completeConnectHandoff).toHaveBeenCalledExactlyOnceWith(ticket, nonce)
+  })
+
+  it('surfaces a failed owner lookup on a live connection', async () => {
+    const session = new NativeConnectSession(), first = api()
+    session.track(first, Promise.reject(new Error('whoami refused')))
+    await expect(nativeConnectCompletion(first, nonce)(ticket, signal())).rejects.toThrow('whoami refused')
+    expect(first.completeConnectHandoff).not.toHaveBeenCalled()
+  })
+
   it('surfaces a live-session server rejection without retrying it', async () => {
     const session = new NativeConnectSession(), first = api()
     first.completeConnectHandoff.mockRejectedValue(new Error('ticket expired'))

@@ -113,9 +113,9 @@ describe("htmlToMarkdown", () => {
   });
 
   it("delimits code by runs longer than the backticks inside it", () => {
-    const markdown = htmlToMarkdown("<p><code>a`b</code> <code>`x</code></p><pre>one\n```\ntwo</pre>");
+    const markdown = htmlToMarkdown("<p><code>a`b</code> <code>`x</code> <code> a </code></p><pre>one\n```\ntwo</pre>");
     expect(render(markdown)).toBe(
-      "<p><code>a`b</code> <code>`x</code></p>\n<pre><code>one\n```\ntwo\n</code></pre>\n");
+      "<p><code>a`b</code> <code>`x</code> <code> a </code></p>\n<pre><code>one\n```\ntwo\n</code></pre>\n");
   });
 });
 

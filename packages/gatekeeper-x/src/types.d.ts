@@ -159,8 +159,8 @@ export type XPostInfo = {
   /** Present when this post is a reply. */
   replyTo?: { postId: string; userId: string };
   /**
-   * Present when this post is a repost of another post. A repost waiting for approval is listed by
-   * `listMyPosts()` under the reposted post's ID, since a repost has none until X makes it.
+   * Present when this post is a repost of another post. A repost made in this session is listed
+   * by `listMyPosts()` under the reposted post's ID, since X has not given it one of its own yet.
    */
   repostOf?: XReferencedPost;
   /** Present when this post quotes another post. */
@@ -267,8 +267,8 @@ export interface XPost {
   /**
    * Reply to this post as the connected account. Returns the new reply. X takes a reply made through
    * the API only to a post that summons the account: one by the account, or one that mentions it or
-   * quotes one of its posts (a reply to the account mentions it). Any other is refused here, before
-   * it reaches the approver, so a Post binding replies within the account's own conversations.
+   * quotes one of its posts (a reply to the account mentions it). Any other is refused, so a Post
+   * binding replies within the account's own conversations.
    */
   reply(draft: XPostDraft): Promise<XPost>;
 
@@ -290,7 +290,7 @@ export interface XPost {
 
   /**
    * Hide this reply. Only replies in a conversation the connected account started can be hidden;
-   * any other is refused here, before it reaches the approver.
+   * any other is refused.
    */
   hide(): Promise<void>;
   /** Unhide this reply, on the same terms as `hide`. */

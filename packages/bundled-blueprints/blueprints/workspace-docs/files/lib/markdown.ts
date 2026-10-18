@@ -40,7 +40,14 @@ export function htmlToMarkdown(html: string): string {
   // A `<` that starts no tag (`1 < 2`) is text, as the browser recovers it.
   const tokens = String(html).match(
     /<!--[\s\S]*?-->|<![^>]*>|<\/?[a-z](?:[^>"']|"[^"]*"|'[^']*')*>|<\/?[a-z][^>]*>|[^<]+|</gi) || [];
-  const lists: { type: "ul" | "ol"; count: number }[] = [];
+  // Each open list: the number its next item takes, which way it counts, and the last it wrote.
+  const lists: { type: "ul" | "ol"; next: number; step: 1 | -1; last?: number }[] = [];
+  // Where the last list ended: a list opening with nothing written since would run on from it.
+  let listEnd = -1;
+  const openList = (list: (typeof lists)[number]) => {
+    if (listEnd >= 0 && !trimAscii(markdown.slice(listEnd))) markdown += "\n\n<!-- -->\n\n";
+    lists.push(list);
+  };
   // Each open list item's marker and where its content starts, written whole when it closes.
   const items: { marker: string; start: number; depth: number }[] = [];
   // Every line after the first is indented to the marker's width, which CommonMark needs to keep
@@ -122,7 +129,7 @@ export function htmlToMarkdown(html: string): string {
   // The open element whose content the page never shows (script, style, template), and how deep.
   let hidden: { tag: string; depth: number } | undefined;
 
-  for (const token of tokens) {
+  for (const [index, token] of tokens.entries()) {
     if (hidden) {
       const tag = /^<\s*(\/?)\s*([a-z0-9]+)/i.exec(token);
       if (tag?.[2].toLowerCase() === hidden.tag) {
@@ -133,8 +140,8 @@ export function htmlToMarkdown(html: string): string {
       continue;
     }
     if (!token.startsWith("<") || token === "<") {
-      const text = decodeHtml(token);
-      const html = token === "<" ? "&lt;" : token;
+      const html = token === "<" ? "&lt;" : withLegacySemicolons(token);
+      const text = decodeHtml(html);
       // The HTML parser drops a newline right after `<pre>`; the page never shows it.
       if (inPre) {
         preText += preText ? text : text.replace(/^\r?\n/, "");
@@ -145,7 +152,7 @@ export function htmlToMarkdown(html: string): string {
       }
       else {
         // Only ASCII whitespace collapses: a no-break space is content, as in the page.
-        const words = textMarkdown(token);
+        const words = textMarkdown(html);
         space ||= words.startsWith(" ");
         if (trimAscii(words)) {
           beginInline();
@@ -222,7 +229,7 @@ export function htmlToMarkdown(html: string): string {
           break;
         }
         case "li": finishOpenItem(); break;
-        case "ul": case "ol": finishOpenItem(); lists.pop(); break;
+        case "ul": case "ol": finishOpenItem(); lists.pop(); listEnd = markdown.length; break;
         case "td": case "th": markdown += "\t"; break;
         case "tr": markdown += "\n"; break;
       }
@@ -246,26 +253,31 @@ export function htmlToMarkdown(html: string): string {
       case "pre": preText = ""; preHtml = ""; inPre = true; break;
       case "blockquote": markdown += "\n\n"; blockquotes.push(markdown.length); break;
       case "hr": markdown += "\n\n---\n\n"; break;
-      case "ul": lists.push({ type: "ul", count: 0 }); break;
+      case "ul": openList({ type: "ul", next: 1, step: 1 }); break;
       case "ol": {
-        const start = Number.parseInt(readHtmlAttribute(attributes, "start") ?? "", 10);
-        // CommonMark reads at most nine digits as a list number.
-        lists.push({ type: "ol", count: start >= 0 && start <= 999_999_999 ? start - 1 : 0 });
+        const reversed = readHtmlAttribute(attributes, "reversed") !== undefined;
+        const start = listNumber(readHtmlAttribute(attributes, "start"));
+        // A reversed list counts down from its item count unless it says where to start.
+        openList({ type: "ol", step: reversed ? -1 : 1,
+          next: start ?? (reversed ? countItems(tokens, index) : 1) });
         break;
       }
       case "li": {
         finishOpenItem();
-        const list = lists.at(-1) || { type: "ul", count: 0 };
+        const list = lists.at(-1) || { type: "ul", next: 1, step: 1 };
         // An item's own `value` renumbers it, and the items after it count on from there.
-        const value = Number.parseInt(readHtmlAttribute(attributes, "value") ?? "", 10);
-        const renumbered = list.type === "ol" && value >= 0 && value <= 999_999_999;
-        // CommonMark reads only a list's first number, so a later item renumbered starts a list of
-        // its own, which an empty comment keeps from running on from this one.
-        if (renumbered && list.count > 0 && value !== list.count + 1) markdown += "\n<!-- -->\n\n";
-        list.count = renumbered ? value : list.count + 1;
+        const number = (list.type === "ol" ? listNumber(readHtmlAttribute(attributes, "value")) : undefined)
+          ?? list.next;
+        // CommonMark reads only a list's first number and counts up from it, so an item numbered
+        // any other way starts a list of its own, which an empty comment keeps apart.
+        if (list.type === "ol" && list.last !== undefined && number !== list.last + 1) {
+          markdown += "\n<!-- -->\n\n";
+        }
+        list.last = number;
+        list.next = number + list.step;
         if (!markdown.endsWith("\n")) markdown += "\n";
         items.push({
-          marker: list.type === "ol" ? list.count + ". " : "- ", start: markdown.length, depth: lists.length,
+          marker: list.type === "ol" ? number + ". " : "- ", start: markdown.length, depth: lists.length,
         });
         break;
       }
@@ -273,7 +285,7 @@ export function htmlToMarkdown(html: string): string {
       // own; the toolbar's Bold or Italic on a whole link styles the link itself.
       case "a": {
         frames.push(styleEmphasis(attributes));
-        const href = readRawHtmlAttribute(attributes, "href");
+        const href = readRawHtmlAttribute(attributes, "href", true);
         links.push(href === undefined ? null : linkDestination(href));
         if (href === undefined) break;
         beginInline([]);
@@ -285,8 +297,8 @@ export function htmlToMarkdown(html: string): string {
       case "img": {
         beginInline();
         if (inline.endsWith("!")) inline = inline.slice(0, -1) + "\\!";
-        const alt = textMarkdown(readRawHtmlAttribute(attributes, "alt") ?? "");
-        inline += "![" + alt + "](" + linkDestination(readRawHtmlAttribute(attributes, "src") ?? "") + ")";
+        const alt = textMarkdown(readRawHtmlAttribute(attributes, "alt", true) ?? "");
+        inline += "![" + alt + "](" + linkDestination(readRawHtmlAttribute(attributes, "src", true) ?? "") + ")";
         break;
       }
     }
@@ -402,10 +414,12 @@ function charClass(char: string | undefined): "space" | "punctuation" | "word" {
  * attributes are read in order, a quoted value whole, so a name inside another's value (`title=
  * "href=x"`) is not mistaken for that attribute; the first of a repeated name wins, as in HTML.
  */
-function readRawHtmlAttribute(source: string, name: string): string | undefined {
+function readRawHtmlAttribute(source: string, name: string, legacy = false): string | undefined {
   for (const [, key, double, single, bare] of
       source.matchAll(/([^\s"'>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
-    if (key.toLowerCase() === name) return double ?? single ?? bare ?? "";
+    if (key.toLowerCase() !== name) continue;
+    const value = double ?? single ?? bare ?? "";
+    return legacy ? withLegacySemicolons(value, true) : value;
   }
   return undefined;
 }
@@ -413,7 +427,7 @@ function readRawHtmlAttribute(source: string, name: string): string | undefined 
 /** An attribute's decoded value, or undefined when the element has none. */
 function readHtmlAttribute(source: string, name: string): string | undefined {
   const value = readRawHtmlAttribute(source, name);
-  return value === undefined ? undefined : decodeHtml(value);
+  return value === undefined ? undefined : decodeHtml(withLegacySemicolons(value, true));
 }
 
 /**
@@ -424,6 +438,62 @@ function readHtmlAttribute(source: string, name: string): string | undefined {
  */
 function textMarkdown(html: string): string {
   return withForeignReferences(html, (part) => escapeText(part.replace(/[ \t\n\r\f]+/g, " ")));
+}
+
+/** A list number as CommonMark can write it (at most nine digits), or undefined. */
+function listNumber(value: string | undefined): number | undefined {
+  const number = Number.parseInt(value ?? "", 10);
+  return number >= 0 && number <= 999_999_999 ? number : undefined;
+}
+
+/** How many items the list opened at `tokens[open]` holds, not counting those of nested lists. */
+function countItems(tokens: string[], open: number): number {
+  let depth = 0;
+  let items = 0;
+  for (const token of tokens.slice(open + 1)) {
+    const tag = /^<\s*(\/?)\s*(ol|ul|li)\b/i.exec(token);
+    if (!tag) continue;
+    const list = tag[2].toLowerCase() !== "li";
+    if (list && tag[1]) { if (depth-- === 0) break; }
+    else if (list) depth++;
+    else if (!tag[1] && depth === 0) items++;
+  }
+  return items;
+}
+
+/**
+ * The named references HTML still decodes without their `;`, from before HTML required one (the
+ * spec's legacy list). CommonMark decodes none without it, so they get theirs back first.
+ */
+const LEGACY_REFERENCES = new Set([
+  "AElig", "AMP", "Aacute", "Acirc", "Agrave", "Aring", "Atilde", "Auml", "COPY", "Ccedil", "ETH",
+  "Eacute", "Ecirc", "Egrave", "Euml", "GT", "Iacute", "Icirc", "Igrave", "Iuml", "LT", "Ntilde",
+  "Oacute", "Ocirc", "Ograve", "Oslash", "Otilde", "Ouml", "QUOT", "REG", "THORN", "Uacute",
+  "Ucirc", "Ugrave", "Uuml", "Yacute", "aacute", "acirc", "acute", "aelig", "agrave", "amp",
+  "aring", "atilde", "auml", "brvbar", "ccedil", "cedil", "cent", "copy", "curren", "deg",
+  "divide", "eacute", "ecirc", "egrave", "eth", "euml", "frac12", "frac14", "frac34", "gt",
+  "iacute", "icirc", "iexcl", "igrave", "iquest", "iuml", "laquo", "lt", "macr", "micro", "middot",
+  "nbsp", "not", "ntilde", "oacute", "ocirc", "ograve", "ordf", "ordm", "oslash", "otilde", "ouml",
+  "para", "plusmn", "pound", "quot", "raquo", "reg", "sect", "shy", "sup1", "sup2", "sup3",
+  "szlig", "thorn", "times", "uacute", "ucirc", "ugrave", "uml", "uuml", "yacute", "yen", "yuml",
+]);
+
+/**
+ * `html` with each semicolonless legacy reference spelled with its `;`, as a browser reads it: in
+ * text the longest legacy name the run starts with (`&notit` is `&not;it`), in an attribute value
+ * only a whole name not followed by `=`, which would make it a query parameter.
+ */
+function withLegacySemicolons(html: string, attribute = false): string {
+  return html.replace(/&([a-z][a-z0-9]*)(;?)(=?)/gi, (whole, run: string, semicolon, equals) => {
+    if (semicolon) return whole;
+    if (attribute) return LEGACY_REFERENCES.has(run) && !equals ? `&${run};` : whole;
+    for (let length = run.length; length > 0; length--) {
+      if (LEGACY_REFERENCES.has(run.slice(0, length))) {
+        return `&${run.slice(0, length)};${run.slice(length)}${equals}`;
+      }
+    }
+    return whole;
+  });
 }
 
 /** Whether `html` holds a named reference `decodeHtml` leaves for a browser or CommonMark. */

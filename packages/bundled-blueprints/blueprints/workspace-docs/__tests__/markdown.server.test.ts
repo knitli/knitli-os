@@ -196,6 +196,15 @@ describe("htmlToMarkdown", () => {
         "<p>plain <strong>bold</strong></p>\n");
   });
 
+  it("numbers reversed lists down, and reads semicolonless references as a browser does", () => {
+    expect(render(htmlToMarkdown(
+      '<ol reversed start="5"><li>five</li><li>four</li></ol><ol reversed><li>b</li><li>a</li></ol>' +
+      '<p>&copy test &notit &amp; <a href="?a=1&copy=2&amp">x</a></p>')))
+      .toBe('<ol start="5">\n<li>five</li>\n</ol>\n<!-- -->\n<ol start="4">\n<li>four</li>\n</ol>\n<!-- -->\n' +
+        '<ol start="2">\n<li>b</li>\n</ol>\n<!-- -->\n<ol>\n<li>a</li>\n</ol>\n' +
+        '<p>\u00a9 test \u00acit &amp; <a href="?a=1&amp;copy=2&amp;">x</a></p>\n');
+  });
+
   it("keeps a link's destination whole when it holds parentheses or spaces", () => {
     expect(render(htmlToMarkdown('<p><a href="https://example.com/a)">x</a> <img src="b (1).png" alt="y"></p>')))
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');

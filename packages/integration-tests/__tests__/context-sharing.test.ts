@@ -74,7 +74,7 @@ async function privateWorkspace(owner: ContextUser) {
   return Object.assign(stack.move(), { collection, workspace, workspaceId, session });
 }
 
-it.concurrent("top-level private collection metadata does not prevent a collaborator opening",
+it.concurrent("top-level private collection metadata prevents a collaborator opening",
     async () => {
   using owner = await newAccount("contextlistingowner");
   using observer = await newAccount("contextlistingobserver");
@@ -82,6 +82,8 @@ it.concurrent("top-level private collection metadata does not prevent a collabor
   const { collection, workspace, workspaceId, session } = state;
 
   // The collaborator has their own Context account, with no access to the owner's collection.
+  // The listing itself returns the private collection's title, description, and count, so the
+  // observation it records is attributed to that collection like a content listing is.
   expect(await observer.context.getContextCollectionMetadata(collection.id)).toBeNull();
   expect(await session.list()).toEqual({ entries: [{
     type: "collection", id: collection.id, title: collection.title,
@@ -89,8 +91,11 @@ it.concurrent("top-level private collection metadata does not prevent a collabor
   }] });
 
   await workspace.addCollaborator(observer.username, "build");
-  using opened = await observer.api.openGadget(workspaceId);
-  expect(await opened.getMetadata()).toMatchObject({ id: workspaceId, role: "build" });
+  const recorder = new ObserverConfigRecorder()
+    .alwaysChoose(observer.account.id, MAX_OBSERVER_PROMPTS);
+  using callback = stubFor(recorder);
+  await expect(observer.api.openGadget(workspaceId, undefined, callback))
+    .rejects.toThrow(/could not confirm that you are permitted/);
 });
 
 it.concurrent.each(["list", "read"] as const)(

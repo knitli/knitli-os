@@ -26,7 +26,10 @@ const ELEMENT_EMPHASIS = new Map<string, Emphasis>([
 ]);
 
 /** Elements whose content the page never renders, so the export leaves it out too. */
-const HIDDEN_TAGS = new Set(["script", "style", "template", "noscript", "title", "iframe", "video", "audio"]);
+const HIDDEN_TAGS = new Set(["script", "style", "template", "noscript", "title", "iframe", "video", "audio", "canvas"]);
+
+/** Elements a same-kind start tag implicitly closes, so they never nest inside a hidden subtree. */
+const IMPLICITLY_CLOSED = new Set(["p", "li", "dd", "dt", "td", "th", "tr", "option"]);
 
 /** Elements with no end tag or subtree, so a `hidden` attribute suppresses only the element. */
 const VOID_TAGS = new Set([
@@ -282,11 +285,18 @@ export function htmlToMarkdown(html: string): string {
     if (hidden) {
       // An end-tag name must be followed by whitespace, `/` or `>`: `</script.foo>` is not one.
       const tag = /^<\s*(\/?)\s*([a-z0-9]+)(?=[\s/>])/i.exec(token);
-      if (tag?.[2].toLowerCase() === hidden.tag) {
-        hidden.depth += tag[1] ? -1 : hidden.nest ? 1 : 0;
-        if (hidden.depth === 0) hidden = undefined;
+      if (tag?.[2].toLowerCase() === hidden.tag && !tag[1] && hidden.nest &&
+          IMPLICITLY_CLOSED.has(hidden.tag)) {
+        // A same-kind start ends an element that cannot nest (a second <p> closes a hidden
+        // first), and the new element is visible: stop hiding and process it normally.
+        hidden = undefined;
+      } else {
+        if (tag?.[2].toLowerCase() === hidden.tag) {
+          hidden.depth += tag[1] ? -1 : hidden.nest ? 1 : 0;
+          if (hidden.depth === 0) hidden = undefined;
+        }
+        continue;
       }
-      continue;
     }
     // Inside a collapsed disclosure only its summary shows; details/summary tags still run so
     // the state above tracks where the summary starts and ends.

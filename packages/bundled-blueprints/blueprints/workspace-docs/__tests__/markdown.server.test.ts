@@ -353,6 +353,13 @@ describe("htmlToMarkdown", () => {
       .toBe("a “quoted ‘nested’” b\n");
   });
 
+  it("suppresses canvas fallback and honors implicit closure inside hidden elements", () => {
+    expect(htmlToMarkdown("<canvas>private fallback</canvas><p>shown</p>")).toBe("shown\n");
+    expect(htmlToMarkdown("<p hidden>private<p>shown</p>")).toBe("shown\n");
+    expect(htmlToMarkdown("<ul><li hidden>private<li>shown</ul>"))
+      .toBe("- shown\n");
+  });
+
   it("delimits code by runs longer than the backticks inside it", () => {
     const markdown = htmlToMarkdown("<p><code>a`b</code> <code>`x</code> <code> a </code></p><pre>one\n```\ntwo</pre>");
     expect(render(markdown)).toBe(

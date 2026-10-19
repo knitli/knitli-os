@@ -26,7 +26,7 @@ const ELEMENT_EMPHASIS = new Map<string, Emphasis>([
 ]);
 
 /** Elements whose content the page never renders, so the export leaves it out too. */
-const HIDDEN_TAGS = new Set(["script", "style", "template", "noscript", "title", "iframe"]);
+const HIDDEN_TAGS = new Set(["script", "style", "template", "noscript", "title", "iframe", "video", "audio"]);
 
 /** Elements with no end tag or subtree, so a `hidden` attribute suppresses only the element. */
 const VOID_TAGS = new Set([
@@ -36,7 +36,7 @@ const VOID_TAGS = new Set([
 /** Other block elements, which Markdown has no syntax for: each stands apart as a paragraph does. */
 const PARAGRAPH_LIKE = [
   "address", "article", "aside", "caption", "center", "dd", "details", "dl", "dt", "fieldset",
-  "figcaption", "figure", "footer", "header", "hgroup", "legend", "main", "nav", "section", "summary",
+  "figcaption", "figure", "footer", "form", "header", "hgroup", "legend", "main", "nav", "section", "summary",
 ];
 
 /** Tags that end a run of inline content, closing its emphasis and dropping any space or break. */
@@ -101,20 +101,27 @@ export function htmlToMarkdown(html: string): string {
   const detailsSuppressed = () => details.some((frame) => frame.collapsed && !frame.inSummary);
   // An open select's options and the one being read: a single select shows only its selected
   // value; a multiple select shows every option, so it is kept as HTML instead.
-  let select: { listbox?: string; options: { text: string; selected: boolean; labeled: boolean }[]; current?: { text: string; selected: boolean; labeled: boolean } } | undefined;
+  type SelectOption = { text: string; selected: boolean; labeled: boolean };
+  // A listbox's structure in order: options and the option groups around them.
+  type SelectItem = SelectOption | { group: string } | { endGroup: true };
+  let select: { listbox?: string; items: SelectItem[]; current?: SelectOption } | undefined;
   const flushSelect = () => {
     const current = select;
     select = undefined;
     if (!current) return;
+    const options = current.items.filter((item): item is SelectOption => "text" in item);
     if (current.listbox) {
       endBlock();
-      const options = current.options.map((option) =>
-        `<option${option.selected ? " selected" : ""}>${option.text.replace(/</g, "&lt;")}</option>`);
-      markdown += `\n\n${current.listbox}\n${options.join("\n")}\n</select>\n\n`;
+      const lines = current.items.map((item) => "text" in item
+        ? `<option${item.selected ? " selected" : ""}>${item.text.replace(/</g, "&lt;")}</option>`
+        : "group" in item
+          ? `<optgroup label="${item.group.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;")}">`
+          : "</optgroup>");
+      markdown += `\n\n${current.listbox}\n${lines.join("\n")}\n</select>\n\n`;
       return;
     }
     // A single select keeps the last option marked selected, as the browser's reset does.
-    const chosen = current.options.findLast((option) => option.selected) ?? current.options[0];
+    const chosen = options.findLast((option) => option.selected) ?? options[0];
     if (chosen) emitText(withLegacySemicolons(chosen.text));
   };
   // Fenced code blocks, each held out of the Markdown as a placeholder line until the end, so no
@@ -140,6 +147,8 @@ export function htmlToMarkdown(html: string): string {
   // literally, so code holding one only a browser decodes is written as HTML instead.
   let codeHtml = "";
   let preHtml = "";
+  // Whether the open preformatted block holds an element, in which case it stays raw HTML.
+  let preHasTags = false;
   let inHeading = false;
   // Space and `<br>`s since the last content, written only once more content follows: the editor
   // leaves a `<br>` as the sole content of an empty paragraph.
@@ -196,6 +205,23 @@ export function htmlToMarkdown(html: string): string {
     breaks = 0;
   };
 
+  // Writes the open preformatted block, at its `</pre>` or, left open, at the end of the input.
+  const writePre = () => {
+    const fence = "`".repeat(Math.max(3, longestRun(preText, "`") + 1));
+    // An HTML block keeps its content verbatim, references and all, up to its `</pre>`; one
+    // holding elements keeps those elements too.
+    fences.push(preHasTags
+      ? "<pre>" + preHtml.replace(/\n$/, "") + "</pre>"
+      : hasForeignReference(preHtml)
+        ? "<pre><code>" + preHtml.replace(/\n$/, "") + "</code></pre>"
+        : fence + "\n" + preText.replace(/\n$/, "") + "\n" + fence);
+    markdown += "\n\n" + fencePlaceholder(fences.length - 1) + "\n\n";
+    preText = "";
+    preHtml = "";
+    preHasTags = false;
+    inPre = false;
+  };
+
   let cellOpen = false;
   // Whether a table row is open, apart from its cell: a row ends at the next row even when its
   // last cell was closed explicitly.
@@ -245,14 +271,20 @@ export function htmlToMarkdown(html: string): string {
     if (select) {
       const tag = /^<\s*(\/?)\s*([a-z0-9]+)(?=[\s/>])([\s\S]*)>$/i.exec(token);
       const name = tag?.[2].toLowerCase();
-      if (tag && !tag[1] && name === "option") {
+      if (tag && !tag[1] && name === "optgroup") {
+        select.items.push({ group: readHtmlAttribute(tag[3], "label") ?? "" });
+        select.current = undefined;
+      } else if (tag && tag[1] && name === "optgroup") {
+        select.items.push({ endGroup: true });
+        select.current = undefined;
+      } else if (tag && !tag[1] && name === "option") {
         // An option's `label` is what the page shows; its text is only the fallback.
         const label = readHtmlAttribute(tag[3], "label");
         const option = {
           text: label ?? "", labeled: label !== undefined,
           selected: readRawHtmlAttribute(tag[3], "selected") !== undefined,
         };
-        select.options.push(option);
+        select.items.push(option);
         select.current = option;
       } else if (tag && tag[1] && name === "select") flushSelect();
       else if (tag && tag[1] && name === "option") select.current = undefined;
@@ -291,6 +323,15 @@ export function htmlToMarkdown(html: string): string {
     const closing = match[1] === "/";
     const tag = match[2].toLowerCase();
     const attributes = match[3];
+    // A `hidden` attribute suppresses any element's subtree, as the tag-name set above does;
+    // it is honored before disclosure state, so a hidden details never shows its summary.
+    const attributeHidden = !closing && readRawHtmlAttribute(attributes, "hidden") !== undefined;
+    if (!closing && (HIDDEN_TAGS.has(tag) || attributeHidden)) {
+      if (!VOID_TAGS.has(tag)) {
+        hidden = { tag, depth: 1, nest: tag === "template" || attributeHidden };
+      }
+      continue;
+    }
     if (tag === "details") {
       if (closing) details.pop();
       else details.push({
@@ -304,14 +345,9 @@ export function htmlToMarkdown(html: string): string {
       else if (!top.summarySeen) { top.inSummary = true; top.summarySeen = true; }
     }
     if (detailsSuppressed()) continue;
-    // A `hidden` attribute suppresses any element's subtree, as the tag-name set above does.
-    const attributeHidden = !closing && readRawHtmlAttribute(attributes, "hidden") !== undefined;
-    if (!closing && (HIDDEN_TAGS.has(tag) || attributeHidden)) {
-      if (!VOID_TAGS.has(tag)) {
-        hidden = { tag, depth: 1, nest: tag === "template" || attributeHidden };
-      }
-      continue;
-    }
+    // An anchor or image inside a preformatted block is kept as written, so the block stays
+    // raw HTML; other elements there are formatting the verbatim text ignores, as before.
+    if (inPre && (tag === "a" || tag === "img")) { preHtml += token; preHasTags = true; continue; }
     const emphasis = emphasisOf(tag, attributes);
     if (emphasis) {
       if (closing) {
@@ -365,18 +401,7 @@ export function htmlToMarkdown(html: string): string {
           break;
         case "blockquote": closeBlockquote(); break;
         case "code": if (!inPre) flushCode(); break;
-        case "pre": {
-          const fence = "`".repeat(Math.max(3, longestRun(preText, "`") + 1));
-          // An HTML block keeps its content verbatim, references and all, up to its `</pre>`.
-          fences.push(hasForeignReference(preHtml)
-            ? "<pre><code>" + preHtml.replace(/\n$/, "") + "</code></pre>"
-            : fence + "\n" + preText.replace(/\n$/, "") + "\n" + fence);
-          markdown += "\n\n" + fencePlaceholder(fences.length - 1) + "\n\n";
-          preText = "";
-          preHtml = "";
-          inPre = false;
-          break;
-        }
+        case "pre": writePre(); break;
         // An `</a>` with no anchor open (one a later `<a>` already closed) is ignored, as in HTML.
         // Code before it inside a code element is written first, as the link's label segment.
         case "a": if (inCode) writeCode(); closeLink(); break;
@@ -416,7 +441,7 @@ export function htmlToMarkdown(html: string): string {
         else breaks++;
         break;
       case "code": if (!inPre) { beginInline(); codeText = ""; codeHtml = ""; inCode = true; } break;
-      case "pre": preText = ""; preHtml = ""; inPre = true; break;
+      case "pre": preText = ""; preHtml = ""; preHasTags = false; inPre = true; break;
       // Textarea content is raw text until its end tag; it is collected at the top of the loop.
       case "textarea": rawTextarea = ""; break;
       // A select shows only its selected option, which the top of the loop collects.
@@ -425,7 +450,7 @@ export function htmlToMarkdown(html: string): string {
         const size = integer(readHtmlAttribute(attributes, "size"));
         const listbox = readRawHtmlAttribute(attributes, "multiple") !== undefined
           ? "<select multiple>" : size !== undefined && size > 1 ? `<select size="${size}">` : undefined;
-        select = { listbox, options: [] };
+        select = { listbox, items: [] };
         break;
       }
       // An input's value and state are its visible content: keep the control as raw HTML,
@@ -534,16 +559,7 @@ export function htmlToMarkdown(html: string): string {
   }
   if (select) flushSelect();
   if (rawTextarea !== undefined) flushTextarea();
-  if (inPre) {
-    const fence = "`".repeat(Math.max(3, longestRun(preText, "`") + 1));
-    fences.push(hasForeignReference(preHtml)
-      ? "<pre><code>" + preHtml.replace(/\n$/, "") + "</code></pre>"
-      : fence + "\n" + preText.replace(/\n$/, "") + "\n" + fence);
-    markdown += "\n\n" + fencePlaceholder(fences.length - 1) + "\n\n";
-    preText = "";
-    preHtml = "";
-    inPre = false;
-  }
+  if (inPre) writePre();
   closeLink();
   endBlock();
   while (items.length > 0) finishItem();
@@ -595,8 +611,8 @@ function styleEmphasis(attributes: string, ownStrike = false): Emphasis {
   if (weightValue === "bolder" || weightValue === "lighter") emphasis.weight = weightValue;
   else if (weightValue === "bold") emphasis.weight = 700;
   else if (weightValue === "normal") emphasis.weight = 400;
-  else if (/^\d+$/.test(weightValue)) {
-    // CSS allows any weight in 1..1000, not just the hundred steps.
+  else if (/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?$/.test(weightValue)) {
+    // CSS allows any number in 1..1000, fractions included, not just the hundred steps.
     const weight = Number(weightValue);
     if (weight >= 1 && weight <= 1000) emphasis.weight = weight;
   }
@@ -617,10 +633,10 @@ function emphasisIn(frames: Emphasis[]): Marker[] {
       if (frame[marker]) on.add(marker);
       else if (frame[marker] === false) on.delete(marker);
     }
-    // The CSS relative-weight table, bucketed: bolder steps 100-300 to 400, 400-500 to 700,
-    // the rest to 900; lighter steps under 600 to 100, 600-700 to 400, the rest to 700.
-    if (frame.weight === "bolder") weight = (weight ?? 400) < 400 ? 400 : (weight ?? 400) < 600 ? 700 : 900;
-    else if (frame.weight === "lighter") weight = (weight ?? 400) < 600 ? 100 : (weight ?? 400) < 800 ? 400 : 700;
+    // The CSS relative-weight table at its 350/550/750 boundaries: bolder steps below 350 to
+    // 400, below 550 to 700, the rest to 900; lighter below 550 to 100, below 750 to 400, else 700.
+    if (frame.weight === "bolder") weight = (weight ?? 400) < 350 ? 400 : (weight ?? 400) < 550 ? 700 : 900;
+    else if (frame.weight === "lighter") weight = (weight ?? 400) < 550 ? 100 : (weight ?? 400) < 750 ? 400 : 700;
     else if (frame.weight !== undefined) weight = frame.weight;
     else if (frame["**"] !== undefined) weight = frame["**"] ? 700 : 400;
   }

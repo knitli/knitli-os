@@ -322,6 +322,24 @@ describe("htmlToMarkdown", () => {
     expect(htmlToMarkdown('<p><a href="x">a]b</a></p>')).toBe("[a\\]b](x)\n");
   });
 
+  it("honors hidden on disclosures, optgroups, relative weights and form blocks", () => {
+    expect(htmlToMarkdown("<details hidden><summary>private</summary>body</details><p>shown</p>"))
+      .toBe("shown\n");
+    expect(htmlToMarkdown(
+      '<select multiple><optgroup label="Fruit"><option>Apple</option></optgroup></select>'))
+      .toBe('<select multiple>\n<optgroup label="Fruit">\n<option>Apple</option>\n</optgroup>\n</select>\n');
+    expect(htmlToMarkdown(
+      '<p><span style="font-weight:350"><span style="font-weight:bolder">heavy</span></span> ' +
+      '<span style="font-weight:650.5">fraction</span></p>'))
+      .toBe("**heavy fraction**\n");
+    expect(htmlToMarkdown("<div>before<form>inside</form>after</div>"))
+      .toBe("before\n\ninside\n\nafter\n");
+    expect(htmlToMarkdown('<video controls src="movie.mp4">private fallback</video><p>shown</p>'))
+      .toBe("shown\n");
+    expect(render(htmlToMarkdown('<pre><a href="x">foo</a></pre>')))
+      .toBe('<pre><a href="x">foo</a></pre>\n');
+  });
+
   it("delimits code by runs longer than the backticks inside it", () => {
     const markdown = htmlToMarkdown("<p><code>a`b</code> <code>`x</code> <code> a </code></p><pre>one\n```\ntwo</pre>");
     expect(render(markdown)).toBe(

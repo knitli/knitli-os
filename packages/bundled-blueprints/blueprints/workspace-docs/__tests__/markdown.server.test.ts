@@ -236,6 +236,16 @@ describe("htmlToMarkdown", () => {
       .toBe('<p><a href="https://example.com/a)">x</a> <img src="b%20(1).png" alt="y" /></p>\n');
   });
 
+  it("ignores a list end tag that matches no open list of its type", () => {
+    expect(render(htmlToMarkdown("<ol><li>one</ul><li>two</ol>")))
+      .toBe("<ol>\n<li>one</li>\n<li>two</li>\n</ol>\n");
+    expect(render(htmlToMarkdown("<ul><li>one</ol><li>two</ul>")))
+      .toBe("<ul>\n<li>one</li>\n<li>two</li>\n</ul>\n");
+    // One matching an outer list closes through the lists nested inside it.
+    expect(render(htmlToMarkdown("<ul><li>one<ol><li>two</ul><li>three</li></ul>")))
+      .toBe("<ul>\n<li>one\n<ol>\n<li>two</li>\n</ol>\n</li>\n<li>three</li>\n</ul>\n");
+  });
+
   it("delimits code by runs longer than the backticks inside it", () => {
     const markdown = htmlToMarkdown("<p><code>a`b</code> <code>`x</code> <code> a </code></p><pre>one\n```\ntwo</pre>");
     expect(render(markdown)).toBe(

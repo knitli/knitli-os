@@ -3469,10 +3469,11 @@ export interface Overseer extends RpcTarget {
   uploadBlob(content: Uint8Array): Promise<GitOid>;
 
   /**
-   * Upload a staged attachment for use in a future chat message (spreadsheets, which the
-   * server parses on the way in; other files use `uploadBlob()`). `modelId` is retained for
-   * compatibility and no longer gates the upload. Pass the returned handle to newChat() or
-   * sendChatMessage() to commit the attachment into chat history.
+   * Upload a staged attachment for use in a future chat message. The server parses
+   * spreadsheets on the way in; other files stay staged until a send commits them as
+   * workspace files. `modelId` is retained for compatibility and no longer gates the upload.
+   * Pass the returned handle to newChat() or sendChatMessage() to commit the attachment into
+   * chat history, or delete it with deleteChatAttachment() if it is never sent.
    */
   uploadChatAttachment(attachment: ChatAttachmentUpload, modelId: string | null): Promise<ChatAttachmentHandle>;
 
@@ -4614,8 +4615,8 @@ export type AlwaysAvailableResource = {
 };
 
 /**
- * Bytes to upload as a staged chat attachment (spreadsheets, which the server parses on the
- * way in). Other files use `Overseer.uploadBlob()` instead.
+ * Bytes to upload as a staged chat attachment. The server parses spreadsheets on the way
+ * in; other files stay staged until a send commits them as workspace files.
  *
  * The server stores the bytes and returns the handle to pass when sending the message.
  */
@@ -4631,8 +4632,8 @@ export type ChatAttachmentUpload = {
 /**
  * A previously uploaded blob to attach to a chat message, with display/model-input metadata.
  * The blob must be present in this workspace's Git store. Attachment limits and MIME signatures
- * are checked when sending. The ID-only variant names a staged upload: a spreadsheet from
- * `uploadChatAttachment()` (fork), or a legacy one.
+ * are checked when sending. The ID-only variant names a staged upload from
+ * `uploadChatAttachment()`, or a legacy one.
  */
 export type ChatAttachmentHandle = {
   /** Immutable Git blob returned by `uploadBlob()`. */
@@ -4642,7 +4643,7 @@ export type ChatAttachmentHandle = {
   /** Original display filename, sanitized when sending. */
   name?: string;
 } | {
-  /** Staged-upload ID: a spreadsheet's from `uploadChatAttachment()`, or a legacy upload's. */
+  /** Staged-upload ID from `uploadChatAttachment()`, or a legacy upload's. */
   id: string;
 };
 

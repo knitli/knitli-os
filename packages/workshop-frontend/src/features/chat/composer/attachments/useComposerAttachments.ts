@@ -69,7 +69,7 @@ export const useComposerAttachments = ({
     };
   }, []);
 
-  // Staged spreadsheet uploads live server-side; drop them with the composer.
+  // Staged uploads live server-side until a send commits them; drop them with the composer.
   const deleteStaged = (attachment: ComposerAttachment | undefined) => {
     const stagedId = attachment?.ref && "id" in attachment.ref ? attachment.ref.id : undefined;
     if (stagedId === undefined) return;
@@ -90,11 +90,12 @@ export const useComposerAttachments = ({
       if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) return;
       const overseer = await getOverseerRef.current();
       if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) return;
-      // Spreadsheets are staged so the server parses them into a workbook; everything else is
-      // stored as an immutable workspace blob.
-      const ref: ChatAttachmentHandle = isSpreadsheetMimeType(mimeType)
-        ? await overseer.uploadChatAttachment({ mimeType, content, name }, null)
-        : { oid: await overseer.uploadBlob(content), mimeType, name };
+      // Every upload is staged under its own ID, so removing or abandoning it before a send
+      // reclaims the server copy; a send commits it (spreadsheets as a parsed workbook, other
+      // files as workspace files). An immutable blob could not be reclaimed this way: identical
+      // bytes share one OID, so deleting it could break another attachment holding the same OID.
+      const ref: ChatAttachmentHandle =
+        await overseer.uploadChatAttachment({ mimeType, content, name }, null);
       if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) {
         if ("id" in ref) void overseer.deleteChatAttachment(ref.id).catch(() => {});
         return;

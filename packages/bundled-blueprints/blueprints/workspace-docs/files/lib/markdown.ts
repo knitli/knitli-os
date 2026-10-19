@@ -280,12 +280,20 @@ export function htmlToMarkdown(html: string): string {
         // An `</a>` with no anchor open (one a later `<a>` already closed) is ignored, as in HTML.
         case "a": closeLink(); break;
         case "li": if (lists.at(-1)?.html) markdown += "\n\n</li>\n\n"; else finishOpenItem(); break;
-        case "ul": case "ol":
-          if (lists.at(-1)?.html) markdown += "\n\n</ol>\n\n";
-          else finishOpenItem();
-          lists.pop();
+        case "ul": case "ol": {
+          // A list end tag with no open list of its type is ignored, as in a browser; one that
+          // matches an outer list closes through the lists nested inside it.
+          let at = lists.findLastIndex((list) => list.type === tag);
+          if (at < 0) break;
+          while (lists.length > at) {
+            const list = lists.at(-1)!;
+            if (list.html) markdown += `\n\n</${list.type}>\n\n`;
+            else finishOpenItem();
+            lists.pop();
+          }
           listEnd = markdown.length;
           break;
+        }
         case "td": case "th": if (cellOpen) markdown += "\t"; cellOpen = false; break;
         case "tr": markdown += "\n"; cellOpen = false; break;
       }

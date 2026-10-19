@@ -323,6 +323,11 @@ export function htmlToMarkdown(html: string): string {
     // Inside a collapsed disclosure only its summary shows; details/summary tags still run so
     // the state above tracks where the summary starts and ends.
     if (detailsSuppressed() && !/^<\s*\/?\s*(?:details|summary)(?=[\s/>])/i.test(token)) continue;
+    if (rawTextarea !== undefined) {
+      if (/^<\s*\/\s*textarea(?=[\s/>])/i.test(token)) flushTextarea();
+      else rawTextarea += token;
+      continue;
+    }
     // `visibility` is inherited: a hidden subtree stays hidden until a descendant declares
     // itself visible, whose own end tag then hides it again.
     const visTag = /^<\s*(\/?)\s*([a-z0-9]+)(?=[\s/>])([\s\S]*)>$/i.exec(token);
@@ -346,18 +351,14 @@ export function htmlToMarkdown(html: string): string {
         // paragraph), as for hidden-attribute subtrees above.
         while (visStack.length && implicitlyCloses(visStack.at(-1)!.tag, name)) visStack.pop();
         if (invisible()) {
-          if (declared === "visible" && !VOID_TAGS.has(name)) {
-            visStack.push({ tag: name, hidden: false });
-          } else continue;
+          // A visible override shows again; a void element has no subtree, so it is simply
+          // processed, while a container pushes a frame its end tag will close.
+          if (declared !== "visible") continue;
+          if (!VOID_TAGS.has(name)) visStack.push({ tag: name, hidden: false });
         } else if (declared === "visible" && visStack.length && !VOID_TAGS.has(name)) {
           visStack.push({ tag: name, hidden: false });
         }
       }
-    }
-    if (rawTextarea !== undefined) {
-      if (/^<\s*\/\s*textarea(?=[\s/>])/i.test(token)) flushTextarea();
-      else rawTextarea += token;
-      continue;
     }
     if (select) {
       const tag = /^<\s*(\/?)\s*([a-z0-9]+)(?=[\s/>])([\s\S]*)>$/i.exec(token);

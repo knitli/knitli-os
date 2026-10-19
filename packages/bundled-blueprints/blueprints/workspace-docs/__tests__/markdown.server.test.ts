@@ -377,6 +377,12 @@ describe("htmlToMarkdown", () => {
     expect(htmlToMarkdown("<p>a</q>b</p>")).toBe("ab\n");
     expect(htmlToMarkdown('<p style="visibility:hidden">private<div>shown</div>'))
       .toBe("shown\n");
+    expect(render(htmlToMarkdown(
+      '<textarea><span style="visibility:hidden">shown literally</span></textarea>')))
+      .toBe('<p>&lt;span style="visibility:hidden"&gt;shown literally&lt;/span&gt;</p>\n');
+    expect(htmlToMarkdown(
+      '<span style="visibility:hidden"><img style="visibility:visible" src="x" alt="shown"></span>'))
+      .toBe("![shown](x)\n");
     expect(htmlToMarkdown('<?xml version="1.0"?><p>shown</p>')).toBe("shown\n");
   });
 

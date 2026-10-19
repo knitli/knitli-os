@@ -232,7 +232,12 @@ export function overlayPosts(items: readonly XPostInfo[], pending: Pending, over
     }
   }
   const present = new Set(result.map(post => post.id));
-  return [...added.filter(post => !present.has(post.id) && withinBounds(post, bounds)), ...result];
+  // A synthesized self-repost reuses its source's ID: it replaces that row instead of being
+  // de-duplicated against it.
+  const head = added.filter(post => withinBounds(post, bounds) &&
+      (!present.has(post.id) || post.repostOf !== undefined));
+  const headIds = new Set(head.map(post => post.id));
+  return [...head, ...result.filter(post => !headIds.has(post.id))];
 }
 
 /** A post with pending actions replayed: `null` once a pending deletion removes it. */

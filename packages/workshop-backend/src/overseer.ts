@@ -1,4 +1,6 @@
-import { clearAlarmGuard, guardedAlarmFor } from "@gadgets/observability/fork/alarm-guard";
+import {
+  clearAlarmGuard, guardedAlarmFor, MAX_ALARM_CONSECUTIVE_FAILURES, readAlarmGuardRecord,
+} from "@gadgets/observability/fork/alarm-guard";
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { capExecuteCodeOutput } from "./fork/turn-guards";
 import { chatWorkbook, describeWorkbookBinding, dropWorkbook, isChatWorkbook, isSpreadsheetUpload, isWorkbookAttachment, openWorkbookSession, readWorkbookRange, stageWorkbookUpload, workbookRefFields } from "./fork/workbook-upload";
@@ -1069,8 +1071,9 @@ class OverseerImpl implements AgentHooks {
   // joins, being single-flight). A drain that fails leaves its calls recorded rather than looping
   // here; the recompute at the end re-arms the alarm for them, starting a fresh keep-alive period
   // from now rather than re-firing on the time that has just passed. A delivery failure is
-  // rethrown once everything else has settled, so the platform retries the alarm. After its last
-  // retry, schedule a fresh wake-up: a long response-target outage must not strand durable work.
+  // rethrown once everything else has settled. After the last retry — the platform's, or the
+  // alarm guard's where the guard is what retries — schedule a fresh wake-up: a long
+  // response-target outage must not strand durable work.
   async runAlarmTasks(retryCount = 0): Promise<void> {
     this.#inAlarmHandler = true;
     this.#scheduledAlarm = undefined; // A success recomputes the next alarm from settled state.
@@ -1094,7 +1097,14 @@ class OverseerImpl implements AgentHooks {
     } finally {
       this.#inAlarmHandler = false;
       this.#agentKeepAliveTime = undefined;
-      if (!failed || retryCount >= ALARM_MAX_RETRIES) {
+      // The fresh wake-up after the last retry cannot key off the platform's retryCount alone:
+      // the alarm guard catches the rethrow, so the platform never retries and its count never
+      // advances. The guard's own lifecycle is the one that runs — when this failure is the one
+      // that reaches its consecutive-failure limit, it will stop re-arming, so arm the wake-up
+      // here (the guard then holds it to its longest backoff rather than dropping the work).
+      const guardWillGiveUp = (readAlarmGuardRecord(this.ctx, "overseer")?.failures ?? 0) + 1 >=
+          MAX_ALARM_CONSECUTIVE_FAILURES;
+      if (!failed || retryCount >= ALARM_MAX_RETRIES || guardWillGiveUp) {
         this.#updateAlarm(failed ? Date.now() + AGENT_KEEPALIVE_ALARM_MS : 0);
       }
     }

@@ -610,6 +610,31 @@ describe("decision handoff using the existing execution row", () => {
     });
   });
 
+  it("re-arms failed response delivery when the alarm guard reaches its failure limit", async () => {
+    const s = await scenario(), name = crypto.randomUUID();
+    await s.visit(async impl => {
+      impl.storage.activeAgents.delete(CHAT);
+      using target: RpcStub<FakeChatResponseTarget> = await impl.ctx.restore({
+        type: "test-response-target", name,
+      });
+      await target.setAvailable(false);
+      impl.storage.gadgetResponseDeliveries.put({idempotencyKey: "external-response", chatId: CHAT,
+        promptSequence: 0, createdAt: Date.now(), status: "ready", responseText: "Done.",
+        chatGatewayRpcTarget: target});
+      // The guard has recorded seven consecutive failures; this one reaches its limit, so the
+      // fresh wake-up must be armed even though the platform retry count never advances.
+      impl.ctx.storage.kv.put("alarm-guard:overseer",
+          { bucket: Math.floor(Date.now() / 60_000), count: 1, failures: 7 });
+      await impl.ctx.storage.deleteAlarm();
+      await expect(impl.runAlarmTasks(0)).rejects.toThrow("Response target unavailable");
+      expect(await impl.ctx.storage.getAlarm()).toBeGreaterThan(Date.now());
+      await target.setAvailable(true);
+      await impl.runAlarmTasks();
+      expect(impl.storage.gadgetResponseDeliveries.get("external-response")?.status)
+          .toBe("delivered");
+    });
+  });
+
   it("preserves the scheduled alarm while constructor recovery is running", async () => {
     const s = await scenario("connection", true), gate = Promise.withResolvers<void>();
     const requests = inference(gate.promise);

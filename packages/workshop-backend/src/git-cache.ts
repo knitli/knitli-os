@@ -743,6 +743,10 @@ export class WorkspaceGitCache {
           } else if (payload.byteLength > READ_FILES_RESPONSE_BUDGET) {
             // A pack can inflate one blob far past any response; no call could ever return it.
             out.push([path, { kind: "unreadable", message: tooLargeToShowMessage(path) }]);
+          } else if (bytes + payload.byteLength > READ_FILES_RESPONSE_BUDGET) {
+            // The budget is for the whole response: stop rather than overshoot it, omitting
+            // this and the remaining paths as the accumulated-budget stop above does.
+            break;
           } else {
             let text = decodeBlobText(payload, path);
             bytes += payload.byteLength;

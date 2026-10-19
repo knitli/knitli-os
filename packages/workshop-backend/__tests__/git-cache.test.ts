@@ -1461,6 +1461,26 @@ describe("lazy walker reads", () => {
     expect(t.pulls).toHaveLength(0);
   });
 
+  it("stops a multi-file read at the aggregate response budget, not just per file", async () => {
+    let t = makeCache();
+    let size = Math.floor(READ_FILES_RESPONSE_BUDGET / 2) + 1024;
+    let textA = "a".repeat(size), textB = "b".repeat(size);
+    let a = await storeLocal(t.storage, { type: "blob", payload: new TextEncoder().encode(textA) });
+    let b = await storeLocal(t.storage, { type: "blob", payload: new TextEncoder().encode(textB) });
+    let tree = await storeLocal(t.storage, {
+      type: "tree",
+      payload: treePayload([
+        { mode: "100644", name: "a.txt", oid: a },
+        { mode: "100644", name: "b.txt", oid: b },
+      ]),
+    });
+    let commit = await storeLocal(t.storage,
+        { type: "commit", payload: commitPayload(tree, [], "two large files") });
+    // Each file fits on its own; together they pass the budget, so the second is omitted.
+    expect(await t.cache.readFilesAtCommit(commit, ["a.txt", "b.txt"]))
+        .toEqual([["a.txt", { kind: "text", text: textA }]]);
+  });
+
   it("fails parsing a tree with a non-UTF-8 entry name, naming the tree", async () => {
     let t = makeCache();
     await storeLocal(t.storage, fixture(BAD_NAME_TREE));
@@ -1618,10 +1638,10 @@ describe("client-facing reads (readCommitTree / readFilesAtCommit)", () => {
     let commit = await storeLocal(t.storage,
         { type: "commit", payload: commitPayload(tree, [], "big") });
 
-    // Eight files fill the budget exactly; the ninth pushes past it and is still delivered;
-    // the tenth is omitted (not reported absent).
+    // Eight files fill the budget exactly; the ninth would push past it, so it and the tenth
+    // are omitted (not reported absent) for the client to re-request.
     let result = await t.cache.readFilesAtCommit(commit, names);
-    expect(result.map(([path]) => path)).toStrictEqual(names.slice(0, 9));
+    expect(result.map(([path]) => path)).toStrictEqual(names.slice(0, 8));
     expect(result.every(([, file]) =>
         file.kind === "text" && file.text.length === FILE_SIZE)).toBe(true);
     expect(t.pulls).toHaveLength(0);

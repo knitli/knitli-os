@@ -9,6 +9,7 @@ import {
   guardedAlarm,
   guardedAlarmFor,
   haltIfAlarmsDisabled,
+  readAlarmGuardRecord,
   scheduleAlarm,
   type AlarmGuardRecord,
   type AlarmGuardState,
@@ -86,6 +87,14 @@ describe("alarm guard", () => {
     error = vi.spyOn(console, "error").mockImplementation(() => {});
   });
   afterEach(() => vi.restoreAllMocks());
+
+  it("exposes the counters a running body reads: failures before its own lands", async () => {
+    await state.fire({}, boom);
+    let during: number | undefined;
+    await state.fire({}, async () => { during = readAlarmGuardRecord(state, "test")?.failures; });
+    expect(during).toBe(1);
+    expect(readAlarmGuardRecord(state, "other")).toBeUndefined();
+  });
 
   it("reads the kill switch only from the exact string \"true\"", () => {
     expect(alarmsDisabled({ ALARMS_DISABLED: "true" })).toBe(true);

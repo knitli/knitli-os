@@ -26,7 +26,7 @@ const ELEMENT_EMPHASIS = new Map<string, Emphasis>([
 ]);
 
 /** Elements whose content the page never renders, so the export leaves it out too. */
-const HIDDEN_TAGS = new Set(["script", "style", "template", "noscript", "title"]);
+const HIDDEN_TAGS = new Set(["script", "style", "template", "noscript", "title", "iframe"]);
 
 /** Elements with no end tag or subtree, so a `hidden` attribute suppresses only the element. */
 const VOID_TAGS = new Set([
@@ -96,6 +96,16 @@ export function htmlToMarkdown(html: string): string {
   // Each open anchor's destination, or null for one with no href, which the page shows as text.
   const links: (string | null)[] = [];
   const blockquotes: number[] = [];
+  // Each open disclosure: a collapsed one shows only its summary, so the rest is suppressed.
+  const details: { collapsed: boolean; inSummary: boolean }[] = [];
+  const detailsSuppressed = () => details.some((frame) => frame.collapsed && !frame.inSummary);
+  // An open select's options and the one being read: the page shows only the selected value.
+  let select: { options: { text: string; selected: boolean }[]; current?: { text: string; selected: boolean } } | undefined;
+  const flushSelect = () => {
+    const chosen = select?.options.find((option) => option.selected) ?? select?.options[0];
+    select = undefined;
+    if (chosen) emitText(withLegacySemicolons(chosen.text));
+  };
   // Fenced code blocks, each held out of the Markdown as a placeholder line until the end, so no
   // trimming, blank-line collapsing or indenting of the text around it reaches its content.
   const fences: string[] = [];
@@ -176,17 +186,17 @@ export function htmlToMarkdown(html: string): string {
   };
 
   let cellOpen = false;
+  // Whether a table row is open, apart from its cell: a row ends at the next row even when its
+  // last cell was closed explicitly.
+  let rowOpen = false;
   // The open element whose content the page never shows (script, style, template, or anything
   // carrying a `hidden` attribute), and how deep. `nest` is set for parsed elements, whose same
   // tag can nest; raw-text elements end at their first proper end tag however often they reopen.
   let hidden: { tag: string; depth: number; nest: boolean } | undefined;
   // A textarea's raw content while it is open: its tags are literal text, not markup.
   let rawTextarea: string | undefined;
-  const flushTextarea = () => {
-    // Textarea content is RCDATA: references decode but tags stay literal, and the parser drops
-    // a newline right after the start tag.
-    const html = withLegacySemicolons((rawTextarea ?? "").replace(/^\r?\n/, ""));
-    rawTextarea = undefined;
+  // Writes raw HTML text as inline content, as the ordinary text path does.
+  const emitText = (html: string) => {
     const words = textMarkdown(html);
     space ||= words.startsWith(" ");
     if (trimAscii(words)) {
@@ -194,6 +204,13 @@ export function htmlToMarkdown(html: string): string {
       inline += trimAscii(words);
       space = words.endsWith(" ");
     }
+  };
+  const flushTextarea = () => {
+    // Textarea content is RCDATA: references decode but tags stay literal, and the parser drops
+    // a newline right after the start tag.
+    const html = withLegacySemicolons((rawTextarea ?? "").replace(/^\r?\n/, ""));
+    rawTextarea = undefined;
+    emitText(html);
   };
 
   for (const [index, token] of tokens.entries()) {
@@ -206,9 +223,24 @@ export function htmlToMarkdown(html: string): string {
       }
       continue;
     }
+    // Inside a collapsed disclosure only its summary shows; details/summary tags still run so
+    // the state above tracks where the summary starts and ends.
+    if (detailsSuppressed() && !/^<\s*\/?\s*(?:details|summary)(?=[\s/>])/i.test(token)) continue;
     if (rawTextarea !== undefined) {
       if (/^<\s*\/\s*textarea(?=[\s/>])/i.test(token)) flushTextarea();
       else rawTextarea += token;
+      continue;
+    }
+    if (select) {
+      const tag = /^<\s*(\/?)\s*([a-z0-9]+)(?=[\s/>])([\s\S]*)>$/i.exec(token);
+      const name = tag?.[2].toLowerCase();
+      if (tag && !tag[1] && name === "option") {
+        const option = { text: "", selected: readRawHtmlAttribute(tag[3], "selected") !== undefined };
+        select.options.push(option);
+        select.current = option;
+      } else if (tag && tag[1] && name === "select") flushSelect();
+      else if (tag && tag[1] && name === "option") select.current = undefined;
+      else if ((!token.startsWith("<") || token === "<") && select.current) select.current.text += token;
       continue;
     }
     if (!token.startsWith("<") || token === "<") {
@@ -236,11 +268,20 @@ export function htmlToMarkdown(html: string): string {
     }
     if (token.startsWith("<!--") || token.startsWith("<!")) continue;
 
-    const match = /^<\s*(\/?)\s*([a-z0-9]+)([\s\S]*)>$/i.exec(token);
+    const match = /^<\s*(\/?)\s*([a-z0-9]+)(?=[\s/>])([\s\S]*)>$/i.exec(token);
     if (!match) continue;
     const closing = match[1] === "/";
     const tag = match[2].toLowerCase();
     const attributes = match[3];
+    if (tag === "details") {
+      if (closing) details.pop();
+      else details.push({
+        collapsed: readRawHtmlAttribute(attributes, "open") === undefined, inSummary: false,
+      });
+    } else if (tag === "summary" && details.at(-1)?.collapsed) {
+      details.at(-1)!.inSummary = !closing;
+    }
+    if (detailsSuppressed()) continue;
     // A `hidden` attribute suppresses any element's subtree, as the tag-name set above does.
     const attributeHidden = !closing && readRawHtmlAttribute(attributes, "hidden") !== undefined;
     if (!closing && (HIDDEN_TAGS.has(tag) || attributeHidden)) {
@@ -333,7 +374,8 @@ export function htmlToMarkdown(html: string): string {
           break;
         }
         case "td": case "th": if (cellOpen) markdown += "\t"; cellOpen = false; break;
-        case "tr": markdown += "\n"; cellOpen = false; break;
+        case "tr": markdown += "\n"; cellOpen = false; rowOpen = false; break;
+        case "table": markdown += "\n\n"; break;
       }
       continue;
     }
@@ -355,11 +397,18 @@ export function htmlToMarkdown(html: string): string {
       case "pre": preText = ""; preHtml = ""; inPre = true; break;
       // Textarea content is raw text until its end tag; it is collected at the top of the loop.
       case "textarea": rawTextarea = ""; break;
+      // A select shows only its selected option, which the top of the loop collects.
+      case "select": select = { options: [] }; break;
       case "blockquote": markdown += "\n\n"; blockquotes.push(markdown.length); break;
       case "hr": markdown += "\n\n---\n\n"; break;
       // HTML lets `</td>` go unwritten before the next cell, which closes it then.
       case "td": case "th": if (cellOpen) markdown += "\t"; cellOpen = true; break;
-      case "tr": if (cellOpen) { markdown += "\n"; cellOpen = false; } break;
+      // A table is its own block, apart from any inline content before it.
+      case "table": markdown += "\n\n"; break;
+      case "tr":
+        if (rowOpen) { markdown += "\n"; cellOpen = false; }
+        rowOpen = true;
+        break;
       case "ul": openList({ type: "ul", next: 1, step: 1 }); break;
       case "ol": {
         const markerType = readHtmlAttribute(attributes, "type");
@@ -444,6 +493,7 @@ export function htmlToMarkdown(html: string): string {
       }
     }
   }
+  if (select) flushSelect();
   if (rawTextarea !== undefined) flushTextarea();
   if (inPre) {
     const fence = "`".repeat(Math.max(3, longestRun(preText, "`") + 1));
@@ -645,7 +695,7 @@ function itemValues(tokens: string[], open: number): (string | undefined)[] {
   let depth = 0;
   const values: (string | undefined)[] = [];
   for (const token of tokens.slice(open + 1)) {
-    const tag = /^<\s*(\/?)\s*(ol|ul|li)\b([\s\S]*)>$/i.exec(token);
+    const tag = /^<\s*(\/?)\s*(ol|ul|li)(?=[\s/>])([\s\S]*)>$/i.exec(token);
     if (!tag) continue;
     const list = tag[2].toLowerCase() !== "li";
     if (list && tag[1]) { if (depth-- === 0) break; }

@@ -278,6 +278,27 @@ describe("htmlToMarkdown", () => {
       .toBe("shown\n");
   });
 
+  it("reads malformed tag names as unknown elements, and keeps tables and rows apart", () => {
+    expect(htmlToMarkdown("<b.foo>x</b.foo>")).toBe("x\n");
+    expect(htmlToMarkdown("<div>intro<table><tr><td>a</td></tr></table></div>"))
+      .toBe("intro\n\na\n");
+    expect(htmlToMarkdown("<table><tr><td>a</td><tr><td>b</td></tr></table>"))
+      .toBe("a\nb\n");
+  });
+
+  it("leaves iframe fallback, collapsed details and unselected options unshown", () => {
+    expect(htmlToMarkdown("<iframe>private fallback</iframe><p>shown</p>")).toBe("shown\n");
+    expect(htmlToMarkdown(
+      "<details><summary>Public title</summary>hidden until expanded</details><p>shown</p>"))
+      .toBe("Public title\n\nshown\n");
+    expect(htmlToMarkdown("<details open><summary>Title</summary>body</details>"))
+      .toBe("Title\n\nbody\n");
+    expect(htmlToMarkdown("<select><option>one</option><option selected>two</option></select>"))
+      .toBe("two\n");
+    expect(htmlToMarkdown("<select><option>one</option><option>two</option></select>"))
+      .toBe("one\n");
+  });
+
   it("delimits code by runs longer than the backticks inside it", () => {
     const markdown = htmlToMarkdown("<p><code>a`b</code> <code>`x</code> <code> a </code></p><pre>one\n```\ntwo</pre>");
     expect(render(markdown)).toBe(

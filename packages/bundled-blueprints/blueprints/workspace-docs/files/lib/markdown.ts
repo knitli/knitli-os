@@ -101,16 +101,16 @@ export function htmlToMarkdown(html: string): string {
   const detailsSuppressed = () => details.some((frame) => frame.collapsed && !frame.inSummary);
   // An open select's options and the one being read: a single select shows only its selected
   // value; a multiple select shows every option, so it is kept as HTML instead.
-  let select: { multiple: boolean; options: { text: string; selected: boolean; labeled: boolean }[]; current?: { text: string; selected: boolean; labeled: boolean } } | undefined;
+  let select: { listbox?: string; options: { text: string; selected: boolean; labeled: boolean }[]; current?: { text: string; selected: boolean; labeled: boolean } } | undefined;
   const flushSelect = () => {
     const current = select;
     select = undefined;
     if (!current) return;
-    if (current.multiple) {
+    if (current.listbox) {
       endBlock();
       const options = current.options.map((option) =>
         `<option${option.selected ? " selected" : ""}>${option.text.replace(/</g, "&lt;")}</option>`);
-      markdown += `\n\n<select multiple>\n${options.join("\n")}\n</select>\n\n`;
+      markdown += `\n\n${current.listbox}\n${options.join("\n")}\n</select>\n\n`;
       return;
     }
     // A single select keeps the last option marked selected, as the browser's reset does.
@@ -420,9 +420,14 @@ export function htmlToMarkdown(html: string): string {
       // Textarea content is raw text until its end tag; it is collected at the top of the loop.
       case "textarea": rawTextarea = ""; break;
       // A select shows only its selected option, which the top of the loop collects.
-      case "select":
-        select = { multiple: readRawHtmlAttribute(attributes, "multiple") !== undefined, options: [] };
+      case "select": {
+        // A multiple select, or a sized one, shows several options at once: a listbox.
+        const size = integer(readHtmlAttribute(attributes, "size"));
+        const listbox = readRawHtmlAttribute(attributes, "multiple") !== undefined
+          ? "<select multiple>" : size !== undefined && size > 1 ? `<select size="${size}">` : undefined;
+        select = { listbox, options: [] };
         break;
+      }
       // An input's value and state are its visible content: keep the control as raw HTML,
       // except a hidden one, which the page does not show at all.
       case "input": {

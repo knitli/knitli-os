@@ -303,6 +303,9 @@ describe("htmlToMarkdown", () => {
     expect(htmlToMarkdown(
       "<select multiple><option selected>one</option><option selected>two</option></select>"))
       .toBe("<select multiple>\n<option selected>one</option>\n<option selected>two</option>\n</select>\n");
+    expect(htmlToMarkdown(
+      '<select size="3"><option>one</option><option>two</option><option>three</option></select>'))
+      .toBe('<select size="3">\n<option>one</option>\n<option>two</option>\n<option>three</option>\n</select>\n');
     expect(htmlToMarkdown('<p>Name: <input value="Ada"></p>')).toBe('Name: <input value="Ada">\n');
     expect(htmlToMarkdown('<p>a<input type="hidden" value="x">b</p>')).toBe("ab\n");
     expect(htmlToMarkdown('<select><option label="Short label">Long fallback text</option></select>'))

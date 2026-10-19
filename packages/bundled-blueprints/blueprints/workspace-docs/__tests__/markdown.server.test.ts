@@ -368,6 +368,16 @@ describe("htmlToMarkdown", () => {
     expect(htmlToMarkdown("<h1>one</h2>two")).toBe("# onetwo\n");
   });
 
+  it("honors visibility hiding with visible descendants, and ignores stray q ends and instructions", () => {
+    expect(htmlToMarkdown('<p>shown<span style="visibility:hidden">private</span></p>'))
+      .toBe("shown\n");
+    expect(htmlToMarkdown(
+      '<p><span style="visibility:hidden">a<span style="visibility:visible">shown</span>b</span></p>'))
+      .toBe("shown\n");
+    expect(htmlToMarkdown("<p>a</q>b</p>")).toBe("ab\n");
+    expect(htmlToMarkdown('<?xml version="1.0"?><p>shown</p>')).toBe("shown\n");
+  });
+
   it("delimits code by runs longer than the backticks inside it", () => {
     const markdown = htmlToMarkdown("<p><code>a`b</code> <code>`x</code> <code> a </code></p><pre>one\n```\ntwo</pre>");
     expect(render(markdown)).toBe(

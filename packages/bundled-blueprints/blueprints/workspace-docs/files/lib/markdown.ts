@@ -70,7 +70,7 @@ export function htmlToMarkdown(html: string): string {
   // A quoted attribute value may hold `>`; a tag with an unbalanced quote falls back to the first.
   // A `<` that starts no tag (`1 < 2`) is text, as the browser recovers it.
   const tokens = String(html).match(
-    /<!--[\s\S]*?(?:-->|$)|<![^>]*>|<\/?[a-z](?:[^>"']|"[^"]*"|'[^']*')*>|<\/?[a-z][^>]*>|[^<]+|</gi) || [];
+    /<!--[\s\S]*?(?:-->|$)|<![^>]*>|<\?[^>]*>|<\/?[a-z](?:[^>"']|"[^"]*"|'[^']*')*>|<\/?[a-z][^>]*>|[^<]+|</gi) || [];
   // Each open list: the number its next item takes, which way it counts, and the last it wrote.
   // `html` marks a list whose numbers Markdown cannot write (below zero), kept as HTML tags instead.
   const lists: { type: "ul" | "ol"; next: number; step: 1 | -1; last?: number; html?: true }[] = [];
@@ -126,6 +126,10 @@ export function htmlToMarkdown(html: string): string {
   };
   // How deep nested quotation marks are: the page alternates double and single marks.
   let qDepth = 0;
+  // Elements that declared a visibility, outermost first: the nearest declaration decides, so
+  // a descendant declaring itself visible shows again inside a hidden ancestor.
+  const visStack: { tag: string; hidden: boolean }[] = [];
+  const invisible = () => visStack.at(-1)?.hidden === true;
   // Each open disclosure: a collapsed one shows only its first summary, so the rest is suppressed.
   const details: { collapsed: boolean; inSummary: boolean; summarySeen: boolean }[] = [];
   const detailsSuppressed = () => details.some((frame) => frame.collapsed && !frame.inSummary);
@@ -319,6 +323,34 @@ export function htmlToMarkdown(html: string): string {
     // Inside a collapsed disclosure only its summary shows; details/summary tags still run so
     // the state above tracks where the summary starts and ends.
     if (detailsSuppressed() && !/^<\s*\/?\s*(?:details|summary)(?=[\s/>])/i.test(token)) continue;
+    // `visibility` is inherited: a hidden subtree stays hidden until a descendant declares
+    // itself visible, whose own end tag then hides it again.
+    const visTag = /^<\s*(\/?)\s*([a-z0-9]+)(?=[\s/>])([\s\S]*)>$/i.exec(token);
+    if (!visTag) {
+      if (invisible()) continue;
+    } else {
+      const name = visTag[2].toLowerCase();
+      if (visTag[1]) {
+        if (visStack.at(-1)?.tag === name) {
+          // A hidden element's opening made no other state, so its end is skipped too; a
+          // revealed element's end tag runs normally.
+          if (visStack.pop()!.hidden) continue;
+        } else if (invisible()) continue;
+      } else {
+        const declared = declaredStyles(visTag[3]).get("visibility")?.value;
+        if (declared === "hidden" || declared === "collapse") {
+          if (!VOID_TAGS.has(name)) visStack.push({ tag: name, hidden: true });
+          continue;
+        }
+        if (invisible()) {
+          if (declared === "visible" && !VOID_TAGS.has(name)) {
+            visStack.push({ tag: name, hidden: false });
+          } else continue;
+        } else if (declared === "visible" && visStack.length && !VOID_TAGS.has(name)) {
+          visStack.push({ tag: name, hidden: false });
+        }
+      }
+    }
     if (rawTextarea !== undefined) {
       if (/^<\s*\/\s*textarea(?=[\s/>])/i.test(token)) flushTextarea();
       else rawTextarea += token;
@@ -372,7 +404,7 @@ export function htmlToMarkdown(html: string): string {
       }
       continue;
     }
-    if (token.startsWith("<!--") || token.startsWith("<!")) continue;
+    if (token.startsWith("<!--") || token.startsWith("<!") || token.startsWith("<?")) continue;
 
     const match = /^<\s*(\/?)\s*([a-z0-9]+)(?=[\s/>])([\s\S]*)>$/i.exec(token);
     if (!match) continue;
@@ -485,9 +517,11 @@ export function htmlToMarkdown(html: string): string {
           closeLink();
           break;
         }
-        // The page supplies a quotation's marks: closing the one its depth opened.
+        // The page supplies a quotation's marks: closing the one its depth opened. A stray
+        // end tag with none open is ignored, as in HTML.
         case "q": {
-          qDepth = Math.max(0, qDepth - 1);
+          if (qDepth === 0) break;
+          qDepth--;
           beginInline();
           inline += qDepth % 2 ? "’" : "”";
           break;

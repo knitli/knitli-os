@@ -260,6 +260,11 @@ describe("htmlToMarkdown", () => {
   it("shows a textarea's contents as the literal text the page shows", () => {
     expect(render(htmlToMarkdown("<textarea><b>literal</b> &copy;</textarea>")))
       .toBe("<p>&lt;b&gt;literal&lt;/b&gt; \u00a9</p>\n");
+    expect(render(htmlToMarkdown("<textarea>before</textarea.foo><b>after</b></textarea>")))
+      .toBe("<p>before&lt;/textarea.foo&gt;&lt;b&gt;after&lt;/b&gt;</p>\n");
+    expect(htmlToMarkdown('<p><span style="font-weight:650">heavy</span> ' +
+      '<span style="font-weight:550">medium</span></p>'))
+      .toBe("**heavy** medium\n");
     expect(htmlToMarkdown("<p>a</p><textarea>left open"))
       .toBe("a\n\nleft open\n");
   });

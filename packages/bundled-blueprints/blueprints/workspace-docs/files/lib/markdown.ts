@@ -207,7 +207,7 @@ export function htmlToMarkdown(html: string): string {
       continue;
     }
     if (rawTextarea !== undefined) {
-      if (/^<\s*\/\s*textarea\b/i.test(token)) flushTextarea();
+      if (/^<\s*\/\s*textarea(?=[\s/>])/i.test(token)) flushTextarea();
       else rawTextarea += token;
       continue;
     }
@@ -504,9 +504,12 @@ function styleEmphasis(attributes: string, ownStrike = false): Emphasis {
   // Relative weights resolve against the inherited weight in emphasisIn.
   const weightValue = value("font-weight") ?? "";
   if (weightValue === "bolder" || weightValue === "lighter") emphasis.weight = weightValue;
-  else {
-    const weight = /^(?:(bold|[6-9]00)|normal|[1-5]00)$/.exec(weightValue);
-    if (weight) emphasis.weight = weight[1] === "bold" ? 700 : weight[1] ? Number(weight[1]) : 400;
+  else if (weightValue === "bold") emphasis.weight = 700;
+  else if (weightValue === "normal") emphasis.weight = 400;
+  else if (/^\d+$/.test(weightValue)) {
+    // CSS allows any weight in 1..1000, not just the hundred steps.
+    const weight = Number(weightValue);
+    if (weight >= 1 && weight <= 1000) emphasis.weight = weight;
   }
   const slant = /^(?:(italic|oblique)\b.*|normal)$/.exec(value("font-style") ?? "");
   if (slant) emphasis["*"] = slant[1] !== undefined;

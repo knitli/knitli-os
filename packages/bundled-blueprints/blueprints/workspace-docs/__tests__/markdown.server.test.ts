@@ -360,6 +360,14 @@ describe("htmlToMarkdown", () => {
       .toBe("- shown\n");
   });
 
+  it("hides display:none subtrees, ends hidden paragraphs at block starts, and ignores mismatched headings", () => {
+    expect(htmlToMarkdown('<p>shown<span style="display:none">private</span></p>')).toBe("shown\n");
+    expect(htmlToMarkdown('<p>shown<span style="display:none; display:inline">kept</span></p>'))
+      .toBe("shownkept\n");
+    expect(htmlToMarkdown("<p hidden>private<div>shown</div>")).toBe("shown\n");
+    expect(htmlToMarkdown("<h1>one</h2>two")).toBe("# onetwo\n");
+  });
+
   it("delimits code by runs longer than the backticks inside it", () => {
     const markdown = htmlToMarkdown("<p><code>a`b</code> <code>`x</code> <code> a </code></p><pre>one\n```\ntwo</pre>");
     expect(render(markdown)).toBe(

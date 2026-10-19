@@ -55,6 +55,15 @@ describe("pending posts", () => {
     expect(second.links).toEqual([{ url: "https://a.co" }]);
   });
 
+  it("recognizes a hashtag after punctuation in a pending post", () => {
+    const action: XAction = {
+      kind: "createPost",
+      payload: { refs: ["~1"], drafts: [{ text: "News (#launch) and updates" }], submittedAt: 1000 },
+    };
+    const [shown] = pendingPosts(pending(action), me, unresolved);
+    expect(shown.hashtags).toEqual(["launch"]);
+  });
+
   it("stops showing a post once X has assigned its ID, and points at the real one", () => {
     const resolve = (id: string) => id === "~1" ? "100" : id;
     const shown = pendingPosts(pending(thread), me, resolve);

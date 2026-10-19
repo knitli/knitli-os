@@ -31,6 +31,23 @@ const HIDDEN_TAGS = new Set(["script", "style", "template", "noscript", "title",
 /** Elements a same-kind start tag implicitly closes, so they never nest inside a hidden subtree. */
 const IMPLICITLY_CLOSED = new Set(["p", "li", "dd", "dt", "td", "th", "tr", "option"]);
 
+/** Start tags that implicitly close a `p` element (its end tag may be omitted before any of them). */
+const P_CLOSERS = new Set([
+  "address", "article", "aside", "blockquote", "details", "div", "dl", "fieldset", "figcaption",
+  "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr", "main",
+  "menu", "nav", "ol", "p", "pre", "section", "table", "ul",
+]);
+
+/** Whether a start tag named `name` implicitly closes an open element named `open`. */
+function implicitlyCloses(open: string, name: string): boolean {
+  if (name === open) return IMPLICITLY_CLOSED.has(open);
+  if (open === "p") return P_CLOSERS.has(name);
+  if (open === "dd" || open === "dt") return name === "dd" || name === "dt";
+  if (open === "td" || open === "th") return name === "td" || name === "th" || name === "tr";
+  if (open === "option") return name === "optgroup";
+  return false;
+}
+
 /** Elements with no end tag or subtree, so a `hidden` attribute suppresses only the element. */
 const VOID_TAGS = new Set([
   "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr",
@@ -163,6 +180,8 @@ export function htmlToMarkdown(html: string): string {
   // Whether the open preformatted block holds an element, in which case it stays raw HTML.
   let preHasTags = false;
   let inHeading = false;
+  // The open heading's tag name: a mismatched heading end tag is ignored, as in HTML.
+  let headingName: string | undefined;
   // Space and `<br>`s since the last content, written only once more content follows: the editor
   // leaves a `<br>` as the sole content of an empty paragraph.
   let space = false;
@@ -285,10 +304,9 @@ export function htmlToMarkdown(html: string): string {
     if (hidden) {
       // An end-tag name must be followed by whitespace, `/` or `>`: `</script.foo>` is not one.
       const tag = /^<\s*(\/?)\s*([a-z0-9]+)(?=[\s/>])/i.exec(token);
-      if (tag?.[2].toLowerCase() === hidden.tag && !tag[1] && hidden.nest &&
-          IMPLICITLY_CLOSED.has(hidden.tag)) {
-        // A same-kind start ends an element that cannot nest (a second <p> closes a hidden
-        // first), and the new element is visible: stop hiding and process it normally.
+      if (tag && !tag[1] && hidden.nest && implicitlyCloses(hidden.tag, tag[2].toLowerCase())) {
+        // A start tag that implicitly closes the hidden element (a <div> or a second <p> ends
+        // a hidden paragraph) is itself visible: stop hiding and process it normally.
         hidden = undefined;
       } else {
         if (tag?.[2].toLowerCase() === hidden.tag) {
@@ -367,9 +385,14 @@ export function htmlToMarkdown(html: string): string {
     // A dialog without `open` is not rendered either; an open one keeps block boundaries below.
     const closedDialog = !closing && tag === "dialog" &&
       readRawHtmlAttribute(attributes, "open") === undefined;
-    if (!closing && (HIDDEN_TAGS.has(tag) || attributeHidden || closedDialog)) {
+    // An effective inline `display: none` hides any element and its subtree.
+    const styleHidden = !closing && declaredStyles(attributes).get("display")?.value === "none";
+    if (!closing && (HIDDEN_TAGS.has(tag) || attributeHidden || closedDialog || styleHidden)) {
       if (!VOID_TAGS.has(tag)) {
-        hidden = { tag, depth: 1, nest: tag === "template" || attributeHidden || closedDialog };
+        hidden = {
+          tag, depth: 1,
+          nest: tag === "template" || attributeHidden || closedDialog || styleHidden,
+        };
       }
       continue;
     }
@@ -435,7 +458,10 @@ export function htmlToMarkdown(html: string): string {
           else breaks++;
           break;
         case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
+          // A heading end tag naming another heading is ignored; that heading stays open.
+          if (tag !== headingName) break;
           inHeading = false;
+          headingName = undefined;
           // A trailing run of `#` after a space would be read as the heading's closing sequence.
           markdown = markdown.replace(/(\s)(#+)$/, "$1\\$2") + "\n\n";
           break;
@@ -491,6 +517,7 @@ export function htmlToMarkdown(html: string): string {
     switch (tag) {
       case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
         inHeading = true;
+        headingName = tag;
         markdown += "\n\n" + "#".repeat(Number(tag[1])) + " ";
         break;
       case "p": case "div": markdown += "\n\n"; break;
@@ -668,9 +695,9 @@ function emphasisOf(tag: string, attributes: string): Emphasis | undefined {
  * that default, so a decoration without one cancels it. On any other element a descendant's
  * style cannot lift an ancestor's line-through, so strikethrough only turns on there.
  */
-function styleEmphasis(attributes: string, ownStrike = false): Emphasis {
+/** An element's inline style declarations as the cascade picks each: last `!important`, else last. */
+function declaredStyles(attributes: string): Map<string, { value: string; important: boolean }> {
   const style = (readHtmlAttribute(attributes, "style") ?? "").toLowerCase();
-  // Each property's value as the cascade picks it: the last `!important` declaration, else the last.
   const declared = new Map<string, { value: string; important: boolean }>();
   for (const declaration of style.split(";")) {
     const colon = declaration.indexOf(":");
@@ -682,6 +709,11 @@ function styleEmphasis(attributes: string, ownStrike = false): Emphasis {
     if (declared.get(property)?.important && !important) continue;
     declared.set(property, { value: raw.replace(/!\s*important\s*$/, "").trim(), important });
   }
+  return declared;
+}
+
+function styleEmphasis(attributes: string, ownStrike = false): Emphasis {
+  const declared = declaredStyles(attributes);
   const value = (property: string) => declared.get(property)?.value;
   const emphasis: Emphasis = {};
   // Relative weights resolve against the inherited weight in emphasisIn.

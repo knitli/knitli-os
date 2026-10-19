@@ -44,7 +44,7 @@ function synthesize(draft: StoredDraft, ref: string, me: StoredIdentity, submitt
     conversationId,
     ...(replyTo ? { replyTo } : {}),
     mentions: extractMentions(draft.text),
-    hashtags: [...draft.text.matchAll(/(?:^|\s)#([\p{L}\p{N}_]+)/gu)].map(match => match[1]),
+    hashtags: [...draft.text.matchAll(/(?:^|[^\p{L}\p{N}_&])#([\p{L}\p{N}_]+)/gu)].map(match => match[1]),
     links: extractUrls(draft.text).map(url => ({ url })),
     media: (draft.images ?? []).map(image => ({
       type: "photo" as const, ...(image.altText ? { altText: image.altText } : {}),

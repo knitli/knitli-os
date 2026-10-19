@@ -79,6 +79,15 @@ export function htmlToMarkdown(html: string): string {
   };
   // HTML lets `</li>` go unwritten before the next item or the list's end, which close it then.
   const finishOpenItem = () => { if (items.at(-1)?.depth === lists.length) finishItem(); };
+  const closeBlockquote = () => {
+    const start = blockquotes.pop();
+    if (start === undefined) return;
+    const content = trimAscii(markdown.slice(start)).replace(/\n{3,}/g, "\n\n");
+    const quoted = content
+      ? content.split("\n").map((line) => line ? "> " + line : ">").join("\n")
+      : ">";
+    markdown = markdown.slice(0, start) + quoted + "\n\n";
+  };
   // Each open anchor's destination, or null for one with no href, which the page shows as text.
   const links: (string | null)[] = [];
   const blockquotes: number[] = [];
@@ -221,7 +230,17 @@ export function htmlToMarkdown(html: string): string {
       } else { frames.push(emphasis); frameTags.push(tag); }
       continue;
     }
-    if (BLOCK_TAGS[tag]) endBlock();
+    if (BLOCK_TAGS[tag]) {
+      const wrapped = !closing && links.length > 0 ? links.at(-1) : undefined;
+      if (wrapped !== undefined) closeLink();
+      endBlock();
+      if (wrapped !== undefined) {
+        links.push(wrapped);
+        frames.push({});
+        frameTags.push("a");
+        inline += "[";
+      }
+    }
     if (PARAGRAPH_LIKE.includes(tag)) {
       markdown += "\n\n";
       continue;
@@ -244,16 +263,7 @@ export function htmlToMarkdown(html: string): string {
         case "p": case "div":
           markdown += "\n\n";
           break;
-        case "blockquote": {
-          const start = blockquotes.pop();
-          if (start === undefined) break;
-          const content = trimAscii(markdown.slice(start)).replace(/\n{3,}/g, "\n\n");
-          const quoted = content
-            ? content.split("\n").map((line) => line ? "> " + line : ">").join("\n")
-            : ">";
-          markdown = markdown.slice(0, start) + quoted + "\n\n";
-          break;
-        }
+        case "blockquote": closeBlockquote(); break;
         case "code": if (!inPre) flushCode(); break;
         case "pre": {
           const fence = "`".repeat(Math.max(3, longestRun(preText, "`") + 1));
@@ -319,6 +329,8 @@ export function htmlToMarkdown(html: string): string {
         const step = reversed ? -1 : 1;
         // A reversed list counts down from its item count unless it says where to start.
         const next = integer(readHtmlAttribute(attributes, "start")) ?? (reversed ? values.length : 1);
+        // Only a list starting at 1 may interrupt a paragraph in CommonMark.
+        if (inline.trim() && next !== 1) endBlock();
         let number = next - step;
         const numbers = values.map(value => number = integer(value) ?? number + step);
         if (numbers.every(n => listNumber(String(n)) !== undefined)) {
@@ -394,6 +406,7 @@ export function htmlToMarkdown(html: string): string {
   closeLink();
   endBlock();
   while (items.length > 0) finishItem();
+  while (blockquotes.length > 0) closeBlockquote();
 
   const clean = trimAscii(markdown
     .replace(/[ \t]+\n/g, "\n")

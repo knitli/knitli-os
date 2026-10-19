@@ -96,14 +96,24 @@ export function htmlToMarkdown(html: string): string {
   // Each open anchor's destination, or null for one with no href, which the page shows as text.
   const links: (string | null)[] = [];
   const blockquotes: number[] = [];
-  // Each open disclosure: a collapsed one shows only its summary, so the rest is suppressed.
-  const details: { collapsed: boolean; inSummary: boolean }[] = [];
+  // Each open disclosure: a collapsed one shows only its first summary, so the rest is suppressed.
+  const details: { collapsed: boolean; inSummary: boolean; summarySeen: boolean }[] = [];
   const detailsSuppressed = () => details.some((frame) => frame.collapsed && !frame.inSummary);
-  // An open select's options and the one being read: the page shows only the selected value.
-  let select: { options: { text: string; selected: boolean }[]; current?: { text: string; selected: boolean } } | undefined;
+  // An open select's options and the one being read: a single select shows only its selected
+  // value; a multiple select shows every option, so it is kept as HTML instead.
+  let select: { multiple: boolean; options: { text: string; selected: boolean }[]; current?: { text: string; selected: boolean } } | undefined;
   const flushSelect = () => {
-    const chosen = select?.options.find((option) => option.selected) ?? select?.options[0];
+    const current = select;
     select = undefined;
+    if (!current) return;
+    if (current.multiple) {
+      endBlock();
+      const options = current.options.map((option) =>
+        `<option${option.selected ? " selected" : ""}>${option.text.replace(/</g, "&lt;")}</option>`);
+      markdown += `\n\n<select multiple>\n${options.join("\n")}\n</select>\n\n`;
+      return;
+    }
+    const chosen = current.options.find((option) => option.selected) ?? current.options[0];
     if (chosen) emitText(withLegacySemicolons(chosen.text));
   };
   // Fenced code blocks, each held out of the Markdown as a placeholder line until the end, so no
@@ -276,10 +286,14 @@ export function htmlToMarkdown(html: string): string {
     if (tag === "details") {
       if (closing) details.pop();
       else details.push({
-        collapsed: readRawHtmlAttribute(attributes, "open") === undefined, inSummary: false,
+        collapsed: readRawHtmlAttribute(attributes, "open") === undefined,
+        inSummary: false, summarySeen: false,
       });
     } else if (tag === "summary" && details.at(-1)?.collapsed) {
-      details.at(-1)!.inSummary = !closing;
+      // Only the first summary is a collapsed disclosure's label; later ones are body content.
+      const top = details.at(-1)!;
+      if (closing) top.inSummary = false;
+      else if (!top.summarySeen) { top.inSummary = true; top.summarySeen = true; }
     }
     if (detailsSuppressed()) continue;
     // A `hidden` attribute suppresses any element's subtree, as the tag-name set above does.
@@ -398,7 +412,17 @@ export function htmlToMarkdown(html: string): string {
       // Textarea content is raw text until its end tag; it is collected at the top of the loop.
       case "textarea": rawTextarea = ""; break;
       // A select shows only its selected option, which the top of the loop collects.
-      case "select": select = { options: [] }; break;
+      case "select":
+        select = { multiple: readRawHtmlAttribute(attributes, "multiple") !== undefined, options: [] };
+        break;
+      // An input's value and state are its visible content: keep the control as raw HTML,
+      // except a hidden one, which the page does not show at all.
+      case "input": {
+        if ((readHtmlAttribute(attributes, "type") ?? "").toLowerCase() === "hidden") break;
+        beginInline();
+        inline += token;
+        break;
+      }
       case "blockquote": markdown += "\n\n"; blockquotes.push(markdown.length); break;
       case "hr": markdown += "\n\n---\n\n"; break;
       // HTML lets `</td>` go unwritten before the next cell, which closes it then.

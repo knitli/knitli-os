@@ -297,6 +297,14 @@ describe("htmlToMarkdown", () => {
       .toBe("two\n");
     expect(htmlToMarkdown("<select><option>one</option><option>two</option></select>"))
       .toBe("one\n");
+    expect(htmlToMarkdown(
+      "<details><summary>shown</summary><summary>hidden</summary>body</details>"))
+      .toBe("shown\n");
+    expect(htmlToMarkdown(
+      "<select multiple><option selected>one</option><option selected>two</option></select>"))
+      .toBe("<select multiple>\n<option selected>one</option>\n<option selected>two</option>\n</select>\n");
+    expect(htmlToMarkdown('<p>Name: <input value="Ada"></p>')).toBe('Name: <input value="Ada">\n');
+    expect(htmlToMarkdown('<p>a<input type="hidden" value="x">b</p>')).toBe("ab\n");
   });
 
   it("delimits code by runs longer than the backticks inside it", () => {

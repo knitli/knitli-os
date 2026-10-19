@@ -375,6 +375,8 @@ describe("htmlToMarkdown", () => {
       '<p><span style="visibility:hidden">a<span style="visibility:visible">shown</span>b</span></p>'))
       .toBe("shown\n");
     expect(htmlToMarkdown("<p>a</q>b</p>")).toBe("ab\n");
+    expect(htmlToMarkdown('<p style="visibility:hidden">private<div>shown</div>'))
+      .toBe("shown\n");
     expect(htmlToMarkdown('<?xml version="1.0"?><p>shown</p>')).toBe("shown\n");
   });
 

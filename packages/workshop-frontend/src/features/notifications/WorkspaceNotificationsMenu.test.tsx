@@ -34,8 +34,8 @@ const NOW = new Date(2026, 9, 15, 21, 30)
 const ENDED: NotificationMute = { until: new Date(2026, 9, 15, 21, 0) }
 
 // Owns the workspace's mute as the sidebar and workspace list do.
-const WorkspaceMenu = () => {
-  const [mute, setMute] = useState<NotificationMute | undefined>(ENDED)
+const WorkspaceMenu = ({ initial = ENDED }: { initial?: NotificationMute }) => {
+  const [mute, setMute] = useState<NotificationMute | undefined>(initial)
   return (
     <Kumo.DropdownMenu>
       <Kumo.DropdownMenu.Trigger render={<button type="button">Workspace actions</button>} />
@@ -82,6 +82,19 @@ it('mutes until local midnight, and unmutes once muted', async () => {
   expect(await openMenu()).toBe('Unmute notifications')
   await act(async () => byText('[role="menuitem"]', 'Unmute notifications')!.click())
   expect(api.setWorkspaceNotificationMute).toHaveBeenLastCalledWith('workspace-1', null)
+  expect(await openMenu()).toBe('Mute notifications')
+})
+
+it('offers the mute choices again once a timed mute ends, with no parent re-render', async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(NOW)
+  act(() => root?.unmount())
+  root = createRoot(document.body.appendChild(document.createElement('div')))
+  await act(async () => root!.render(
+    <WorkspaceMenu initial={{ until: new Date(NOW.getTime() + 30 * 60_000) }} />))
+  expect(await openMenu()).toBe('Unmute notifications')
+  await act(async () => byText('button', 'Workspace actions')!.click())
+  await act(async () => { vi.advanceTimersByTime(31 * 60_000) })
   expect(await openMenu()).toBe('Mute notifications')
 })
 

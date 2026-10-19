@@ -342,6 +342,9 @@ export function htmlToMarkdown(html: string): string {
           if (!VOID_TAGS.has(name)) visStack.push({ tag: name, hidden: true });
           continue;
         }
+        // A start tag that implicitly closes an open frame ends it (a <div> ends a hidden
+        // paragraph), as for hidden-attribute subtrees above.
+        while (visStack.length && implicitlyCloses(visStack.at(-1)!.tag, name)) visStack.pop();
         if (invisible()) {
           if (declared === "visible" && !VOID_TAGS.has(name)) {
             visStack.push({ tag: name, hidden: false });

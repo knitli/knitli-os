@@ -658,6 +658,23 @@ async function profileInfo(ctx: SessionContext, user: WireUser, relationship: bo
   return overlayUser(info, ctx.host.pending());
 }
 
+/**
+ * Whether a profile's posts are private to the account, judged by the profile as X described it
+ * within `PRIVACY_TTL_MS`, as `pageRestricted` judges a List: the profile as resolved can be an
+ * hour old. One already known to be protected needs no second look, and one X can't vouch for
+ * counts as protected. Without this, an empty page of a protected profile discloses as public.
+ */
+async function profileRestricted(ctx: SessionContext, user: WireUser): Promise<boolean> {
+  try {
+    if (user.protected) return true;
+    const envelope = await ctx.host.cached(`user:${user.id}`, PRIVACY_TTL_MS,
+      resourceLoad(ctx.host, "user", api => api.get<WireUser>(`/2/users/${user.id}`, USER_FIELDS)));
+    return requireData(envelope, "user").protected === true;
+  } catch {
+    return true;
+  }
+}
+
 async function profilePosts(ctx: SessionContext, user: WireUser, options: XTimelineOptions | undefined):
     Promise<Cursor<XPostInfo>> {
   const size = pageSize(options, 5);
@@ -673,6 +690,8 @@ async function profilePosts(ctx: SessionContext, user: WireUser, options: XTimel
     overlay: mine
       ? { kind: "mine", excludeReplies: options?.excludeReplies, excludeReposts: options?.excludeReposts }
       : { kind: "others" },
+    // For each page: a protected profile's posts are the owner's, even a page with none.
+    privateSource: () => profileRestricted(ctx, user),
     newestFirst: true,
     bounds,
     title: `Read ${name}'s X posts`,

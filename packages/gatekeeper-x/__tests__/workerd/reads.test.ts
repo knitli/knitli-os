@@ -278,6 +278,16 @@ describe("what a read discloses", () => {
     expect(await exclusions(name)).toEqual([["observer"]]);
   });
 
+  it("withholds even an empty page of a protected profile's posts", async () => {
+    const { x, props, name } = await observed();
+    // Carol is protected and has posted nothing: the page is empty, but still hers alone.
+    const page = unwrap(await hooks().run(name, props, [["getUser", "carol"], ["listPosts"]],
+      { pages: 1 })) as XPostInfo[][];
+    expect(page).toEqual([[]]);
+    expect(await exclusions(name)).toEqual([["observer"]]);
+    expect(x.requests.length).toBeGreaterThan(0);
+  });
+
   it("withholds a protected account's relationships, as it does its follow lists", async () => {
     const x = new FakeX().install();
     const props: GatekeeperProps = {

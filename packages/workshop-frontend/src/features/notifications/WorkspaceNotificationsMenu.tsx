@@ -4,7 +4,7 @@ import type { NotificationMute } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { MENU_CONTENT, MENU_ITEM, MENU_POSITIONER_STYLE } from '../../components/menuStyles'
 import { logRpcFailure } from '../../rpcErrors'
-import { describeMute } from './notificationMute'
+import { useMuteDescription } from './notificationMute'
 
 const hoursFromNow = (hours: number): NotificationMute =>
   ({ until: new Date(Date.now() + hours * 60 * 60_000) })
@@ -35,6 +35,9 @@ export const WorkspaceNotificationsMenu = ({ workspaceId, mute, onMuteChange }: 
 }) => {
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
+  // Rendered again when a timed mute ends, so the menu stops offering to unmute on its own
+  // even with no parent re-rendering at the deadline.
+  const muteDescription = useMuteDescription(mute)
 
   const setMute = async (next: NotificationMute | undefined) => {
     try {
@@ -46,7 +49,7 @@ export const WorkspaceNotificationsMenu = ({ workspaceId, mute, onMuteChange }: 
     }
   }
 
-  if (describeMute(mute)) {
+  if (muteDescription) {
     return (
       <DropdownMenu.Item onClick={() => setMute(undefined)} className={MENU_ITEM}>
         <Bell size={13} className="mr-2" /> Unmute notifications

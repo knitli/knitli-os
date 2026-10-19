@@ -72,6 +72,7 @@ export function htmlToMarkdown(html: string): string {
     if (links.length === 0) return;
     const destination = links.pop();
     frames.pop();
+    frameTags.pop();
     if (destination === null) return;
     closeTo(0);
     inline += "](" + (destination ?? "") + ")";
@@ -90,6 +91,7 @@ export function htmlToMarkdown(html: string): string {
   // space between, the only placement Markdown reads (`**Hello **world` keeps its asterisks; an
   // empty `****` is a horizontal rule).
   const frames: Emphasis[] = [];
+  const frameTags: string[] = [];
   const written: Marker[] = [];
   let markdown = "";
   // The current block's inline content and where its emphasis changes, spelled when it ends.
@@ -204,8 +206,11 @@ export function htmlToMarkdown(html: string): string {
     const attributes = match[3];
     const emphasis = emphasisOf(tag, attributes);
     if (emphasis) {
-      if (closing) frames.pop();
-      else frames.push(emphasis);
+      if (closing) {
+        // An unmatched end tag is ignored; a misnested one closes through its opener.
+        const at = frameTags.lastIndexOf(tag);
+        if (at >= 0) { frames.splice(at); frameTags.splice(at); }
+      } else { frames.push(emphasis); frameTags.push(tag); }
       continue;
     }
     if (BLOCK_TAGS[tag]) endBlock();
@@ -340,6 +345,7 @@ export function htmlToMarkdown(html: string): string {
         // Anchors cannot nest: a browser closes an open one before the next begins.
         closeLink();
         frames.push(styleEmphasis(attributes));
+        frameTags.push("a");
         const href = readRawHtmlAttribute(attributes, "href", true);
         links.push(href === undefined ? null : linkDestination(href));
         if (href === undefined) break;
@@ -368,7 +374,9 @@ export function htmlToMarkdown(html: string): string {
     preHtml = "";
     inPre = false;
   }
+  closeLink();
   endBlock();
+  while (items.length > 0) finishItem();
 
   const clean = trimAscii(markdown
     .replace(/[ \t]+\n/g, "\n")

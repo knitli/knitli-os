@@ -3836,7 +3836,11 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     } finally {
       gitCache.dispose();
     }
-    await callback.receiveEvent(event);
+    try {
+      await callback.receiveEvent(event);
+    } finally {
+      for (const capability of capabilities) capability[Symbol.dispose]();
+    }
   }
 
   /**

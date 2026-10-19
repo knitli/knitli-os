@@ -10,7 +10,7 @@
 
 type Marker = "**" | "*" | "~~";
 /** What one element says about each emphasis: on, off, or (absent) nothing. */
-type Emphasis = Partial<Record<Marker, boolean>>;
+type Emphasis = Partial<Record<Marker, boolean>> & { weight?: number | "bolder" | "lighter" };
 /** Emphasis turning on or off at an offset into a block's inline Markdown. */
 type EmphasisChange = { at: number; marker: Marker; open: boolean };
 
@@ -197,7 +197,7 @@ export function htmlToMarkdown(html: string): string {
     if (!match) continue;
     const closing = match[1] === "/";
     const tag = match[2].toLowerCase();
-    if (!closing && HIDDEN_TAGS.has(tag) && !/\/\s*$/.test(match[3])) {
+    if (!closing && HIDDEN_TAGS.has(tag)) {
       hidden = { tag, depth: 1 };
       continue;
     }
@@ -280,9 +280,18 @@ export function htmlToMarkdown(html: string): string {
       case "hr": markdown += "\n\n---\n\n"; break;
       // HTML lets `</td>` go unwritten before the next cell, which closes it then.
       case "td": case "th": if (cellOpen) markdown += "\t"; cellOpen = true; break;
-      case "tr": cellOpen = false; break;
+      case "tr": if (cellOpen) { markdown += "\n"; cellOpen = false; } break;
       case "ul": openList({ type: "ul", next: 1, step: 1 }); break;
       case "ol": {
+        const markerType = readHtmlAttribute(attributes, "type");
+        if (markerType !== undefined && markerType !== "1") {
+          // CommonMark has no lettered or roman markers; keep the list as HTML.
+          const reversedAttr = readHtmlAttribute(attributes, "reversed") !== undefined;
+          const startAttr = integer(readHtmlAttribute(attributes, "start"));
+          openList({ type: "ol", step: reversedAttr ? -1 : 1, next: startAttr ?? 1, html: true });
+          markdown += `\n\n<ol type="${markerType}"${startAttr !== undefined ? ` start="${startAttr}"` : ""}${reversedAttr ? " reversed" : ""}>\n\n`;
+          break;
+        }
         const reversed = readHtmlAttribute(attributes, "reversed") !== undefined;
         const values = itemValues(tokens, index);
         const step = reversed ? -1 : 1;
@@ -349,6 +358,16 @@ export function htmlToMarkdown(html: string): string {
       }
     }
   }
+  if (inPre) {
+    const fence = "`".repeat(Math.max(3, longestRun(preText, "`") + 1));
+    fences.push(hasForeignReference(preHtml)
+      ? "<pre><code>" + preHtml.replace(/\n$/, "") + "</code></pre>"
+      : fence + "\n" + preText.replace(/\n$/, "") + "\n" + fence);
+    markdown += "\n\n" + fencePlaceholder(fences.length - 1) + "\n\n";
+    preText = "";
+    preHtml = "";
+    inPre = false;
+  }
   endBlock();
 
   const clean = trimAscii(markdown
@@ -387,9 +406,13 @@ function styleEmphasis(attributes: string): Emphasis {
   }
   const value = (property: string) => declared.get(property)?.value;
   const emphasis: Emphasis = {};
-  // `lighter` is relative (900 becomes a still-bold 700), so it says nothing.
-  const weight = /^(?:(bold|bolder|[6-9]00)|normal|[1-5]00)$/.exec(value("font-weight") ?? "");
-  if (weight) emphasis["**"] = weight[1] !== undefined;
+  // Relative weights resolve against the inherited weight in emphasisIn.
+  const weightValue = value("font-weight") ?? "";
+  if (weightValue === "bolder" || weightValue === "lighter") emphasis.weight = weightValue;
+  else {
+    const weight = /^(?:(bold|[6-9]00)|normal|[1-5]00)$/.exec(weightValue);
+    if (weight) emphasis.weight = weight[1] === "bold" ? 700 : weight[1] ? Number(weight[1]) : 400;
+  }
   const slant = /^(?:(italic|oblique)\b.*|normal)$/.exec(value("font-style") ?? "");
   if (slant) emphasis["*"] = slant[1] !== undefined;
   // A descendant cannot lift its ancestor's line-through, so strikethrough only turns on.
@@ -400,11 +423,20 @@ function styleEmphasis(attributes: string): Emphasis {
 /** The emphasis in force inside `frames`, in the order it was turned on. */
 function emphasisIn(frames: Emphasis[]): Marker[] {
   const on = new Set<Marker>();
+  let weight: number | undefined;
   for (const frame of frames) {
     for (const marker of MARKERS) {
       if (frame[marker]) on.add(marker);
       else if (frame[marker] === false) on.delete(marker);
     }
+    if (frame.weight === "bolder") weight = (weight ?? 400) < 600 ? 700 : 900;
+    else if (frame.weight === "lighter") weight = (weight ?? 400) > 500 ? 400 : 100;
+    else if (frame.weight !== undefined) weight = frame.weight;
+    else if (frame["**"] !== undefined) weight = frame["**"] ? 700 : 400;
+  }
+  if (weight !== undefined) {
+    if (weight >= 600) on.add("**");
+    else on.delete("**");
   }
   return [...on];
 }

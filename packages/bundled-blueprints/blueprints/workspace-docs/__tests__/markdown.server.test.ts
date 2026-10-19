@@ -246,6 +246,24 @@ describe("htmlToMarkdown", () => {
       .toBe("<ul>\n<li>one\n<ol>\n<li>two</li>\n</ol>\n</li>\n<li>three</li>\n</ul>\n");
   });
 
+  it("lets an element's own style cancel its strike, and keeps code inside link labels", () => {
+    expect(htmlToMarkdown(
+      '<p><s style="text-decoration:none">plain</s> <s>struck</s> ' +
+      '<s><span style="text-decoration:none">still</span></s></p>'))
+      .toBe("plain ~~struck still~~\n");
+    expect(render(htmlToMarkdown('<p><code><a href="x">foo</a></code></p>')))
+      .toBe('<p><a href="x"><code>foo</code></a></p>\n');
+    expect(render(htmlToMarkdown('<p><code>pre <a href="x">foo</a> post</code></p>')))
+      .toBe('<p><code>pre </code><a href="x"><code>foo</code></a><code> post</code></p>\n');
+  });
+
+  it("shows a textarea's contents as the literal text the page shows", () => {
+    expect(render(htmlToMarkdown("<textarea><b>literal</b> &copy;</textarea>")))
+      .toBe("<p>&lt;b&gt;literal&lt;/b&gt; \u00a9</p>\n");
+    expect(htmlToMarkdown("<p>a</p><textarea>left open"))
+      .toBe("a\n\nleft open\n");
+  });
+
   it("delimits code by runs longer than the backticks inside it", () => {
     const markdown = htmlToMarkdown("<p><code>a`b</code> <code>`x</code> <code> a </code></p><pre>one\n```\ntwo</pre>");
     expect(render(markdown)).toBe(

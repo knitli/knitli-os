@@ -140,9 +140,9 @@ export function htmlToMarkdown(html: string): string {
       changes.push({ at: inline.length, marker, open: true });
     }
   };
-  // Writes the open code element, at its `</code>` or, when that was left out, at the block's end.
-  const flushCode = () => {
-    if (!inCode) return;
+  // Writes the code accumulated so far as one span, without ending the code element: an anchor
+  // inside code wraps the segment written before it, so the link's label holds that segment.
+  const writeCode = () => {
     // An empty element shows nothing, and an empty span would show its backticks.
     if (codeText) {
       inline += hasForeignReference(codeHtml)
@@ -150,6 +150,11 @@ export function htmlToMarkdown(html: string): string {
     }
     codeText = "";
     codeHtml = "";
+  };
+  // Writes the open code element, at its `</code>` or, when that was left out, at the block's end.
+  const flushCode = () => {
+    if (!inCode) return;
+    writeCode();
     inCode = false;
   };
   const endBlock = () => {
@@ -168,6 +173,21 @@ export function htmlToMarkdown(html: string): string {
   let cellOpen = false;
   // The open element whose content the page never shows (script, style, template), and how deep.
   let hidden: { tag: string; depth: number } | undefined;
+  // A textarea's raw content while it is open: its tags are literal text, not markup.
+  let rawTextarea: string | undefined;
+  const flushTextarea = () => {
+    // Textarea content is RCDATA: references decode but tags stay literal, and the parser drops
+    // a newline right after the start tag.
+    const html = withLegacySemicolons((rawTextarea ?? "").replace(/^\r?\n/, ""));
+    rawTextarea = undefined;
+    const words = textMarkdown(html);
+    space ||= words.startsWith(" ");
+    if (trimAscii(words)) {
+      beginInline();
+      inline += trimAscii(words);
+      space = words.endsWith(" ");
+    }
+  };
 
   for (const [index, token] of tokens.entries()) {
     if (hidden) {
@@ -177,6 +197,11 @@ export function htmlToMarkdown(html: string): string {
         hidden.depth += tag[1] ? -1 : hidden.tag === "template" ? 1 : 0;
         if (hidden.depth === 0) hidden = undefined;
       }
+      continue;
+    }
+    if (rawTextarea !== undefined) {
+      if (/^<\s*\/\s*textarea\b/i.test(token)) flushTextarea();
+      else rawTextarea += token;
       continue;
     }
     if (!token.startsWith("<") || token === "<") {
@@ -278,7 +303,8 @@ export function htmlToMarkdown(html: string): string {
           break;
         }
         // An `</a>` with no anchor open (one a later `<a>` already closed) is ignored, as in HTML.
-        case "a": closeLink(); break;
+        // Code before it inside a code element is written first, as the link's label segment.
+        case "a": if (inCode) writeCode(); closeLink(); break;
         case "li": if (lists.at(-1)?.html) markdown += "\n\n</li>\n\n"; else finishOpenItem(); break;
         case "ul": case "ol": {
           // A list end tag with no open list of its type is ignored, as in a browser; one that
@@ -315,6 +341,8 @@ export function htmlToMarkdown(html: string): string {
         break;
       case "code": if (!inPre) { beginInline(); codeText = ""; codeHtml = ""; inCode = true; } break;
       case "pre": preText = ""; preHtml = ""; inPre = true; break;
+      // Textarea content is raw text until its end tag; it is collected at the top of the loop.
+      case "textarea": rawTextarea = ""; break;
       case "blockquote": markdown += "\n\n"; blockquotes.push(markdown.length); break;
       case "hr": markdown += "\n\n---\n\n"; break;
       // HTML lets `</td>` go unwritten before the next cell, which closes it then.
@@ -379,6 +407,9 @@ export function htmlToMarkdown(html: string): string {
       // Emphasis cannot pair across a link label's brackets, so the label opens and closes its
       // own; the toolbar's Bold or Italic on a whole link styles the link itself.
       case "a": {
+        // Code written before an anchor inside a code element stands outside the link, so its
+        // segment is written first; the anchor's own segment becomes the label at its `</a>`.
+        if (inCode) writeCode();
         // Anchors cannot nest: a browser closes an open one before the next begins.
         closeLink();
         frames.push(styleEmphasis(attributes));
@@ -401,6 +432,7 @@ export function htmlToMarkdown(html: string): string {
       }
     }
   }
+  if (rawTextarea !== undefined) flushTextarea();
   if (inPre) {
     const fence = "`".repeat(Math.max(3, longestRun(preText, "`") + 1));
     fences.push(hasForeignReference(preHtml)
@@ -432,11 +464,16 @@ export function htmlToMarkdown(html: string): string {
 /** What a formatting element says about emphasis, or undefined for any other element. */
 function emphasisOf(tag: string, attributes: string): Emphasis | undefined {
   const implied = ELEMENT_EMPHASIS.get(tag);
-  return implied && { ...implied, ...styleEmphasis(attributes) };
+  return implied && { ...implied, ...styleEmphasis(attributes, implied["~~"] === true) };
 }
 
-/** What an element's inline style says about emphasis, which overrides what its tag implies. */
-function styleEmphasis(attributes: string): Emphasis {
+/**
+ * What an element's inline style says about emphasis, which overrides what its tag implies.
+ * `ownStrike` is set when the element's own tag implies a line-through: its style then replaces
+ * that default, so a decoration without one cancels it. On any other element a descendant's
+ * style cannot lift an ancestor's line-through, so strikethrough only turns on there.
+ */
+function styleEmphasis(attributes: string, ownStrike = false): Emphasis {
   const style = (readHtmlAttribute(attributes, "style") ?? "").toLowerCase();
   // Each property's value as the cascade picks it: the last `!important` declaration, else the last.
   const declared = new Map<string, { value: string; important: boolean }>();
@@ -461,8 +498,9 @@ function styleEmphasis(attributes: string): Emphasis {
   }
   const slant = /^(?:(italic|oblique)\b.*|normal)$/.exec(value("font-style") ?? "");
   if (slant) emphasis["*"] = slant[1] !== undefined;
-  // A descendant cannot lift its ancestor's line-through, so strikethrough only turns on.
-  if (value("text-decoration-line")?.includes("line-through")) emphasis["~~"] = true;
+  const decoration = value("text-decoration-line");
+  if (decoration?.includes("line-through")) emphasis["~~"] = true;
+  else if (decoration !== undefined && ownStrike) emphasis["~~"] = false;
   return emphasis;
 }
 

@@ -101,7 +101,7 @@ export function htmlToMarkdown(html: string): string {
   const detailsSuppressed = () => details.some((frame) => frame.collapsed && !frame.inSummary);
   // An open select's options and the one being read: a single select shows only its selected
   // value; a multiple select shows every option, so it is kept as HTML instead.
-  let select: { multiple: boolean; options: { text: string; selected: boolean }[]; current?: { text: string; selected: boolean } } | undefined;
+  let select: { multiple: boolean; options: { text: string; selected: boolean; labeled: boolean }[]; current?: { text: string; selected: boolean; labeled: boolean } } | undefined;
   const flushSelect = () => {
     const current = select;
     select = undefined;
@@ -113,7 +113,8 @@ export function htmlToMarkdown(html: string): string {
       markdown += `\n\n<select multiple>\n${options.join("\n")}\n</select>\n\n`;
       return;
     }
-    const chosen = current.options.find((option) => option.selected) ?? current.options[0];
+    // A single select keeps the last option marked selected, as the browser's reset does.
+    const chosen = current.options.findLast((option) => option.selected) ?? current.options[0];
     if (chosen) emitText(withLegacySemicolons(chosen.text));
   };
   // Fenced code blocks, each held out of the Markdown as a placeholder line until the end, so no
@@ -245,12 +246,19 @@ export function htmlToMarkdown(html: string): string {
       const tag = /^<\s*(\/?)\s*([a-z0-9]+)(?=[\s/>])([\s\S]*)>$/i.exec(token);
       const name = tag?.[2].toLowerCase();
       if (tag && !tag[1] && name === "option") {
-        const option = { text: "", selected: readRawHtmlAttribute(tag[3], "selected") !== undefined };
+        // An option's `label` is what the page shows; its text is only the fallback.
+        const label = readHtmlAttribute(tag[3], "label");
+        const option = {
+          text: label ?? "", labeled: label !== undefined,
+          selected: readRawHtmlAttribute(tag[3], "selected") !== undefined,
+        };
         select.options.push(option);
         select.current = option;
       } else if (tag && tag[1] && name === "select") flushSelect();
       else if (tag && tag[1] && name === "option") select.current = undefined;
-      else if ((!token.startsWith("<") || token === "<") && select.current) select.current.text += token;
+      else if ((!token.startsWith("<") || token === "<") && select.current && !select.current.labeled) {
+        select.current.text += token;
+      }
       continue;
     }
     if (!token.startsWith("<") || token === "<") {
@@ -509,6 +517,8 @@ export function htmlToMarkdown(html: string): string {
         break;
       }
       case "img": {
+        // Code before an image inside a code element is its own segment, written first.
+        if (inCode) writeCode();
         beginInline();
         if (inline.endsWith("!")) inline = inline.slice(0, -1) + "\\!";
         const alt = textMarkdown(readRawHtmlAttribute(attributes, "alt", true) ?? "");
@@ -602,8 +612,10 @@ function emphasisIn(frames: Emphasis[]): Marker[] {
       if (frame[marker]) on.add(marker);
       else if (frame[marker] === false) on.delete(marker);
     }
-    if (frame.weight === "bolder") weight = (weight ?? 400) < 600 ? 700 : 900;
-    else if (frame.weight === "lighter") weight = (weight ?? 400) > 500 ? 400 : 100;
+    // The CSS relative-weight table, bucketed: bolder steps 100-300 to 400, 400-500 to 700,
+    // the rest to 900; lighter steps under 600 to 100, 600-700 to 400, the rest to 700.
+    if (frame.weight === "bolder") weight = (weight ?? 400) < 400 ? 400 : (weight ?? 400) < 600 ? 700 : 900;
+    else if (frame.weight === "lighter") weight = (weight ?? 400) < 600 ? 100 : (weight ?? 400) < 800 ? 400 : 700;
     else if (frame.weight !== undefined) weight = frame.weight;
     else if (frame["**"] !== undefined) weight = frame["**"] ? 700 : 400;
   }

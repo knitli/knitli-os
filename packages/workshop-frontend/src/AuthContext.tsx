@@ -7,8 +7,10 @@ import { hasSignOutWorkerHandoff, releaseOnSignOut } from './features/notificati
 interface AuthContextType {
   authenticatedApi: RpcStub<AuthenticatedApi>
   logout: () => void
-  /** Current user info, fetched once on mount. Null while loading. */
+  /** Last confirmed user; retained while an API reconnect is being authenticated. */
   currentUser: AiChatAuthorInfo | null
+  /** True only when the current API, not a previous connection, confirmed the user. */
+  isCurrentUserConfirmed: boolean
   /** Whether the current user is a deployment admin. False while loading / for non-admins. */
   isAdmin: boolean
 }
@@ -21,43 +23,54 @@ interface AuthProviderProps {
   onLogout: () => void
 }
 
-type ApiScoped<T> = {
-  authenticatedApi: RpcStub<AuthenticatedApi>
-  value: T
-}
-
 export function AuthProvider({ children, authenticatedApi, onLogout }: AuthProviderProps) {
-  const [currentUserResult, setCurrentUserResult] = useState<ApiScoped<AiChatAuthorInfo> | null>(null)
-  const [isAdminResult, setIsAdminResult] = useState<ApiScoped<boolean> | null>(null)
+  const [identity, setIdentity] = useState<{
+    api: RpcStub<AuthenticatedApi>
+    user: AiChatAuthorInfo
+  } | null>(null)
+  const [isAdmin, setIsAdmin] = useState(false)
 
   useEffect(() => {
     let cancelled = false
-    authenticatedApi.whoami().then((info) => {
-      if (!cancelled) setCurrentUserResult({ authenticatedApi, value: info })
-    }).catch(() => {})
-    return () => { cancelled = true }
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    let retryCount = 0
+    const retryDelays = [250, 1000, 2000]
+    const confirmUser = () => {
+      authenticatedApi.whoami().then((info) => {
+        if (!cancelled) setIdentity({ api: authenticatedApi, user: info })
+      }).catch(() => {
+        if (cancelled || retryCount >= retryDelays.length) return
+        retryTimer = setTimeout(confirmUser, retryDelays[retryCount++])
+      })
+    }
+    confirmUser()
+    return () => {
+      cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
+    }
   }, [authenticatedApi])
 
   useEffect(() => {
+    setIsAdmin(false)
     let cancelled = false
     authenticatedApi.amIAdmin().then((admin) => {
-      if (!cancelled) setIsAdminResult({ authenticatedApi, value: admin })
+      if (!cancelled) setIsAdmin(admin)
     }).catch(() => {})
     return () => { cancelled = true }
   }, [authenticatedApi])
 
-  const currentUser = currentUserResult?.authenticatedApi === authenticatedApi ? currentUserResult.value : null
-  const isAdmin = isAdminResult?.authenticatedApi === authenticatedApi ? isAdminResult.value : false
-
   return (
-    <AuthContext.Provider value={{ authenticatedApi, logout: () => {
-      // Sign out first, as push cleanup is best effort and must not hold the session open if the page
-      // goes: a service worker finishes it. Without one the page has to (bounded), or the redirect
-      // could cut it off.
-      const cleanup = releaseOnSignOut(authenticatedApi)
-      if (hasSignOutWorkerHandoff()) onLogout()
-      else void cleanup.finally(onLogout)
-    }, currentUser, isAdmin }}>
+    <AuthContext.Provider value={{
+      authenticatedApi, logout: () => {
+        // Sign out first, as push cleanup is best effort and must not hold the session open if the page
+        // goes: a service worker finishes it. Without one the page has to (bounded), or the redirect
+        // could cut it off.
+        const cleanup = releaseOnSignOut(authenticatedApi)
+        if (hasSignOutWorkerHandoff()) onLogout()
+        else void cleanup.finally(onLogout)
+      }, currentUser: identity?.user ?? null,
+      isCurrentUserConfirmed: identity?.api === authenticatedApi, isAdmin,
+    }}>
       <WebPushSync />
       {children}
     </AuthContext.Provider>

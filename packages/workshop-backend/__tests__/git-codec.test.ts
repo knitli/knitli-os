@@ -532,6 +532,24 @@ describe("pack decoding", () => {
     expect(cancelled).toBe(true);
   });
 
+  it("cancels the source when its consumer stops partway", async () => {
+    // A consumer whose storage write throws leaves its for-await early; the pull must not stall.
+    let cancelled = false;
+    let bytes = concatBytes(await buildPackBytes([
+      { type: "blob", payload: new Uint8Array(3) }, { type: "blob", payload: new Uint8Array(4) },
+    ]));
+    let pack = new ReadableStream({
+      type: "bytes",
+      start: controller => controller.enqueue(bytes.slice(0, -10)),
+      cancel: () => { cancelled = true; },
+    });
+    let options = { maxPackSize: Infinity, maxObjectSize: 64, resolveBase: () => undefined };
+    await expect((async () => {
+      for await (let _ of decodePackStream(pack, options)) throw new Error("storage write failed");
+    })()).rejects.toThrow("storage write failed");
+    expect(cancelled).toBe(true);
+  });
+
   it("fails a ref-delta whose base is nowhere, and resolves it via resolveBase", async () => {
     // Hand-build a one-entry thin pack: a ref-delta against an external base.
     let base = new TextEncoder().encode("hello base content");

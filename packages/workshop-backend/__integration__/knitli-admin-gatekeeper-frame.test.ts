@@ -171,7 +171,7 @@ describe('admin gatekeeper frames', () => {
     expect(frame).not.toBeNull();
     try {
       const calls = await control.getCalls();
-      expect(calls).toContainEqual({ vendorId: 'adminframe', method: 'startAdminUi', args: [{ isAdmin: true }] });
+      expect(calls).toContainEqual({ vendorId: 'adminframe', method: 'startAdminUi', args: [{ isAdmin: true, hasExchange: true }] });
       expect(calls.filter((call) => call.method === 'connectAccount' || call.method === 'createAccount')).toEqual([]);
     } finally {
       frame?.ui[Symbol.dispose]();

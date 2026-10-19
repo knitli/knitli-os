@@ -14,6 +14,7 @@
 // path segments are percent-encoded and every query parameter goes through `URLSearchParams`.
 // Interpolating either raw would let a crafted id escape into the path or into OData syntax.
 
+import { pathSegment } from "@gadgets/gatekeeper-kit/endpoint";
 import {
   ResponseTooLargeError, readBytesCapped, readTextCapped,
 } from "@gadgets/gatekeeper-kit/response-body";
@@ -227,16 +228,8 @@ export function truncate(value: string, max = MAX_GRAPH_ERROR_CHARS): string {
  * attached. Refusing them keeps "one segment stays one segment" literally true.
  */
 export function graphUrl(segments: string[], params?: Record<string, string>): string {
-  let path = segments.map(encodeSegment).join("/");
+  let path = segments.map(pathSegment).join("/");
   return `${GRAPH_BASE}/${path}${queryString(params)}`;
-}
-
-/** One path segment, percent-encoded, with the guard `graphUrl`'s doc comment describes. */
-function encodeSegment(segment: string): string {
-  if (segment === "" || segment === "." || segment === "..") {
-    throw new Error("Microsoft Graph path segments must not be empty or relative.");
-  }
-  return encodeURIComponent(segment);
 }
 
 function queryString(params?: Record<string, string>): string {
@@ -252,7 +245,7 @@ function queryString(params?: Record<string, string>): string {
  * Graph addresses a site as `/sites/{hostname}:/{site-path}`, which `graphUrl` cannot express: the
  * whole `contoso.sharepoint.com:/sites/HR` string is one addressable unit, but it contains the `/`
  * separators that `graphUrl` exists to encode away. So it is assembled here instead, under the same
- * guard — every component goes through `encodeSegment`, so a component of `..` is refused rather
+ * guard — every component goes through `pathSegment`, so a component of `..` is refused rather
  * than being allowed to collapse the path onto a different site (or off `/sites` entirely) with this
  * account's bearer token attached.
  *
@@ -262,10 +255,10 @@ function queryString(params?: Record<string, string>): string {
  */
 export function graphSiteByPathUrl(
     hostname: string, sitePath: string, params?: Record<string, string>): string {
-  let host = encodeSegment(hostname);
+  let host = pathSegment(hostname);
   let relative = sitePath.startsWith("/") ? sitePath.slice(1) : sitePath;
   if (!relative) return `${GRAPH_BASE}/sites/${host}${queryString(params)}`;
-  let path = relative.split("/").map(encodeSegment).join("/");
+  let path = relative.split("/").map(pathSegment).join("/");
   return `${GRAPH_BASE}/sites/${host}:/${path}${queryString(params)}`;
 }
 

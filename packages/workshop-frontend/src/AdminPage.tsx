@@ -61,7 +61,7 @@ const mergeBusyResourceVendors = (
 })
 
 export default function AdminPage() {
-  const { authenticatedApi, isAdmin } = useAuthenticatedApi()
+  const { authenticatedApi, isAdmin, isCurrentUserConfirmed } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
   const toastsRef = useRef(toasts)
   toastsRef.current = toasts
@@ -185,8 +185,8 @@ export default function AdminPage() {
   useEffect(() => {
     setAdmin(null)
     setLoadError(false)
-    setLoading(isAdmin)
-    if (!isAdmin) {
+    setLoading(isAdmin && isCurrentUserConfirmed !== false)
+    if (!isAdmin || isCurrentUserConfirmed === false) {
       return
     }
     let cancelled = false
@@ -222,7 +222,7 @@ export default function AdminPage() {
       if (currentAdminApi.current === stub) currentAdminApi.current = null
       stub?.[Symbol.dispose]?.()
     }
-  }, [isAdmin, authenticatedApi])
+  }, [isAdmin, isCurrentUserConfirmed, authenticatedApi])
 
   // Live-preview the draft accent color across the whole app while the admin page is open. On leave
   // (or before each change) revert to the last-saved value so an unsaved preview doesn't stick.

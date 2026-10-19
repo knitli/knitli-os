@@ -28,7 +28,6 @@ export type ComposerAttachment = {
 
 type ComposerAttachmentsOptions = {
   getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>;
-  modelId: string | null;
   onError: (message: string) => void;
 };
 
@@ -37,13 +36,13 @@ const errorMessage = (error: unknown, fallback: string) =>
 
 export const useComposerAttachments = ({
   getOverseer,
-  modelId,
   onError,
 }: ComposerAttachmentsOptions) => {
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const attachmentsRef = useRef<ComposerAttachment[]>([]);
-  const stagedCleanupRef = useRef(new Map<string, () => void>());
   const mountedRef = useRef(true);
+  // Attachments handed to a send in flight: that send commits or abandons them, not an unmount.
+  const sendingRef = useRef(new Set<string>());
   const getOverseerRef = useRef(getOverseer);
   const onErrorRef = useRef(onError);
   getOverseerRef.current = getOverseer;
@@ -65,35 +64,42 @@ export const useComposerAttachments = ({
       attachmentsRef.current = [];
       for (const attachment of abandoned) {
         if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-        stagedCleanupRef.current.get(attachment.id)?.();
+        if (!sendingRef.current.has(attachment.id)) deleteStaged(attachment);
       }
-      stagedCleanupRef.current.clear();
     };
   }, []);
+
+  // Staged uploads live server-side until a send commits them; drop them with the composer.
+  const deleteStaged = (attachment: ComposerAttachment | undefined) => {
+    const stagedId = attachment?.ref && "id" in attachment.ref ? attachment.ref.id : undefined;
+    if (stagedId === undefined) return;
+    void (async () => {
+      const overseer = await getOverseerRef.current();
+      await overseer.deleteChatAttachment(stagedId);
+    })().catch(() => {});
+  };
 
   const uploadAttachment = async (
     id: string,
     blob: Blob,
     mimeType: string,
     name: string | undefined,
-    uploadModelId: string | null,
   ) => {
     try {
       const content = new Uint8Array(await blob.arrayBuffer());
       if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) return;
       const overseer = await getOverseerRef.current();
       if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) return;
-      const ref = await overseer.uploadChatAttachment({ mimeType, content, name }, uploadModelId);
-      const deleteUpload = () => {
-        void overseer.deleteChatAttachment(ref.id).catch(() => {
-          // Cleanup is best-effort because the owner may already have disposed its Overseer.
-        });
-      };
+      // Every upload is staged under its own ID, so removing or abandoning it before a send
+      // reclaims the server copy; a send commits it (spreadsheets as a parsed workbook, other
+      // files as workspace files). An immutable blob could not be reclaimed this way: identical
+      // bytes share one OID, so deleting it could break another attachment holding the same OID.
+      const ref: ChatAttachmentHandle =
+        await overseer.uploadChatAttachment({ mimeType, content, name }, null);
       if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) {
-        deleteUpload();
+        if ("id" in ref) void overseer.deleteChatAttachment(ref.id).catch(() => {});
         return;
       }
-      stagedCleanupRef.current.set(id, deleteUpload);
       updateAttachments((current) => current.map((item) =>
         item.id === id ? { ...item, uploadState: "ready", ref } : item));
     } catch (error) {
@@ -161,23 +167,36 @@ export const useComposerAttachments = ({
         uploadState: "uploading",
       };
       updateAttachments((current) => [...current, attachment]);
-      void uploadAttachment(id, blob, mimeType, file.name || undefined, modelId);
+      void uploadAttachment(id, blob, mimeType, file.name || undefined);
     }
   };
 
   const removeAttachment = (id: string) => {
     const attachment = attachmentsRef.current.find((item) => item.id === id);
     if (attachment?.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-    stagedCleanupRef.current.get(id)?.();
-    stagedCleanupRef.current.delete(id);
     updateAttachments((current) => current.filter((item) => item.id !== id));
+    deleteStaged(attachment);
+  };
+
+  /**
+   * Hands `sent` to a send in flight, so an unmount before it settles leaves their staged uploads
+   * for the server to commit. Call the result once it settles: a send that failed after the
+   * composer unmounted drops them, since nothing is left to retry it.
+   */
+  const holdForSend = (sent: readonly ComposerAttachment[]) => {
+    for (const attachment of sent) sendingRef.current.add(attachment.id);
+    return (delivered: boolean) => {
+      for (const attachment of sent) {
+        sendingRef.current.delete(attachment.id);
+        if (!delivered && !mountedRef.current) deleteStaged(attachment);
+      }
+    };
   };
 
   const clearSentAttachments = (sent: readonly ComposerAttachment[]) => {
     const sentIds = new Set(sent.map((attachment) => attachment.id));
     for (const attachment of sent) {
       if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-      stagedCleanupRef.current.delete(attachment.id);
     }
     updateAttachments((current) => current.filter((attachment) => !sentIds.has(attachment.id)));
   };
@@ -187,6 +206,7 @@ export const useComposerAttachments = ({
     hasAttachments: () => attachmentsRef.current.length > 0,
     addFiles,
     clearSentAttachments,
+    holdForSend,
     removeAttachment,
   };
 };

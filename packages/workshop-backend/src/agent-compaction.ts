@@ -310,8 +310,9 @@ export function findCompactionBoundary(
 }
 
 /**
- * Fold state before `compactedTo` into a new checkpoint. `initialBindings` is the chat's frozen seed
- * layer, which `previous` already contains once a chat has compacted before.
+ * Fold state before `compactedTo` into a new checkpoint. `initialBindings` is the chat's seed
+ * layer. `previous` already contains it, apart from the always-available resources the chat gained
+ * since.
  */
 export function buildCompactionState(
     messages: AiChatMessage[], compactedTo: number,
@@ -319,7 +320,7 @@ export function buildCompactionState(
     previous: CompactionCheckpoint | undefined)
     : Omit<CompactionCheckpoint, "chatId" | "compactedTo" | "summary"> {
   let compacted = messages.filter(message => message.sequence < compactedTo);
-  let chatBindings = new Map(previous?.chatBindings ?? initialBindings);
+  let chatBindings = new Map([...initialBindings, ...previous?.chatBindings ?? []]);
   let nextChangeId = previous?.nextChangeId ?? 0;
   // Names of every connection request, whatever became of it: replay keeps workbook names clear of
   // all of them, so that denying a request cannot rename a workbook.

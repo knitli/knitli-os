@@ -9,7 +9,7 @@
 // vitest's `testTimeout`/`hookTimeout` are enforced *inside* the test worker, so they die with it;
 // the one process-level watchdog, `teardownTimeout`, is armed after the run resolves and therefore
 // never arms when the run is what hangs. Underneath that,
-// `@cloudflare/vitest-pool-workers` imports Miniflare without passing `onWorkerdCrashRestart`, so a
+// `@cloudflare/vitest-plugin` imports Miniflare without passing `onWorkerdCrashRestart`, so a
 // workerd that dies mid-run leaves the pool awaiting a reply that will never arrive. The result is
 // an unbounded local hang, and in CI an anonymous job-level kill that names no culprit.
 //
@@ -34,13 +34,9 @@
 // unsupervised local run. A wedge is then killed anonymously by whatever is outside, with no
 // surviving-tree listing to name the culprit. Under vp the variable reaches a cached task only
 // through the task's `env` declaration (see vitest-task-vite-config.ts), which also fingerprints it.
-//
-// `TESTS_WITH_TIMEOUT_MAX_SECONDS=<secs>` replaces the `--max` given on the command line, for an
-// environment whose machines are slower than the number the repo baked in (a 2-vCPU CI runner runs a
-// workerd-heavy suite far past what a laptop does). The idle timer is untouched, so a wedge is still
-// caught by silence, and the value is capped at a day (MAX_OVERRIDE_CEILING_SECONDS) so the backstop
-// cannot be configured away. It reaches a cached task the same way the off switch does. An invalid
-// value exits 2 before the command starts, rather than being ignored.
+// `TESTS_WITH_TIMEOUT_IDLE_SECONDS` and `TESTS_WITH_TIMEOUT_MAX_SECONDS` override their respective
+// CLI thresholds for slow CI/container runs. Both require positive, finite seconds and are likewise
+// forwarded and fingerprinted; neither disables the watchdog.
 
 import { execFile, spawn } from "node:child_process";
 import { constants } from "node:os";
@@ -58,13 +54,6 @@ const KILL_GRACE_MS = 5_000;
 const LIFELINE_FLAG = "--lifeline";
 
 const USAGE = "usage: with-timeout.ts --idle <secs> --max <secs> -- <command> [args...]";
-
-/**
- * The longest `TESTS_WITH_TIMEOUT_MAX_SECONDS` accepted. Keeps the wall-clock cap a cap, and stays
- * inside `setTimeout`'s 2^31 ms range: past it the timer fires immediately, which would kill every
- * run at once instead of never.
- */
-const MAX_OVERRIDE_CEILING_SECONDS = 86_400;
 
 type Options = {
   idleMs: number;
@@ -93,24 +82,16 @@ function parseArgs(args: string[]): Options {
   const argv = args.slice(index);
   if (idleMs === undefined || maxMs === undefined) fail(`--idle and --max are both required\n${USAGE}`);
   if (argv.length === 0) fail(`no command given\n${USAGE}`);
-  // Unset and empty both mean "no override": CI expressions for an unset variable expand to "".
-  const maxOverride = process.env.TESTS_WITH_TIMEOUT_MAX_SECONDS;
-  if (maxOverride) maxMs = parseMaxOverride(maxOverride);
   return { idleMs, maxMs, argv };
 }
 
-function parseMaxOverride(value: string): number {
-  const name = "TESTS_WITH_TIMEOUT_MAX_SECONDS";
-  const ms = parseSeconds(name, value);
-  if (ms > MAX_OVERRIDE_CEILING_SECONDS * 1000) {
-    fail(`${name} is at most ${MAX_OVERRIDE_CEILING_SECONDS} seconds (got ${value})`);
-  }
-  return ms;
-}
+/** One day: a ceiling well under the 2^31-1 ms past which `setTimeout` fires almost at once. */
+const MAX_SECONDS = 86_400;
 
 function parseSeconds(flag: string, value: string | undefined): number {
   const seconds = Number(value);
   if (!Number.isFinite(seconds) || seconds <= 0) fail(`${flag} needs a positive number of seconds`);
+  if (seconds > MAX_SECONDS) fail(`${flag} must be at most ${MAX_SECONDS} seconds (one day)`);
   return seconds * 1000;
 }
 
@@ -195,7 +176,14 @@ function holdLifeline(args: string[]): void {
 
 /** The back (see the header): the watchdog itself, run by the front with `--lifeline`. */
 function supervise(args: string[]): void {
-  const { idleMs, maxMs, argv } = parseArgs(args);
+  const defaults = parseArgs(args);
+  const idleOverride = process.env.TESTS_WITH_TIMEOUT_IDLE_SECONDS;
+  const maxOverride = process.env.TESTS_WITH_TIMEOUT_MAX_SECONDS;
+  const idleMs = idleOverride === undefined ? defaults.idleMs :
+    parseSeconds("TESTS_WITH_TIMEOUT_IDLE_SECONDS", idleOverride);
+  const maxMs = maxOverride === undefined ? defaults.maxMs :
+    parseSeconds("TESTS_WITH_TIMEOUT_MAX_SECONDS", maxOverride);
+  const { argv } = defaults;
   // After `parseArgs`, so a malformed invocation fails with the usage error even when disabled.
   const watchdogsDisabled = Boolean(process.env.TESTS_WITH_TIMEOUT_DISABLE);
   const [command, commandArgs] = resolveCommand(argv);

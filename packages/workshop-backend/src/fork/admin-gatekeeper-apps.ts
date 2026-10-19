@@ -1,6 +1,7 @@
 import type { AdminGatekeeperAppInfo } from '@gadgets/workshop-shared/api';
 import type {
   GatekeeperUiFrame,
+  GatekeeperUserSelectionExchange,
   GatekeeperVendor,
   VendorDescription,
 } from '@gadgets/workshop-shared/gatekeeper';
@@ -24,7 +25,15 @@ function advertisesAdminUi(
 }
 
 export class AdminGatekeeperApps {
-  constructor(private readonly vendors: ReadonlyMap<string, Service<GatekeeperVendor>>) {}
+  constructor(
+    private readonly vendors: ReadonlyMap<string, Service<GatekeeperVendor>>,
+    // Vendor admin UIs are deployment-scoped, not account-scoped, so there is no selecting
+    // user or account for a selection ticket to redeem against; the exchange fails closed.
+    private readonly userSelectionExchange: () => Fetcher<GatekeeperUserSelectionExchange> =
+      () => ({ redeem: async () => {
+        throw new Error("User selection is not available in vendor administration apps.");
+      } }) as unknown as Fetcher<GatekeeperUserSelectionExchange>,
+  ) {}
 
   async list(): Promise<AdminGatekeeperAppInfo[]> {
     const descriptions = await Promise.all([...this.vendors].map(async ([id, vendor]) => {
@@ -62,7 +71,9 @@ export class AdminGatekeeperApps {
     }
     if (!advertisesAdminUi(vendor, description)) return null;
     try {
-      return await vendor.startAdminUi({ isAdmin: true });
+      return await vendor.startAdminUi({
+        isAdmin: true, userSelectionExchange: this.userSelectionExchange(),
+      });
     } catch (error) {
       logger.warn('failed to open admin gatekeeper app', {
         event: 'gatekeeper.admin.open.failed', vendorId: id, operation: 'startAdminUi',

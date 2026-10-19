@@ -1,4 +1,4 @@
-import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import capnwebValidate from "capnweb-validate/vite";
 import { defineConfig } from "vitest/config";
 
@@ -159,7 +159,7 @@ export default defineConfig({
             export class AdminFrameVendor extends WorkerEntrypoint {
               async getSupportedResources() { return []; }
               async describe() { record("adminframe", "describe"); return { displayName: "Admin frame fixture", url: "https://fixture.invalid/adminframe", providesAdminUi: { title: "OpenAPI segments" } }; }
-              async startAdminUi(context) { record("adminframe", "startAdminUi", [context]); return frame(); }
+              async startAdminUi(context) { record("adminframe", "startAdminUi", [{ isAdmin: context.isAdmin, hasExchange: !!context.userSelectionExchange }]); return frame(); }
               async connectAccount() { record("adminframe", "connectAccount"); return { url: "https://fixture.invalid/connect" }; }
               async createAccount() { record("adminframe", "createAccount"); throw new Error("fixture createAccount must not be called"); }
             }

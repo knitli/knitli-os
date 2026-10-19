@@ -94,7 +94,7 @@ export const WRANGLER_RUNTIME_SCRATCH_EXCLUSIONS: GlobWithBase[] = [
  * The default set: the vitest scratch paths plus the whole of `.wrangler`.
  *
  * `.wrangler/validate/**` is the capnweb-validate build tree, regenerated and then loaded by any
- * suite that starts a worker under `@cloudflare/vitest-pool-workers`. For these packages it is
+ * suite that starts a worker under `@cloudflare/vitest-plugin`. For these packages it is
  * derived from sources the same task already tracks, so dropping it from the fingerprint loses no
  * invalidation -- and it must be dropped, because a task that reads a path it also wrote never
  * caches. `build:app` excludes the same tree, for the same reason.
@@ -122,16 +122,12 @@ export type TestCommand = string | { command: string; idleSeconds: number }
  * line per completed test file, so silence -- not wall clock -- is what distinguishes a hang from a
  * slow suite.
  *
- * That holds only where files complete more often than this. A suite dominated by import rather than
- * execution is quiet for longer, and raises the threshold for itself with the object form of
- * `TestCommand`.
+ * Import-heavy suites can raise their idle allowance with `TestCommand`; slower environments can
+ * override both thresholds through the watchdog's declared environment variables.
  */
 const IDLE_TIMEOUT_SECONDS = 60
 
-/**
- * Wall-clock backstop, for a command that stays chatty while looping forever. The default only: an
- * environment replaces it with `TESTS_WITH_TIMEOUT_MAX_SECONDS` (see `withTestTimeout`).
- */
+/** Wall-clock backstop, for a command that stays chatty while looping forever. */
 const TOTAL_TIMEOUT_SECONDS = 600
 
 /**
@@ -148,21 +144,8 @@ const TOTAL_TIMEOUT_SECONDS = 600
  * consuming package's `node_modules/.bin` on the task's PATH, so it resolves wherever the package
  * lives, and a rename fails loudly with "Failed to find executable" rather than silently.
  *
- * The thresholds are baked into the string rather than read from the environment for the same
- * fingerprint reason: a cached `vp` run strips undeclared env vars, so an override would silently
- * not apply (and would owe `scripts/env-passthrough.test.ts` an entry). Here a policy change is a
- * visible, fingerprinted change -- including a per-command `idleSeconds`, which lands in the command
- * string like any other.
- *
- * Only the idle threshold is overridable per command: `TOTAL_TIMEOUT_SECONDS` is the backstop
- * against a real hang, and a command able to opt out of it would be unbounded again. An
- * *environment* can rebudget it, though -- `TESTS_WITH_TIMEOUT_MAX_SECONDS`, read by `with-timeout.ts`
- * itself rather than here, so the string below (and the tests pinning it) read the same everywhere.
- * It replaces this number, is capped at a day, and does not touch the idle threshold, so a wedge is
- * still caught by silence.
- *
- * The off switch and that override, `TESTS_WITH_TIMEOUT_ENV`, are the only variables read, and both
- * are declared in `env` so that they are fingerprinted too.
+ * Defaults are baked into the command; runtime overrides and the off switch are passed and
+ * fingerprinted through `TESTS_WITH_TIMEOUT_ENV`, so cached runs retain the requested policy.
  */
 export const withTestTimeout = (command: TestCommand): string => {
   const { command: argv, idleSeconds } =
@@ -173,18 +156,13 @@ export const withTestTimeout = (command: TestCommand): string => {
 /**
  * The `cache.env` every task wrapping `withTestTimeout` must declare, if it is cached.
  *
- * `TESTS_WITH_TIMEOUT_DISABLE`, set to anything non-empty, turns the watchdog off, and
- * `TESTS_WITH_TIMEOUT_MAX_SECONDS` replaces its wall-clock cap (see the header of `with-timeout.ts`).
- * A cached `vp` task sees none of the ambient environment unless the task declares a variable;
- * `cache.env` both passes it through and fingerprints it, so a supervised run never replays an
- * unsupervised one, nor a 600s run a 1200s one. The builders below add both to every vitest `test`
- * task; a hand-declared task that wraps `withTestTimeout` spreads them itself, and
- * `scripts/vitest-task.test.ts` checks that each one either does so or is `cache: false`.
- *
- * `DISABLE` stays first: that test destructures it by position.
+ * The watchdog accepts positive-second idle/total overrides, or a non-empty disable switch.
+ * `cache.env` passes and fingerprints all three, so a run never replays a different timeout policy.
+ * Hand-declared watchdogged tasks must use this list too (or be uncached).
  */
 export const TESTS_WITH_TIMEOUT_ENV: string[] = [
   'TESTS_WITH_TIMEOUT_DISABLE',
+  'TESTS_WITH_TIMEOUT_IDLE_SECONDS',
   'TESTS_WITH_TIMEOUT_MAX_SECONDS',
 ]
 
@@ -218,11 +196,24 @@ const pinsWorkerCount = (command: TestCommand): boolean =>
  * pick its `agent` reporter, which prints nothing until the run ends, and the idle watchdog would
  * kill any suite that outlasts `IDLE_TIMEOUT_SECONDS`.
  */
-const withProgressReporter = (command: TestCommand): TestCommand => {
+const withProgressReporter = (command: TestCommand): TestCommand =>
+  withVitestFlag(command, '--reporter=default', /(^|\s)--reporters?(=|\s)/)
+
+/**
+ * Turns off Vitest 5's `fsModuleCache` unless the command sets it. vp already caches the whole task,
+ * and every package's vitest shares the one cache under the workspace root's `node_modules`, so
+ * parallel tasks race on it: a run that invalidates the cache deletes the directory while another
+ * is writing into it, and that run fails to start with ENOTEMPTY.
+ */
+const withoutModuleCache = (command: TestCommand): TestCommand =>
+  withVitestFlag(command, '--no-fsModuleCache', /(^|\s)--(no-)?fs-?module-?cache(=|\s|$)/i)
+
+/** Appends `flag` to a vitest command whose arguments don't already match `alreadySet`. */
+const withVitestFlag = (command: TestCommand, flag: string, alreadySet: RegExp): TestCommand => {
   const argv = typeof command === 'string' ? command : command.command
-  if (!/^vitest(\s|$)/.test(argv) || /(^|\s)--reporters?(=|\s)/.test(argv)) return command
-  const pinned = `${argv} --reporter=default`
-  return typeof command === 'string' ? pinned : { ...command, command: pinned }
+  if (!/^vitest(\s|$)/.test(argv) || alreadySet.test(argv)) return command
+  const flagged = `${argv} ${flag}`
+  return typeof command === 'string' ? flagged : { ...command, command: flagged }
 }
 
 /**
@@ -259,7 +250,8 @@ export function vitestTaskWithExclusions(
   // One `cache` covers every command in the task, so a single pinned command forgoes the budget for
   // its siblings too.
   const pinned = [command].flat().some(pinsWorkerCount)
-  const wrap = (one: TestCommand): string => withTestTimeout(withProgressReporter(one))
+  const wrap = (one: TestCommand): string =>
+    withTestTimeout(withoutModuleCache(withProgressReporter(one)))
   return {
     command: Array.isArray(command) ? command.map(wrap) : wrap(command),
     cache: {

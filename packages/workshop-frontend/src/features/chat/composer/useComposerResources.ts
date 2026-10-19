@@ -8,10 +8,12 @@ import {
   discardCreatedConnection,
 } from "../../../connectionRestartRecovery";
 import { normalizeResourceUrl } from "../../../resourceMatching";
+import { rpcFailureDescription } from "../../../rpcErrors";
 import {
   insertComposerCapsule,
   refineComposerResourceUrl,
   replaceComposerUrlWithCapsule,
+  type ComposerCapsule,
   type ComposerDocument,
   type ComposerSelection,
   type ComposerUrlRange,
@@ -29,6 +31,27 @@ type CommittedTransition<T extends { document: ComposerDocument }> =
 type ActiveResourceUrl = ComposerUrlRange & {
   snapshot: ComposerDocumentSnapshot;
 };
+
+/** The connection the URL picker chose for a URL: an account, and the resource of its vendor. */
+export type ComposerResourceResolution = {
+  accountId: number;
+  vendorId: string;
+  /** The `SupportedResource.urlPattern` the URL was matched to. */
+  resourceUrlPattern: string;
+};
+
+/** A URL the attach modal was opened to configure, and the connection the picker chose for it. */
+export type ComposerAttachModalPrefill = {
+  url: string;
+  resolution: ComposerResourceResolution;
+};
+
+// Where a capsule the attach modal creates goes: at a caret position, or in place of a URL.
+type AttachTarget =
+  | { type: "position"; snapshot: ComposerDocumentSnapshot; position: number }
+  | { type: "url"; source: ActiveResourceUrl };
+
+const PROMPT_CHANGED_MESSAGE = "The prompt changed before the resource could be added";
 
 type UseComposerResourcesOptions = {
   createCapsuleGatekeeper: (
@@ -48,7 +71,11 @@ type UseComposerResourcesOptions = {
   capsuleTokenText: (description: ResourceDescription, vendorId?: string) => string;
   onConnectionCreated: () => void;
   onSelectionRequest: (selection: ComposerSelection, documentRevision: number) => void;
-  onError: (message: string) => void;
+  /**
+   * Reports a failure. `configure` is offered when a URL could not be connected directly: it opens
+   * the attach modal on that URL, whose capsule then replaces it.
+   */
+  onError: (title: string, description?: string, configure?: () => void) => void;
 };
 
 const currentResourceUrl = (
@@ -66,6 +93,18 @@ const currentResourceUrl = (
   const match = [...document.text.matchAll(/https?:\/\/[^\s)>\]]*/g)][sourceIndex];
   if (!match || match[0] !== source.text) return null;
   return { text: match[0], start: match.index, end: match.index + match[0].length };
+};
+
+// The first occurrence of `url` outside a capsule, wherever edits have moved it.
+const findResourceUrl = (url: string, document: ComposerDocument): ComposerUrlRange | null => {
+  for (const match of document.text.matchAll(/https?:\/\/[^\s)>\]]*/g)) {
+    const start = match.index;
+    const end = start + match[0].length;
+    const isCapsule = document.capsules.some((capsule) =>
+      start >= capsule.start && end <= capsule.start + capsule.length);
+    if (match[0] === url && !isCapsule) return { text: url, start, end };
+  }
+  return null;
 };
 
 const currentPresentationPosition = (
@@ -100,13 +139,12 @@ export const useComposerResources = ({
   onError,
 }: UseComposerResourcesOptions) => {
   const [activeUrl, setActiveUrl] = useState<ActiveResourceUrl | null>(null);
-  const [attachModalOpen, setAttachModalOpen] = useState(false);
+  const [attachModal, setAttachModal] = useState<{
+    prefill?: ComposerAttachModalPrefill;
+  } | null>(null);
   const [isCreatingResource, setIsCreatingResource] = useState(false);
   const activeUrlRef = useRef(activeUrl);
-  const attachSnapshotRef = useRef<{
-    snapshot: ComposerDocumentSnapshot;
-    position: number;
-  } | undefined>(undefined);
+  const attachTargetRef = useRef<AttachTarget | undefined>(undefined);
   const operationRef = useRef(0);
   const lastScanRef = useRef({ position: -1, text: "", documentRevision: -1 });
   const getOverseerRef = useRef(getOverseer);
@@ -117,7 +155,7 @@ export const useComposerResources = ({
 
   useEffect(() => () => {
     operationRef.current++;
-    attachSnapshotRef.current = undefined;
+    attachTargetRef.current = undefined;
   }, []);
 
   const hideUrl = () => {
@@ -164,35 +202,58 @@ export const useComposerResources = ({
     hideUrl();
   };
 
-  const createCapsule = async (accountId: number, vendorId: string) => {
+  const replaceUrlWithCapsule = (
+    source: ActiveResourceUrl,
+    capsule: Omit<ComposerCapsule, "start" | "length">,
+  ) => commitDocumentEdit(source.snapshot, (document) => {
+    const url = currentResourceUrl(source, document);
+    return url && replaceComposerUrlWithCapsule(
+      document,
+      url,
+      capsule,
+      capsuleTokenText(capsule.description, capsule.vendorId),
+    );
+  }, { allowPresentationChanges: true });
+
+  const openUrlInAttachModal = (source: ActiveResourceUrl, prefill: ComposerAttachModalPrefill) => {
+    if (attachTargetRef.current) return;
+    // A snapshot taken now, so edits made before the modal opened don't reject its capsule. The
+    // occurrence the picker was opened on while it can still be tracked, else the first copy.
+    const snapshot = getDocumentSnapshot();
+    const url = currentResourceUrl(source, snapshot.document) ??
+      findResourceUrl(source.text, snapshot.document);
+    if (!url) {
+      onError(PROMPT_CHANGED_MESSAGE);
+      return;
+    }
+    attachTargetRef.current = { type: "url", source: { ...url, snapshot } };
+    hideUrl();
+    setAttachModal({ prefill });
+  };
+
+  const createCapsule = async (resolution: ComposerResourceResolution) => {
     const source = activeUrlRef.current;
     if (!source) return;
     const operation = ++operationRef.current;
+    const url = normalizeResourceUrl(source.text);
+    const configure = () => openUrlInAttachModal(source, { url, resolution });
     setIsCreatingResource(true);
     try {
-      const gatekeeper = await createCapsuleGatekeeper(
-        accountId,
-        normalizeResourceUrl(source.text),
-      );
+      const gatekeeper = await createCapsuleGatekeeper(resolution.accountId, url);
       if (!gatekeeper) {
         if (operationRef.current !== operation) return;
-        onError("Failed to create resource connection");
+        onError("Failed to create resource connection", undefined, configure);
         return;
       }
       await consumeCreatedConnection(gatekeeper, (connection) => connection.describe(),
           getCurrentOverseer, (gatekeeperId, description) => {
         if (operationRef.current !== operation) return false;
-        const result = commitDocumentEdit(source.snapshot, (document) => {
-          const url = currentResourceUrl(source, document);
-          return url && replaceComposerUrlWithCapsule(
-            document,
-            url,
-            { gatekeeperId, description, vendorId },
-            capsuleTokenText(description, vendorId),
-          );
-        }, { allowPresentationChanges: true });
+        const result = replaceUrlWithCapsule(
+          source,
+          { gatekeeperId, description, vendorId: resolution.vendorId },
+        );
         if (!result) {
-          onError("The prompt changed before the resource could be added");
+          onError(PROMPT_CHANGED_MESSAGE);
           dismissUrl();
           return false;
         }
@@ -204,7 +265,8 @@ export const useComposerResources = ({
     } catch (error) {
       if (operationRef.current !== operation) return;
       console.error("Failed to create capsule:", error);
-      onError(error instanceof ConnectionRestartError ? error.message : "Failed to add resource");
+      if (error instanceof ConnectionRestartError) onError(error.message);
+      else onError("Failed to add resource", rpcFailureDescription(error), configure);
     } finally {
       if (operationRef.current === operation) setIsCreatingResource(false);
     }
@@ -238,38 +300,39 @@ export const useComposerResources = ({
     if (position < 0 || position > snapshot.document.text.length) {
       return;
     }
-    attachSnapshotRef.current = { snapshot, position };
-    setAttachModalOpen(true);
+    attachTargetRef.current = { type: "position", snapshot, position };
+    setAttachModal({});
   };
 
   const closeAttachModal = () => {
-    attachSnapshotRef.current = undefined;
-    setAttachModalOpen(false);
+    attachTargetRef.current = undefined;
+    setAttachModal(null);
   };
 
   const attachCreated = async (gatekeeper: RpcStub<GatekeeperClient<any>>) => {
-    const source = attachSnapshotRef.current;
-    if (!source) return discardCreatedConnection(gatekeeper);
+    const target = attachTargetRef.current;
+    if (!target) return discardCreatedConnection(gatekeeper);
     try {
-      // Fork: the `use` body below is deliberately left at upstream's indentation to keep the
-      // upstream diff small.
       await consumeCreatedConnection(gatekeeper,
           (connection) => Promise.all([connection.describe(), connection.getCreationSpec()]),
           getCurrentOverseer, (gatekeeperId, [description, creationSpec]) => {
-      if (!source || attachSnapshotRef.current !== source) return false;
+      if (attachTargetRef.current !== target) return false;
       const vendorId = creationSpec.type === "gatekeeper" ? creationSpec.vendorId : undefined;
-      const result = commitDocumentEdit(source.snapshot, (document) => {
-        const position = currentPresentationPosition(source.snapshot, document, source.position);
-        return position === null ? null : insertComposerCapsule(
-          document,
-          position,
-          { gatekeeperId, description, vendorId },
-          capsuleTokenText(description, vendorId),
-        );
-      }, { allowPresentationChanges: true });
+      const capsule = { gatekeeperId, description, vendorId };
+      const result = target.type === "url"
+        ? replaceUrlWithCapsule(target.source, capsule)
+        : commitDocumentEdit(target.snapshot, (document) => {
+          const position = currentPresentationPosition(target.snapshot, document, target.position);
+          return position === null ? null : insertComposerCapsule(
+            document,
+            position,
+            capsule,
+            capsuleTokenText(description, vendorId),
+          );
+        }, { allowPresentationChanges: true });
       closeAttachModal();
       if (!result) {
-        onError("The prompt changed before the resource could be added");
+        onError(PROMPT_CHANGED_MESSAGE);
         return false;
       }
       onSelectionRequest({ start: result.caret, end: result.caret }, result.documentRevision);
@@ -277,7 +340,7 @@ export const useComposerResources = ({
       return true;
       });
     } catch (error) {
-      if (attachSnapshotRef.current !== source) return;
+      if (attachTargetRef.current !== target) return;
       throw error;
     }
   };
@@ -285,7 +348,8 @@ export const useComposerResources = ({
   return {
     activeUrl,
     attachCreated,
-    attachModalOpen,
+    attachModalOpen: attachModal !== null,
+    attachModalPrefill: attachModal?.prefill,
     closeAttachModal,
     createCapsule,
     dismissUrl,

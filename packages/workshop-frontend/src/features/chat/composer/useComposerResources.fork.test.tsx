@@ -123,7 +123,9 @@ describe("useComposerResources after a connection restarts the workspace", () =>
       harness.controls.draft.replaceDocument(emptyDocument(description.url));
     });
     act(() => harness.controls.resources.scanAt(10));
-    await act(async () => harness.controls.resources.createCapsule(3, "vendor"));
+    await act(async () => harness.controls.resources.createCapsule({
+      accountId: 3, vendorId: "vendor", resourceUrlPattern: "https://example.com/*",
+    }));
   };
 
   const capsule = { start: 0, length: 4, gatekeeperId: 7, description, vendorId: "vendor" };
@@ -163,7 +165,8 @@ describe("useComposerResources after a connection restarts the workspace", () =>
     expect(getGatekeeperById).not.toHaveBeenCalled();
     expect(gatekeeper.remove).toHaveBeenCalledOnce();
     expect(gatekeeper.dispose).toHaveBeenCalledOnce();
-    expect(harness.onError).toHaveBeenCalledWith("Failed to add resource");
+    expect(harness.onError).toHaveBeenCalledWith(
+      "Failed to add resource", "describe failed", expect.any(Function));
   });
 
   it("keeps the connection and says so when a restart loses its id", async () => {

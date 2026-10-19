@@ -400,7 +400,7 @@ describe("reads", () => {
       "Teams chat: Project Falcon",
     ]);
 
-    await expect(session.getTeam("..")).rejects.toThrow(/empty or relative/);
+    await expect(session.getTeam("..")).rejects.toThrow(/Refusing the path segment/);
   });
 
   it("re-reads a message rather than serving the copy the listing carried", async () => {

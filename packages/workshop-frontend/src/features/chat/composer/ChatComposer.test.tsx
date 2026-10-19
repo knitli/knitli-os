@@ -4,20 +4,37 @@
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { RpcStub } from "capnweb";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { Overseer, SlashCommandChoice } from "@gadgets/workshop-shared/api";
 
+type TestToast = {
+  title: string;
+  description?: string;
+  variant: string;
+  timeout?: number;
+  actions?: { children: string; onClick: () => void }[];
+};
+
 const testState = vi.hoisted(() => ({
-  addToast: vi.fn<(toast: unknown) => void>(),
+  addToast: vi.fn<(toast: TestToast) => string>(() => "toast-1"),
+  closeToast: vi.fn<(toastId?: string) => void>(),
   gatekeeperModalProps: undefined as undefined | {
     open: boolean;
     onCreated: (gatekeeper: unknown) => Promise<void>;
+    initialVendorId?: string;
+    initialResourceUrl?: string;
+    initialResourceUrlPattern?: string;
+    initialAccountId?: number;
+  },
+  capsuleOverlayProps: undefined as undefined | {
+    url: string;
+    onSelectAccount: (accountId: number, vendorId: string, resource: { urlPattern: string }) => void;
   },
 }));
 
 vi.mock("@cloudflare/kumo", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@cloudflare/kumo")>()),
-  useKumoToastManager: () => ({ add: testState.addToast }),
+  useKumoToastManager: () => ({ add: testState.addToast, close: testState.closeToast }),
 }));
 
 vi.mock("../../../AuthContext", () => ({
@@ -26,6 +43,14 @@ vi.mock("../../../AuthContext", () => ({
 
 vi.mock("../../../useVendorBranding", () => ({
   useVendorBranding: () => new Map(),
+}));
+
+vi.mock("../../../CapsuleOverlay", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../CapsuleOverlay")>()),
+  default: (props: typeof testState.capsuleOverlayProps) => {
+    testState.capsuleOverlayProps = props;
+    return null;
+  },
 }));
 
 vi.mock("../../../GatekeeperModal", () => ({
@@ -48,6 +73,18 @@ class TestResizeObserver {
 
 vi.stubGlobal("ResizeObserver", TestResizeObserver);
 
+const typeText = async (textarea: HTMLTextAreaElement, text: string) => {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
+      textarea,
+      text,
+    );
+    textarea.setSelectionRange(text.length, text.length);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise(requestAnimationFrame);
+  });
+};
+
 describe("ChatComposer", () => {
   let container: HTMLDivElement | undefined;
   let root: Root | undefined;
@@ -57,7 +94,9 @@ describe("ChatComposer", () => {
     container?.remove();
     sessionStorage.clear();
     testState.addToast.mockClear();
+    testState.closeToast.mockClear();
     testState.gatekeeperModalProps = undefined;
+    testState.capsuleOverlayProps = undefined;
   });
 
   it("reads current draft eligibility even through a getter captured before an edit", async () => {
@@ -84,14 +123,10 @@ describe("ChatComposer", () => {
 
   it("blocks conversation while an attachment is prepared and uploaded, until removed", async () => {
     let canStartConversation: (() => boolean) | undefined;
-    let finishPreparation: ((bitmap: ImageBitmap) => void) | undefined;
-    let finishUpload: ((value: { id: string; mimeType: string; size: number }) => void) | undefined;
-    const bitmap = { width: 10, height: 10, close: vi.fn<() => void>() } as unknown as ImageBitmap;
-    vi.stubGlobal("createImageBitmap", vi.fn<() => Promise<ImageBitmap>>(() => new Promise<ImageBitmap>((resolve) => { finishPreparation = resolve; })));
+    let finishUpload: ((handle: { id: string }) => void) | undefined;
     const createUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
     const revokeUrl = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
-    const upload = vi.fn<() => Promise<{ id: string; mimeType: string; size: number }>>(() => new Promise<{ id: string; mimeType: string; size: number }>((resolve) => { finishUpload = resolve; }));
-    const remove = vi.fn<(id: string) => Promise<void>>(async () => {});
+    const upload = vi.fn<() => Promise<{ id: string }>>(() => new Promise<{ id: string }>((resolve) => { finishUpload = resolve; }));
     const file = new File(["image"], "draft.png", { type: "image/png" });
     Object.defineProperty(file, "arrayBuffer", { value: async () => new ArrayBuffer(5) });
     container = document.createElement("div");
@@ -100,7 +135,7 @@ describe("ChatComposer", () => {
     try {
       await act(async () => root!.render(<ChatComposer
         createCapsuleGatekeeper={async () => null}
-        getOverseer={() => ({ uploadChatAttachment: upload, deleteChatAttachment: remove }) as unknown as RpcStub<Overseer>}
+        getOverseer={() => ({ uploadChatAttachment: upload, deleteChatAttachment: async () => {} }) as unknown as RpcStub<Overseer>}
         onSend={() => {}} isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
         voiceControls={(draft) => { canStartConversation ??= draft.canStartConversation; return null; }}
       />));
@@ -111,16 +146,14 @@ describe("ChatComposer", () => {
         input.dispatchEvent(new Event("change", { bubbles: true }));
         expect(canStartConversation!()).toBe(false);
       });
-      expect(upload).not.toHaveBeenCalled();
-      await act(async () => finishPreparation!(bitmap));
       expect(upload).toHaveBeenCalledOnce();
       expect(canStartConversation!()).toBe(false);
-      await act(async () => finishUpload!({ id: "staged", mimeType: "image/png", size: 5 }));
+      await act(async () => finishUpload!({ id: "staged-draft" }));
       expect(canStartConversation!()).toBe(false);
-      expect(remove).not.toHaveBeenCalled();
-      await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Remove attachment"]')!.click());
+      // The attachment tray renders once: a single remove control for the one attachment.
+      expect(container.querySelectorAll('[aria-label="Remove draft.png"]')).toHaveLength(1);
+      await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Remove draft.png"]')!.click());
       expect(canStartConversation!()).toBe(true);
-      expect(remove).toHaveBeenCalledExactlyOnceWith("staged");
     } finally {
       createUrl.mockRestore();
       revokeUrl.mockRestore();
@@ -745,5 +778,122 @@ describe("ChatComposer", () => {
     await act(async () => vi.waitFor(() => expect(document.body.textContent)
       .toContain("new connection skill")));
     expect(listSlashCommands).toHaveBeenCalledTimes(2);
+  });
+
+  const url = "https://docs.google.com/spreadsheets/d/abc123/edit";
+  const reason = "This file is an Office file rather than a Google Sheets file.";
+
+  // Pastes `url` after "Summarize ", picks account 4 for it, and has the connection fail.
+  const pasteFailingUrl = async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    // jsdom has no Range layout; the URL panel measures the line its URL sits on.
+    Range.prototype.getBoundingClientRect = () => new DOMRect();
+    onTestFinished(() => {
+      delete (Range.prototype as Partial<Range>).getBoundingClientRect;
+    });
+    const createCapsuleGatekeeper = vi.fn<
+      Parameters<typeof ChatComposer>[0]["createCapsuleGatekeeper"]
+    >(async () => {
+      throw new Error(reason);
+    });
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(
+      <ChatComposer
+        createCapsuleGatekeeper={createCapsuleGatekeeper}
+        getOverseer={() => ({} as RpcStub<Overseer>)}
+        onSend={() => {}}
+        isAgentActive={false}
+        models={[]}
+        selectedModel={{ id: "model-a" }}
+        onModelChange={() => {}}
+      />,
+    ));
+
+    const textarea = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
+    const text = `Summarize ${url}`;
+    await typeText(textarea, text);
+    expect(testState.capsuleOverlayProps?.url).toBe(url);
+
+    await act(async () => testState.capsuleOverlayProps!.onSelectAccount(
+      4,
+      "google",
+      { urlPattern: "https://docs.google.com/spreadsheets/d/*" },
+    ));
+    await act(async () => vi.waitFor(() => expect(testState.addToast).toHaveBeenCalledOnce()));
+    consoleError.mockRestore();
+
+    expect(createCapsuleGatekeeper).toHaveBeenCalledWith(4, url);
+    return { textarea, toast: testState.addToast.mock.calls[0][0] };
+  };
+
+  it("offers to configure a pasted URL that could not be connected, then replaces it", async () => {
+    const { textarea, toast } = await pasteFailingUrl();
+
+    expect(toast).toMatchObject({
+      title: "Failed to add resource",
+      description: reason,
+      variant: "error",
+      timeout: 0,
+    });
+    expect(toast.actions?.map((action) => action.children)).toEqual(["Configure…"]);
+    expect(testState.gatekeeperModalProps?.open).toBe(false);
+
+    act(() => toast.actions![0].onClick());
+
+    expect(testState.closeToast).toHaveBeenCalledWith("toast-1");
+    expect(testState.gatekeeperModalProps).toMatchObject({
+      open: true,
+      initialVendorId: "google",
+      initialResourceUrl: url,
+      initialResourceUrlPattern: "https://docs.google.com/spreadsheets/d/*",
+      initialAccountId: 4,
+    });
+
+    const gatekeeper = {
+      getId: async () => 9,
+      describe: async () => ({ title: "Budget", url: "https://docs.google.com/spreadsheets/d/copy" }),
+      getCreationSpec: async () => ({ type: "gatekeeper", vendorId: "google" }),
+      remove: vi.fn<() => Promise<void>>(async () => {}),
+      [Symbol.dispose]: vi.fn<() => void>(),
+    };
+    await act(async () => {
+      await testState.gatekeeperModalProps!.onCreated(gatekeeper);
+      await new Promise(requestAnimationFrame);
+    });
+
+    expect(textarea.value).toBe("Summarize Budget ");
+    expect(gatekeeper.remove).not.toHaveBeenCalled();
+    expect(testState.gatekeeperModalProps?.open).toBe(false);
+    expect(testState.gatekeeperModalProps?.initialResourceUrl).toBeUndefined();
+  });
+
+  it("closes its Configure… toast when the composer unmounts", async () => {
+    const { toast } = await pasteFailingUrl();
+    expect(toast.actions?.map((action) => action.children)).toEqual(["Configure…"]);
+    expect(testState.closeToast).not.toHaveBeenCalled();
+
+    act(() => root!.unmount());
+    root = undefined;
+
+    expect(testState.closeToast).toHaveBeenCalledExactlyOnceWith("toast-1");
+  });
+
+  it("reports a URL gone before Configure with a toast that times out as usual", async () => {
+    const { textarea, toast } = await pasteFailingUrl();
+    await typeText(textarea, "Summarize nothing");
+
+    act(() => toast.actions![0].onClick());
+
+    expect(testState.gatekeeperModalProps?.open).toBe(false);
+    expect(testState.addToast).toHaveBeenCalledTimes(2);
+    const changed = testState.addToast.mock.calls[1][0];
+    expect(changed).toMatchObject({
+      title: "The prompt changed before the resource could be added",
+      variant: "error",
+    });
+    expect(changed.timeout).toBeUndefined();
+    expect(changed.actions).toBeUndefined();
   });
 });

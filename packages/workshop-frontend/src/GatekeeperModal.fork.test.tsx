@@ -27,6 +27,8 @@ function fakePopup() {
     sessionStorage: {
       store,
       setItem: vi.fn<(key: string, value: string) => void>((key, value) => { store.set(key, value) }),
+      removeItem: vi.fn<(key: string) => void>((key) => { store.delete(key) }),
+      getItem: vi.fn<(key: string) => string | null>((key) => store.get(key) ?? null),
     },
     location: {
       replace: vi.fn<(url: string) => void>(),

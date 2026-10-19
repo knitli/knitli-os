@@ -88,9 +88,9 @@ describe("URL construction", () => {
   it("refuses a dot or empty segment, which URL parsing would collapse", () => {
     // `/v1.0/me/mailFolders/..` would normalize to `/v1.0/me` — a different endpoint, reached with
     // this mailbox's bearer token.
-    expect(() => graphUrl(["me", "mailFolders", ".."])).toThrow(/empty or relative/);
-    expect(() => graphUrl(["me", "mailFolders", "."])).toThrow(/empty or relative/);
-    expect(() => graphUrl(["me", "mailFolders", ""])).toThrow(/empty or relative/);
+    expect(() => graphUrl(["me", "mailFolders", ".."])).toThrow(/Refusing the path segment/);
+    expect(() => graphUrl(["me", "mailFolders", "."])).toThrow(/Refusing the path segment/);
+    expect(() => graphUrl(["me", "mailFolders", ""])).toThrow(/Refusing the path segment/);
     // A dot inside an id is still an ordinary character.
     expect(graphUrl(["me", "mailFolders", "a..b"]))
       .toBe("https://graph.microsoft.com/v1.0/me/mailFolders/a..b");
@@ -101,7 +101,7 @@ describe("URL construction", () => {
 
     // `getFolder` is the only place an agent-supplied id reaches a path (message ids come from
     // Graph itself); a move's destination travels in the JSON body, where it cannot retarget a URL.
-    await expect(newApi().getFolder("..")).rejects.toThrow(/empty or relative/);
+    await expect(newApi().getFolder("..")).rejects.toThrow(/Refusing the path segment/);
 
     expect(calls).toHaveLength(0);
   });
@@ -706,7 +706,7 @@ describe("attachments", () => {
     // An attachment id is agent-supplied and reaches a URL path, so it takes the same treatment a
     // folder id does.
     await expect(newApi().getAttachmentBytes(MESSAGE.id, "..")).rejects.toThrow(
-      /empty or relative/);
+      /Refusing the path segment/);
     expect(calls).toHaveLength(0);
   });
 

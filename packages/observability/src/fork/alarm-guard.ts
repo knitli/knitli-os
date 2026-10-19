@@ -30,6 +30,9 @@ export const MAX_ALARM_RUNS_PER_MINUTE = 6_000;
 /** The earliest an alarm armed through {@link scheduleAlarm} may fire, relative to now. */
 export const ALARM_FLOOR_MS = 1_000;
 
+/** Consecutive failures after which {@link guardedAlarm} stops re-arming, by default. */
+export const MAX_ALARM_CONSECUTIVE_FAILURES = 8;
+
 /** Prefix of the single storage key a guarded alarm keeps its counters under, when it must. */
 export const ALARM_GUARD_KEY_PREFIX = "alarm-guard:";
 
@@ -120,7 +123,7 @@ export type GuardedAlarmOptions = {
   maxPerMinute?: number;
   /** Failure backoff: `min(baseMs * 2^(failures - 1), maxMs)`. Defaults to 30 s and 1 h. */
   backoff?: { baseMs?: number; maxMs?: number };
-  /** Consecutive failures after which the guard stops re-arming. Defaults to 8. */
+  /** Consecutive failures after which the guard stops re-arming. Defaults to {@link MAX_ALARM_CONSECUTIVE_FAILURES}. */
   maxConsecutiveFailures?: number;
   /**
    * While the circuit is open, re-arm once for the start of the next minute instead of leaving the
@@ -181,7 +184,7 @@ export async function guardedAlarm(
   options: GuardedAlarmOptions,
   run: () => Promise<void>,
 ): Promise<void> {
-  const { key, maxPerMinute = MAX_ALARM_RUNS_PER_MINUTE, maxConsecutiveFailures = 8, now = Date.now } = options;
+  const { key, maxPerMinute = MAX_ALARM_RUNS_PER_MINUTE, maxConsecutiveFailures = MAX_ALARM_CONSECUTIVE_FAILURES, now = Date.now } = options;
   const storage = state.storage;
   if (options.disabled) return halt(state, key);
 
@@ -239,6 +242,15 @@ export async function guardedAlarm(
   } else if (nextFailures !== failures) {
     storage.kv.put<AlarmGuardRecord>(storageKey, { bucket, count, failures: nextFailures });
   }
+}
+
+/**
+ * The guard's current counters for an alarm, or undefined when it has none. A handler body can
+ * read them while it runs: the guard has already recorded this run, so `failures` is the count
+ * of consecutive failures before this one.
+ */
+export function readAlarmGuardRecord(state: AlarmGuardState, key: string): AlarmGuardRecord | undefined {
+  return state.storage.kv.get<AlarmGuardRecord>(ALARM_GUARD_KEY_PREFIX + key);
 }
 
 /**

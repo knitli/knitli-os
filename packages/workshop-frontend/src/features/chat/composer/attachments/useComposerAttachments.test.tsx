@@ -48,20 +48,15 @@ describe("useComposerAttachments", () => {
     vi.unstubAllGlobals();
   });
 
-  it("clears only sent attachments and cleans up through their staging Overseer", async () => {
+  it("stages uploads and clears only sent attachments", async () => {
     const uploadChatAttachment = vi.fn<Overseer["uploadChatAttachment"]>(
-      async () => ({ id: `upload-${++testState.nextId}` }),
+      async () => ({ id: `staged-${++testState.nextId}` }),
     );
-    const deleteFromFirst = vi.fn<Overseer["deleteChatAttachment"]>(async () => {});
+    const deleteChatAttachment = vi.fn<Overseer["deleteChatAttachment"]>(async () => {});
     const firstOverseer = {
       uploadChatAttachment,
-      deleteChatAttachment: deleteFromFirst,
+      deleteChatAttachment,
     } as unknown as RpcStub<Overseer>;
-    const deleteFromSecond = vi.fn<Overseer["deleteChatAttachment"]>(async () => {});
-    const secondOverseer = {
-      deleteChatAttachment: deleteFromSecond,
-    } as unknown as RpcStub<Overseer>;
-    let currentOverseer = firstOverseer;
     const onError = vi.fn<(message: string) => void>();
     let attachments: ComposerAttachment[] = [];
     let hasAttachments!: () => boolean;
@@ -72,8 +67,7 @@ describe("useComposerAttachments", () => {
     vi.stubGlobal("crypto", { randomUUID: () => `local-${++testState.nextId}` });
     const Harness = () => {
       const attachmentState = useComposerAttachments({
-        getOverseer: () => currentOverseer,
-        modelId: "model-a",
+        getOverseer: () => firstOverseer,
         onError,
       });
       attachments = attachmentState.attachments;
@@ -95,6 +89,9 @@ describe("useComposerAttachments", () => {
       expect(hasAttachments()).toBe(true);
     });
     await waitFor(() => attachments[0]?.uploadState === "ready");
+    expect(uploadChatAttachment).toHaveBeenCalledWith(
+      { mimeType: "text/plain", content: Uint8Array.of(1, 2, 3, 4), name: "one.txt" }, null);
+    expect(attachments[0].ref).toEqual({ id: expect.stringMatching(/^staged-/) });
     const sentSnapshot = [...attachments];
 
     await act(async () => addFiles!([
@@ -105,19 +102,45 @@ describe("useComposerAttachments", () => {
 
     expect(attachments).toHaveLength(1);
     expect(attachments[0].name).toBe("two.txt");
-    expect(deleteFromFirst).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
 
-    currentOverseer = secondOverseer;
-    act(() => {
-      removeAttachment!(attachments[0].id);
-      expect(hasAttachments()).toBe(false);
-    });
-    await waitFor(() => deleteFromFirst.mock.calls.length === 1);
-    expect(deleteFromSecond).not.toHaveBeenCalled();
+act(() => removeAttachment!(attachments[0].id));
+    expect(attachments).toHaveLength(0);
+    // A ready attachment removed before sending has its staged upload reclaimed.
+    await waitFor(() => deleteChatAttachment.mock.calls.length === 1);
   });
 
-  it("deletes an upload that finishes after the composer unmounts", async () => {
+  it.each([[true, []], [false, ["staged-1"]]])(
+      "leaves a spreadsheet held by a send to it when the composer unmounts (delivered: %s)",
+      async (delivered, deletedAfterSettle) => {
+    const deleteChatAttachment = vi.fn<Overseer["deleteChatAttachment"]>(async () => {});
+    const overseer = {
+      uploadChatAttachment: async () => ({ id: "staged-1" }),
+      deleteChatAttachment,
+    } as unknown as RpcStub<Overseer>;
+    let state!: ReturnType<typeof useComposerAttachments>;
+    vi.stubGlobal("crypto", { randomUUID: () => "local-sheet" });
+    const Harness = () => {
+      state = useComposerAttachments({ getOverseer: () => overseer, onError: vi.fn<(message: string) => void>() });
+      return null;
+    };
+    container = document.createElement("div");
+    root = createRoot(container);
+    await act(async () => root!.render(<Harness />));
+    await act(async () => state.addFiles([new File(["x"], "a.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    })]));
+    await waitFor(() => state.attachments[0]?.uploadState === "ready");
+
+    const release = state.holdForSend(state.attachments);
+    await act(async () => root!.unmount());
+    root = undefined;
+    expect(deleteChatAttachment).not.toHaveBeenCalled();
+    await act(async () => release(delivered));
+    expect(deleteChatAttachment.mock.calls.map(([id]) => id)).toEqual(deletedAfterSettle);
+  });
+
+  it("reclaims a staged upload that finishes after the composer unmounts", async () => {
     let finishUpload!: (handle: { id: string }) => void;
     const uploadChatAttachment = vi.fn<Overseer["uploadChatAttachment"]>(
       () => new Promise((resolve) => { finishUpload = resolve; }),
@@ -133,7 +156,6 @@ describe("useComposerAttachments", () => {
     const Harness = () => {
       ({ addFiles } = useComposerAttachments({
         getOverseer: () => overseer,
-        modelId: "model-a",
         onError: vi.fn<(message: string) => void>(),
       }));
       return null;
@@ -148,8 +170,9 @@ describe("useComposerAttachments", () => {
 
     await act(async () => root!.unmount());
     root = undefined;
-    await act(async () => finishUpload({ id: "late-upload" }));
+    await act(async () => finishUpload({ id: "staged-late" }));
+    expect(uploadChatAttachment).toHaveBeenCalledTimes(1);
     await waitFor(() => deleteChatAttachment.mock.calls.length === 1);
-    expect(deleteChatAttachment).toHaveBeenCalledWith("late-upload");
+    expect(deleteChatAttachment).toHaveBeenCalledWith("staged-late");
   });
 });

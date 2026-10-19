@@ -27,7 +27,7 @@ import type {
   WorktreeFileEntry,
 } from "./worktree-binding";
 import type { AiChatAuthorInfo, WorkpieceId } from "@gadgets/workshop-shared/api";
-import { diffFiles, type FileChange } from "@gadgets/workshop-shared/code-change";
+import { diffFiles, validateCodeChangeSchema, type FileChange, type FileContent } from "@gadgets/workshop-shared/code-change";
 
 import { UnreadableContentError, type WorkspaceGitCache } from "./git-cache";
 import { commitIdentityForAuthor, type GitStore } from "./git-store";
@@ -174,6 +174,48 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     return text;
   }
 
+  async #byteValue(path: string): Promise<FileContent> {
+    // Blindfold: prompt files fail exactly like missing files, as bytes too.
+    if (isPromptFileAnywhere(path)) throw new Error(`${path}: no such file`);
+    const overlay = this.turn.getOverlayFiles(this.worktreeId);
+    const value = overlay.get(path);
+    if (value !== undefined) return value;
+    if (this.turn.getRemovedPaths(this.worktreeId).has(path)) throw new Error(`${path}: no such file`);
+    const base = await this.host.gitCache.fileBytesAtCommit(this.#pinBase(), path);
+    // The session may have closed while the base faulted in; do not serve it after revocation.
+    this.#pinBase();
+    if (!base) throw new Error(`${path}: no such file`);
+    const current = this.turn.getOverlayFiles(this.worktreeId).get(path);
+    if (this.turn.getRemovedPaths(this.worktreeId).has(path)) throw new Error(`${path}: no such file`);
+    return current ?? base;
+  }
+  async readBytes(path: string, range?: {offset: number; length: number}): Promise<ReadableStream<Uint8Array>> {
+    this.#pinBase();
+    const value = await this.#byteValue(path);
+    const bytes = typeof value === "string" ? new TextEncoder().encode(value)
+      : this.host.gitStore.readBlob(value.oid, value.byteLength);
+    const offset = range?.offset ?? 0, length = range?.length ?? bytes.length;
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 0 ||
+        offset > bytes.length || length > bytes.length - offset) throw new Error("Invalid byte range.");
+    return new ReadableStream({pull: c => {
+      this.#pinBase();
+      c.enqueue(bytes.slice(offset, offset + length)); c.close();
+    }}, {highWaterMark: 0});
+  }
+  async writeBytes(path: string, content: Uint8Array): Promise<void> {
+    // Blindfold: prompt files are unwritable as bytes too (same missing-file error).
+    if (isPromptFileAnywhere(path)) throw new Error(`${path}: no such file`);
+    await this.host.gitCache.assertWorktreePathWritable(this.#pinBase(), path);
+    // Validated before the blob is stored: git objects are never collected, so a change refused
+    // after the write would leave its blob behind for good. The stand-in oid has the real shape.
+    validateCodeChangeSchema({[this.worktreeId]: [[path,
+      {setBytes: {oid: "0".repeat(40), byteLength: content.byteLength}}]]});
+    this.#pinBase();
+    const value = await this.host.gitStore.writeBlob(content);
+    const change = {setBytes: value};
+    this.#pinBase();
+    this.turn.appendChange(this.worktreeId, path, change);
+  }
   async writeFile(path: string, text: string): Promise<void> {
     let base = this.#pinBase();
     // Blindfold: prompt files are unwritable (same missing-file error), so prompts can
@@ -182,7 +224,8 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     let overlay = this.turn.getOverlayFiles(this.worktreeId);
     let before: string | undefined;
     if (overlay.has(path)) {
-      before = overlay.get(path);
+      const value = overlay.get(path);
+      before = typeof value === "string" ? value : undefined;
     } else if (!this.turn.getRemovedPaths(this.worktreeId).has(path)) {
       // The base entry is still live: reject symlink/gitlink/directory targets with the
       // descriptive read errors (the same rule as the writeFile tool), then read the base text
@@ -258,7 +301,7 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
     // auto-commits since, they simply never appear in this commit's ancestry (squash semantics;
     // see WorktreeRecord). The overlay may include lazily-read untouched files; content
     // addressing makes rewriting them a no-op that reuses their blob oids and modes.
-    let changes = new Map<string, string | null>();
+    let changes = new Map<string, FileContent | null>();
     for (let [path, text] of this.turn.getOverlayFiles(this.worktreeId)) {
       changes.set(path, text);
     }
@@ -371,8 +414,9 @@ export class WorktreeSessionImpl extends RpcTarget implements Worktree {
         // An overlay file keeps its base entry's mode (the one a commit would write, see
         // GitStore.writeChangedFilesAsCommit); a new one is a regular file.
         let baseEntry = await this.host.gitCache.pathEntryAtCommit(base, path);
-        newSide = { text: overlay.get(path),
-                    kind: baseEntry?.kind === "executable" ? "executable" : "file" };
+        const value = overlay.get(path);
+        newSide = typeof value === "string" ? { text: value,
+          kind: baseEntry?.kind === "executable" ? "executable" : "file" } : {note: "binary content changed"};
       } else if (removed.has(path)) {
         newSide = {};  // removed: no current text
       } else {

@@ -518,6 +518,15 @@ describe("worktree-binding blindfold", () => {
         .rejects.toThrow("missing.js: no such file or directory");
   });
 
+  it("prompt files fail the byte API exactly like missing files, before any lookup or write", async () => {
+    // The overlay holds the prompt, so only the guard (not a failed lookup) can refuse it.
+    let session = sessionWithBase({overlay: {"PROMPT.md": "overlay secret\n", "docs/PROMPT.md": "x"}});
+    for (let path of ["PROMPT.md", "docs/PROMPT.md"]) {
+      await expect(session.readBytes(path)).rejects.toThrow(`${path}: no such file`);
+      await expect(session.writeBytes(path, new Uint8Array([1]))).rejects.toThrow(`${path}: no such file`);
+    }
+  });
+
   it("a directly-named prompt scope fails listFiles exactly like a missing path", async () => {
     // Base-resident: without the guard this throws "is not a directory", confirming the file.
     let session = sessionWithBase();

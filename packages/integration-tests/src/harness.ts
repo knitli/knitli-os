@@ -167,6 +167,9 @@ export async function startHarness(opts: {
   // the name the booted worker will actually carry, patches included.
   const gatekeepers = opts.gatekeepers.map(gk => {
     const config = readWorkerConfig(gk.dir);
+    // Fork: gatekeeper-context's Artifacts binding is remote-only, which needs a Cloudflare token
+    // the suite does not have. Unbound, the gatekeeper serves inline collections only.
+    delete config.artifacts;
     gk.patch?.(config);
     return { binding: gk.binding, name: config.name, config };
   });
@@ -266,6 +269,31 @@ export function startTestGatekeeperHarness(options: { enableGadgetExecution?: bo
     gatekeepers: [{ binding: TEST_GATEKEEPER_BINDING, dir: TEST_GATEKEEPER_DIR }],
     enableGadgetExecution: options.enableGadgetExecution,
   });
+}
+
+/**
+ * Fork: resources are opt-in on a deployment, so a fresh test deployment offers none until an
+ * admin enables them. Enable every bound vendor's resources once, as the deployment admin, for
+ * upstream suites that connect a real gatekeeper and assume upstream's opt-out default.
+ */
+export async function enableBoundGatekeeperResources(harness: Harness): Promise<void> {
+  const { connect, logIn, signUp } = await import("./rpc-client.js");
+  using publicApi = connect(harness.url);
+  let admin;
+  try {
+    admin = await signUp(publicApi, ADMIN_USERNAME);
+  } catch {
+    admin = await logIn(publicApi, ADMIN_USERNAME);
+  }
+  using adminApi = await admin.getAdminApi();
+  if (!adminApi) throw new Error("Integration admin did not receive an AdminApi.");
+  const settings = await adminApi.getSettings();
+  for (const vendor of settings.resourceVendors) {
+    if (vendor.autoProvisions) continue;
+    for (const resource of vendor.resources) {
+      if (!resource.enabled) await adminApi.setResourceEnabled(vendor.vendorId, resource.urlPattern, true);
+    }
+  }
 }
 
 /** POST `body` to the fixture gatekeeper's `/control/<route>`: its JSON reply, or undefined for 204. */

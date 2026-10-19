@@ -45,7 +45,7 @@ export function htmlToMarkdown(html: string): string {
   // A quoted attribute value may hold `>`; a tag with an unbalanced quote falls back to the first.
   // A `<` that starts no tag (`1 < 2`) is text, as the browser recovers it.
   const tokens = String(html).match(
-    /<!--[\s\S]*?-->|<![^>]*>|<\/?[a-z](?:[^>"']|"[^"]*"|'[^']*')*>|<\/?[a-z][^>]*>|[^<]+|</gi) || [];
+    /<!--[\s\S]*?(?:-->|$)|<![^>]*>|<\/?[a-z](?:[^>"']|"[^"]*"|'[^']*')*>|<\/?[a-z][^>]*>|[^<]+|</gi) || [];
   // Each open list: the number its next item takes, which way it counts, and the last it wrote.
   // `html` marks a list whose numbers Markdown cannot write (below zero), kept as HTML tags instead.
   const lists: { type: "ul" | "ol"; next: number; step: 1 | -1; last?: number; html?: true }[] = [];
@@ -207,9 +207,17 @@ export function htmlToMarkdown(html: string): string {
     const emphasis = emphasisOf(tag, attributes);
     if (emphasis) {
       if (closing) {
-        // An unmatched end tag is ignored; a misnested one closes through its opener.
+        // An unmatched end tag is ignored; a misnested one closes through its opener and
+        // reopens the formatting nested inside it, as HTML's adoption agency does.
         const at = frameTags.lastIndexOf(tag);
-        if (at >= 0) { frames.splice(at); frameTags.splice(at); }
+        if (at >= 0) {
+          const inner = frames.splice(at + 1);
+          const innerTags = frameTags.splice(at + 1);
+          frames.pop();
+          frameTags.pop();
+          frames.push(...inner);
+          frameTags.push(...innerTags);
+        }
       } else { frames.push(emphasis); frameTags.push(tag); }
       continue;
     }
@@ -221,6 +229,13 @@ export function htmlToMarkdown(html: string): string {
 
     if (closing) {
       switch (tag) {
+        // HTML recovers a stray </br> as a <br>.
+        case "br":
+          if (inPre) { preText += "\n"; preHtml += "\n"; }
+          else if (inCode) { codeText += " "; codeHtml += " "; }
+          else if (inHeading) space = true;
+          else breaks++;
+          break;
         case "h1": case "h2": case "h3": case "h4": case "h5": case "h6":
           inHeading = false;
           // A trailing run of `#` after a space would be read as the heading's closing sequence.
@@ -289,7 +304,7 @@ export function htmlToMarkdown(html: string): string {
       case "ul": openList({ type: "ul", next: 1, step: 1 }); break;
       case "ol": {
         const markerType = readHtmlAttribute(attributes, "type");
-        if (markerType !== undefined && markerType !== "1") {
+        if (markerType !== undefined && markerType !== "1" && ["a", "A", "i", "I"].includes(markerType)) {
           // CommonMark has no lettered or roman markers; keep the list as HTML.
           const reversedAttr = readHtmlAttribute(attributes, "reversed") !== undefined;
           const startAttr = integer(readHtmlAttribute(attributes, "start"));

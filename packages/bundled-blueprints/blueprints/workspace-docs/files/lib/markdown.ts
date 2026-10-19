@@ -28,6 +28,11 @@ const ELEMENT_EMPHASIS = new Map<string, Emphasis>([
 /** Elements whose content the page never renders, so the export leaves it out too. */
 const HIDDEN_TAGS = new Set(["script", "style", "template", "noscript", "title"]);
 
+/** Elements with no end tag or subtree, so a `hidden` attribute suppresses only the element. */
+const VOID_TAGS = new Set([
+  "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr",
+]);
+
 /** Other block elements, which Markdown has no syntax for: each stands apart as a paragraph does. */
 const PARAGRAPH_LIKE = [
   "address", "article", "aside", "caption", "center", "dd", "details", "dl", "dt", "fieldset",
@@ -171,8 +176,10 @@ export function htmlToMarkdown(html: string): string {
   };
 
   let cellOpen = false;
-  // The open element whose content the page never shows (script, style, template), and how deep.
-  let hidden: { tag: string; depth: number } | undefined;
+  // The open element whose content the page never shows (script, style, template, or anything
+  // carrying a `hidden` attribute), and how deep. `nest` is set for parsed elements, whose same
+  // tag can nest; raw-text elements end at their first proper end tag however often they reopen.
+  let hidden: { tag: string; depth: number; nest: boolean } | undefined;
   // A textarea's raw content while it is open: its tags are literal text, not markup.
   let rawTextarea: string | undefined;
   const flushTextarea = () => {
@@ -191,10 +198,10 @@ export function htmlToMarkdown(html: string): string {
 
   for (const [index, token] of tokens.entries()) {
     if (hidden) {
-      const tag = /^<\s*(\/?)\s*([a-z0-9]+)/i.exec(token);
+      // An end-tag name must be followed by whitespace, `/` or `>`: `</script.foo>` is not one.
+      const tag = /^<\s*(\/?)\s*([a-z0-9]+)(?=[\s/>])/i.exec(token);
       if (tag?.[2].toLowerCase() === hidden.tag) {
-        // Only a template nests; the others are raw text up to their first closing tag.
-        hidden.depth += tag[1] ? -1 : hidden.tag === "template" ? 1 : 0;
+        hidden.depth += tag[1] ? -1 : hidden.nest ? 1 : 0;
         if (hidden.depth === 0) hidden = undefined;
       }
       continue;
@@ -233,11 +240,15 @@ export function htmlToMarkdown(html: string): string {
     if (!match) continue;
     const closing = match[1] === "/";
     const tag = match[2].toLowerCase();
-    if (!closing && HIDDEN_TAGS.has(tag)) {
-      hidden = { tag, depth: 1 };
+    const attributes = match[3];
+    // A `hidden` attribute suppresses any element's subtree, as the tag-name set above does.
+    const attributeHidden = !closing && readRawHtmlAttribute(attributes, "hidden") !== undefined;
+    if (!closing && (HIDDEN_TAGS.has(tag) || attributeHidden)) {
+      if (!VOID_TAGS.has(tag)) {
+        hidden = { tag, depth: 1, nest: tag === "template" || attributeHidden };
+      }
       continue;
     }
-    const attributes = match[3];
     const emphasis = emphasisOf(tag, attributes);
     if (emphasis) {
       if (closing) {
@@ -263,7 +274,8 @@ export function htmlToMarkdown(html: string): string {
         links.push(wrapped);
         frames.push({});
         frameTags.push("a");
-        inline += "[";
+        // An href-less anchor shows as plain text: reopen it without link delimiters.
+        if (wrapped !== null) inline += "[";
       }
     }
     if (PARAGRAPH_LIKE.includes(tag)) {

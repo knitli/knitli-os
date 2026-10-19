@@ -865,7 +865,7 @@ export const ChatComposer = ({
         )}
         <ComposerAttachmentTray
           attachments={pendingAttachments}
-          disabled={isSending}
+          disabled={isSending || isDictating || !!conversationDraft}
           onRemove={removeAttachment}
         />
         {/* Textarea */}
@@ -1082,12 +1082,6 @@ export const ChatComposer = ({
             />
           </div>
         </div>
-
-        <ComposerAttachmentTray
-          attachments={pendingAttachments}
-          disabled={isSending || isDictating || !!conversationDraft}
-          onRemove={removeAttachment}
-        />
 
         {/* Footer row: connection/options left, model + send right */}
         <div className="flex items-center justify-between gap-1.5 px-3 pb-1.5">

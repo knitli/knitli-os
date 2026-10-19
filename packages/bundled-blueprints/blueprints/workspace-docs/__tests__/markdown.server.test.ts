@@ -264,6 +264,15 @@ describe("htmlToMarkdown", () => {
       .toBe("a\n\nleft open\n");
   });
 
+  it("reopens an href-less anchor without brackets, and keeps hidden content hidden", () => {
+    expect(htmlToMarkdown("<a><div>x</div></a>")).toBe("x\n");
+    expect(htmlToMarkdown("<p hidden>private draft</p><p>shown</p>")).toBe("shown\n");
+    expect(htmlToMarkdown("<div hidden><div>x</div>y</div><p>shown</p>")).toBe("shown\n");
+    expect(htmlToMarkdown('<p>a<img hidden src="x">b</p>')).toBe("ab\n");
+    expect(htmlToMarkdown("<script>secret</script.foo>visible</script><p>shown</p>"))
+      .toBe("shown\n");
+  });
+
   it("delimits code by runs longer than the backticks inside it", () => {
     const markdown = htmlToMarkdown("<p><code>a`b</code> <code>`x</code> <code> a </code></p><pre>one\n```\ntwo</pre>");
     expect(render(markdown)).toBe(

@@ -150,6 +150,8 @@ describe("ChatComposer", () => {
       expect(canStartConversation!()).toBe(false);
       await act(async () => finishUpload!({ id: "staged-draft" }));
       expect(canStartConversation!()).toBe(false);
+      // The attachment tray renders once: a single remove control for the one attachment.
+      expect(container.querySelectorAll('[aria-label="Remove draft.png"]')).toHaveLength(1);
       await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Remove draft.png"]')!.click());
       expect(canStartConversation!()).toBe(true);
     } finally {

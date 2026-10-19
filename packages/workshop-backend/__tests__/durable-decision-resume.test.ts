@@ -687,6 +687,13 @@ describe("decision handoff using the existing execution row", () => {
       expect(impl.storage.actions.get(7)?.state).toBe("approved");
       expect(impl.storage.chatMeta.get(CHAT)?.activeAgent).toEqual(MODEL.profile);
       expect([...impl.storage.chats.list()].at(-1)?.type).toBe("agentNudge");
+      // The approval summary precedes the nudge that claims the turn, so the resumed model
+      // reads it as the record that the action ran.
+      let listed = [...impl.storage.chats.list()];
+      let summaryAt = listed.findIndex(msg => msg.type === "message" &&
+          msg.message.includes("The user approved your action(s)"));
+      expect(summaryAt).toBeGreaterThanOrEqual(0);
+      expect(summaryAt).toBeLessThan(listed.length - 1);
       expect(apply).toHaveBeenCalledTimes(1);
       gate.resolve();
       await impl.waitForAllAgentsToComplete();

@@ -26,7 +26,10 @@ const ELEMENT_EMPHASIS = new Map<string, Emphasis>([
 ]);
 
 /** Elements whose content the page never renders, so the export leaves it out too. */
-const HIDDEN_TAGS = new Set(["script", "style", "template", "noscript", "title", "iframe", "video", "audio", "canvas"]);
+const HIDDEN_TAGS = new Set([
+  "script", "style", "template", "noscript", "title", "iframe", "video", "audio", "canvas",
+  "progress", "meter",
+]);
 
 /** Elements a same-kind start tag implicitly closes, so they never nest inside a hidden subtree. */
 const IMPLICITLY_CLOSED = new Set(["p", "li", "dd", "dt", "td", "th", "tr", "option"]);

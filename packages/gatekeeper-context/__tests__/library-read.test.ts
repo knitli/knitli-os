@@ -75,7 +75,7 @@ function makeSession() {
 }
 
 describe("LibraryReadSession sharing", () => {
-  it("lists every collection without restricting who may open the workspace", async () => {
+  it("lists every collection, restricting the observation to readers of the private ones", async () => {
     let { session, strategy, authorized } = makeSession();
     await strategy.addObserver("existing", verifier(["public"]));
 
@@ -84,8 +84,12 @@ describe("LibraryReadSession sharing", () => {
     expect(listing.entries.map(entry => entry.type === "collection" && entry.id))
       .toEqual(["public", "private"]);
     expect(authorized).toHaveLength(1);
-    expect(authorized[0].excludeObservers).toBeUndefined();
-    await strategy.addObserver("later", verifier(["public"]));
+    // The private collection's title, description, and count are in this listing, so the
+    // observation is attributed to it: observers who may not read it are excluded.
+    expect(authorized[0].excludeObservers).toEqual(["existing"]);
+    await expect(strategy.addObserver("later", verifier(["public"])))
+      .rejects.toThrow(CONTEXT_OBSERVER_DENIED);
+    await strategy.addObserver("full", verifier(["public", "private"]));
   });
 
   it("restricts sharing once a private collection's contents are listed or read", async () => {

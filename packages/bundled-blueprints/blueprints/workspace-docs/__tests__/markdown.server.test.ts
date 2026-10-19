@@ -355,6 +355,8 @@ describe("htmlToMarkdown", () => {
 
   it("suppresses canvas fallback and honors implicit closure inside hidden elements", () => {
     expect(htmlToMarkdown("<canvas>private fallback</canvas><p>shown</p>")).toBe("shown\n");
+    expect(htmlToMarkdown("<progress>50%</progress><meter>50%</meter><p>shown</p>"))
+      .toBe("shown\n");
     expect(htmlToMarkdown("<p hidden>private<p>shown</p>")).toBe("shown\n");
     expect(htmlToMarkdown("<ul><li hidden>private<li>shown</ul>"))
       .toBe("- shown\n");

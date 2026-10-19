@@ -122,9 +122,17 @@ export class LibraryReadSession extends RpcTarget implements ContextLibrary {
     let listing = await this.#fetchListing(opts);
     // Nothing listed → nothing was observed, so don't record an observation (mirrors read()).
     if (listing.entries.length === 0) return listing;
-    // Collection titles, descriptions, and counts are discovery metadata the agent catalog already
-    // advertises unobserved, so only drilling into a collection attributes the read to it.
+    // Drilling into a collection attributes the read to it, and so does listing the collections
+    // themselves whenever a private one is among them: its title, description, and count are
+    // private data an observer of the persisted observation must be entitled to, even though
+    // public collections' discovery metadata is public. (Upstream advertised the top-level
+    // listing as unobserved catalog metadata; that left private collections' metadata baseline.)
     let collectionIds = opts?.collectionId ? [opts.collectionId] : [];
+    if (!opts?.collectionId) {
+      let enabled = await this.#enabled();
+      collectionIds = listing.entries.flatMap(entry =>
+        entry.type === "collection" && enabled.get(entry.id) === "private" ? [entry.id] : []);
+    }
     await this.#authorize(collectionIds, {
       title: opts?.collectionId
         ? `Context listing: ${opts.collectionId}${opts.path ? "/" + opts.path : ""}`

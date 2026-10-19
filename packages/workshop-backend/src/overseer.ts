@@ -9423,6 +9423,16 @@ class OverseerImpl implements AgentHooks {
       return;
     }
     if (wait.pending || this.isPreparingChatMessage(chatId)) return;
+    // Fork: once every awaited action is approved, the approval summary is the model's record
+    // that they ran (raw action cards are not surfaced to it; see #53). It is recorded here,
+    // after the wait above was derived from the untouched history and before the agent starts,
+    // since the wrapper's later summary path defers once this claims the execution.
+    let waiters = this.approvalWaiters(chatId);
+    let summary = approvedActionSummary(waiters?.actions);
+    if (summary) {
+      let author = approvalSummaryAuthor(waiters!.actions);
+      if (author) this.addChatMessages(chatId, author, [{type: "message", message: summary}]);
+    }
     let text = wait.titles.length
         ? `The changes you submitted have been approved and applied: ${wait.titles.map(t => `"${t}"`).join(", ")}. Reads now reflect them.`
         : "The requested connections have been accepted. Continue using the connected resources.";

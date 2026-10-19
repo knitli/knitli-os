@@ -82,11 +82,14 @@ async function openSuspendedChat(requester: AiChatAuthorInfo, reason: string) {
 describe("resuming a suspended agent whose model no longer resolves", () => {
   it("approves the action and reports the reason in the chat", async () => {
     let reason = 'The "Retired Model" model is disabled on this deployment by an administrator.';
-    let { client, meta, record, getChatContext, logError, postAgentErrorMessage, startAgent } =
+    let { client, meta, messages, record, getChatContext, logError, postAgentErrorMessage, startAgent } =
         await openSuspendedChat(AGENT, reason);
 
     await expect(client.approveAction(ACTION_ID)).resolves.toBeUndefined();
 
+    // The approval summary is the model's record that the action ran.
+    expect(messages.some(msg => msg.type === "message" &&
+        msg.message.includes("The user approved your action(s)"))).toBe(true);
     expect(getChatContext).toHaveBeenCalledWith(AGENT.id);
     expect(postAgentErrorMessage).toHaveBeenCalledTimes(1);
     expect(postAgentErrorMessage).toHaveBeenCalledWith(

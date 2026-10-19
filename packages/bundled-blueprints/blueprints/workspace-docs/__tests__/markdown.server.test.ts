@@ -340,6 +340,19 @@ describe("htmlToMarkdown", () => {
       .toBe('<pre><a href="x">foo</a></pre>\n');
   });
 
+  it("closes dialogs by default, completes block-wrapping links, and quotes q elements", () => {
+    expect(htmlToMarkdown("<dialog>private draft</dialog><p>shown</p>")).toBe("shown\n");
+    expect(htmlToMarkdown("<dialog open>shown dialog</dialog><p>shown</p>"))
+      .toBe("shown dialog\n\nshown\n");
+    expect(htmlToMarkdown('<a href="x"><div>one</div></a>')).toBe("[one](x)\n");
+    expect(htmlToMarkdown('<a href="x"><div>one</div><div>two</div></a>'))
+      .toBe("[one](x)\n\n[two](x)\n");
+    expect(htmlToMarkdown('<a href="x">text<div>one</div></a>'))
+      .toBe("[text](x)\n\n[one](x)\n");
+    expect(htmlToMarkdown("<p>a <q>quoted <q>nested</q></q> b</p>"))
+      .toBe("a “quoted ‘nested’” b\n");
+  });
+
   it("delimits code by runs longer than the backticks inside it", () => {
     const markdown = htmlToMarkdown("<p><code>a`b</code> <code>`x</code> <code> a </code></p><pre>one\n```\ntwo</pre>");
     expect(render(markdown)).toBe(

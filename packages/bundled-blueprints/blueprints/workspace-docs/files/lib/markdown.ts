@@ -36,7 +36,7 @@ const VOID_TAGS = new Set([
 /** Other block elements, which Markdown has no syntax for: each stands apart as a paragraph does. */
 const PARAGRAPH_LIKE = [
   "address", "article", "aside", "caption", "center", "dd", "details", "dl", "dt", "fieldset",
-  "figcaption", "figure", "footer", "form", "header", "hgroup", "legend", "main", "nav", "section", "summary",
+  "dialog", "figcaption", "figure", "footer", "form", "header", "hgroup", "legend", "main", "nav", "section", "summary",
 ];
 
 /** Tags that end a run of inline content, closing its emphasis and dropping any space or break. */
@@ -96,6 +96,16 @@ export function htmlToMarkdown(html: string): string {
   // Each open anchor's destination, or null for one with no href, which the page shows as text.
   const links: (string | null)[] = [];
   const blockquotes: number[] = [];
+  // An anchor wrapping block content, which CommonMark cannot nest a link around: each block's
+  // segment becomes a complete link of its own, opened with its content and closed at its end.
+  let wrapAnchor: { destination: string; open: boolean } | undefined;
+  const closeWrapSegment = () => {
+    if (!wrapAnchor?.open) return;
+    inline += "](" + wrapAnchor.destination + ")";
+    wrapAnchor.open = false;
+  };
+  // How deep nested quotation marks are: the page alternates double and single marks.
+  let qDepth = 0;
   // Each open disclosure: a collapsed one shows only its first summary, so the rest is suppressed.
   const details: { collapsed: boolean; inSummary: boolean; summarySeen: boolean }[] = [];
   const detailsSuppressed = () => details.some((frame) => frame.collapsed && !frame.inSummary);
@@ -155,6 +165,22 @@ export function htmlToMarkdown(html: string): string {
   let space = false;
   let breaks = 0;
 
+  // Whether the anchor opened at `tokens[from]` reaches block content before its end tag, in
+  // which case no single link can wrap what it holds.
+  const anchorWrapsBlock = (from: number): boolean => {
+    let depth = 0;
+    for (let i = from + 1; i < tokens.length; i++) {
+      const ahead = /^<\s*(\/?)\s*([a-z0-9]+)(?=[\s/>])/i.exec(tokens[i]);
+      if (!ahead) continue;
+      const name = ahead[2].toLowerCase();
+      if (name === "a") {
+        if (ahead[1]) { if (depth === 0) return false; depth--; }
+        else depth++;
+      } else if (BLOCK_TAGS[name]) return true;
+    }
+    return false;
+  };
+
   const closeTo = (depth: number) => {
     for (const marker of written.splice(depth).reverse()) {
       changes.push({ at: inline.length, marker, open: false });
@@ -174,6 +200,8 @@ export function htmlToMarkdown(html: string): string {
       written.push(marker);
       changes.push({ at: inline.length, marker, open: true });
     }
+    // A block-wrapping anchor's next segment opens with its content.
+    if (wrapAnchor && !wrapAnchor.open) { inline += "["; wrapAnchor.open = true; }
   };
   // Writes the code accumulated so far as one span, without ending the code element: an anchor
   // inside code wraps the segment written before it, so the link's label holds that segment.
@@ -326,9 +354,12 @@ export function htmlToMarkdown(html: string): string {
     // A `hidden` attribute suppresses any element's subtree, as the tag-name set above does;
     // it is honored before disclosure state, so a hidden details never shows its summary.
     const attributeHidden = !closing && readRawHtmlAttribute(attributes, "hidden") !== undefined;
-    if (!closing && (HIDDEN_TAGS.has(tag) || attributeHidden)) {
+    // A dialog without `open` is not rendered either; an open one keeps block boundaries below.
+    const closedDialog = !closing && tag === "dialog" &&
+      readRawHtmlAttribute(attributes, "open") === undefined;
+    if (!closing && (HIDDEN_TAGS.has(tag) || attributeHidden || closedDialog)) {
       if (!VOID_TAGS.has(tag)) {
-        hidden = { tag, depth: 1, nest: tag === "template" || attributeHidden };
+        hidden = { tag, depth: 1, nest: tag === "template" || attributeHidden || closedDialog };
       }
       continue;
     }
@@ -368,6 +399,8 @@ export function htmlToMarkdown(html: string): string {
     if (BLOCK_TAGS[tag]) {
       const wrapped = !closing && links.length > 0 ? links.at(-1) : undefined;
       if (wrapped !== undefined) closeLink();
+      // A block boundary also ends a block-wrapping anchor's current segment, complete.
+      closeWrapSegment();
       endBlock();
       if (wrapped !== undefined) {
         links.push(wrapped);
@@ -404,7 +437,25 @@ export function htmlToMarkdown(html: string): string {
         case "pre": writePre(); break;
         // An `</a>` with no anchor open (one a later `<a>` already closed) is ignored, as in HTML.
         // Code before it inside a code element is written first, as the link's label segment.
-        case "a": if (inCode) writeCode(); closeLink(); break;
+        case "a": {
+          if (inCode) writeCode();
+          if (wrapAnchor) {
+            closeWrapSegment();
+            frames.pop();
+            frameTags.pop();
+            wrapAnchor = undefined;
+            break;
+          }
+          closeLink();
+          break;
+        }
+        // The page supplies a quotation's marks: closing the one its depth opened.
+        case "q": {
+          qDepth = Math.max(0, qDepth - 1);
+          beginInline();
+          inline += qDepth % 2 ? "’" : "”";
+          break;
+        }
         case "li": if (lists.at(-1)?.html) markdown += "\n\n</li>\n\n"; else finishOpenItem(); break;
         case "ul": case "ol": {
           // A list end tag with no open list of its type is ignored, as in a browser; one that
@@ -533,11 +584,25 @@ export function htmlToMarkdown(html: string): string {
         // Code written before an anchor inside a code element stands outside the link, so its
         // segment is written first; the anchor's own segment becomes the label at its `</a>`.
         if (inCode) writeCode();
-        // Anchors cannot nest: a browser closes an open one before the next begins.
+        // Anchors cannot nest: a browser closes an open one before the next begins, including
+        // a block-wrapping one.
+        if (wrapAnchor) {
+          closeWrapSegment();
+          frames.pop();
+          frameTags.pop();
+          wrapAnchor = undefined;
+        }
         closeLink();
+        const href = readRawHtmlAttribute(attributes, "href", true);
+        // An anchor reaching block content cannot be one link: each block becomes its own.
+        if (href !== undefined && anchorWrapsBlock(index)) {
+          frames.push(styleEmphasis(attributes));
+          frameTags.push("a");
+          wrapAnchor = { destination: linkDestination(href), open: false };
+          break;
+        }
         frames.push(styleEmphasis(attributes));
         frameTags.push("a");
-        const href = readRawHtmlAttribute(attributes, "href", true);
         links.push(href === undefined ? null : linkDestination(href));
         if (href === undefined) break;
         beginInline([]);
@@ -546,6 +611,8 @@ export function htmlToMarkdown(html: string): string {
         inline += "[";
         break;
       }
+      // The page supplies a quotation's marks, alternating double and single by depth.
+      case "q": beginInline(); inline += qDepth++ % 2 ? "‘" : "“"; break;
       case "img": {
         // Code before an image inside a code element is its own segment, written first.
         if (inCode) writeCode();
@@ -560,6 +627,7 @@ export function htmlToMarkdown(html: string): string {
   if (select) flushSelect();
   if (rawTextarea !== undefined) flushTextarea();
   if (inPre) writePre();
+  if (wrapAnchor) { closeWrapSegment(); wrapAnchor = undefined; }
   closeLink();
   endBlock();
   while (items.length > 0) finishItem();

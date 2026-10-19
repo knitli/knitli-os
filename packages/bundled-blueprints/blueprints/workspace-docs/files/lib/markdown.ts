@@ -246,6 +246,7 @@ export function htmlToMarkdown(html: string): string {
           break;
         case "blockquote": {
           const start = blockquotes.pop();
+          if (start === undefined) break;
           const content = trimAscii(markdown.slice(start)).replace(/\n{3,}/g, "\n\n");
           const quoted = content
             ? content.split("\n").map((line) => line ? "> " + line : ">").join("\n")
@@ -308,7 +309,8 @@ export function htmlToMarkdown(html: string): string {
           // CommonMark has no lettered or roman markers; keep the list as HTML.
           const reversedAttr = readHtmlAttribute(attributes, "reversed") !== undefined;
           const startAttr = integer(readHtmlAttribute(attributes, "start"));
-          openList({ type: "ol", step: reversedAttr ? -1 : 1, next: startAttr ?? 1, html: true });
+          openList({ type: "ol", step: reversedAttr ? -1 : 1,
+            next: startAttr ?? (reversedAttr ? itemValues(tokens, index).length : 1), html: true });
           markdown += `\n\n<ol type="${markerType}"${startAttr !== undefined ? ` start="${startAttr}"` : ""}${reversedAttr ? " reversed" : ""}>\n\n`;
           break;
         }

@@ -7553,11 +7553,6 @@ class OverseerImpl implements AgentHooks {
           this.#unregisterRunningAgent(chatId,
               finished && !liveChat.cancelController.signal.aborted && !!meta && !!wait && !wait.denied);
 
-          if (finished && meta) {
-            // Classified here, past the turn's last await, so a decision made as it ended counts.
-            this.#publishAgentTurnNotification(chatId, initiator, initiatorUserId);
-          }
-
       // Approval may win before captured references reach durable history. Recheck
       // the normally suspended turn after its step commits, without another await.
       const captured = this.#consumedApprovalWaiters.get(chatId);
@@ -7566,16 +7561,21 @@ class OverseerImpl implements AgentHooks {
       const summary = finished && activeRecord && !this.isPreparingChatMessage(chatId)
         ? approvedCapturedActionSummary(captured, waiters) : undefined;
       const approvalAuthor = approvalSummaryAuthor(waiters?.actions);
+      const willResume = !!(summary && approvalAuthor && meta && activeRecord &&
+          !this.hasPendingAgentCalls(chatId));
+      if (finished && meta && !willResume) {
+        // Classified here, past the turn's last await, so a decision made as it ended counts.
+        // A turn about to resume on an approval has not finished, so it notifies later instead.
+        this.#publishAgentTurnNotification(chatId, initiator, initiatorUserId);
+      }
       if (summary && approvalAuthor && meta) {
         this.addChatMessages(chatId, approvalAuthor, [{type: "message", message: summary}]);
         meta = this.storage.chatMeta.get(chatId);
       }
       // An approval summary restarts the agent so it reacts promptly -- unless calls were
       // recorded mid-turn, which drain first (and see the summary in history). Otherwise the
-      // turn ends through the shared hand-off, which delivers any waiting response. The turn
-      // notification was already published above, past the turn's last await.
-      if (summary && approvalAuthor && meta && activeRecord &&
-          !this.hasPendingAgentCalls(chatId)) {
+      // turn ends through the shared hand-off, which delivers any waiting response.
+      if (willResume) {
         const resumed = this.storage.chatMeta.get(chatId)!;
         resumed.activeAgent = aiModel.profile;
         this.storage.chatMeta.put(resumed);

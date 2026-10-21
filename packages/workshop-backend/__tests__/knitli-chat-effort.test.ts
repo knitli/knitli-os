@@ -137,6 +137,7 @@ function fakeHooks(): AgentHooks {
     consumeCapturedActions: () => undefined,
     consumeCapturedConnectionRequests: () => [],
     commitAgentStep: async () => false,
+    takeSteers: () => [],
     getChatModelData: () => undefined,
     emitChatStreamEvent: () => {},
     getPromptCacheSalt: () => "",

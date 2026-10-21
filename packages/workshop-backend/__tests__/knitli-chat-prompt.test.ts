@@ -251,6 +251,7 @@ function fakeHooks(overrides: {
     consumeCapturedActions: () => undefined,
     consumeCapturedConnectionRequests: () => [],
     commitAgentStep: async () => false,
+    takeSteers: () => [],
     getChatModelData: () => undefined,
     emitChatStreamEvent: () => {},
     getPromptRefText: async (ref: PromptRef) => {

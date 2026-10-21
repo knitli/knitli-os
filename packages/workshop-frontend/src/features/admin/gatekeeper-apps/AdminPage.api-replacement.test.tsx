@@ -25,7 +25,7 @@ vi.mock('../../../components/format/AdminFormatsPanel', () => ({ default: () => 
 vi.mock('../../../components/AdminAiExecutorsPanel', () => ({ default: () => null }))
 vi.mock('../../../theme', () => ({ applyAccentColor: () => {}, DEFAULT_ACCENT_COLOR: '' }))
 vi.mock('../../../siteLogoUtils', () => ({ cacheBustSiteLogoUrl: (url: string) => url, prepareSiteLogo: async () => null }))
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => state.navigate }))
+vi.mock('@tanstack/react-router', async () => (await import('../../../fakeAdminRouter')).fakeAdminRouter)
 
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true

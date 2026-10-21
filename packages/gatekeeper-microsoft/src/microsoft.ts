@@ -4,7 +4,7 @@ import {
   AccountDescription, ConnectHandoff, Gatekeeper, GatekeeperConnectCallback,
   ConnectInitiator, GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier,
   GatekeeperVendor as GatekeeperVendorIface, ResourceConfiguratorFrame, SupportedResource,
-  VendorDescription, stripTrailingSlashes,
+  VendorDescription, stripTrailingSlashes, workerVersionTag,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   ACCESS_TOKEN_SAFETY_MS, CONNECT_TIMEOUT_MS, INITIATION_NONCE_LIFETIME_MS, NONCE_BYTES,
@@ -502,6 +502,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
           "separate password — and the connection is limited to reading your own profile.",
       providesAuth: true,
     };
+  }
+
+  async versionTag(): Promise<string | undefined> {
+    return workerVersionTag(this.env);
   }
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>,

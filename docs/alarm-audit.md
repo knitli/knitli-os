@@ -53,6 +53,7 @@ not connected. A completed connect or `revoke()` deletes it. When it fires the h
 |---|---|---|
 | `gatekeeper-cloudflare` `UserAccount` | `cloudflare.connect-timeout` | SAFE |
 | `gatekeeper-confluence` | `confluence.connect-timeout` | SAFE |
+| `gatekeeper-context` `ContextCollectionDurableObject` | `context.collection` | SAFE (kill switch only: retry alarm for credential cleanup and memberless deletion, armed at a delayed `retryAt` and deleted once nothing is left; not wrapped in `guardedAlarm` because upstream's outage test relies on it rethrowing) |
 | `gatekeeper-email` | `email.connect-timeout` | SAFE |
 | `gatekeeper-github` | `github.connect-timeout` | SAFE |
 | `gatekeeper-gitlab` | `gitlab.connect-timeout` | SAFE |

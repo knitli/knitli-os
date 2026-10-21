@@ -18,6 +18,7 @@ import {
   SupportedResource,
   ResourceConfiguratorFrame,
   type ConnectInitiator,
+  workerVersionTag,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   type ActionDescriptionBuilder, buildDescription, plainInline, type RenderedDescription,
@@ -518,6 +519,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
         "Connect your Linear account so Cloudflare OS can read and manage issues, projects, and " +
         "comments across the teams you choose.",
     };
+  }
+
+  async versionTag(): Promise<string | undefined> {
+    return workerVersionTag(this.env);
   }
 
   async connectAccount(

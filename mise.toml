@@ -9,4 +9,14 @@ viteplus = "latest"
 python = "3.13"
 
 [deps]
-pnpm = { auto = true, run = "pnpm install -y" }
+
+[deps.pnpm]
+auto = true
+run = "pnpm install -y"
+sources = [
+  "pnpm-lock.yaml",
+  "packages/*/pnpm-lock.yaml",
+  "package.json",
+  "packages/*/package.json",
+  "pnpm-workspace.yaml",
+]

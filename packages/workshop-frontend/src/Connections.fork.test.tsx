@@ -50,6 +50,13 @@ function gadget(bindWithSuggestedName: (target: number, chatId?: number) => Prom
 
 const created = () => ({ getId: async () => 9, [Symbol.dispose]: vi.fn<() => void>() }) as unknown as RpcStub<GatekeeperClient<any>>
 
+const clickButton = (label: string) => act(async () => {
+    const el = [...document.querySelectorAll('button')].find(b =>
+      b.textContent === label || b.getAttribute('aria-label') === label)
+    if (!el) throw new Error(`no button: ${label}`)
+    el.click()
+  })
+
 describe('Connections after a connection restarts the workspace', () => {
   let root: Root | undefined
 
@@ -62,8 +69,8 @@ describe('Connections after a connection restarts the workspace', () => {
 
   async function render(props: Partial<ComponentProps<typeof Connections>> & { gadget: RpcStub<GadgetClient> }) {
     const element = (next: typeof props) =>
-      <Connections overseer={overseer} authenticatedApi={authenticatedApi} chatId={3} {...next} />
-    root ??= createRoot(document.createElement('div'))
+      <Connections overseer={props.overseer ?? overseer} authenticatedApi={authenticatedApi} chatId={3} {...next} />
+    root ??= createRoot(document.body.appendChild(document.createElement('div')))
     await act(async () => root!.render(element(props)))
     return (next: typeof props) => act(async () => root!.render(element(next)))
   }
@@ -100,5 +107,45 @@ describe('Connections after a connection restarts the workspace', () => {
 
     await expect(adding).resolves.toBeUndefined()
     expect(toastAdd).not.toHaveBeenCalled()
+  })
+
+  describe('Remove connection (knitli-site#607)', () => {
+    const binding = { name: 'EXEC', resourceTitle: 'Knitli Execution', target: 42, vendorId: undefined }
+    function setup(remove: () => Promise<void>) {
+      const dispose = vi.fn<() => void>()
+      const removeFn = vi.fn<() => Promise<void>>(remove)
+      const getGatekeeperById = vi.fn<(id: number) => Promise<unknown>>()
+        .mockResolvedValue({ remove: removeFn, [Symbol.dispose]: dispose })
+      const stub = {
+        getId: async () => 100, getTitle: async () => 'Gadget', unbind: vi.fn<() => Promise<void>>(),
+        listBindings: vi.fn<() => Promise<unknown[]>>().mockResolvedValue([binding]),
+      } as unknown as RpcStub<GadgetClient>
+      const ov = { listHooks: async () => [], getGatekeeperById } as unknown as RpcStub<Overseer>
+      return { stub, ov, removeFn, dispose, getGatekeeperById }
+    }
+
+    it('destroys the connection itself, not only the binding, and disposes the stub', async () => {
+      const t = setup(async () => {})
+      await render({ gadget: t.stub, overseer: t.ov })
+      await clickButton('Delete connection')
+      await clickButton('Remove connection')
+
+      expect(t.getGatekeeperById).toHaveBeenCalledExactlyOnceWith(42)
+      expect(t.removeFn).toHaveBeenCalledTimes(1)
+      expect(t.dispose).toHaveBeenCalledTimes(1)
+      expect((t.stub as unknown as { unbind: unknown }).unbind).not.toHaveBeenCalled()
+      expect(t.stub.listBindings).toHaveBeenCalledTimes(2)
+    })
+
+    it('reports a failed removal and still disposes', async () => {
+      const t = setup(async () => { throw new Error('boom') })
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      await render({ gadget: t.stub, overseer: t.ov })
+      await clickButton('Delete connection')
+      await clickButton('Remove connection')
+
+      expect(toastAdd).toHaveBeenCalledWith({ title: 'Failed to remove connection', variant: 'error' })
+      expect(t.dispose).toHaveBeenCalledTimes(1)
+    })
   })
 })

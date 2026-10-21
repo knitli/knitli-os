@@ -51,7 +51,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   const [editingBinding, setEditingBinding] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [isNewConnectionModalVisible, setIsNewConnectionModalVisible] = useState(false)
-  const [deleteTarget, setDeleteTarget] = useState<{ name: string; resourceTitle: string } | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<{ name: string; resourceTitle: string; target: number } | null>(null)
   const [deleteHookTarget, setDeleteHookTarget] = useState<{ id: number; title: string } | null>(null)
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GadgetBindingInfo | null>(null)
@@ -214,6 +214,29 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
     }
   }
 
+  // Fork (knitli/knitli-site#607): destroy the connection itself, not just this gadget's binding,
+  // so an orphaned or disconnected one (e.g. a stale Execution entry) can be cleared. Backend
+  // GatekeeperClient.remove() clears every binding and the owner-only record, which is what
+  // restores shareability; a latched read stays latched there.
+  const handleRemoveConnectionConfirm = async () => {
+    if (!deleteTarget) return
+    try {
+      const connection = await overseer.getGatekeeperById(deleteTarget.target)
+      try {
+        await connection.remove()
+      } finally {
+        connection[Symbol.dispose]()
+      }
+      await loadGatekeepers()
+      onConnectionsChange?.()
+    } catch (err) {
+      console.error('Failed to remove connection:', err)
+      toasts.add({ title: 'Failed to remove connection', variant: 'error' })
+    } finally {
+      setDeleteTarget(null)
+    }
+  }
+
   return (
     <div className="h-full overflow-auto bg-kumo-base">
       <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col px-4 py-5 sm:px-6">
@@ -278,6 +301,14 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                         >
                           Delete
                         </WorkshopButton>
+                        <Tooltip content="Destroys the connection for every gadget in this workspace" asChild>
+                          <WorkshopButton
+                            tone="danger"
+                            onClick={handleRemoveConnectionConfirm}
+                          >
+                            Remove connection
+                          </WorkshopButton>
+                        </Tooltip>
                         <WorkshopButton
                           onClick={() => setDeleteTarget(null)}
                         >
@@ -357,7 +388,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                           <Tooltip content="Delete connection" asChild>
                             <WorkshopIconButton
                               danger
-                              onClick={() => setDeleteTarget({ name: gk.name, resourceTitle: gk.resourceTitle })}
+                              onClick={() => setDeleteTarget({ name: gk.name, resourceTitle: gk.resourceTitle, target: gk.target })}
                               aria-label="Delete connection"
                             >
                               <Trash size={14} />

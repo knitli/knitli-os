@@ -65,6 +65,10 @@
       "reason": "Fork-owned Web Push settings UI and subscription hook; no upstream counterpart."
     },
     {
+      "path": "packages/workshop-frontend/src/fakeAdminRouter.ts",
+      "reason": "Test-only router stand-in for the fork's AdminPage tests; upstream has none."
+    },
+    {
       "path": "packages/workshop-frontend/public/sw.js",
       "reason": "Fork-owned push-only service worker; upstream ships no public/sw.js."
     },

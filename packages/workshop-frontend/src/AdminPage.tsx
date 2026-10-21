@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback, type ChangeEvent } from 'react'
 import { RpcStub } from 'capnweb'
-import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
+import { useNavigate, useSearch } from '@tanstack/react-router'
+import { Switch, Textarea, Input, Button, Tabs, Loader, useKumoToastManager } from '@cloudflare/kumo'
 import { Hexagon, MagnifyingGlass, ShieldWarning, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
-import { AdminApi, AdminFormat, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, AuthenticatedApi, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR, PromptPreset, VoiceAdminConfig } from '@gadgets/workshop-shared/api'
+import { AdminApi, AdminFormat, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, AuthenticatedApi, DeploymentUpdateStatus, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR, PromptPreset, VoiceAdminConfig } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
 import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
@@ -14,6 +15,11 @@ import { AdminGatekeeperAppsPanel } from './features/admin/gatekeeper-apps/Admin
 import { AdminVoicePanel } from './features/admin/voice/AdminVoicePanel'
 import DeleteConfirmationDialog from './components/DeleteConfirmationDialog'
 import { AdminModelsPanel } from './features/ai-models/AdminModelsPanel'
+import { AdminUpdatesPanel } from './features/deployment-updates/AdminUpdatesPanel'
+import { latestReads } from './features/deployment-updates/latestReads'
+import { probeRouterTag } from './features/deployment-updates/probeRouterTag'
+import { isAdminTab, resolveAdminTab } from './adminTab'
+import { logRpcFailure } from './rpcErrors'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [
@@ -131,8 +137,25 @@ export default function AdminPage() {
   const admin = adminState?.authenticatedApi === authenticatedApi ? adminState : null
   currentAdminApi.current = admin?.api ?? null
 
-  const [activeTab, setActiveTab] = useState('general')
+  // The update status of a deployment the deploy flow installed, null for any other deployment.
+  // Loaded beside the settings but never holding them up, so it may still be pending.
+  const [updateStatus, setUpdateStatus] = useState<DeploymentUpdateStatus | null | 'pending'>('pending')
+  // Only the latest re-read applies, and a setting whose re-read a later one replaced is shown as
+  // saved only once that later one has applied.
+  const [reloadUpdateStatus] = useState(() => latestReads<DeploymentUpdateStatus | null>(setUpdateStatus))
+
+  // The tab lives in the URL so the notice can link to one; changing it replaces the history entry
+  // on the same route, which keeps this component and its drafts.
+  const navigate = useNavigate()
+  const activeTab = resolveAdminTab(useSearch({ from: '/admin' }).tab, {
+    updatesAvailable: updateStatus === 'pending' ? 'pending' : updateStatus !== null,
+  })
   const [openedConnectorManagement, setOpenedConnectorManagement] = useState(false)
+  const handleTabChange = (tab: string) => {
+    if (!isAdminTab(tab)) return
+    setOpenedConnectorManagement(tab === 'openapi' || (tab === 'gatekeepers' && openedConnectorManagement))
+    void navigate({ to: '/admin', search: { tab }, replace: true })
+  }
 
   // Promoted output formats, in menu order (see AdminFormatsPanel).
   const [formats, setFormats] = useState<AdminFormat[]>([])
@@ -204,6 +227,16 @@ export default function AdminPage() {
         }
         stub = api
         setAdmin({ authenticatedApi, api })
+        // A backend older than the update check rejects this as an unknown method mid-rollout; any
+        // failure means no Updates tab rather than a page that fails to load.
+        probeRouterTag().then(() => api.getUpdateStatus()).then(
+          (status) => { if (!cancelled) setUpdateStatus(status) },
+          (err) => {
+            if (cancelled) return
+            logRpcFailure('Failed to read the deployment update status:', err)
+            setUpdateStatus(null)
+          },
+        )
         const settings = await api.getSettings()
         if (cancelled) return
         applySettings(settings)
@@ -563,10 +596,7 @@ export default function AdminPage() {
       <Tabs
         variant="underline"
         value={activeTab}
-        onValueChange={(tab) => {
-          setActiveTab(tab)
-          setOpenedConnectorManagement(tab === 'openapi' || (tab === 'gatekeepers' && openedConnectorManagement))
-        }}
+        onValueChange={handleTabChange}
         tabs={[
           { value: 'general', label: 'General' },
           { value: 'gatekeepers', label: 'Gatekeepers' },
@@ -576,12 +606,33 @@ export default function AdminPage() {
           { value: 'models', label: 'Models' },
           { value: 'voice', label: 'Voice' },
           { value: 'access', label: 'Access' },
+          // Also listed while a requested Updates tab waits for the status, so it shows as selected.
+          ...(activeTab === 'updates' || (updateStatus !== null && updateStatus !== 'pending')
+            ? [{ value: 'updates', label: 'Updates' }]
+            : []),
         ]}
       />
 
       {activeTab === 'executors' && admin && <AdminAiExecutorsPanel admin={admin.api} />}
 
-      {openedConnectorManagement && admin && <div hidden={activeTab !== 'openapi'}><AdminGatekeeperAppsPanel admin={admin.api} vendors={resourceVendors} onResourcesChanged={refreshResourcesAfterFrameWrite} /></div>}
+      {/* Deploy-flow updates */}
+      {activeTab === 'updates' && (
+        updateStatus === 'pending' || updateStatus === null
+          ? (
+            <div className="flex justify-center py-16">
+              <Loader size="lg" />
+            </div>
+          )
+          : (
+            <AdminUpdatesPanel
+              admin={admin.api}
+              status={updateStatus}
+              onChanged={() => reloadUpdateStatus(() => admin.api.getUpdateStatus())}
+            />
+          )
+      )}
+
+      {(openedConnectorManagement || activeTab === 'openapi') && admin && <div hidden={activeTab !== 'openapi'}><AdminGatekeeperAppsPanel admin={admin.api} vendors={resourceVendors} onResourcesChanged={refreshResourcesAfterFrameWrite} /></div>}
 
       {/* Standard output formats */}
       {activeTab === 'formats' && admin && (

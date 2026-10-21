@@ -772,7 +772,7 @@ describe('GatekeeperModal ambient resource connections', () => {
       await Promise.resolve()
     })
     expect(configuratorSessions).toHaveLength(3)
-    expect(configuratorSessions[2]).toEqual({ initialResourceUrl: undefined, resourceUrlPattern: BARE_MAIL })
+    expect(configuratorSessions[2]).toEqual({ initialResourceUrl: undefined, resourceUrlPattern: undefined })
     expect(configuratorCleanups).toHaveBeenCalledTimes(2)
   })
 
@@ -793,7 +793,7 @@ describe('GatekeeperModal ambient resource connections', () => {
       await Promise.resolve()
     })
     expect(matching.container.textContent).toContain('Mail')
-    expect(configuratorSessions).toEqual([{ initialResourceUrl: undefined, resourceUrlPattern: BARE_MAIL }])
+    expect(configuratorSessions).toEqual([{ initialResourceUrl: undefined, resourceUrlPattern: undefined }])
   })
 
   it('H-SUBSET-006 forwards the authoritative raw URL through the one-shot configurator to creation', async () => {

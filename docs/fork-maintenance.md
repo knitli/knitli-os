@@ -259,7 +259,8 @@ Intentional, reviewed differences from upstream. Keep this current.
   Payloads are fixed templates plus the chat title bounded to 96 characters, encrypted to the
   device.
 - **UI:** `packages/workshop-frontend/src/features/notifications/webPush/` (settings switch,
-  subscription hook and sync), `public/sw.js` and `public/manifest.webmanifest`, all Tier 1. The
+  subscription hook and sync) and `public/sw.js`, both Tier 1. The web app manifest is upstream's
+  (`public/manifest.webmanifest`, adopted in the 2026-10-21 sync; our own is retired). The
   worker has no `fetch` handler, so the WebSocket and sign-in redirects are never intercepted. It
   does two jobs that must survive a sync, as the worker holds no credentials and outlives the page:
   its `pushsubscriptionchange` handler wakes open pages with a `push-subscription-changed` message,
@@ -273,11 +274,10 @@ Intentional, reviewed differences from upstream. Keep this current.
   worker survives that, and with no controlling worker (Safari's declarative push) logout waits,
   bounded, for the page's own cleanup. One user per browser is assumed: the auth token is shared by
   every tab through `localStorage`, so tabs signed in as different users are unsupported and not
-  guarded against. Upstream seams: a manifest link in `index.html` (with
-  `crossorigin="use-credentials"` for Cloudflare Access), the Notifications section in
-  `SettingsPage.tsx`, and the logout wrapper and `<WebPushSync />` in `AuthContext.tsx`. Both public
-  files are served from the router's static assets at the origin root, which gives the worker scope
-  `/`; no router change.
+  guarded against. Upstream seams: the Notifications section in
+  `SettingsPage.tsx`, and the logout wrapper and `<WebPushSync />` in `AuthContext.tsx`. `sw.js` is
+  served from the router's static assets at the origin root, which gives the worker scope `/`; no
+  router change.
 - **Known limits:** a browser that refreshes its subscription while no Workshop tab is open is not
   re-registered until the app is next opened (the worker holds no credentials to call the
   authenticated API, and adding a worker-capable registration path would be new kernel surface);
@@ -662,6 +662,18 @@ authorizes a read after fetching it.
   sessions on revocation via `RpcStub.revocable()`"), which needs a patched workerd. If that lands on
   `foundation/main`, the gate, `runRevocationCleanup()` and this whole divergence entry should be
   able to go.
+- **Seams added by the 2026-10-21 sync (foundation `a679442`).** Each is a place where our code now
+  sits inside an upstream change; re-check them when upstream next touches the file.
+  - `overseer.ts` turn teardown: the approval-continuation resume is kept and everything else ends
+    through upstream's `#finishAgentTurn(chatId, {aiModel, initiator, initiatorUserId})`, so queued
+    steers (#809) still reach the next turn. `sendChatMessage` skips the steer path when
+    `hasSpeech` is set, so a speech message keeps its marker and prompts instead.
+  - `adminTab.ts`: `ADMIN_TABS` carries our `openapi`, `executors` and `voice` tabs beside
+    upstream's, because the tab now lives in the URL. `AdminPage.tsx` keeps `openedConnectorManagement`.
+  - `GatekeeperModal.tsx`: our always-on/ambient logic rides on upstream's card model
+    (`awaitingGrant`, `resources`); `initialResourceUrlPattern` still picks the pre-filled type.
+  - `gatekeeper-context/src/library-read.ts`: the private-collection attribution of the top-level
+    listing now reads `listPrivateLibrary()`, since upstream dropped the cached enabled set.
 
 ### Credential mutation transaction hook
 

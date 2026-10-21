@@ -83,6 +83,7 @@ const state = vi.hoisted(() => {
 vi.mock('./AuthContext', () => ({
   useAuthenticatedApi: () => ({ authenticatedApi: state.authenticatedApi, isAdmin: true }),
 }))
+vi.mock('@tanstack/react-router', async () => (await import('./fakeAdminRouter')).fakeAdminRouter)
 vi.mock('./useDocumentTitle', () => ({ useDocumentTitle: () => {} }))
 vi.mock('./components/SiteLogo', () => ({ default: () => null }))
 vi.mock('./components/format/AdminFormatsPanel', () => ({ default: () => null }))

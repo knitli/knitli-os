@@ -78,6 +78,7 @@ function baseHooks(overrides: Record<string, any> = {}): AgentHooks {
     consumeCapturedActions: () => undefined,
     consumeCapturedConnectionRequests: () => [],
     commitAgentStep: async () => false,
+    takeSteers: () => [],
     getChatModelData: () => undefined,
     getGadgetHead: () => undefined,
     emitChatStreamEvent: () => {},

@@ -5,6 +5,8 @@ The following files are commonly important to reference:
 * packages/workshop-shared/node_modules/capnweb/README.md: Explains how to use Cap'n Web RPC, which is used extensively for client-server communications.
 * packages/workshop-shared/src/api.ts: Defines the RPC API used between the frontend and backend.
 
+Fork of upstream: this repo is `knitli/knitli-os`, a fork of `cloudflare/cloudflare-os` (remote `foundation`; ours is `origin` — never push to `foundation`). `docs/fork-maintenance.md` is the source of truth for keeping the fork cheap to sync; read it before editing any file upstream also has. In short: new work goes in fork-owned Tier-1 paths declared in `scripts/fork/fork-boundary.json`; an upstream file gets at most a one-line seam into a fork-owned module; never reformat an upstream-owned file; fork tests live in fork-owned files; every intentional divergence is recorded in the inventory in `docs/fork-maintenance.md`. Sync with `pnpm fork:sync --dry-run`, `pnpm fork:sync`, `pnpm fork:sync --verify`; check divergence any time with `pnpm fork:audit`. Run checks on Node 24 (for example `mise x node@24 -- pnpm test`); newer Node breaks unrelated frontend tests.
+
 The project structure is:
 
 * packages/workshop-frontend: The Gadgets Workshop UI.

@@ -1,0 +1,12 @@
+[settings]
+experimental = true
+
+[tools]
+node = "24"
+pnpm = "latest"
+"npm:@codacy/codacy-cloud-cli" = "latest"
+viteplus = "latest"
+python = "3.13"
+
+[deps]
+pnpm = { auto = true, run = "pnpm install -y" }

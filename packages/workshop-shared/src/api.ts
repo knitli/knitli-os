@@ -1429,6 +1429,38 @@ export type PromptRef =
 /** Longest prompt-preset display name the admin API accepts. */
 export const MAX_PROMPT_PRESET_NAME_LENGTH = 80;
 
+/**
+ * The default of the deployment's check interval (see AdminApi.setUpdateCheckIntervalMinutes): how
+ * many minutes a successful update check is relied on before the deployment asks again.
+ */
+export const DEFAULT_UPDATE_CHECK_INTERVAL_MINUTES = 60;
+
+/** The largest check interval, in minutes, an admin may set: 30 days. */
+export const MAX_UPDATE_CHECK_INTERVAL_MINUTES = 43_200;
+
+/**
+ * The default of the deployment's minimum age (see AdminApi.setUpdateMinimumAgeHours): how many
+ * hours a newer release must have been available before admins are notified of it.
+ */
+export const DEFAULT_UPDATE_MINIMUM_AGE_HOURS = 24;
+
+/**
+ * The default of the deployment's notice snooze (see AdminApi.setUpdateNoticeSnoozeHours): how
+ * many hours a dismissed update notice stays hidden in the browser that dismissed it.
+ */
+export const DEFAULT_UPDATE_NOTICE_SNOOZE_HOURS = 24;
+
+/** The largest minimum age and notice snooze, in hours, an admin may set: 30 days. */
+export const MAX_UPDATE_HOURS = 720;
+
+/**
+ * The path a Workshop browser POSTs to, through the router, before it reads the update status, so
+ * that the backend records the router's current version tag first. The Workshop's other calls
+ * travel over one WebSocket, which carries the router's tag only when it opens. Answered with an
+ * empty 204.
+ */
+export const ROUTER_TAG_PROBE_PATH = "/api/router-tag";
+
 /** All admin-managed deployment settings, returned by AdminApi.getSettings() for the admin UI. */
 export type AdminSettingsView = {
   /** Whether new account signups are allowed. */
@@ -1654,6 +1686,76 @@ export const createAiExecutorAdminError = aiExecutorAdminErrors.create;
 
 /** Reads a stable AI executor administrator bridge code from an expected error. */
 export const getAiExecutorAdminErrorCode = aiExecutorAdminErrors.getCode;
+
+/**
+ * Whether a newer release is available for a deployment the deploy flow installed, returned by
+ * AdminApi.getUpdateStatus(). The check fields describe the last successful update check made for
+ * the release this backend runs: until one succeeds, `latestReleaseId`, `availableSince` and
+ * `checkedAt` are absent and `updateAvailable` is false.
+ */
+export type DeploymentUpdateStatus = {
+  /** The release this backend runs. */
+  currentReleaseId: string;
+  /** The newest release the last successful check for `currentReleaseId` reported. */
+  latestReleaseId?: string;
+  /** Whether that check said a release newer than `currentReleaseId` exists. */
+  updateAvailable: boolean;
+  /**
+   * When the first release newer than `currentReleaseId` was published. Absent unless
+   * `updateAvailable`.
+   */
+  availableSince?: Date;
+  /**
+   * Whether the home page should show admins the update notice now, before the browser applies
+   * its own dismissal (see `noticeSnoozeHours`). True exactly when `checksEnabled`, the check says
+   * `updateAvailable`, the deployment is not `modified`, and `availableSince` is at least
+   * `minimumAgeHours` ago.
+   */
+  notify: boolean;
+  /**
+   * Whether the deployment checks for updates by itself (see AdminApi.setUpdateChecksEnabled).
+   * When false, `notify` is false and only AdminApi.checkForUpdates() asks for the newest release.
+   */
+  checksEnabled: boolean;
+  /**
+   * The deployment's check interval: how many minutes a successful check is relied on before the
+   * deployment asks again (see AdminApi.setUpdateCheckIntervalMinutes).
+   */
+  checkIntervalMinutes: number;
+  /**
+   * The deployment's minimum age: how many hours a newer release must have been available before
+   * `notify` is true (see AdminApi.setUpdateMinimumAgeHours).
+   */
+  minimumAgeHours: number;
+  /**
+   * The deployment's notice snooze: how many hours a browser hides the notice after an admin
+   * dismisses it there (see AdminApi.setUpdateNoticeSnoozeHours).
+   */
+  noticeSnoozeHours: number;
+  /**
+   * Whether this deployment's running code differs from what the deploy flow installed: true
+   * exactly when `modifiedWorkers` is non-empty. The deploy flow refuses to upgrade a modified
+   * deployment.
+   */
+  modified: boolean;
+  /**
+   * The Workers whose running version is neither this installation's current one nor another
+   * release of it: they have no version tag, or one the deploy flow did not write for this
+   * installation. Each is "backend", "router", or a gatekeeper's install slug. A Worker that did
+   * not report its version is in neither this list nor `unfinishedWorkers`.
+   */
+  modifiedWorkers: string[];
+  /**
+   * The Workers still running another release of this installation: an update that did not
+   * finish, which the deploy flow can finish once no Worker is modified. Named as in
+   * `modifiedWorkers`. Unlike those, they do not affect `notify`.
+   */
+  unfinishedWorkers: string[];
+  /** The opaque link that opens the deploy flow for this installation. */
+  updateUrl: string;
+  /** When the last successful check for `currentReleaseId` was made. */
+  checkedAt?: Date;
+};
 
 /**
  * Capability for managing deployment-wide admin settings, obtained via
@@ -1950,6 +2052,51 @@ export interface AdminApi {
    * eight requests, each of which may use the whole response cap.
    */
   testNewGatewayModel(model: GatewayModel): Promise<GatewayModelLevelTest[]>;
+
+  /**
+   * Whether a newer release is available. Null unless the deploy flow installed this deployment.
+   * While automatic update checks are off (see setUpdateChecksEnabled) it asks no one and reports
+   * the last check made for the running release, if any.
+   */
+  getUpdateStatus(): Promise<DeploymentUpdateStatus | null>;
+
+  /**
+   * Ask now for the newest release, whether or not automatic update checks are on, and return
+   * the status that check produces. Null unless the deploy flow installed this deployment. Throws
+   * when the check fails.
+   */
+  checkForUpdates(): Promise<DeploymentUpdateStatus | null>;
+
+  /**
+   * Set whether the deployment checks for updates by itself. On by default. When off,
+   * getUpdateStatus() makes no outbound call and admins are never notified; checkForUpdates()
+   * still asks.
+   */
+  setUpdateChecksEnabled(enabled: boolean): Promise<void>;
+
+  /**
+   * Set how many minutes a successful update check is relied on before the deployment asks again,
+   * DEFAULT_UPDATE_CHECK_INTERVAL_MINUTES by default. A failed check is retried after the interval
+   * or 15 minutes, whichever is shorter. The deployment asks only while an admin is using it
+   * (getUpdateStatus() makes the check when one is due), never on a schedule of its own. Throws
+   * unless `minutes` is a whole number from 1 to MAX_UPDATE_CHECK_INTERVAL_MINUTES.
+   */
+  setUpdateCheckIntervalMinutes(minutes: number): Promise<void>;
+
+  /**
+   * Set how many hours a newer release must have been available before admins are notified of
+   * it, DEFAULT_UPDATE_MINIMUM_AGE_HOURS by default. It delays the notice only: an update always
+   * installs the newest release. 0 notifies as soon as a check reports an update. Throws unless
+   * `hours` is a whole number from 0 to MAX_UPDATE_HOURS.
+   */
+  setUpdateMinimumAgeHours(hours: number): Promise<void>;
+
+  /**
+   * Set how many hours a dismissed update notice stays hidden in the browser that dismissed it,
+   * DEFAULT_UPDATE_NOTICE_SNOOZE_HOURS by default. 0 means a closed notice comes back on the next
+   * visit to Home. Throws unless `hours` is a whole number from 0 to MAX_UPDATE_HOURS.
+   */
+  setUpdateNoticeSnoozeHours(hours: number): Promise<void>;
 }
 
 /** A partial edit to one promoted format. Absent fields are left alone. */
@@ -3443,6 +3590,10 @@ export interface Overseer extends RpcTarget {
   /**
    * Send a message to the chat from this client. Sending a message causes the LLM to start
    * running if it isn't already.
+   * While it runs, plain text with no capsules, attachments or formats steers it, on the running
+   * turn's model whatever `modelId` is, even null: it waits in `AiChatMetadata.queuedSteers` until
+   * the agent reads it. Anything else, or anything sent after `stopAgent()`, throws until the
+   * agent finishes.
    * If a slash command produces no message, only its visible invocation event is committed and the
    * agent does not run.
    * Slash-command requests cannot include capsules or attachments.
@@ -3450,7 +3601,7 @@ export interface Overseer extends RpcTarget {
    * `modelId` is one of the IDs in the result of `listModels()`, or null to inhibit AI response
    * (useful when using chat to talk between humans).
    * Returns the committed prompt message sequence, or undefined when a slash command produces
-   * no prompt. The receipt identifies this submission even when subscription events arrive
+   * no prompt or the message steers a running turn instead. The receipt identifies this submission even when subscription events arrive
    * before the RPC resolves; it does not indicate that the agent has finished.
    * `hasSpeech` marks a plain-text message as transcribed speech. Slash commands carry the same
    * marker on their request.
@@ -3631,6 +3782,9 @@ export interface Overseer extends RpcTarget {
    * reflecting this before `stop()` returns.
    *
    * If no LLM is running, `stop()` does nothing and returns immediately.
+   *
+   * Stopping drops the chat's queued steers (see `AiChatMetadata.queuedSteers`), whoever sent them.
+   * The client that stops is expected to put them in its draft, so its user can still send them.
    */
   stopAgent(chatId: number): Promise<void>;
 
@@ -3811,6 +3965,15 @@ export type AiChatMetadata = {
    * linger in stored metadata but are never delivered as truth.)
    */
   proposedChangeWorkpieces?: WorkpieceId[];
+
+  /**
+   * Messages sent while the agent works that it has not read yet, oldest first (see
+   * `Overseer.sendChatMessage`). Each then appears in the chat as a message marked `steered`,
+   * unless a turn ends without reading it and without failing or waiting on the user's decision:
+   * it then prompts the next turn as an ordinary message. Stopping the agent drops them all (see
+   * `Overseer.stopAgent`). Absent when none.
+   */
+  queuedSteers?: {text: string, author: AiChatAuthorInfo}[];
 
   /** If this was started from an agent spawner, the spawner's display name. */
   spawnerName?: string;
@@ -4237,6 +4400,13 @@ export type AiChatMessageBody = {
    * Clients use this to group the two records for display.
    */
   generatedBySlashCommandSequence?: number;
+
+  /**
+   * Sent while the agent was working, so it steers that turn rather than prompting one. The agent
+   * reads it before its next model request, or, if the turn ended before it could and started no
+   * other (it failed, or stopped to wait on the user's decision), when the agent next runs.
+   */
+  steered?: true;
 } | {
   /**
    * A slash command exactly as requested by the client, retained for display and never included in

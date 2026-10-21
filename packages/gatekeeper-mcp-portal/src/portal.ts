@@ -12,6 +12,7 @@ import { accessEmailReader } from "@gadgets/observability/fork/connect-initiator
 import {
   matchesResourceUrlPattern,
   stripTrailingSlashes,
+  workerVersionTag,
   type AvatarImage,
   type Gatekeeper,
   type GatekeeperConnectCallback,
@@ -288,6 +289,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
         "Use the MCP servers this organization has approved, through its MCP server portal. Reads " +
         "happen straight away. Anything that writes waits for your approval.",
     };
+  }
+
+  async versionTag(): Promise<string | undefined> {
+    return workerVersionTag(this.env);
   }
 
   async connectAccount(

@@ -13,6 +13,7 @@ import { readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
 import { accessEmailReader } from "@gadgets/observability/fork/connect-initiator";
 import {
   stripTrailingSlashes,
+  workerVersionTag,
   type AvatarImage,
   type Gatekeeper,
   type GatekeeperConnectCallback,
@@ -190,6 +191,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
         "Connect a Model Context Protocol server and use its tools from a Gadget. Reads happen " +
         "straight away. Anything that writes waits for your approval.",
     };
+  }
+
+  async versionTag(): Promise<string | undefined> {
+    return workerVersionTag(this.env);
   }
 
   async connectAccount(

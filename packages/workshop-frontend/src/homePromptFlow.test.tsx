@@ -62,6 +62,7 @@ vi.mock("./features/chat/voice/useVoiceChat", () => ({
 
 vi.mock("./components/MeshBackground", () => ({ default: () => null }));
 vi.mock("./components/AppShell/HomeTaskSuggestions", () => ({ default: () => null }));
+vi.mock("./features/deployment-updates/UpdateAvailableNotice", () => ({ UpdateAvailableNotice: () => null }));
 vi.mock("./useDocumentTitle", () => ({ useDocumentTitle: () => {} }));
 
 import { HomePageContent } from "./routes/index";

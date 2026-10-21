@@ -69,10 +69,6 @@
       "reason": "Fork-owned push-only service worker; upstream ships no public/sw.js."
     },
     {
-      "path": "packages/workshop-frontend/public/manifest.webmanifest",
-      "reason": "Fork-owned web app manifest, needed for Home Screen installs that iOS requires for push."
-    },
-    {
       "path": "packages/workshop-backend/__tests__/knitli-idle-lease.test.ts",
       "reason": "Unit test for the fork-owned client-activity lease (src/fork/idle-lease.ts); exact path because this package's vitest include is non-recursive."
     },
@@ -543,379 +539,54 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "M1HhlnGWqcA",
-      "path": "pnpm-lock.yaml",
-      "reason": "Integrity hash of @modelcontextprotocol/client@2.0.0, kept because the fork's agents@0.24.0 dep pulls it transitively via @cloudflare/codemode; upstream never had agents."
+      "token": "buttonNamed",
+      "path": "packages/workshop-frontend/src/GatekeeperModal.fork.test.tsx",
+      "reason": "Local test helper defined in the file itself; the same-named upstream helper was in a configurator test (#775) and is unrelated."
     },
     {
-      "token": "PQp9ZTwKXNeO5wzbfKL7H3MYpCorM4oFBoQrdjnBgEoqG",
-      "path": "pnpm-lock.yaml",
-      "reason": "Integrity hash of @modelcontextprotocol/client@2.0.0, kept because the fork's agents@0.24.0 dep pulls it transitively via @cloudflare/codemode; upstream never had agents."
+      "token": "listName",
+      "path": "packages/gatekeeper-microsoft/src/sharepoint-list.ts",
+      "reason": "Method of the SharePoint list context in this file; the upstream use was an unrelated configurator helper removed in #775."
     },
     {
-      "token": "QXemssEuuOvLLmLO",
-      "path": "pnpm-lock.yaml",
-      "reason": "Integrity hash of @modelcontextprotocol/client@2.0.0, kept because the fork's agents@0.24.0 dep pulls it transitively via @cloudflare/codemode; upstream never had agents."
+      "token": "resolveResourceUrl",
+      "path": "packages/workshop-backend/__integration__/connection-request-resource-resolution.test.ts",
+      "reason": "Fork's optional GatekeeperVendor.resolveResourceUrl() hook (connection-request resolution); upstream #775 only removed a test-harness global of the same name."
     },
     {
-      "token": "RjhsvS1FKrDbKux",
-      "path": "pnpm-lock.yaml",
-      "reason": "Integrity hash of @modelcontextprotocol/client@2.0.0, kept because the fork's agents@0.24.0 dep pulls it transitively via @cloudflare/codemode; upstream never had agents."
-    },
-    {
-      "token": "kqM3IQHtISw",
-      "path": "pnpm-lock.yaml",
-      "reason": "Integrity hash of @modelcontextprotocol/client@2.0.0, kept because the fork's agents@0.24.0 dep pulls it transitively via @cloudflare/codemode; upstream never had agents."
-    },
-    {
-      "token": "pJCEwGG7Lfr",
-      "path": "pnpm-lock.yaml",
-      "reason": "Integrity hash of @modelcontextprotocol/client@2.0.0, kept because the fork's agents@0.24.0 dep pulls it transitively via @cloudflare/codemode; upstream never had agents."
-    },
-    {
-      "token": "ScriptKind",
-      "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
-      "reason": "Frozen design record referencing the same API; not code."
-    },
-    {
-      "token": "ScriptKind",
-      "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
-      "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
-    },
-    {
-      "token": "getPreEmitDiagnostics",
-      "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
-      "reason": "Frozen design record referencing the same API; not code."
-    },
-    {
-      "token": "getPreEmitDiagnostics",
-      "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
-      "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
-    },
-    {
-      "token": "CompilerOptions",
-      "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
-      "reason": "Frozen design record referencing the same API; not code."
-    },
-    {
-      "token": "CompilerOptions",
-      "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
-      "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
-    },
-    {
-      "token": "createCompilerHost",
-      "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
-      "reason": "Frozen design record referencing the same API; not code."
-    },
-    {
-      "token": "createCompilerHost",
-      "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
-      "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
-    },
-    {
-      "token": "flattenDiagnosticMessageText",
-      "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
-      "reason": "Frozen design record referencing the same API; not code."
-    },
-    {
-      "token": "flattenDiagnosticMessageText",
-      "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
-      "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
-    },
-    {
-      "token": "shouldCreateNewSourceFile",
-      "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
-      "reason": "Frozen design record referencing the same API; not code."
-    },
-    {
-      "token": "shouldCreateNewSourceFile",
-      "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
-      "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
-    },
-    {
-      "token": "createSourceFile",
-      "path": "docs/superpowers/plans/2026-09-10-mcp-shared-defs-aliases.md",
-      "reason": "Frozen design record referencing the same API; not code."
-    },
-    {
-      "token": "createSourceFile",
-      "path": "packages/mcp-shared/__tests__/fork/schema-to-ts-defs.test.ts",
-      "reason": "Fork test drives the TS compiler API through the typescript6 alias; upstream #691 removed its own uses, ours remain and typecheck."
-    },
-    {
-      "token": "pendingAction",
-      "path": "packages/integration-tests/__tests__/fork/observer-privacy.test.ts",
-      "reason": "Local in the fork's observer-privacy test; unrelated to upstream's removed uses."
-    },
-    {
-      "token": "_gadget",
-      "path": "packages/integration-tests/__tests__/fork/observer-privacy.test.ts",
-      "reason": "Intentionally-ignored local in the fork test."
-    },
-    {
-      "token": "_gadget",
-      "path": "packages/integration-tests/__tests__/workshop-blueprints.test.ts",
-      "reason": "Intentionally-ignored local in the test."
-    },
-    {
-      "token": "fromBase64",
+      "token": "resolveResourceUrl",
       "path": "packages/workshop-backend/src/user.ts",
-      "reason": "Standard Uint8Array.fromBase64 runtime API, not the upstream helper #659 removed."
+      "reason": "Fork's optional GatekeeperVendor.resolveResourceUrl() hook (connection-request resolution); upstream #775 only removed a test-harness global of the same name."
     },
     {
-      "token": "menuItem",
-      "path": "packages/workshop-frontend/src/features/chat/controls/ComposerEffortSelector.test.tsx",
-      "reason": "Local query helper in the fork's effort-selector test."
+      "token": "resolveResourceUrl",
+      "path": "packages/workshop-backend/vitest.integration.config.ts",
+      "reason": "Fork's optional GatekeeperVendor.resolveResourceUrl() hook (connection-request resolution); upstream #775 only removed a test-harness global of the same name."
     },
     {
-      "token": "menuItem",
-      "path": "packages/workshop-frontend/src/features/chat/controls/ComposerPromptSelector.test.tsx",
-      "reason": "Local query helper in the fork's prompt-selector test."
+      "token": "resolveResourceUrl",
+      "path": "packages/workshop-shared/src/gatekeeper.ts",
+      "reason": "Fork's optional GatekeeperVendor.resolveResourceUrl() hook (connection-request resolution); upstream #775 only removed a test-harness global of the same name."
     },
     {
-      "token": "readAllPullReviewComments",
-      "path": "packages/gatekeeper-github/src/github.ts",
-      "reason": "Upstream's own helper, still present in merged github.ts; #702 moved most uses to kit."
+      "token": "createRequire",
+      "path": "scripts/fork/capnweb-native-validation.test.ts",
+      "reason": "Node's module.createRequire used by this fork test; #775 only dropped an unrelated configurator-runtime use."
     },
     {
-      "token": "syncPullReviewComments",
-      "path": "packages/gatekeeper-github/src/github.ts",
-      "reason": "Upstream's own helper, still present in merged github.ts; #702 moved most uses to kit."
-    },
-    {
-      "token": "commentTargetFromResponse",
-      "path": "packages/gatekeeper-github/src/github.ts",
-      "reason": "Upstream's own helper, still present in merged github.ts; #702 moved most uses to kit."
-    },
-    {
-      "token": "recordOversized",
-      "path": "packages/workshop-backend/src/git-cache.ts",
-      "reason": "Upstream's own helper, still present in merged git-cache.ts; #656 moved most uses."
-    },
-    {
-      "token": "currentCompactions",
-      "path": "packages/workshop-frontend/src/ChatInterface.tsx",
-      "reason": "Local in merged ChatInterface; #683 dwindled upstream's uses."
-    },
-    {
-      "token": "isVisibleSavedChangesMessage",
-      "path": "packages/workshop-frontend/src/ChatInterface.tsx",
-      "reason": "Local predicate in merged ChatInterface; #659 dwindled upstream's uses."
-    },
-    {
-      "token": "ChatAttachmentUpload",
-      "path": "packages/workshop-backend/__tests__/knitli-workbook-agent.test.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "ChatAttachmentUpload",
-      "path": "packages/workshop-backend/__tests__/knitli-workbook-session.test.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "ChatAttachmentUpload",
-      "path": "packages/workshop-backend/__tests__/knitli-workbook-upload.test.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "ChatAttachmentUpload",
-      "path": "packages/workshop-backend/src/fork/workbook-upload.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "ChatAttachmentUpload",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "ChatAttachmentUpload",
-      "path": "packages/workshop-shared/src/api.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "MAX_STAGED_CHAT_ATTACHMENT_AGE_MS",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "_attachment",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Fork's own identifier; upstream removed an unrelated same-named declaration."
-    },
-    {
-      "token": "armHandoffSweep",
-      "path": "docs/alarm-audit.md",
-      "reason": "Fork's own identifier; upstream removed an unrelated same-named declaration."
-    },
-    {
-      "token": "deleteChatAttachment",
-      "path": "packages/integration-tests/__tests__/workshop-use-role.test.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "deleteChatAttachment",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "deleteChatAttachment",
-      "path": "packages/workshop-frontend/src/features/chat/composer/ChatComposer.test.tsx",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "deleteChatAttachment",
-      "path": "packages/workshop-frontend/src/features/chat/composer/attachments/useComposerAttachments.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "deleteChatAttachment",
-      "path": "packages/workshop-shared/src/api.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "maybeResumeAfterActionDecision",
-      "path": "docs/fork-maintenance.md",
-      "reason": "Fork approval-summary resume retained alongside upstream durable resume (#797): upstream resume does not inject the approval summary message."
-    },
-    {
-      "token": "maybeResumeAfterActionDecision",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Fork approval-summary resume retained alongside upstream durable resume (#797): upstream resume does not inject the approval summary message."
-    },
-    {
-      "token": "resumeSuspendedAgent",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Fork approval-summary resume retained alongside upstream durable resume (#797): upstream resume does not inject the approval summary message."
-    },
-    {
-      "token": "sweepStagedChatAttachments",
-      "path": "packages/workshop-backend/__tests__/knitli-workbook-upload.test.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "sweepStagedChatAttachments",
-      "path": "packages/workshop-backend/src/fork/workbook-upload.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "sweepStagedChatAttachments",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "uploadChatAttachment",
-      "path": "docs/fork-maintenance.md",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "uploadChatAttachment",
-      "path": "packages/integration-tests/__tests__/workshop-use-role.test.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "uploadChatAttachment",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "uploadChatAttachment",
-      "path": "packages/workshop-frontend/src/features/chat/composer/ChatComposer.test.tsx",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "uploadChatAttachment",
-      "path": "packages/workshop-frontend/src/features/chat/composer/attachments/useComposerAttachments.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "uploadChatAttachment",
-      "path": "packages/workshop-shared/src/api.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "stagedByUploadedAt",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "stagedByUploadedAt",
-      "path": "packages/workshop-backend/src/storage-schema/overseer-storage.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "synthetic_$",
+      "token": "createTextNode",
       "path": "packages/workshop-backend/src/agent.ts",
-      "reason": "Fork's own identifier; upstream removed an unrelated same-named declaration."
+      "reason": "DOM call inside an agent-prompt example string, not an import of the removed configurator code."
     },
     {
-      "token": "CHAT_CHANGE_MESSAGE_BUDGET",
-      "path": "packages/workshop-backend/src/agent.ts",
-      "reason": "Fork turn-guard change budget; upstream raised limits but the fork cap still bounds one tool message."
+      "token": "doesNotMatch",
+      "path": "scripts/build-gatekeeper-configurator.test.ts",
+      "reason": "node:assert method used by this fork test; #775 only dropped other uses of it."
     },
     {
-      "token": "GOOGLE_DOC",
-      "path": "packages/gatekeeper-google/src/google.ts",
-      "reason": "Fork's own identifier; upstream removed an unrelated same-named declaration."
-    },
-    {
-      "token": "TOTAL_TIMEOUT_SECONDS",
-      "path": "docs/fork-maintenance.md",
-      "reason": "Fork's own identifier; upstream removed an unrelated same-named declaration."
-    },
-    {
-      "token": "TOTAL_TIMEOUT_SECONDS",
-      "path": "scripts/vitest-task-vite-config.ts",
-      "reason": "Fork's own identifier; upstream removed an unrelated same-named declaration."
-    },
-    {
-      "token": "approvedId",
-      "path": "docs/fork-maintenance.md",
-      "reason": "Fork approval-summary resume retained alongside upstream durable resume (#797): upstream resume does not inject the approval summary message."
-    },
-    {
-      "token": "approvedId",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Fork approval-summary resume retained alongside upstream durable resume (#797): upstream resume does not inject the approval summary message."
-    },
-    {
-      "token": "ownChanges",
-      "path": "packages/workshop-backend/src/agent.ts",
-      "reason": "Fork's own identifier; upstream removed an unrelated same-named declaration."
-    },
-    {
-      "token": "updatePinned",
-      "path": "packages/workshop-backend/__tests__/loop-limit-restart.test.ts",
-      "reason": "Fork presence probe (whoami/updatePinned on client open); upstream moved pinning out of the overseer only."
-    },
-    {
-      "token": "updatePinned",
-      "path": "packages/workshop-backend/src/server.ts",
-      "reason": "Fork presence probe (whoami/updatePinned on client open); upstream moved pinning out of the overseer only."
-    },
-    {
-      "token": "updatePinned",
-      "path": "packages/workshop-backend/src/user.ts",
-      "reason": "Fork presence probe (whoami/updatePinned on client open); upstream moved pinning out of the overseer only."
-    },
-    {
-      "token": "WATCH_PATHS",
-      "path": "packages/integration-tests/vitest.config.ts",
-      "reason": "Fork's own identifier; upstream removed an unrelated same-named declaration."
-    },
-    {
-      "token": "createAccessTokenGetter",
-      "path": "packages/gatekeeper-slack/src/slack.ts",
-      "reason": "Fork's own identifier; upstream removed an unrelated same-named declaration."
-    },
-    {
-      "token": "isTextLikeAttachmentMimeType",
-      "path": "packages/workshop-backend/src/agent.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
-    },
-    {
-      "token": "isTextLikeAttachmentMimeType",
-      "path": "packages/workshop-shared/src/api.ts",
-      "reason": "Fork workbook staging retained alongside upstream workspace files (#770): spreadsheets are parsed into summaries, not stored raw."
+      "token": "doesNotMatch",
+      "path": "scripts/fork/connect-initiator-enforced.test.ts",
+      "reason": "node:assert method used by this fork test; #775 only dropped other uses of it."
     }
   ]
 }

@@ -133,8 +133,9 @@ export interface WranglerConfig {
   /** Send Email bindings (gatekeeper-email's outbound mail), keyed by `name`, not `binding`. */
   send_email?: SendEmailDecl[];
   /**
-   * Workers AI binding of a worker that declares its own (gatekeeper-websearch). The backend's
-   * `WORKERS_AI` is hardcoded in buildWorkerEntry instead, which refuses one in its config.
+   * Workers AI binding of a worker that declares its own (gatekeeper-websearch, gatekeeper-google).
+   * The backend's `WORKERS_AI` is hardcoded in buildWorkerEntry instead, which refuses one in its
+   * config.
    */
   ai?: BindingDecl;
   /** Artifacts binding — closed beta, cut from customer manifests. */
@@ -277,8 +278,8 @@ const HANDLED_CONFIG_KEYS = new Set([
   // passes through as a placeholder-free binding; what it can deliver depends on the account's
   // Email Routing / Email Service setup, which the gatekeeper reports as a failed action.
   "send_email",
-  // Workers AI, for a gatekeeper that calls it itself (gatekeeper-websearch). Placeholder-free,
-  // like browser.
+  // Workers AI, for a gatekeeper that calls it itself (gatekeeper-websearch's searches,
+  // gatekeeper-google's Drive PDF reading). Placeholder-free, like browser.
   "ai",
   // gatekeeper-context's Artifacts binding is closed-beta and cannot be provisioned in arbitrary
   // user accounts; it is dropped from customer manifests (the gatekeeper degrades gracefully).
@@ -539,8 +540,8 @@ export function buildWorkerEntry(
   let gatekeeperBindingExpansion: WorkerEntry["gatekeeperBindingExpansion"];
   if (kind === "backend") {
     // Deliberate contract: the manifest carries only $PUBLIC_BASE_URL. The backend's other
-    // instance-state vars (ADMINS, DEPLOY_URL, CF_ACCESS_*, CF_AI_GATEWAY*) are injected by
-    // the deploy service's backendExtraVars at PUT time, never manifest-templated.
+    // instance-state vars (ADMINS, CLOUDFLARE_OS_DEPLOYMENT, CF_ACCESS_*, CF_AI_GATEWAY*) are
+    // injected by the deploy service's backendExtraVars at PUT time, never manifest-templated.
     vars.PUBLIC_BASE_URL = "$PUBLIC_BASE_URL";
     if (config.ai) {
       throw new Error(`${pkgName} declares an ai binding, but the backend's WORKERS_AI is ` +

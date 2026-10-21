@@ -2,6 +2,7 @@
 // update the domain registry; grant changes update the grantee's library.
 
 import { DurableObject } from "cloudflare:workers";
+import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import {
   ContextCollectionContent, ContextCollectionMember, ContextCollectionMetadata,
@@ -585,6 +586,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
 
   /** Resumes credential cleanup and memberless deletion, including interrupted grant changes. */
   async alarm(): Promise<void> {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "context.collection")) return;
     await this.#serializeAccessChange(async () => {
       if (this.storage.deletionPending.get()) await this.#deleteSelf();
       else {

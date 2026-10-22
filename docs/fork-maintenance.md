@@ -1150,3 +1150,10 @@ ids are facet-local, not Activity ids.
 - **Divergences from the source fork:** durable rolling-hour cap of 100 recipients that also binds auto-approved sends (checked at submit, charged at apply); stricter address, Message-ID, MIME type, filename and `fromName` validation; messages whose approval view would truncate are refused.
 - **Fail closed:** sending needs `EMAIL_DOMAIN` and `EMAIL_SEND_PREFIX` (administrator-set worker vars; the manifest has no input for a non-installable gatekeeper) so users cannot claim `admin@` and send as it.
 - **At sync:** Tier 2 seams in `email.ts`/`types.d.ts`; if upstream adds sending, drop this entry and the port.
+
+### Workshop route table
+
+- **Where:** `packages/workshop-backend/src/fork/workshop-routes.ts` (Tier 1), its snapshot `packages/workshop-backend/workshop-routes.json`, and `__tests__/knitli-workshop-routes.test.ts`. No upstream file is edited.
+- **What:** the routes the Worker serves, as data (`name`, `method`, `path`). knitli-site's WAF route check reads `workshop-routes.json` instead of regex-scanning `server.ts`. `server.ts` does not use the table.
+- **Test:** every row has a probe that only its handler answers, run through the real `fetch`; every route literal `server.ts` tests `url.pathname` against (constants resolved) has a row; an unknown path is the router's 404.
+- **At sync:** nothing to merge. A route upstream adds to `server.ts` fails the test until it gets a row (and a probe).

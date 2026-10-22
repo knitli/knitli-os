@@ -1,0 +1,42 @@
+[
+  {
+    "name": "routerTagProbe",
+    "method": "POST",
+    "path": "/api/router-tag"
+  },
+  {
+    "name": "siteLogo",
+    "method": "GET",
+    "path": "/api/site-logo"
+  },
+  {
+    "name": "blueprintScreenshot",
+    "method": "GET",
+    "path": "/blueprint-screenshot/:blueprintId"
+  },
+  {
+    "name": "clientErrors",
+    "method": "POST",
+    "path": "/api/client-errors"
+  },
+  {
+    "name": "mcp",
+    "method": "POST",
+    "path": "/api/mcp/:gadgetId/:gatekeeperId"
+  },
+  {
+    "name": "voice",
+    "method": "GET",
+    "path": "/api/voice/:sessionId"
+  },
+  {
+    "name": "deviceSessionCallback",
+    "method": "POST",
+    "path": "/api/device-session/callback"
+  },
+  {
+    "name": "rpc",
+    "method": "POST",
+    "path": "/api"
+  }
+]

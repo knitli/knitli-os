@@ -104,10 +104,14 @@ describe("workshop route table against server.ts", () => {
     expect(uncovered).toEqual([]);
   });
 
-  it("does not route on url.pathname in a form the scan cannot read", () => {
-    const uses = source.match(/url\.pathname/g)!.length;
-    const read = literals.length + source.match(/url\.pathname\.slice\(/g)!.length;
-    expect(uses).toBe(read);
+  it("reads every use of pathname in server.ts, or names the line it cannot read", () => {
+    // `const { pathname } = url`, `u.pathname`, `url["pathname"]` and the like would route past
+    // the scan above, so any pathname token it did not read on its own line fails.
+    const read = /url\.pathname(?:\.startsWith\(\s*|\s*===\s*)(?:"[^"]*"|[A-Z_]+)|url\.pathname\.slice\(/g;
+    const unread = source.split("\n").flatMap((text, i) =>
+        (text.match(/\bpathname\b/g)?.length ?? 0) === (text.match(read)?.length ?? 0)
+            ? [] : [`server.ts:${i + 1}: ${text.trim()}`]);
+    expect(unread).toEqual([]);
   });
 
   it("has a probe for every row", () => {
@@ -130,6 +134,16 @@ describe("workshop route table against server.ts", () => {
 
   it("declares the voice route as GET, the only verb a WebSocket upgrade has", () => {
     expect(declaredMethod("voice")).toBe("GET");
+  });
+
+  it("serves blueprint screenshots to any verb, so only the schema narrows the row to GET", async () => {
+    // server.ts is upstream's and never looks at the verb; the table row records what the WAF
+    // schema should allow. If this starts refusing other verbs, the row is no longer the only limit.
+    for (const verb of ["GET", "POST", "PUT", "DELETE"]) {
+      expect(await send(verb, "/blueprint-screenshot/probe"))
+          .toMatchObject({ status: 200, body: "png" });
+    }
+    expect(declaredMethod("blueprintScreenshot")).toBe("GET");
   });
 
   it("answers a bad voice session id with the handler's own 404", async () => {

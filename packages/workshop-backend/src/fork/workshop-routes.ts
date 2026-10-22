@@ -18,6 +18,7 @@ export type WorkshopRoute = Readonly<{ name: string; method: string; path: strin
 export const WORKSHOP_ROUTES = [
   { name: "routerTagProbe", method: "POST", path: ROUTER_TAG_PROBE_PATH },
   { name: "siteLogo", method: "GET", path: SITE_LOGO_PATH },
+  // GET is what the WAF schema should allow; the handler answers any verb, so only the schema narrows it.
   { name: "blueprintScreenshot", method: "GET", path: `${BLUEPRINT_SCREENSHOT_PATH_PREFIX}:blueprintId` },
   { name: "clientErrors", method: "POST", path: "/api/client-errors" },
   { name: "mcp", method: "POST", path: "/api/mcp/:gadgetId/:gatekeeperId" },

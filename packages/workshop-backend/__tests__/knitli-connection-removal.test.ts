@@ -1,6 +1,6 @@
 // Fork (knitli/knitli-site#607): GatekeeperClient.remove(), the Connections tab's Remove
 // connection, goes through fork/connection-removal.ts. Pins that it re-puts the metadata of a chat
-// whose pending binding it deleted. (Queued actions stay pending after removal, deliberately:
+// whose pending binding it deleted, and that it refuses an ambient connection. (Queued actions stay pending after removal, deliberately:
 // integration-tests' workshop-connections.test.ts pins that upstream behaviour.)
 
 import { describe, expect, it, vi } from "vitest";
@@ -53,6 +53,18 @@ async function withRemoveClient(
 }
 
 describe("removing a connection from a workspace", () => {
+  it("refuses to remove an always-on (ambient) connection, which open() would re-provision", async () => {
+    await withRemoveClient("ambient", async impl => {
+      impl.storage.gatekeepers.put({
+        id: GATEKEEPER, class: {} as any, resourceTitle: "Scheduled Tasks",
+        creationSpec: { type: "ambient", vendorId: "scheduler", accountId: 7 },
+      });
+    }, async (remove, impl) => {
+      await expect(remove()).rejects.toThrow("Always-on connections cannot be removed from a workspace.");
+      expect(impl.storage.gatekeepers.get(GATEKEEPER)).toBeDefined();
+    });
+  });
+
   it("removes the connection and re-puts the metadata of the chat whose pending binding it deleted", async () => {
     await withRemoveClient("chat-meta", async impl => {
       impl.storage.gadgets.put({

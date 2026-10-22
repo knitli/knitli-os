@@ -94,7 +94,7 @@ export function RemoveConnectionRow({ overseer, target, reload, onChange, onDone
       <div className="basis-full">
         <Text as="p" variant="secondary">
           Remove connection destroys the connection for every gadget in this workspace and permanently
-          deletes its hooks, including hooks that wake other gadgets.
+          deletes its hooks, including hooks that wake other gadgets. Always-on connections, such as Context and Scheduled Tasks, cannot be removed.
         </Text>
       </div>
     </fieldset>

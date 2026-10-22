@@ -1003,6 +1003,12 @@ ids are facet-local, not Activity ids.
   **Known gap, upstream's:** rejecting such an action fails the same way (`getGatekeeperFacet`
   restores a facet that is gone), so it stays in Activity and an agent suspended on it is not
   resumed. Closing it means letting `rejectAction` settle an action whose connection is gone.
+- **Ambient connections are refused.** `removeConnection()` rejects a connection whose creation spec
+  is `ambient` ("Always-on connections cannot be removed from a workspace."): `ensureAmbientCapsules()`
+  (`#reconcileAmbientCapsules`) re-adds any missing ambient record under a new id on every open, so
+  removal would only look like it worked. The UI names this in the confirmation text and shows the
+  server's message in the failure toast; `GadgetBindingInfo` carries no creation spec, so the button
+  is not hidden (that needs a shared API field).
 - **Effects the copy states:** `OverseerImpl.removeGatekeeper()` clears every gadget's bindings to
   the connection and deletes every hook bound through it, including hooks that wake other
   gadgets. It deletes the connection record, which restores shareability for an owner-only

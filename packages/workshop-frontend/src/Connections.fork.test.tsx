@@ -160,6 +160,7 @@ describe('Connections after a connection restarts the workspace', () => {
       await clickButton('Delete connection')
 
       expect(document.body.textContent).toContain('permanently deletes its hooks, including hooks that wake other gadgets')
+      expect(document.body.textContent).toContain('Always-on connections, such as Context and Scheduled Tasks, cannot be removed')
     })
 
     it('dismisses the confirmation when a refresh rebinds the name to another connection, and never removes the new one', async () => {

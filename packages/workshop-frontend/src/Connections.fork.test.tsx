@@ -144,7 +144,7 @@ describe('Connections after a connection restarts the workspace', () => {
       await clickButton('Delete connection')
       await clickButton('Remove connection')
 
-      expect(toastAdd).toHaveBeenCalledWith({ title: 'Failed to remove connection', variant: 'error' })
+      expect(toastAdd).toHaveBeenCalledWith({ title: 'Failed to remove connection from the workspace', variant: 'error' })
       expect(t.dispose).toHaveBeenCalledTimes(1)
     })
   })

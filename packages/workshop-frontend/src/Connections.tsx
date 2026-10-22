@@ -231,7 +231,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
       onConnectionsChange?.()
     } catch (err) {
       console.error('Failed to remove connection:', err)
-      toasts.add({ title: 'Failed to remove connection', variant: 'error' })
+      toasts.add({ title: 'Failed to remove connection from the workspace', variant: 'error' })
     } finally {
       setDeleteTarget(null)
     }
@@ -290,8 +290,8 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                           <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-danger">
                             Delete {gk.resourceTitle}?
                           </p>
-                          <p className="truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-                            The binding <span className="font-mono">{gk.name}</span> will be removed from this gadget.
+                          <p className="text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                            Delete removes the binding <span className="font-mono">{gk.name}</span> from this gadget only. Remove connection destroys the connection for every gadget in this workspace.
                           </p>
                         </div>
                         <WorkshopButton
@@ -301,14 +301,12 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                         >
                           Delete
                         </WorkshopButton>
-                        <Tooltip content="Destroys the connection for every gadget in this workspace" asChild>
-                          <WorkshopButton
-                            tone="danger"
-                            onClick={handleRemoveConnectionConfirm}
-                          >
-                            Remove connection
-                          </WorkshopButton>
-                        </Tooltip>
+                        <WorkshopButton
+                          tone="danger"
+                          onClick={handleRemoveConnectionConfirm}
+                        >
+                          Remove connection
+                        </WorkshopButton>
                         <WorkshopButton
                           onClick={() => setDeleteTarget(null)}
                         >

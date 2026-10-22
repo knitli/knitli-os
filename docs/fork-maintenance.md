@@ -975,7 +975,7 @@ ids are facet-local, not Activity ids.
 
 ### Remove connection from a workspace's connection list
 
-- **Where:** fork-owned `packages/workshop-frontend/src/RemoveConnection.tsx` (Tier 1), mounted from
+- **Where:** fork-owned `packages/workshop-frontend/src/features/connections/RemoveConnection.tsx` (Tier 1), mounted from
   upstream `Connections.tsx` in the delete confirmation: one hook call, one button, one note, and
   `disabled={removal.removing}` on upstream's Delete and Cancel buttons.
 - **Introduced:** knitli/knitli-site#607

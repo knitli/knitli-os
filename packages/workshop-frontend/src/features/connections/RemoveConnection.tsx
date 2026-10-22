@@ -2,10 +2,10 @@
 // for any connector. Connections.tsx only mounts these (one hook call, one button, one note, and
 // `disabled={removal.removing}` on its own Delete and Cancel); the policy lives here.
 import { useState } from 'react'
-import { useKumoToastManager } from '@cloudflare/kumo'
+import { Text, useKumoToastManager } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
-import { WorkshopButton } from './components/WorkshopControls'
+import { WorkshopButton } from '../../components/WorkshopControls'
 
 export function useRemoveConnection(
   overseer: RpcStub<Overseer>,
@@ -54,9 +54,9 @@ export function RemoveConnectionButton({ removal, target }: { removal: Removal; 
  */
 export function RemoveConnectionNote() {
   return (
-    <p className="text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+    <Text as="p" variant="secondary">
       Remove connection destroys the connection for every gadget in this workspace and permanently
       deletes its hooks, including hooks that wake other gadgets.
-    </p>
+    </Text>
   )
 }

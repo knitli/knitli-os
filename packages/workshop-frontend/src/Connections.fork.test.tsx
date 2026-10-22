@@ -68,6 +68,7 @@ describe('Connections after a connection restarts the workspace', () => {
     root = undefined
     modal.onCreated = undefined
     toastAdd.mockClear()
+    vi.restoreAllMocks()
   })
 
   async function render(props: Partial<ComponentProps<typeof Connections>> & { gadget: RpcStub<GadgetClient> }) {

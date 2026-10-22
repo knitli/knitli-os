@@ -22,7 +22,7 @@ import {
 } from './components/BlueprintBindingCard'
 import { reportIssue } from './errorReporting'
 import { bindCreatedConnection } from './connectionRestartRecovery'
-import { RemoveConnectionButton, RemoveConnectionNote, useRemoveConnection } from './RemoveConnection'
+import { RemoveConnectionButton, RemoveConnectionNote, useRemoveConnection } from './features/connections/RemoveConnection'
 import { isImeComposing } from './keyboardEvent'
 
 interface ConnectionsProps {

@@ -991,7 +991,9 @@ ids are facet-local, not Activity ids.
   Remove connection, which calls `GatekeeperClient.remove()` (pipelined from `getGatekeeperById`),
   so a connection that stays listed after its connector was disconnected can be destroyed. It
   works for any connector. The row remembers the target the confirmation opened for, acts only on
-  it, and dismisses itself if a refresh rebinds the name to another connection. All three buttons are disabled while the removal is in flight, and a
+  it, and dismisses itself if a refresh rebinds the name to another connection. The in-flight lock is shared per
+  target across rows, so a connection bound under several names cannot be removed twice, and a row
+  replaced mid-removal does not dismiss the newer confirmation. All three buttons are disabled while the removal is in flight, and a
   refusal's message is shown in the failure toast.
 - **Backend change to `remove()`:** `removeConnection()` re-puts the metadata of every chat that had
   a pending binding to the connection, as the provisional-workpiece reaper does, so the chat stops

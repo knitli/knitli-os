@@ -175,6 +175,25 @@ describe('Connections after a connection restarts the workspace', () => {
       expect(t.getGatekeeperById).not.toHaveBeenCalled()
     })
 
+    it('locks a connection that is bound under two names while it is being removed, and keeps the newer confirmation open', async () => {
+      let finish!: () => void
+      const t = setup(() => new Promise<void>(resolve => { finish = resolve }))
+      ;(t.stub.listBindings as unknown as ReturnType<typeof vi.fn>)
+        .mockResolvedValue([binding, { ...binding, name: 'EXEC2' }])
+      await render({ gadget: t.stub, overseer: t.ov })
+      await clickButton('Delete connection')
+      await clickButton('Remove connection')
+      await clickButton('Delete connection')
+
+      expect(button('Remove connection')?.matches(':disabled')).toBe(true)
+      await clickButton('Remove connection')
+      expect(t.removeFn).toHaveBeenCalledTimes(1)
+
+      await act(async () => finish())
+      expect(t.removeFn).toHaveBeenCalledTimes(1)
+      expect(button('Remove connection')).toBeDefined()
+    })
+
     it('disables Remove, Delete and Cancel until the removal settles', async () => {
       let finish!: () => void
       const t = setup(() => new Promise<void>(resolve => { finish = resolve }))

@@ -2,22 +2,44 @@
 // for any connector. Connections.tsx mounts one component, the delete confirmation's action row;
 // the policy lives here. A disabled fieldset disables upstream's own Delete and Cancel while a
 // removal is in flight, so none of them needs a prop.
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { Text, useKumoToastManager } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import { WorkshopButton } from '../../components/WorkshopControls'
 
+// Targets being removed, per overseer, shared by every row: the same connection can be bound under
+// several names, and another name's Delete can open a fresh row while a removal is in flight.
+const inFlight = new WeakMap<object, Set<number>>()
+const listeners = new Set<() => void>()
+const targetsOf = (overseer: object) => {
+  let targets = inFlight.get(overseer)
+  if (!targets) inFlight.set(overseer, targets = new Set())
+  return targets
+}
+const setInFlight = (overseer: object, target: number, on: boolean) => {
+  targetsOf(overseer)[on ? 'add' : 'delete'](target)
+  listeners.forEach((notify) => notify())
+}
+
 function useRemoveConnection(
   overseer: RpcStub<Overseer>,
+  target: number,
   onRemoved: () => Promise<void>,
   onSettled: () => void,
 ) {
   const toasts = useKumoToastManager()
-  const [removing, setRemoving] = useState(false)
+  const removing = useSyncExternalStore(
+    (notify) => { listeners.add(notify); return () => { listeners.delete(notify) } },
+    () => targetsOf(overseer).has(target),
+  )
+  // A row replaced by another name's confirmation must not dismiss that newer confirmation.
+  const mounted = useRef(true)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
 
-  const remove = async (target: number) => {
-    setRemoving(true)
+  const remove = async () => {
+    if (targetsOf(overseer).has(target)) return
+    setInFlight(overseer, target, true)
     try {
       // Pipelined: remove() rides on the lookup's promise, so there is no extra round trip.
       const connection = overseer.getGatekeeperById(target)
@@ -35,8 +57,8 @@ function useRemoveConnection(
         variant: 'error',
       })
     } finally {
-      setRemoving(false)
-      onSettled()
+      setInFlight(overseer, target, false)
+      if (mounted.current) onSettled()
     }
   }
 
@@ -62,11 +84,11 @@ export function RemoveConnectionRow({ overseer, target, reload, onChange, onDone
   // connection under it. Confirm and remove only the connection it was opened for.
   const [confirmed] = useState(target)
   useEffect(() => { if (target !== confirmed) onDone() }, [target, confirmed, onDone])
-  const removal = useRemoveConnection(overseer, async () => { await reload(); onChange?.() }, onDone)
+  const removal = useRemoveConnection(overseer, confirmed, async () => { await reload(); onChange?.() }, onDone)
   return (
     <fieldset disabled={removal.removing} className="m-0 flex min-w-0 flex-wrap items-center gap-3 border-0 p-0">
       {children}
-      <WorkshopButton tone="danger" onClick={() => removal.remove(confirmed)}>
+      <WorkshopButton tone="danger" onClick={removal.remove}>
         Remove connection
       </WorkshopButton>
       <div className="basis-full">

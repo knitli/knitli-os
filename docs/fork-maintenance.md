@@ -973,6 +973,55 @@ ids are facet-local, not Activity ids.
 - **At sync:** Tier 2. If upstream reshapes the modal's always-on branch or the accept flow, keep
   the request case offering the ambient gatekeeper rather than a dead end.
 
+### Remove connection from a workspace's connection list
+
+- **Where:** fork-owned `packages/workshop-frontend/src/features/connections/RemoveConnection.tsx` and
+  `packages/workshop-backend/src/fork/connection-removal.ts` (Tier 1). Upstream edits:
+  `Connections.tsx` imports `RemoveConnectionRow` and uses it in place of the `<div>` that wraps the
+  delete confirmation's row (the open and close tags, three lines in all); `GatekeeperClient.remove()`
+  in `overseer.ts` calls `removeConnection()` where it called `removeGatekeeper()`: a static import
+  plus that call, the same shape as the other fork seams in `overseer.ts` (for example
+  `capExecuteCodeOutput` from `fork/turn-guards`).
+- **Why three lines is the minimum:** the row has to wrap upstream's own Delete and Cancel so a
+  disabled fieldset can disable them while a removal runs, and replacing the wrapper tags is
+  fewer upstream lines than prop edits on each button. Moving the whole row into the fork file
+  would delete upstream lines instead, which conflicts on every sync.
+- **Introduced:** knitli/knitli-site#607
+- **What:** upstream's delete confirmation only unbinds the connection from this gadget. The fork adds
+  Remove connection, which calls `GatekeeperClient.remove()` (pipelined from `getGatekeeperById`),
+  so a connection that stays listed after its connector was disconnected can be destroyed. It
+  works for any connector. The row remembers the target the confirmation opened for, acts only on
+  it, and dismisses itself if a refresh rebinds the name to another connection. The in-flight lock is shared per
+  target across rows, so a connection bound under several names cannot be removed twice, and a row
+  replaced mid-removal does not dismiss the newer confirmation. All three buttons are disabled while the removal is in flight, and a
+  refusal's message is shown in the failure toast.
+- **Backend change to `remove()`:** `removeConnection()` re-puts the metadata of every chat that had
+  a pending binding to the connection, as the provisional-workpiece reaper does, so the chat stops
+  offering the deleted pending change. It adds no refusal: upstream deliberately leaves a removed
+  connection's queued actions pending and refuses their approval with "removed from the
+  workspace" (`workshop-connections.test.ts`, "removing a connection cuts off its pending action").
+  **Known gap, upstream's:** rejecting such an action fails the same way (`getGatekeeperFacet`
+  restores a facet that is gone), so it stays in Activity and an agent suspended on it is not
+  resumed. Closing it means letting `rejectAction` settle an action whose connection is gone.
+- **Ambient connections are refused.** `removeConnection()` rejects a connection whose creation spec
+  is `ambient` ("Always-on connections cannot be removed from a workspace."): `ensureAmbientCapsules()`
+  (`#reconcileAmbientCapsules`) re-adds any missing ambient record under a new id on every open, so
+  removal would only look like it worked. The UI names this in the confirmation text and shows the
+  server's message in the failure toast; `GadgetBindingInfo` carries no creation spec, so the button
+  is not hidden (that needs a shared API field).
+- **Effects the copy states:** `OverseerImpl.removeGatekeeper()` clears every gadget's bindings to
+  the connection and deletes every hook bound through it, including hooks that wake other
+  gadgets. It deletes the connection record, which restores shareability for an owner-only
+  connection nothing has read yet; it does not clear the sticky `prohibitWorkspaceSharing` flag
+  that a read sets, so a workspace stays latched after a read (#602 exe.2).
+- **Known limit:** the list shows only connections bound to this gadget (`listBindings`). A
+  connection with no binding, such as one orphaned by a lost follow-up bind (see "A new connection
+  survives the restart"), is not listed and cannot be removed here; that needs a host RPC to list
+  connections.
+- **Test:** `Connections.fork.test.tsx` (UI) and `workshop-backend/__tests__/knitli-connection-removal.test.ts`.
+- **At sync:** Tier 2 for the three `Connections.tsx` lines and the one `remove()` line. If upstream
+  adds its own remove control, drop both fork files and the edits.
+
 ### Opening a connection session activates a provisional workspace
 
 - **Where:** `GatekeeperClientImpl.openSession()` in `packages/workshop-backend/src/overseer.ts`

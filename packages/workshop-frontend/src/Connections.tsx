@@ -22,6 +22,7 @@ import {
 } from './components/BlueprintBindingCard'
 import { reportIssue } from './errorReporting'
 import { bindCreatedConnection } from './connectionRestartRecovery'
+import { RemoveConnectionRow } from './features/connections/RemoveConnection'
 import { isImeComposing } from './keyboardEvent'
 
 interface ConnectionsProps {
@@ -262,7 +263,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                     className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''} ${isDeleting ? 'bg-kumo-danger-tint/40' : ''}`}
                   >
                     {isDeleting ? (
-                      <div className="flex flex-wrap items-center gap-3">
+                      <RemoveConnectionRow overseer={overseer} target={gk.target} reload={loadGatekeepers} onChange={onConnectionsChange} onDone={() => setDeleteTarget(null)}>
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-danger">
                             Delete {gk.resourceTitle}?
@@ -283,7 +284,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                         >
                           Cancel
                         </WorkshopButton>
-                      </div>
+                      </RemoveConnectionRow>
                     ) : isEditing ? (
                       <div className="flex items-center gap-2">
                         <WorkshopInput

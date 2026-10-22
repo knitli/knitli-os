@@ -44,7 +44,7 @@ async function withRemoveClient(
     using notifyClosed = new NativeRpcStub<() => void>(() => {});
     let overseer: any = await instance.open(USER.id, "owner-profile", notifyClosed);
     try {
-      let client: any = await overseer.getGatekeeperById(GATEKEEPER);
+      using client: any = await overseer.getGatekeeperById(GATEKEEPER);
       await fn(() => client.remove(), impl);
     } finally {
       overseer[Symbol.dispose]?.();

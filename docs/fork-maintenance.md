@@ -979,7 +979,9 @@ ids are facet-local, not Activity ids.
   `packages/workshop-backend/src/fork/connection-removal.ts` (Tier 1). Upstream edits:
   `Connections.tsx` imports `RemoveConnectionRow` and uses it in place of the `<div>` that wraps the
   delete confirmation's row (the open and close tags, three lines in all); `GatekeeperClient.remove()`
-  in `overseer.ts` calls `removeConnection()` where it called `removeGatekeeper()`.
+  in `overseer.ts` calls `removeConnection()` where it called `removeGatekeeper()`, one line, through
+  a dynamic `import()` so that no import line diverges (overseer.ts has no fork aggregator to route
+  through, and `remove()` is already async).
 - **Why three lines is the minimum:** the row has to wrap upstream's own Delete and Cancel so a
   disabled fieldset can disable them while a removal runs, and replacing the wrapper tags is
   fewer upstream lines than prop edits on each button. Moving the whole row into the fork file
@@ -988,7 +990,8 @@ ids are facet-local, not Activity ids.
 - **What:** upstream's delete confirmation only unbinds the connection from this gadget. The fork adds
   Remove connection, which calls `GatekeeperClient.remove()` (pipelined from `getGatekeeperById`),
   so a connection that stays listed after its connector was disconnected can be destroyed. It
-  works for any connector. All three buttons are disabled while the removal is in flight, and a
+  works for any connector. The row remembers the target the confirmation opened for, acts only on
+  it, and dismisses itself if a refresh rebinds the name to another connection. All three buttons are disabled while the removal is in flight, and a
   refusal's message is shown in the failure toast.
 - **Backend change to `remove()`:** `removeConnection()` re-puts the metadata of every chat that had
   a pending binding to the connection, as the provisional-workpiece reaper does, so the chat stops

@@ -162,6 +162,19 @@ describe('Connections after a connection restarts the workspace', () => {
       expect(document.body.textContent).toContain('permanently deletes its hooks, including hooks that wake other gadgets')
     })
 
+    it('dismisses the confirmation when a refresh rebinds the name to another connection, and never removes the new one', async () => {
+      const t = setup(async () => {})
+      const rerender = await render({ gadget: t.stub, overseer: t.ov, isVisible: false })
+      await clickButton('Delete connection')
+      expect(button('Remove connection')).toBeDefined()
+
+      ;(t.stub.listBindings as unknown as ReturnType<typeof vi.fn>).mockResolvedValue([{ ...binding, target: 43 }])
+      await rerender({ gadget: t.stub, isVisible: true })
+
+      expect(button('Remove connection')).toBeUndefined()
+      expect(t.getGatekeeperById).not.toHaveBeenCalled()
+    })
+
     it('disables Remove, Delete and Cancel until the removal settles', async () => {
       let finish!: () => void
       const t = setup(() => new Promise<void>(resolve => { finish = resolve }))

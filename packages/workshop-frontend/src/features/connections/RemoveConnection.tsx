@@ -2,7 +2,7 @@
 // for any connector. Connections.tsx mounts one component, the delete confirmation's action row;
 // the policy lives here. A disabled fieldset disables upstream's own Delete and Cancel while a
 // removal is in flight, so none of them needs a prop.
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Text, useKumoToastManager } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
@@ -58,11 +58,15 @@ export function RemoveConnectionRow({ overseer, target, reload, onChange, onDone
   onDone: () => void
   children: ReactNode
 }) {
+  // The confirmation is keyed by binding name upstream, so a refresh can rebind the name to another
+  // connection under it. Confirm and remove only the connection it was opened for.
+  const [confirmed] = useState(target)
+  useEffect(() => { if (target !== confirmed) onDone() }, [target, confirmed, onDone])
   const removal = useRemoveConnection(overseer, async () => { await reload(); onChange?.() }, onDone)
   return (
     <fieldset disabled={removal.removing} className="m-0 flex min-w-0 flex-wrap items-center gap-3 border-0 p-0">
       {children}
-      <WorkshopButton tone="danger" onClick={() => removal.remove(target)}>
+      <WorkshopButton tone="danger" onClick={() => removal.remove(confirmed)}>
         Remove connection
       </WorkshopButton>
       <div className="basis-full">

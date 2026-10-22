@@ -50,6 +50,9 @@ function gadget(bindWithSuggestedName: (target: number, chatId?: number) => Prom
 
 const created = () => ({ getId: async () => 9, [Symbol.dispose]: vi.fn<() => void>() }) as unknown as RpcStub<GatekeeperClient<any>>
 
+const button = (label: string) =>
+  [...document.querySelectorAll('button')].find(b => b.textContent === label || b.getAttribute('aria-label') === label)
+
 const clickButton = (label: string) => act(async () => {
     const el = [...document.querySelectorAll('button')].find(b =>
       b.textContent === label || b.getAttribute('aria-label') === label)
@@ -114,8 +117,10 @@ describe('Connections after a connection restarts the workspace', () => {
     function setup(remove: () => Promise<void>) {
       const dispose = vi.fn<() => void>()
       const removeFn = vi.fn<() => Promise<void>>(remove)
-      const getGatekeeperById = vi.fn<(id: number) => Promise<unknown>>()
-        .mockResolvedValue({ remove: removeFn, [Symbol.dispose]: dispose })
+      // A promise that never settles, with remove() on it: only a pipelined call reaches the
+      // backend. A caller that awaits the lookup first would hang here and never call remove().
+      const getGatekeeperById = vi.fn<(id: number) => unknown>()
+        .mockImplementation(() => Object.assign(new Promise(() => {}), { remove: removeFn, [Symbol.dispose]: dispose }))
       const stub = {
         getId: async () => 100, getTitle: async () => 'Gadget', unbind: vi.fn<() => Promise<void>>(),
         listBindings: vi.fn<() => Promise<unknown[]>>().mockResolvedValue([binding]),
@@ -124,7 +129,7 @@ describe('Connections after a connection restarts the workspace', () => {
       return { stub, ov, removeFn, dispose, getGatekeeperById }
     }
 
-    it('destroys the connection itself, not only the binding, and disposes the stub', async () => {
+    it('destroys the connection itself through a pipelined call, not only the binding, and disposes it', async () => {
       const t = setup(async () => {})
       await render({ gadget: t.stub, overseer: t.ov })
       await clickButton('Delete connection')
@@ -146,6 +151,29 @@ describe('Connections after a connection restarts the workspace', () => {
 
       expect(toastAdd).toHaveBeenCalledWith({ title: 'Failed to remove connection from the workspace', variant: 'error' })
       expect(t.dispose).toHaveBeenCalledTimes(1)
+    })
+
+    it('says Remove also deletes the connection\'s hooks, including other gadgets\'', async () => {
+      const t = setup(async () => {})
+      await render({ gadget: t.stub, overseer: t.ov })
+      await clickButton('Delete connection')
+
+      expect(document.body.textContent).toContain('permanently deletes its hooks, including hooks that wake other gadgets')
+    })
+
+    it('disables Remove, Delete and Cancel until the removal settles', async () => {
+      let finish!: () => void
+      const t = setup(() => new Promise<void>(resolve => { finish = resolve }))
+      await render({ gadget: t.stub, overseer: t.ov })
+      await clickButton('Delete connection')
+      await clickButton('Remove connection')
+
+      expect(['Remove connection', 'Delete', 'Cancel'].map(label => button(label)?.disabled)).toEqual([true, true, true])
+      await clickButton('Remove connection')
+      expect(t.removeFn).toHaveBeenCalledTimes(1)
+
+      await act(async () => finish())
+      expect(button('Remove connection')).toBeUndefined()
     })
   })
 })

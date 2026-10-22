@@ -377,12 +377,16 @@
       "reason": "Fork-owned recovery for a picker's follow-up on a connection whose creation restarted the workspace (knitli/knitli-site#640); Connections.tsx and useComposerResources.ts call it."
     },
     {
+      "path": "packages/workshop-frontend/src/RemoveConnection.tsx",
+      "reason": "Fork-owned Remove connection action for a workspace's connection list (knitli/knitli-site#607); Connections.tsx only mounts it."
+    },
+    {
       "path": "packages/workshop-frontend/src/connectionRestartRecovery.test.ts",
       "reason": "Regression test for the fork-owned connectionRestartRecovery.ts."
     },
     {
       "path": "packages/workshop-frontend/src/Connections.fork.test.tsx",
-      "reason": "Regression test for Connections' fork wiring of connectionRestartRecovery.ts, kept out of upstream test files."
+      "reason": "Regression test for Connections' fork wiring of connectionRestartRecovery.ts and RemoveConnection.tsx, kept out of upstream test files."
     },
     {
       "path": "packages/workshop-frontend/src/features/chat/composer/useComposerResources.fork.test.tsx",

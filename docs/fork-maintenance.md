@@ -973,6 +973,30 @@ ids are facet-local, not Activity ids.
 - **At sync:** Tier 2. If upstream reshapes the modal's always-on branch or the accept flow, keep
   the request case offering the ambient gatekeeper rather than a dead end.
 
+### Remove connection from a workspace's connection list
+
+- **Where:** fork-owned `packages/workshop-frontend/src/RemoveConnection.tsx` (Tier 1), mounted from
+  upstream `Connections.tsx` in the delete confirmation: one hook call, one button, one note, and
+  `disabled={removal.removing}` on upstream's Delete and Cancel buttons.
+- **Introduced:** knitli/knitli-site#607
+- **What:** upstream's delete confirmation only unbinds the connection from this gadget. The fork adds
+  Remove connection, which calls `GatekeeperClient.remove()` (pipelined from `getGatekeeperById`),
+  so a connection that stays listed after its connector was disconnected can be destroyed. It
+  works for any connector. Both buttons, and Cancel, are disabled while the removal is in flight.
+- **Effects the copy states:** `OverseerImpl.removeGatekeeper()` (`workshop-backend/src/overseer.ts`)
+  clears every gadget's bindings to the connection and deletes every hook bound through it,
+  including hooks that wake other gadgets. It deletes the connection record, which restores
+  shareability for an owner-only connection nothing has read yet; it does not clear the sticky
+  `prohibitWorkspaceSharing` flag that a read sets, so a workspace stays latched after a read
+  (#602 exe.2).
+- **Known limit:** the list shows only connections bound to this gadget (`listBindings`). A
+  connection with no binding, such as one orphaned by a lost follow-up bind (see "A new connection
+  survives the restart"), is not listed and cannot be removed here; that needs a host RPC to list
+  connections.
+- **Test:** `Connections.fork.test.tsx`.
+- **At sync:** Tier 2 for the six small `Connections.tsx` edits. If upstream adds its own remove
+  control, drop `RemoveConnection.tsx` and the edits.
+
 ### Opening a connection session activates a provisional workspace
 
 - **Where:** `GatekeeperClientImpl.openSession()` in `packages/workshop-backend/src/overseer.ts`

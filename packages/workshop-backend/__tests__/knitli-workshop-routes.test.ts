@@ -23,36 +23,44 @@ type Answer = { status: number; body: string; cacheControl?: string };
 // checks one, with its answer.
 const SAME_ORIGIN = { Origin: ORIGIN, "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Dest": "document" };
-const PROBES: Record<string, { path: string; headers?: HeadersInit; ok: Answer;
+const PROBES: Record<string, { params?: Record<string, string>; headers?: HeadersInit; ok: Answer;
     wrong?: { method: string } & Answer }> = {
-  routerTagProbe: { path: "/api/router-tag", ok: { status: 204, body: "", cacheControl: "no-store" },
+  routerTagProbe: { ok: { status: 204, body: "", cacheControl: "no-store" },
       wrong: { method: "GET", status: 404, body: "Not Found" } },
-  siteLogo: { path: "/api/site-logo",
+  siteLogo: {
       ok: { status: 404, body: "Not Found", cacheControl: "no-store" },
       wrong: { method: "POST", status: 405, body: "Method Not Allowed" } },
   // Seeded below: a missing screenshot is the same plain 404 as no route.
-  blueprintScreenshot: { path: "/blueprint-screenshot/probe", ok: { status: 200, body: "png",
+  blueprintScreenshot: { params: { blueprintId: "probe" }, ok: { status: 200, body: "png",
       cacheControl: "public, max-age=31536000, immutable" } },
-  clientErrors: { path: "/api/client-errors",
+  clientErrors: {
       ok: { status: 403, body: "Cross-origin API access not allowed." },
       wrong: { method: "GET", status: 405, body: "Method Not Allowed" } },
-  mcp: { path: `/api/mcp/${HEX64}/0`, ok: { status: 401, body: "Workshop bearer credential required." },
+  mcp: { params: { gadgetId: HEX64, gatekeeperId: "0" }, ok: { status: 401, body: "Workshop bearer credential required." },
       wrong: { method: "GET", status: 405, body: "Only POST is supported." } },
   // Reaches the session object, which wants a WebSocket upgrade and a live token. No code looks at
   // the verb: an upgrade is a GET by definition, so the test below pins the row to GET.
-  voice: { path: `/api/voice/${HEX64}`, headers: { Origin: ORIGIN, Upgrade: "websocket" },
+  voice: { params: { sessionId: HEX64 }, headers: { Origin: ORIGIN, Upgrade: "websocket" },
       ok: { status: 403, body: "Voice connection expired" } },
-  deviceSessionCallback: { path: "/api/device-session/callback", headers: SAME_ORIGIN,
+  deviceSessionCallback: { headers: SAME_ORIGIN,
       ok: { status: 400, body: "Invalid device session request.", cacheControl: "no-store" },
       wrong: { method: "GET", status: 403, body: "Invalid device session request.",
           cacheControl: "no-store" } },
-  rpc: { path: "/api", ok: { status: 200, body: "" },
+  rpc: { ok: { status: 200, body: "" },
       wrong: { method: "GET", status: 400,
           body: "This endpoint only accepts POST or WebSocket requests." } },
 };
 
 /** The method the table declares for a row. */
 const declaredMethod = (name: string) => WORKSHOP_ROUTES.find((r) => r.name === name)!.method;
+
+/** The path a probe hits: the row's own path, with each `:param` filled from the probe. */
+function probePath(name: string, params: Record<string, string> = {}): string {
+  const path = WORKSHOP_ROUTES.find((r) => r.name === name)!.path.replace(
+      /:(\w+)/g, (_, key: string) => params[key] ?? `:${key}`);
+  if (path.includes("/:")) throw new Error(`${name}: probe has no sample for a param in ${path}`);
+  return path;
+}
 
 async function send(method: string, path: string, headers?: HeadersInit): Promise<Answer> {
   const response = await server.fetch(
@@ -120,13 +128,13 @@ describe("workshop route table against server.ts", () => {
 
   it.each(Object.entries(PROBES))("serves %s through its handler, by the declared method",
       async (name, probe) => {
-    expect(await send(declaredMethod(name), probe.path, probe.headers)).toEqual(probe.ok);
+    expect(await send(declaredMethod(name), probePath(name, probe.params), probe.headers)).toEqual(probe.ok);
   });
 
   it.each(Object.entries(PROBES).filter(([, p]) => p.wrong))(
       "%s refuses a method its row does not declare", async (name, probe) => {
     expect(probe.wrong!.method).not.toBe(declaredMethod(name));
-    expect(await send(probe.wrong!.method, probe.path, probe.headers))
+    expect(await send(probe.wrong!.method, probePath(name, probe.params), probe.headers))
         .toEqual({ status: probe.wrong!.status, body: probe.wrong!.body,
             ...(probe.wrong!.cacheControl === undefined ? {}
                 : { cacheControl: probe.wrong!.cacheControl }) });
@@ -140,14 +148,14 @@ describe("workshop route table against server.ts", () => {
     // server.ts is upstream's and never looks at the verb; the table row records what the WAF
     // schema should allow. If this starts refusing other verbs, the row is no longer the only limit.
     for (const verb of ["GET", "POST", "PUT", "DELETE"]) {
-      expect(await send(verb, "/blueprint-screenshot/probe"))
+      expect(await send(verb, probePath("blueprintScreenshot", { blueprintId: "probe" })))
           .toMatchObject({ status: 200, body: "png" });
     }
     expect(declaredMethod("blueprintScreenshot")).toBe("GET");
   });
 
   it("answers a bad voice session id with the handler's own 404", async () => {
-    expect(await send("GET", "/api/voice/not-a-session", { Origin: ORIGIN }))
+    expect(await send("GET", probePath("voice", { sessionId: "not-a-session" }), { Origin: ORIGIN }))
         .toEqual({ status: 404, body: "Invalid voice session" });
   });
 

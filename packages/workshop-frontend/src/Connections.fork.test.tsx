@@ -160,7 +160,6 @@ describe('Connections after a connection restarts the workspace', () => {
       await clickButton('Delete connection')
 
       expect(document.body.textContent).toContain('permanently deletes its hooks, including hooks that wake other gadgets')
-      expect(document.body.textContent).toContain('refused while the connection has pending actions')
     })
 
     it('disables Remove, Delete and Cancel until the removal settles', async () => {

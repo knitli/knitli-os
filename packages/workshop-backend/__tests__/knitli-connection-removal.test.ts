@@ -1,8 +1,7 @@
 // Fork (knitli/knitli-site#607): GatekeeperClient.remove(), the Connections tab's Remove
-// connection, goes through fork/connection-removal.ts. Pins that it refuses while the
-// connection has queued actions (upstream's removeGatekeeper would strand them pending, with
-// no facet to approve or reject them) and that it re-puts the metadata of a chat whose pending
-// binding it deleted.
+// connection, goes through fork/connection-removal.ts. Pins that it re-puts the metadata of a chat
+// whose pending binding it deleted. (Queued actions stay pending after removal, deliberately:
+// integration-tests' workshop-connections.test.ts pins that upstream behaviour.)
 
 import { describe, expect, it, vi } from "vitest";
 import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
@@ -19,11 +18,6 @@ const USER = { type: "user", id: "alice", name: "Alice" } as const;
 const GATEKEEPER = 7;
 const GADGET = 8;
 const CHAT = 3;
-
-const ACTION = {
-  title: "Do a thing", description: "Does one thing.", descriptionIsComplete: true,
-  implementsRevert: false, actionKind: { tag: "test.write", label: "Write" },
-};
 
 async function withRemoveClient(
     name: string, setup: (impl: any) => Promise<void>,
@@ -59,17 +53,6 @@ async function withRemoveClient(
 }
 
 describe("removing a connection from a workspace", () => {
-  it("refuses while the connection has a queued action, and removes nothing", async () => {
-    await withRemoveClient("pending", async impl => {
-      await impl.submitAction(GATEKEEPER, 1, ACTION, { from: "user" });
-    }, async (remove, impl) => {
-      await expect(remove()).rejects.toThrow("Resolve this connection's pending actions in Activity first.");
-      expect(impl.storage.gatekeepers.get(GATEKEEPER)).toBeDefined();
-      expect([...impl.storage.actions.list()].filter((a: any) => a.type === "action")
-          .map((a: any) => a.state)).toStrictEqual(["pending"]);
-    });
-  });
-
   it("removes the connection and re-puts the metadata of the chat whose pending binding it deleted", async () => {
     await withRemoveClient("chat-meta", async impl => {
       impl.storage.gadgets.put({

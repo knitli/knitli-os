@@ -990,14 +990,14 @@ ids are facet-local, not Activity ids.
   so a connection that stays listed after its connector was disconnected can be destroyed. It
   works for any connector. All three buttons are disabled while the removal is in flight, and a
   refusal's message is shown in the failure toast.
-- **Backend changes to `remove()`:** `removeConnection()` refuses ("Resolve this connection's pending
-  actions in Activity first.") while the connection has a pending action, because
-  `removeGatekeeper()` leaves such an action `pending` with no facet to approve or reject it, and an
-  agent waiting on it is never resumed. Rejecting them instead was not reused: the only code that
-  does so is inline in `rejectAction`'s create branch. It also re-puts the metadata of every chat that
-  had a pending binding to the connection, as the provisional-workpiece reaper does, so the chat
-  stops offering the deleted pending change. The composer's cleanup of an unused new connection
-  also goes through `remove()` and so also meets the refusal.
+- **Backend change to `remove()`:** `removeConnection()` re-puts the metadata of every chat that had
+  a pending binding to the connection, as the provisional-workpiece reaper does, so the chat stops
+  offering the deleted pending change. It adds no refusal: upstream deliberately leaves a removed
+  connection's queued actions pending and refuses their approval with "removed from the
+  workspace" (`workshop-connections.test.ts`, "removing a connection cuts off its pending action").
+  **Known gap, upstream's:** rejecting such an action fails the same way (`getGatekeeperFacet`
+  restores a facet that is gone), so it stays in Activity and an agent suspended on it is not
+  resumed. Closing it means letting `rejectAction` settle an action whose connection is gone.
 - **Effects the copy states:** `OverseerImpl.removeGatekeeper()` clears every gadget's bindings to
   the connection and deletes every hook bound through it, including hooks that wake other
   gadgets. It deletes the connection record, which restores shareability for an owner-only

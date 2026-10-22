@@ -46,9 +46,9 @@ function useRemoveConnection(
 /**
  * The delete confirmation's action row: the caller's children (its text, Delete and Cancel) plus
  * Remove connection and a note on what it does. Backend: removeConnection()
- * (workshop-backend/src/fork/connection-removal.ts) refuses while the connection has pending
- * actions, then OverseerImpl.removeGatekeeper() clears every gadget's bindings to it and deletes
- * every hook bound through it, whichever gadget the hook wakes.
+ * (workshop-backend/src/fork/connection-removal.ts) calls OverseerImpl.removeGatekeeper(), which
+ * clears every gadget's bindings to it and deletes every hook bound through it, whichever gadget
+ * the hook wakes.
  */
 export function RemoveConnectionRow({ overseer, target, reload, onChange, onDone, children }: {
   overseer: RpcStub<Overseer>
@@ -68,8 +68,7 @@ export function RemoveConnectionRow({ overseer, target, reload, onChange, onDone
       <div className="basis-full">
         <Text as="p" variant="secondary">
           Remove connection destroys the connection for every gadget in this workspace and permanently
-          deletes its hooks, including hooks that wake other gadgets. It is refused while the connection
-          has pending actions: resolve them in Activity first.
+          deletes its hooks, including hooks that wake other gadgets.
         </Text>
       </div>
     </fieldset>

@@ -378,7 +378,7 @@
     },
     {
       "path": "packages/workshop-backend/src/fork/connection-removal.ts",
-      "reason": "Fork-owned removal of a connection from a workspace (knitli/knitli-site#607): refuses while actions are pending and re-puts affected chats' metadata; GatekeeperClient.remove() calls it."
+      "reason": "Fork-owned removal of a connection from a workspace (knitli/knitli-site#607): re-puts affected chats' metadata; GatekeeperClient.remove() calls it."
     },
     {
       "path": "packages/workshop-backend/__tests__/knitli-connection-removal.test.ts",

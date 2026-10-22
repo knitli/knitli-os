@@ -14306,7 +14306,7 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
 
   async remove(): Promise<void> {
     let record = this.impl.storage.gatekeepers.get(this.id);
-    removeConnection(this.impl, this.id);  // fork: refuses while actions are pending
+    removeConnection(this.impl, this.id);  // fork: republishes chats with a pending binding
     this.impl.recordGadgetAnalytics({
       event_name: "connection_removed",
       user_id: this.actorUserId,

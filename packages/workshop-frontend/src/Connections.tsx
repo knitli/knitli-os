@@ -22,7 +22,7 @@ import {
 } from './components/BlueprintBindingCard'
 import { reportIssue } from './errorReporting'
 import { bindCreatedConnection } from './connectionRestartRecovery'
-import { RemoveConnectionButton, RemoveConnectionNote, useRemoveConnection } from './features/connections/RemoveConnection'
+import { RemoveConnectionRow } from './features/connections/RemoveConnection'
 import { isImeComposing } from './keyboardEvent'
 
 interface ConnectionsProps {
@@ -215,8 +215,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
     }
   }
 
-  const removal = useRemoveConnection(overseer, async () => { await loadGatekeepers(); onConnectionsChange?.() }, () => setDeleteTarget(null))
-
   return (
     <div className="h-full overflow-auto bg-kumo-base">
       <div className="mx-auto flex min-h-full w-full max-w-5xl flex-col px-4 py-5 sm:px-6">
@@ -265,7 +263,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                     className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''} ${isDeleting ? 'bg-kumo-danger-tint/40' : ''}`}
                   >
                     {isDeleting ? (
-                      <div className="flex flex-wrap items-center gap-3">
+                      <RemoveConnectionRow overseer={overseer} target={gk.target} reload={loadGatekeepers} onChange={onConnectionsChange} onDone={() => setDeleteTarget(null)}>
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-danger">
                             Delete {gk.resourceTitle}?
@@ -273,24 +271,20 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                           <p className="truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
                             The binding <span className="font-mono">{gk.name}</span> will be removed from this gadget.
                           </p>
-                          <RemoveConnectionNote />
                         </div>
                         <WorkshopButton
                           tone="danger"
                           className="min-w-[68px]"
-                          disabled={removal.removing}
                           onClick={handleDeleteConfirm}
                         >
                           Delete
                         </WorkshopButton>
-                        <RemoveConnectionButton removal={removal} target={gk.target} />
                         <WorkshopButton
-                          disabled={removal.removing}
                           onClick={() => setDeleteTarget(null)}
                         >
                           Cancel
                         </WorkshopButton>
-                      </div>
+                      </RemoveConnectionRow>
                     ) : isEditing ? (
                       <div className="flex items-center gap-2">
                         <WorkshopInput

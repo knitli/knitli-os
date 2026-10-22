@@ -377,6 +377,14 @@
       "reason": "Fork-owned recovery for a picker's follow-up on a connection whose creation restarted the workspace (knitli/knitli-site#640); Connections.tsx and useComposerResources.ts call it."
     },
     {
+      "path": "packages/workshop-backend/src/fork/connection-removal.ts",
+      "reason": "Fork-owned removal of a connection from a workspace (knitli/knitli-site#607): refuses while actions are pending and re-puts affected chats' metadata; GatekeeperClient.remove() calls it."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-connection-removal.test.ts",
+      "reason": "Regression test for the fork-owned connection-removal.ts, through GatekeeperClient.remove()."
+    },
+    {
       "path": "packages/workshop-frontend/src/features/connections/RemoveConnection.tsx",
       "reason": "Fork-owned Remove connection action for a workspace's connection list (knitli/knitli-site#607); Connections.tsx only mounts it."
     },

@@ -150,7 +150,7 @@ describe('Connections after a connection restarts the workspace', () => {
       await clickButton('Delete connection')
       await clickButton('Remove connection')
 
-      expect(toastAdd).toHaveBeenCalledWith({ title: 'Failed to remove connection from the workspace', variant: 'error' })
+      expect(toastAdd).toHaveBeenCalledWith({ title: 'Failed to remove connection from the workspace', description: 'boom', variant: 'error' })
       expect(t.dispose).toHaveBeenCalledTimes(1)
     })
 
@@ -160,6 +160,7 @@ describe('Connections after a connection restarts the workspace', () => {
       await clickButton('Delete connection')
 
       expect(document.body.textContent).toContain('permanently deletes its hooks, including hooks that wake other gadgets')
+      expect(document.body.textContent).toContain('refused while the connection has pending actions')
     })
 
     it('disables Remove, Delete and Cancel until the removal settles', async () => {
@@ -169,7 +170,7 @@ describe('Connections after a connection restarts the workspace', () => {
       await clickButton('Delete connection')
       await clickButton('Remove connection')
 
-      expect(['Remove connection', 'Delete', 'Cancel'].map(label => button(label)?.disabled)).toEqual([true, true, true])
+      expect(['Remove connection', 'Delete', 'Cancel'].map(label => button(label)?.matches(':disabled'))).toEqual([true, true, true])
       await clickButton('Remove connection')
       expect(t.removeFn).toHaveBeenCalledTimes(1)
 

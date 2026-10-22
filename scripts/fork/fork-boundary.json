@@ -17,6 +17,14 @@
       "reason": "Fork-owned backend modules (approval-turn continuation); policy lives here behind a one-line upstream seam."
     },
     {
+      "path": "packages/workshop-backend/workshop-routes.json",
+      "reason": "Snapshot of src/fork/workshop-routes.ts that knitli-site's WAF route check reads; written by knitli-workshop-routes.test.ts."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-workshop-routes.test.ts",
+      "reason": "Pins the route table to what server.ts serves and to workshop-routes.json; exact path because this package's vitest include is non-recursive."
+    },
+    {
       "path": "packages/workshop-backend/__integration__/knitli-admin-gatekeeper-frame.test.ts",
       "reason": "Regression test for deployment-admin gatekeeper frames, which upstream does not have."
     },

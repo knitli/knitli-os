@@ -3,6 +3,7 @@ import {
 } from "@gadgets/observability/fork/alarm-guard";
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { capExecuteCodeOutput } from "./fork/turn-guards";
+import { removeConnection } from "./fork/connection-removal";
 import { chatWorkbook, describeWorkbookBinding, dropWorkbook, isChatWorkbook, isSpreadsheetUpload, isWorkbookAttachment, openWorkbookSession, readWorkbookRange, stageWorkbookUpload, workbookRefFields } from "./fork/workbook-upload";
 import { deriveWorkbookBindings } from "./fork/workbook-names";
 import { withRequestedNames } from "./fork/workbook-checkpoint";
@@ -14305,7 +14306,7 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
 
   async remove(): Promise<void> {
     let record = this.impl.storage.gatekeepers.get(this.id);
-    (await import("./fork/connection-removal")).removeConnection(this.impl, this.id);  // fork: republishes chats with a pending binding
+    removeConnection(this.impl, this.id);  // fork: republishes chats with a pending binding
     this.impl.recordGadgetAnalytics({
       event_name: "connection_removed",
       user_id: this.actorUserId,

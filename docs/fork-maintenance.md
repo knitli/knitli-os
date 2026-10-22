@@ -979,9 +979,9 @@ ids are facet-local, not Activity ids.
   `packages/workshop-backend/src/fork/connection-removal.ts` (Tier 1). Upstream edits:
   `Connections.tsx` imports `RemoveConnectionRow` and uses it in place of the `<div>` that wraps the
   delete confirmation's row (the open and close tags, three lines in all); `GatekeeperClient.remove()`
-  in `overseer.ts` calls `removeConnection()` where it called `removeGatekeeper()`, one line, through
-  a dynamic `import()` so that no import line diverges (overseer.ts has no fork aggregator to route
-  through, and `remove()` is already async).
+  in `overseer.ts` calls `removeConnection()` where it called `removeGatekeeper()`: a static import
+  plus that call, the same shape as the other fork seams in `overseer.ts` (for example
+  `capExecuteCodeOutput` from `fork/turn-guards`).
 - **Why three lines is the minimum:** the row has to wrap upstream's own Delete and Cancel so a
   disabled fieldset can disable them while a removal runs, and replacing the wrapper tags is
   fewer upstream lines than prop edits on each button. Moving the whole row into the fork file

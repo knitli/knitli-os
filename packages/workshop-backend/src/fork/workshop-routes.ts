@@ -8,7 +8,7 @@
 // __tests__/knitli-workshop-routes.test.ts keeps the table true: every row is answered by its
 // handler, and every route literal server.ts dispatches on has a row. `method` is what the route
 // accepts. `/api` also takes a WebSocket upgrade, which a method cannot express.
-import { BLUEPRINT_SCREENSHOT_PATH_PREFIX, ROUTER_TAG_PROBE_PATH } from "@gadgets/workshop-shared/api";
+import { BLUEPRINT_SCREENSHOT_PATH_PREFIX, ROUTER_TAG_PROBE_PATH, VERSION_PATH } from "@gadgets/workshop-shared/api";
 import { SITE_LOGO_PATH } from "../site-logo.js";
 
 /** One served route. `name` is unique. */
@@ -17,6 +17,7 @@ export type WorkshopRoute = Readonly<{ name: string; method: string; path: strin
 /** Every route the Workshop Worker serves itself. */
 export const WORKSHOP_ROUTES = [
   { name: "routerTagProbe", method: "POST", path: ROUTER_TAG_PROBE_PATH },
+  { name: "version", method: "GET", path: VERSION_PATH },
   { name: "siteLogo", method: "GET", path: SITE_LOGO_PATH },
   // GET is what the WAF schema should allow; the handler answers any verb, so only the schema narrows it.
   { name: "blueprintScreenshot", method: "GET", path: `${BLUEPRINT_SCREENSHOT_PATH_PREFIX}:blueprintId` },

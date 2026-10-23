@@ -5,6 +5,11 @@
     "path": "/api/router-tag"
   },
   {
+    "name": "version",
+    "method": "GET",
+    "path": "/api/version"
+  },
+  {
     "name": "siteLogo",
     "method": "GET",
     "path": "/api/site-logo"

@@ -1007,9 +1007,10 @@ ids are facet-local, not Activity ids.
   target across rows, so a connection bound under several names cannot be removed twice, and a row
   replaced mid-removal does not dismiss the newer confirmation. All three buttons are disabled while the removal is in flight, and a
   refusal's message is shown in the failure toast.
-- **Backend change to `remove()`:** `removeConnection()` re-puts the metadata of every chat that had
-  a pending binding to the connection, as the provisional-workpiece reaper does, so the chat stops
-  offering the deleted pending change. It adds no refusal: upstream deliberately leaves a removed
+- **Backend change to `remove()`:** `removeConnection()` only refuses ambient connections (below).
+  It used to re-put the metadata of every chat that had a pending binding to the connection; upstream's
+  `removeGatekeeper()` now re-broadcasts those chats itself (`#rebroadcastChatMeta`, adopted in the
+  2026-10-23 sync), so that half was retired. It adds no refusal beyond ambient: upstream deliberately leaves a removed
   connection's queued actions pending and refuses their approval with "removed from the
   workspace" (`workshop-connections.test.ts`, "removing a connection cuts off its pending action").
   **Known gap, upstream's:** rejecting such an action fails the same way (`getGatekeeperFacet`

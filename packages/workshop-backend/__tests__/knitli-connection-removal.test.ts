@@ -65,7 +65,7 @@ describe("removing a connection from a workspace", () => {
     });
   });
 
-  it("removes the connection and re-puts the metadata of the chat whose pending binding it deleted", async () => {
+  it("removes the connection and re-broadcasts the metadata of the chat whose pending binding it deleted (once, by upstream)", async () => {
     await withRemoveClient("chat-meta", async impl => {
       impl.storage.gadgets.put({
         type: "gadget", id: GADGET, title: "G",

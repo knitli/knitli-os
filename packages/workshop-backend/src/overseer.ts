@@ -14611,7 +14611,8 @@ class AgentSpawnerQueueImpl extends ApprovalQueueImpl implements AgentSpawnerQue
     // bindings created before collaborator support).
     let resolveUserId = creatorUserId ?? this.impl.ownerId;
     let initiatorUserId = this.impl.users.idFromString(resolveUserId).toString();
-    let user = this.impl.users.get(this.impl.users.idFromString(resolveUserId));
+    let user = this.impl.wrapUserDo(
+        this.impl.users.get(this.impl.users.idFromString(resolveUserId)));
     let userMeta = await user.getChatContext(this.#spawner().config.modelId);
 
     // Read again after the await, across which the spawner may have been deleted or edited.

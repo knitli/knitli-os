@@ -669,6 +669,9 @@ authorizes a read after fetching it.
   - `overseer.ts` turn teardown: upstream's `cacheWarmer.start(...)` (#738) runs before our
     `willResume` check, and `runAgent` now returns the last request while still taking our
     `RunAgentOptions`.
+  - `AgentSpawnerQueueImpl.#createSpawnedChat` wraps the creator's User DO stub in `wrapUserDo()`:
+    upstream #808 moved the code and dropped the wrapper its `restartIfLoopLimited` recovery needs
+    (one line; drop it once upstream restores it).
   - `workshop-backend/cloudflare.config.ts` carries upstream's `CF_VERSION_METADATA` beside our `ASSETS`;
     `scripts/release/manifest-lib.ts` keeps `send_email` beside `version_metadata`.
   - `server.ts` import line: upstream's list plus `ModelReasoningInfo`, `WebPushSubscriptionInfo`,

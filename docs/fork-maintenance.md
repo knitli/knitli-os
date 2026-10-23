@@ -662,6 +662,18 @@ authorizes a read after fetching it.
   sessions on revocation via `RpcStub.revocable()`"), which needs a patched workerd. If that lands on
   `foundation/main`, the gate, `runRevocationCleanup()` and this whole divergence entry should be
   able to go.
+- **Seams added by the 2026-10-23 sync (foundation `ec22b00`).**
+  - `overseer.ts` `openGatekeeperSession`: upstream's agent-spawner queue choice
+    (`AgentSpawnerQueueImpl` vs `ApprovalQueueImpl`, #808) sits between our two collaborator-coverage
+    checks. `spawnAgent`/`spawnCallableAgent` moved to that queue class and are upstream's again.
+  - `overseer.ts` turn teardown: upstream's `cacheWarmer.start(...)` (#738) runs before our
+    `willResume` check, and `runAgent` now returns the last request while still taking our
+    `RunAgentOptions`.
+  - `workshop-backend/cloudflare.config.ts` carries upstream's `CF_VERSION_METADATA` beside our `ASSETS`;
+    `scripts/release/manifest-lib.ts` keeps `send_email` beside `version_metadata`.
+  - `server.ts` import line: upstream's list plus `ModelReasoningInfo`, `WebPushSubscriptionInfo`,
+    `SESSION_IDLE_CLOSE_CODE`. `reviewedSurvivors`: ten acks no longer matched and were dropped; one
+    added for `isWorktreeId` (upstream's own helper).
 - **Seams added by the 2026-10-21 sync (foundation `a679442`).** Each is a place where our code now
   sits inside an upstream change; re-check them when upstream next touches the file.
   - `overseer.ts` turn teardown: the approval-continuation resume is kept and everything else ends

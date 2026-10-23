@@ -45,6 +45,10 @@ export default defineGadgetsWorker({
     LOADER: bindings.workerLoader(),
     // Fork: this deployment bundles the frontend as assets on the backend.
     ASSETS: bindings.assets(),
+
+    // This version's id, which the frontend compares with the one new requests reach, to notice a
+    // session still connected to an older version after a deploy.
+    CF_VERSION_METADATA: bindings.versionMetadata(),
   },
 
   // Fork: this deployment bundles the frontend as assets on the backend.

@@ -563,54 +563,9 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "buttonNamed",
-      "path": "packages/workshop-frontend/src/GatekeeperModal.fork.test.tsx",
-      "reason": "Local test helper defined in the file itself; the same-named upstream helper was in a configurator test (#775) and is unrelated."
-    },
-    {
-      "token": "listName",
-      "path": "packages/gatekeeper-microsoft/src/sharepoint-list.ts",
-      "reason": "Method of the SharePoint list context in this file; the upstream use was an unrelated configurator helper removed in #775."
-    },
-    {
-      "token": "resolveResourceUrl",
-      "path": "packages/workshop-backend/__integration__/connection-request-resource-resolution.test.ts",
-      "reason": "Fork's optional GatekeeperVendor.resolveResourceUrl() hook (connection-request resolution); upstream #775 only removed a test-harness global of the same name."
-    },
-    {
-      "token": "resolveResourceUrl",
-      "path": "packages/workshop-backend/src/user.ts",
-      "reason": "Fork's optional GatekeeperVendor.resolveResourceUrl() hook (connection-request resolution); upstream #775 only removed a test-harness global of the same name."
-    },
-    {
-      "token": "resolveResourceUrl",
-      "path": "packages/workshop-backend/vitest.integration.config.ts",
-      "reason": "Fork's optional GatekeeperVendor.resolveResourceUrl() hook (connection-request resolution); upstream #775 only removed a test-harness global of the same name."
-    },
-    {
-      "token": "resolveResourceUrl",
-      "path": "packages/workshop-shared/src/gatekeeper.ts",
-      "reason": "Fork's optional GatekeeperVendor.resolveResourceUrl() hook (connection-request resolution); upstream #775 only removed a test-harness global of the same name."
-    },
-    {
-      "token": "createRequire",
-      "path": "scripts/fork/capnweb-native-validation.test.ts",
-      "reason": "Node's module.createRequire used by this fork test; #775 only dropped an unrelated configurator-runtime use."
-    },
-    {
-      "token": "createTextNode",
-      "path": "packages/workshop-backend/src/agent.ts",
-      "reason": "DOM call inside an agent-prompt example string, not an import of the removed configurator code."
-    },
-    {
-      "token": "doesNotMatch",
-      "path": "scripts/build-gatekeeper-configurator.test.ts",
-      "reason": "node:assert method used by this fork test; #775 only dropped other uses of it."
-    },
-    {
-      "token": "doesNotMatch",
-      "path": "scripts/fork/connect-initiator-enforced.test.ts",
-      "reason": "node:assert method used by this fork test; #775 only dropped other uses of it."
+      "token": "isWorktreeId",
+      "path": "packages/workshop-frontend/src/GadgetEditor.tsx",
+      "reason": "Upstream's own local helper in this file, still defined and used there (#808 removed only its other call site); the file's remaining use is upstream's."
     }
   ]
 }

@@ -22,6 +22,7 @@ import {
   waitWhilePaused,
 } from './connectionPause'
 import { getBackendHost } from './connectHandoff';
+import { useStaleBackendReconnect } from './features/stale-session/useStaleBackendReconnect'
 
 // ---------------------------------------------------------------------------
 // Dev auto-login: if VITE_DEV_AUTO_LOGIN=true, automatically create/login
@@ -196,6 +197,12 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('online', () => void probeOnWake());
 
+// Drops a connection that is up, so that handleBroken replaces it as if it had broken: for a
+// socket still talking to a backend that a deploy replaced (see useStaleBackendReconnect).
+function reconnectNow() {
+  if (!isConnectionLost) disposeQuietly(currentStub);
+}
+
 // Current stub. handleBroken() will replace this on disconnect.
 installWorkshopErrorReporting()
 let currentStub = startConnection();
@@ -218,6 +225,10 @@ function AppWithConnection() {
   });
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const [serverConfigError, setServerConfigError] = useState(false);
+  // The backend version, kept with the connection that reported it: `serverConfig` still holds the
+  // previous connection's until the new one answers.
+  const [socketVersion, setSocketVersion] =
+    useState<{ stub: RpcStub<PublicApi>; version: string | undefined } | null>(null);
 
   useEffect(() => {
     const viewport = window.visualViewport;
@@ -260,6 +271,7 @@ function AppWithConnection() {
             ...cfg,
             siteLogo: { url: cacheBustSiteLogoUrl(cfg.siteLogo.url) },
           } : cfg);
+          setSocketVersion({ stub: rpcState.stub, version: cfg.backendVersion });
         }
       })
       .catch(() => { if (!cancelled) setServerConfigError(true); });
@@ -274,6 +286,9 @@ function AppWithConnection() {
   useEffect(() => {
     return applySiteFavicon(serverConfig?.siteLogo?.url);
   }, [serverConfig]);
+
+  useStaleBackendReconnect(
+      socketVersion?.stub === rpcState.stub ? socketVersion.version : undefined, reconnectNow);
 
   return (
     <ThemeProvider>

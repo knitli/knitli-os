@@ -3,7 +3,7 @@
 import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
-import { BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, ROUTER_TAG_PROBE_PATH } from "@gadgets/workshop-shared/api";
+import { BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, ROUTER_TAG_PROBE_PATH, VERSION_PATH } from "@gadgets/workshop-shared/api";
 import server from "../src/server";
 import source from "../src/server.ts?raw";
 import { WORKSHOP_ROUTES } from "../src/fork/workshop-routes";
@@ -27,6 +27,7 @@ const PROBES: Record<string, { params?: Record<string, string>; headers?: Header
     wrong?: { method: string } & Answer }> = {
   routerTagProbe: { ok: { status: 204, body: "", cacheControl: "no-store" },
       wrong: { method: "GET", status: 404, body: "Not Found" } },
+  version: { ok: { status: 200, body: '{"version":null}', cacheControl: "no-store" } },
   siteLogo: {
       ok: { status: 404, body: "Not Found", cacheControl: "no-store" },
       wrong: { method: "POST", status: 405, body: "Method Not Allowed" } },
@@ -90,6 +91,7 @@ describe("workshop route table against server.ts", () => {
   // The constants server.ts compares `url.pathname` with; an unknown one fails until it is added.
   const CONSTANTS: Record<string, string> = {
     ROUTER_TAG_PROBE_PATH,
+    VERSION_PATH,
     SITE_LOGO_PATH,
     BLUEPRINT_SCREENSHOT_PATH_PREFIX,
   };

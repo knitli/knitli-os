@@ -662,6 +662,21 @@ authorizes a read after fetching it.
   sessions on revocation via `RpcStub.revocable()`"), which needs a patched workerd. If that lands on
   `foundation/main`, the gate, `runRevocationCleanup()` and this whole divergence entry should be
   able to go.
+- **Seams added by the 2026-10-23 sync (foundation `ec22b00`).**
+  - `overseer.ts` `openGatekeeperSession`: upstream's agent-spawner queue choice
+    (`AgentSpawnerQueueImpl` vs `ApprovalQueueImpl`, #808) sits between our two collaborator-coverage
+    checks. `spawnAgent`/`spawnCallableAgent` moved to that queue class and are upstream's again.
+  - `overseer.ts` turn teardown: upstream's `cacheWarmer.start(...)` (#738) runs before our
+    `willResume` check, and `runAgent` now returns the last request while still taking our
+    `RunAgentOptions`.
+  - `AgentSpawnerQueueImpl.#createSpawnedChat` wraps the creator's User DO stub in `wrapUserDo()`:
+    upstream #808 moved the code and dropped the wrapper its `restartIfLoopLimited` recovery needs
+    (one line; drop it once upstream restores it).
+  - `workshop-backend/cloudflare.config.ts` carries upstream's `CF_VERSION_METADATA` beside our `ASSETS`;
+    `scripts/release/manifest-lib.ts` keeps `send_email` beside `version_metadata`.
+  - `server.ts` import line: upstream's list plus `ModelReasoningInfo`, `WebPushSubscriptionInfo`,
+    `SESSION_IDLE_CLOSE_CODE`. `reviewedSurvivors`: ten acks no longer matched and were dropped; one
+    added for `isWorktreeId` (upstream's own helper).
 - **Seams added by the 2026-10-21 sync (foundation `a679442`).** Each is a place where our code now
   sits inside an upstream change; re-check them when upstream next touches the file.
   - `overseer.ts` turn teardown: the approval-continuation resume is kept and everything else ends
@@ -995,9 +1010,10 @@ ids are facet-local, not Activity ids.
   target across rows, so a connection bound under several names cannot be removed twice, and a row
   replaced mid-removal does not dismiss the newer confirmation. All three buttons are disabled while the removal is in flight, and a
   refusal's message is shown in the failure toast.
-- **Backend change to `remove()`:** `removeConnection()` re-puts the metadata of every chat that had
-  a pending binding to the connection, as the provisional-workpiece reaper does, so the chat stops
-  offering the deleted pending change. It adds no refusal: upstream deliberately leaves a removed
+- **Backend change to `remove()`:** `removeConnection()` only refuses ambient connections (below).
+  It used to re-put the metadata of every chat that had a pending binding to the connection; upstream's
+  `removeGatekeeper()` now re-broadcasts those chats itself (`#rebroadcastChatMeta`, adopted in the
+  2026-10-23 sync), so that half was retired. It adds no refusal beyond ambient: upstream deliberately leaves a removed
   connection's queued actions pending and refuses their approval with "removed from the
   workspace" (`workshop-connections.test.ts`, "removing a connection cuts off its pending action").
   **Known gap, upstream's:** rejecting such an action fails the same way (`getGatekeeperFacet`

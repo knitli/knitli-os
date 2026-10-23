@@ -13,6 +13,7 @@ import {
 } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import {
+  AGENT_SPAWNER_CONNECTION_ID,
   AgentSpawnerConfig,
   AiChatAuthorInfo,
   AmbientVendorStatus,
@@ -68,11 +69,12 @@ export interface GatekeeperModalProps {
    */
   spawnerEnvCandidates?: Omit<SpawnerEnvRow, 'enabled'>[]
   /**
-   * Optional pre-seed: when the modal opens, auto-select the resource connection for this vendor.
-   * Used by the agent's requestConnection accept flow so the user lands on the right connection with
-   * minimal clicks. `initialResourceUrlPattern` is the exact SupportedResource.urlPattern the
-   * backend resolved the request to (authoritative); `initialResourceUrl` is the raw URL the agent
-   * supplied (used only as a fallback if the resolved pattern isn't present in the current list).
+   * Optional pre-seed: when the modal opens, auto-select the resource connection for this vendor,
+   * or the Agent form for AGENT_SPAWNER_CONNECTION_ID. Used by the agent's requestConnection
+   * accept flow so the user lands on the right connection with minimal clicks.
+   * `initialResourceUrlPattern` is the exact SupportedResource.urlPattern the backend resolved the
+   * request to (authoritative); `initialResourceUrl` is the raw URL the agent supplied (used only
+   * as a fallback if the resolved pattern isn't present in the current list).
    */
   initialVendorId?: string
   initialResourceUrl?: string
@@ -86,7 +88,7 @@ export interface GatekeeperModalProps {
 
 type ConnectionTypeId =
   | 'ai-model'
-  | 'agent-spawner'
+  | typeof AGENT_SPAWNER_CONNECTION_ID
   | `resource:${string}:${string}`
 
 type ConnectionType = {
@@ -148,7 +150,7 @@ function platformConnectionTypes(siteName: string): ConnectionType[] {
     iconColor: '#7c3aed',
   },
   {
-    id: 'agent-spawner',
+    id: AGENT_SPAWNER_CONNECTION_ID,
     groupKey: 'platform:agent-spawner',
     groupLabel: 'Agent',
     title: 'Agent',
@@ -393,7 +395,8 @@ export default function GatekeeperModal({
   // message without a resolved pattern, or the resource list having shifted since the request).
   useEffect(() => {
     if (!open || !initialVendorId || selectedConnectionId !== null) return
-    const vendorConnections = allConnections.filter(c => c.vendorId === initialVendorId)
+    // A platform connection type (the Agent form) has no vendor; its id stands in for one.
+    const vendorConnections = allConnections.filter(c => (c.vendorId ?? c.id) === initialVendorId)
     if (vendorConnections.length === 0) return  // vendors may not be loaded yet
 
     let match: ConnectionType | undefined
@@ -950,7 +953,7 @@ export default function GatekeeperModal({
   const canCreate = (() => {
     if (!selectedConnection) return false
     if (selectedConnection.id === 'ai-model') return Boolean(selectedModelId)
-    if (selectedConnection.id === 'agent-spawner') {
+    if (selectedConnection.id === AGENT_SPAWNER_CONNECTION_ID) {
       return Boolean(spawnerDisplayName.trim()) && !spawnerEnvError
     }
     // Checked here, not left to the configurator Effect's cleanup: a singleton account can arrive
@@ -977,7 +980,7 @@ export default function GatekeeperModal({
       handleAddAmbientToChat()
     } else if (selectedConnection.id === 'ai-model') {
       handleCreateAiModel()
-    } else if (selectedConnection.id === 'agent-spawner') {
+    } else if (selectedConnection.id === AGENT_SPAWNER_CONNECTION_ID) {
       handleCreateAgentSpawner()
     } else if (selectedConnection.resourceUrlPattern) {
       handleCreateResourceConnection()
@@ -1098,7 +1101,7 @@ export default function GatekeeperModal({
                   />
                 )}
 
-                {selectedConnection.id === 'agent-spawner' && (
+                {selectedConnection.id === AGENT_SPAWNER_CONNECTION_ID && (
                   <AgentSpawnerConfigForm
                     availableModels={availableModels}
                     displayName={spawnerDisplayName}

@@ -653,6 +653,20 @@ sync (`tools.ts` is byte-identical to upstream again). No production subclass ev
 field. The sibling `describeRead` hook and read-before-dispatch ordering are kept: upstream still
 authorizes a read after fetching it.
 
+### Rejecting an action on a removed connection (knitli/knitli-site#986)
+
+- **What:** upstream leaves a removed connection's pending actions listed and refuses to approve
+  them. Its `rejectAction` went through the removed facet too and threw "removed from the
+  workspace", so the action could never be cleared and a turn suspended on it was never released.
+  Now a reject whose connection record is gone skips the facet (its storage went with
+  `removeGatekeeper`) and settles the record, then releases the waiter. It skips the auto-approval
+  drain for that connection too. Approving it still refuses.
+- **Where:** `rejectAction` in `packages/workshop-backend/src/overseer.ts` (Tier 2): a `removed`
+  check, `gatekeeper?.rejectAction` and a guarded drain.
+- **Tests:** `packages/workshop-backend/__tests__/knitli-removed-connection-reject.test.ts` (Tier 1).
+- **At sync:** Tier 2. Drop this if upstream settles removed-connection rejects itself; it is
+  worth offering upstream.
+
 ## Open questions
 
 - **Severing revoked sessions instead of gating the whole Durable Object.** The gate is a blunt

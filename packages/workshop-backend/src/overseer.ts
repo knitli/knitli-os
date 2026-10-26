@@ -12585,13 +12585,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return;
     }
 
-    let gatekeeper = await this.impl.getGatekeeperFacet(action.gatekeeperId);
+    // Fork (knitli-site#986): a removed connection's facet, and its side of the action, are gone,
+    // so there is nothing to notify; settle the record and release its waiter anyway.
+    let removed = !this.impl.storage.gatekeepers.get(action.gatekeeperId);
+    let gatekeeper = removed ? undefined : await this.impl.getGatekeeperFacet(action.gatekeeperId);
 
     // Resolve the rejecter's identity before notifying the gatekeeper, so a failed profile fetch
     // can't leave the action rejected with the gatekeeper but still "pending" in storage.
     let profile = await this.#getClientProfile();
 
-    await gatekeeper.rejectAction(action.action);
+    await gatekeeper?.rejectAction(action.action);
 
     action.state = "rejected";
     action.appliedAt = new Date();
@@ -12610,7 +12613,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Deny leaves the turn ended, like denyConnectionRequest. The rejected record also prevents a
     // sibling approval from resuming this turn. Like an approval, though, clearing this manual gate
     // may unblock later auto-eligible pending actions, whose turns do resume.
-    this.impl.ctx.waitUntil(this.#drainAutoApprovalsAndResume(action.gatekeeperId));
+    if (!removed) this.impl.ctx.waitUntil(this.#drainAutoApprovalsAndResume(action.gatekeeperId));
   }
 
   // Enable auto-approval of actions carrying `actionKind` on the given gatekeeper. Stores the

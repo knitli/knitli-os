@@ -661,8 +661,10 @@ authorizes a read after fetching it.
   Now a reject whose connection record is gone skips the facet (its storage went with
   `removeGatekeeper`) and settles the record, then releases the waiter. It skips the auto-approval
   drain for that connection too. Approving it still refuses.
-- **Where:** `rejectAction` in `packages/workshop-backend/src/overseer.ts` (Tier 2): a `removed`
-  check, `gatekeeper?.rejectAction` and a guarded drain.
+- **Where:** `rejectIfConnectionRemoved` in `packages/workshop-backend/src/fork/connection-removal.ts`
+  (Tier 1). Seam: one line at the top of `rejectAction`'s non-creation path in `overseer.ts`, plus
+  the import. It repeats `rejectAction`'s settle steps (transaction, trace, resume), so check them
+  against upstream's at each sync.
 - **Tests:** `packages/workshop-backend/__tests__/knitli-removed-connection-reject.test.ts` (Tier 1).
 - **At sync:** Tier 2. Drop this if upstream settles removed-connection rejects itself; it is
   worth offering upstream.

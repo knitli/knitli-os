@@ -9,16 +9,29 @@ export interface ConnectionRemovalHost {
   removeGatekeeper(id: number): void;
   storage: {
     gatekeepers: { get(id: number): { creationSpec?: { type: string } } | undefined };
+    containsRestrictedData: { get(): boolean };
+    actions: { list(): Iterable<{ type: string; gatekeeperId: number; description: object }> };
   };
 }
 
 /**
  * Refuses an ambient connection (ensureAmbientCapsules() would re-add it under a new id, so removal
- * would only look like it worked). Otherwise removes the connection.
+ * would only look like it worked). Refuses a connection that requires an account (one with a vendor,
+ * or a legacy one with no creationSpec, as #accountRequiringUseScope counts them) and has supplied
+ * restricted data (knitli/knitli-site#987): admission checks only current connections, so after
+ * the removal nobody admitted would be checked against that account while its data may remain.
+ * Owner-only data needs no such rule (its sticky latch blocks sharing). Otherwise removes the
+ * connection, so a just-created one that read nothing can still be discarded.
  */
 export function removeConnection(host: ConnectionRemovalHost, id: number): void {
-  if (host.storage.gatekeepers.get(id)?.creationSpec?.type === "ambient") {
+  let record = host.storage.gatekeepers.get(id);
+  if (record?.creationSpec?.type === "ambient") {
     throw new Error("Always-on connections cannot be removed from a workspace.");
+  }
+  if (record && (!record.creationSpec || "vendorId" in record.creationSpec) &&
+      host.storage.containsRestrictedData.get() && suppliedRestrictedData(host, id)) {
+    throw new Error("This workspace holds restricted data, so this connection cannot be removed: " +
+        "people admitted to the workspace later would no longer be checked for access to it.");
   }
   host.removeGatekeeper(id);
 }
@@ -60,4 +73,14 @@ export async function rejectIfConnectionRemoved<R extends {
     host.resumeAgentAfterDecision(action.caller.chatId, action.id);
   }
   return true;
+}
+
+// Action records are never deleted (they are the audit log), so the observation history is whole.
+function suppliedRestrictedData(host: ConnectionRemovalHost, id: number): boolean {
+  for (let record of host.storage.actions.list()) {
+    if (record.type === "observation" && record.gatekeeperId === id &&
+        "containsRestrictedData" in record.description &&
+        record.description.containsRestrictedData === true) return true;
+  }
+  return false;
 }

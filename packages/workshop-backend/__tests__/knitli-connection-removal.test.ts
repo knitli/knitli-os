@@ -1,6 +1,7 @@
 // Fork (knitli/knitli-site#607): GatekeeperClient.remove(), the Connections tab's Remove
 // connection, goes through fork/connection-removal.ts. Pins that it re-puts the metadata of a chat
-// whose pending binding it deleted, and that it refuses an ambient connection. (Queued actions stay pending after removal, deliberately:
+// whose pending binding it deleted, that it refuses an ambient connection, and that it refuses an account-requiring one that
+// supplied restricted data (knitli/knitli-site#987). (Queued actions stay pending after removal, deliberately:
 // integration-tests' workshop-connections.test.ts pins that upstream behaviour.)
 
 import { describe, expect, it, vi } from "vitest";
@@ -62,6 +63,61 @@ describe("removing a connection from a workspace", () => {
     }, async (remove, impl) => {
       await expect(remove()).rejects.toThrow("Always-on connections cannot be removed from a workspace.");
       expect(impl.storage.gatekeepers.get(GATEKEEPER)).toBeDefined();
+    });
+  });
+
+  it("refuses to remove a connection that requires an account and supplied restricted data (#987)", async () => {
+    await withRemoveClient("restricted", async impl => {
+      impl.storage.containsRestrictedData.put(true);
+      impl.storage.actions.put({ id: 1, gatekeeperId: GATEKEEPER, type: "observation", state: "approved",
+        caller: { from: "user" }, createdAt: new Date(0),
+        description: { title: "Read", description: "Read", containsRestrictedData: true } });
+    }, async (remove, impl) => {
+      await expect(remove()).rejects.toThrow(
+          "This workspace holds restricted data, so this connection cannot be removed: " +
+          "people admitted to the workspace later would no longer be checked for access to it.");
+      expect(impl.storage.gatekeepers.get(GATEKEEPER)).toBeDefined();
+    });
+  });
+
+  it("refuses a legacy connection with no creationSpec under restricted data too", async () => {
+    await withRemoveClient("restricted-legacy", async impl => {
+      impl.storage.containsRestrictedData.put(true);
+      impl.storage.gatekeepers.put({ id: GATEKEEPER, class: {} as any, resourceTitle: "Legacy" });
+      impl.storage.actions.put({ id: 1, gatekeeperId: GATEKEEPER, type: "observation", state: "approved",
+        caller: { from: "user" }, createdAt: new Date(0),
+        description: { title: "Read", description: "Read", containsRestrictedData: true } });
+    }, async (remove, impl) => {
+      await expect(remove()).rejects.toThrow(/holds restricted data/);
+      expect(impl.storage.gatekeepers.get(GATEKEEPER)).toBeDefined();
+    });
+  });
+
+  it("still removes a connection that needs no account (an AI model) under restricted data", async () => {
+    await withRemoveClient("restricted-model", async impl => {
+      impl.storage.containsRestrictedData.put(true);
+      impl.storage.actions.put({ id: 1, gatekeeperId: GATEKEEPER, type: "observation", state: "approved",
+        caller: { from: "user" }, createdAt: new Date(0),
+        description: { title: "Read", description: "Read", containsRestrictedData: true } });
+      impl.storage.gatekeepers.put({ id: GATEKEEPER, class: {} as any, resourceTitle: "Model",
+        creationSpec: { type: "aiModel", modelId: "m", provider: "anthropic", modelName: "claude-test" } });
+    }, async (remove, impl) => {
+      await remove();
+      expect(impl.storage.gatekeepers.get(GATEKEEPER)).toBeUndefined();
+    });
+  });
+
+  it("still removes a connection that supplied no restricted data, though the workspace holds some", async () => {
+    await withRemoveClient("restricted-elsewhere", async impl => {
+      impl.storage.containsRestrictedData.put(true);
+      impl.storage.actions.put({ id: 1, gatekeeperId: GATEKEEPER + 1, type: "observation", state: "approved",
+        caller: { from: "user" }, createdAt: new Date(0),
+        description: { title: "Read", description: "Read", containsRestrictedData: true } });
+      impl.storage.actions.put({ id: 2, gatekeeperId: GATEKEEPER, type: "observation", state: "approved",
+        caller: { from: "user" }, createdAt: new Date(0), description: { title: "Read", description: "Read" } });
+    }, async (remove, impl) => {
+      await remove();
+      expect(impl.storage.gatekeepers.get(GATEKEEPER)).toBeUndefined();
     });
   });
 

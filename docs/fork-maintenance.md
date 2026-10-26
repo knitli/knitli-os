@@ -438,7 +438,9 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **Known residuals:**
   - *Removed connections.* Build scope is computed from current connections, so data observed
     through a connection that has since been removed is no longer checked by anyone admitted
-    afterwards. This is upstream's admission model, not something the attestation adds.
+    afterwards. This is upstream's admission model, not something the attestation adds. A
+    connection that supplied restricted data can no longer be removed (knitli/knitli-site#987);
+    unbinding it from the use role's scope is still unchecked.
   - *`TODO(observer-races)`* in `#enforceExcludeObservers`: a first-time admission registers its
     observerId with gatekeepers before the record persists, so an observation naming that id in the
     window is admitted. The attestation can then include a collaborator whom that observation
@@ -1030,15 +1032,23 @@ ids are facet-local, not Activity ids.
   target across rows, so a connection bound under several names cannot be removed twice, and a row
   replaced mid-removal does not dismiss the newer confirmation. All three buttons are disabled while the removal is in flight, and a
   refusal's message is shown in the failure toast.
-- **Backend change to `remove()`:** `removeConnection()` only refuses ambient connections (below).
+- **Backend change to `remove()`:** `removeConnection()` refuses ambient connections, and
+  account-requiring ones that supplied restricted data (both below).
   It used to re-put the metadata of every chat that had a pending binding to the connection; upstream's
   `removeGatekeeper()` now re-broadcasts those chats itself (`#rebroadcastChatMeta`, adopted in the
-  2026-10-23 sync), so that half was retired. It adds no refusal beyond ambient: upstream deliberately leaves a removed
+  2026-10-23 sync), so that half was retired. Upstream deliberately leaves a removed
   connection's queued actions pending and refuses their approval with "removed from the
   workspace" (`workshop-connections.test.ts`, "removing a connection cuts off its pending action").
-  **Known gap, upstream's:** rejecting such an action fails the same way (`getGatekeeperFacet`
-  restores a facet that is gone), so it stays in Activity and an agent suspended on it is not
-  resumed. Closing it means letting `rejectAction` settle an action whose connection is gone.
+  Rejecting one works: see "Rejecting an action on a removed connection".
+- **Restricted data pins its connection (knitli/knitli-site#987).** `removeConnection()` refuses a
+  connection that requires an account (a vendor, or a legacy record with no creation spec, as
+  `#accountRequiringUseScope` counts them) once one of its observation records has
+  `containsRestrictedData`. Admission checks only current connections, so after a removal nobody
+  admitted would be checked against that account while the data it supplied may remain. The
+  workspace flag is checked first, so the action-log scan runs only in a workspace that holds
+  restricted data. A just-created connection that read nothing can still be discarded. Not covered:
+  unbinding the connection from every gadget, which drops it from the use role's scope (the
+  residual under the observer attestation).
 - **Ambient connections are refused.** `removeConnection()` rejects a connection whose creation spec
   is `ambient` ("Always-on connections cannot be removed from a workspace."): `ensureAmbientCapsules()`
   (`#reconcileAmbientCapsules`) re-adds any missing ambient record under a new id on every open, so

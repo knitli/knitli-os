@@ -259,7 +259,8 @@ Intentional, reviewed differences from upstream. Keep this current.
   Payloads are fixed templates plus the chat title bounded to 96 characters, encrypted to the
   device.
 - **UI:** `packages/workshop-frontend/src/features/notifications/webPush/` (settings switch,
-  subscription hook and sync) and `public/sw.js`, both Tier 1. The web app manifest is upstream's
+  subscription hook and sync), Tier 1, and `public/sw.js`, Tier 2 since upstream #812 (03cf8766)
+  added its own `sw.js` for desktop notifications. The web app manifest is upstream's
   (`public/manifest.webmanifest`, adopted in the 2026-10-21 sync; our own is retired). The
   worker has no `fetch` handler, so the WebSocket and sign-in redirects are never intercepted. It
   does two jobs that must survive a sync, as the worker holds no credentials and outlives the page:
@@ -286,6 +287,9 @@ Intentional, reviewed differences from upstream. Keep this current.
   the 10-device limit.
 - **At sync:** Tier 2 for the seams only; if upstream reshapes `publishNotification()`, keep the
   single `deliverWebPush()` call after the acknowledgement check and before the platform delivery.
+  `sw.js`: the next sync must merge upstream's notification worker and ours into one file that
+  keeps both jobs above (the `pushsubscriptionchange` wake and the sign-out release) and still has no
+  `fetch` handler.
 
 ### Spreadsheet attachments
 
@@ -652,6 +656,22 @@ posture — so the optional `maxArguments` parameter, the `protected readonly ma
 sync (`tools.ts` is byte-identical to upstream again). No production subclass ever overrode the
 field. The sibling `describeRead` hook and read-before-dispatch ordering are kept: upstream still
 authorizes a read after fetching it.
+
+### Rejecting an action on a removed connection (knitli/knitli-site#986)
+
+- **What:** upstream leaves a removed connection's pending actions listed and refuses to approve
+  them. Its `rejectAction` went through the removed facet too and threw "removed from the
+  workspace", so the action could never be cleared and a turn suspended on it was never released.
+  Now a reject whose connection record is gone skips the facet (its storage went with
+  `removeGatekeeper`) and settles the record, then releases the waiter. It skips the auto-approval
+  drain for that connection too. Approving it still refuses.
+- **Where:** `rejectIfConnectionRemoved` in `packages/workshop-backend/src/fork/connection-removal.ts`
+  (Tier 1). Seam: one line at the top of `rejectAction`'s non-creation path in `overseer.ts`, plus
+  the import. It repeats `rejectAction`'s settle steps (transaction, trace, resume), so check them
+  against upstream's at each sync.
+- **Tests:** `packages/workshop-backend/__tests__/knitli-removed-connection-reject.test.ts` (Tier 1).
+- **At sync:** Tier 2. Drop this if upstream settles removed-connection rejects itself; it is
+  worth offering upstream.
 
 ## Open questions
 

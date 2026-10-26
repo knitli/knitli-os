@@ -3,7 +3,7 @@ import {
 } from "@gadgets/observability/fork/alarm-guard";
 import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
 import { capExecuteCodeOutput } from "./fork/turn-guards";
-import { removeConnection } from "./fork/connection-removal";
+import { rejectIfConnectionRemoved, removeConnection } from "./fork/connection-removal";
 import { chatWorkbook, describeWorkbookBinding, dropWorkbook, isChatWorkbook, isSpreadsheetUpload, isWorkbookAttachment, openWorkbookSession, readWorkbookRange, stageWorkbookUpload, workbookRefFields } from "./fork/workbook-upload";
 import { deriveWorkbookBindings } from "./fork/workbook-names";
 import { withRequestedNames } from "./fork/workbook-checkpoint";
@@ -12585,6 +12585,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return;
     }
 
+    if (await rejectIfConnectionRemoved(this.impl, action, () => this.#getClientProfile())) return;
     let gatekeeper = await this.impl.getGatekeeperFacet(action.gatekeeperId);
 
     // Resolve the rejecter's identity before notifying the gatekeeper, so a failed profile fetch

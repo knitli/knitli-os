@@ -259,7 +259,8 @@ Intentional, reviewed differences from upstream. Keep this current.
   Payloads are fixed templates plus the chat title bounded to 96 characters, encrypted to the
   device.
 - **UI:** `packages/workshop-frontend/src/features/notifications/webPush/` (settings switch,
-  subscription hook and sync) and `public/sw.js`, both Tier 1. The web app manifest is upstream's
+  subscription hook and sync), Tier 1, and `public/sw.js`, Tier 2 since upstream #812 (03cf8766)
+  added its own `sw.js` for desktop notifications. The web app manifest is upstream's
   (`public/manifest.webmanifest`, adopted in the 2026-10-21 sync; our own is retired). The
   worker has no `fetch` handler, so the WebSocket and sign-in redirects are never intercepted. It
   does two jobs that must survive a sync, as the worker holds no credentials and outlives the page:
@@ -286,6 +287,9 @@ Intentional, reviewed differences from upstream. Keep this current.
   the 10-device limit.
 - **At sync:** Tier 2 for the seams only; if upstream reshapes `publishNotification()`, keep the
   single `deliverWebPush()` call after the acknowledgement check and before the platform delivery.
+  `sw.js`: the next sync must merge upstream's notification worker and ours into one file that
+  keeps both jobs above (the `pushsubscriptionchange` wake and the sign-out release) and still has no
+  `fetch` handler.
 
 ### Spreadsheet attachments
 

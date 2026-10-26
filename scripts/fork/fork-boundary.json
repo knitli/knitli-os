@@ -81,10 +81,6 @@
       "reason": "Test-only router stand-in for the fork's AdminPage tests; upstream has none."
     },
     {
-      "path": "packages/workshop-frontend/public/sw.js",
-      "reason": "Fork-owned push-only service worker; upstream ships no public/sw.js."
-    },
-    {
       "path": "packages/workshop-backend/__tests__/knitli-idle-lease.test.ts",
       "reason": "Unit test for the fork-owned client-activity lease (src/fork/idle-lease.ts); exact path because this package's vitest include is non-recursive."
     },

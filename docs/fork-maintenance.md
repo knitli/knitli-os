@@ -703,8 +703,8 @@ authorizes a read after fetching it.
   able to go.
 - **Seams added by the 2026-10-27 sync (foundation `fd624bcd`).**
   - Upstream #895 renamed the `AuthenticatedApi` gadget methods to workspace names (`openWorkspace`,
-    `newWorkspace`, `newWorkspaceFromBlueprint`, `listWorkspaces`), `GadgetMetadata*` to
-    `WorkspaceMetadata*`, the `OPEN_GADGET_ERROR_CODES` family to `OPEN_WORKSPACE_*`, and the User DO
+    `newWorkspace`, `newWorkspaceFromBlueprint`, `listWorkspaces`), the gadget metadata types to
+    `WorkspaceMetadata*`, the open-gadget error-code family to `OPEN_WORKSPACE_*`, and the User DO
     methods (`getWorkspace`, `setWorkspaceLastActive`, `ensureWorkspaceRegistered`,
     `recordSharedWorkspaceOpen`, ...). Fork code and tests were renamed to match; the fork-owned
     `collaborator-bookkeeping.ts` option followed. The integration-test session's own `openGadget`
@@ -714,8 +714,8 @@ authorizes a read after fetching it.
     `WebPushSubscription` (different shape, different RPC), and `SESSION_IDLE_CLOSE_CODE`.
   - Upstream's root `AGENTS.md` became an index of per-package guides; the fork paragraph sits above
     it, and the `#enforceGatekeeperResourcePolicy()` sentence moved to `workshop-backend/AGENTS.md`.
-  - `reviewedSurvivors`: acks added for four false positives (`POLICY`, `parseAgentSkill`,
-    `paddingTop`, `paddingBottom`); the stale `isWorktreeId` ack was dropped.
+  - `reviewedSurvivors`: acks added for four false positives (a test constant, a private
+    skill-parsing method and two DOM style properties; see the file); the stale `isWorktreeId` ack was dropped.
 - **Seams added by the 2026-10-23 sync (foundation `ec22b00`).**
   - `overseer.ts` `openGatekeeperSession`: upstream's agent-spawner queue choice
     (`AgentSpawnerQueueImpl` vs `ApprovalQueueImpl`, #808) sits between our two collaborator-coverage

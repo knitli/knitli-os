@@ -259,7 +259,7 @@ async function withBlindfoldTurn(
       id: { toString: () => USER.id },
       whoami: async () => USER,
       getChatContext: async () => ({ profile: USER }),
-      setGadgetLastActive: async () => {},
+      setWorkspaceLastActive: async () => {},
       publishNotification: async () => {},
     };
     impl.users = { idFromString: (id: string) => id, get: () => userStub };

@@ -192,7 +192,7 @@ describe("spreadsheet attachment in the agent", () => {
     let owner = {
       id: OWNER_USER_ID, whoami: async () => OWNER,
       getChatContext: async () => ({ profile: OWNER }),
-      listGatekeeperVendors: async () => [], setGadgetLastActive: async () => {},
+      listGatekeeperVendors: async () => [], setWorkspaceLastActive: async () => {},
     };
     impl.ownerId = OWNER_USER_ID;
     impl.markOutputsDirty = () => {};

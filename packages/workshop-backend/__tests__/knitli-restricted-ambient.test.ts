@@ -42,7 +42,7 @@ async function enableRuleAfterSubmit(restricted: boolean)
     let userStub = {
       id: { toString: () => USER.id },
       whoami: async () => USER,
-      recordSharedGadgetOpen: async () => {},
+      recordSharedWorkspaceOpen: async () => {},
     };
     impl.users = { idFromString: (id: string) => id, get: () => userStub };
     impl.ensureAmbientCapsules = async () => {};

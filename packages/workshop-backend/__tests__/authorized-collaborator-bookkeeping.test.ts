@@ -35,9 +35,9 @@ describe("authorized collaborator bookkeeping", () => {
         },
       };
       const collaborator = {
-        recordSharedGadgetOpen: async () => events.push("record"),
-        forgetSharedGadget: async () => events.push("reconcile"),
-        updateSharedGadgetRole: async () => events.push("update-role"),
+        recordSharedWorkspaceOpen: async () => events.push("record"),
+        forgetSharedWorkspace: async () => events.push("reconcile"),
+        updateSharedWorkspaceRole: async () => events.push("update-role"),
       };
       const sharing = {
         getEffectiveRole: () => authorized ? "build" : undefined,
@@ -91,7 +91,7 @@ describe("authorized collaborator bookkeeping", () => {
         lookupStarted.resolve();
         return releaseLookup.promise;
       },
-      recordSharedGadgetOpen: async (ownerProfile) => {
+      recordSharedWorkspaceOpen: async (ownerProfile) => {
         events.push(`record:${ownerProfile}`);
       },
       reconcileRevokedListing: async () => {
@@ -128,7 +128,7 @@ describe("authorized collaborator bookkeeping", () => {
         events.push("lookup");
         return "owner-profile";
       },
-      recordSharedGadgetOpen: async (ownerProfile) => {
+      recordSharedWorkspaceOpen: async (ownerProfile) => {
         events.push(`record:${ownerProfile}`);
         recordStarted.resolve();
         await releaseRecord.promise;

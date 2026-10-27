@@ -99,6 +99,6 @@ after enabling, using the kill switch for the baseline.
   title field stays locked while its save is queued. Each completes on its own once the user clicks
   the chip. This matches the fork's original design (anything but the listed deliberate actions
   queues); the rest are not individually listed. Wiring resume into the stub itself is deliberately not
-  done: background calls (heartbeat, subscriptions, the re-issued `openGadget`) would wake it, and
+  done: background calls (heartbeat, subscriptions, the re-issued `openWorkspace`) would wake it, and
   the pause exists to prevent exactly that. A click in a modal also wakes for Cancel, which is the
   accepted cost.

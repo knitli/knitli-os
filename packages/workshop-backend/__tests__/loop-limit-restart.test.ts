@@ -67,20 +67,20 @@ function rejectUserCalls(impl: any, error: unknown): string[] {
   };
   let user = {
     id: { toString: () => OWNER_ID },
-    setGadgetLastActive: reject("setGadgetLastActive"),
+    setWorkspaceLastActive: reject("setWorkspaceLastActive"),
     syncWorkspaceOutputs: reject("syncWorkspaceOutputs"),
     listProvidedAccounts: reject("listProvidedAccounts"),
     listModels: reject("listModels"),
     getChatContext: reject("getChatContext"),
     whoami: reject("whoami"),
     whoamiIfExists: reject("whoamiIfExists"),
-    getGadget: reject("getGadget"),
+    getWorkspace: reject("getWorkspace"),
     listBlueprints: reject("listBlueprints"),
     listLibraryBlueprints: reject("listLibraryBlueprints"),
     updateBlueprint: reject("updateBlueprint"),
     deleteBlueprint: reject("deleteBlueprint"),
-    forgetSharedGadget: reject("forgetSharedGadget"),
-    updateSharedGadgetRole: reject("updateSharedGadgetRole"),
+    forgetSharedWorkspace: reject("forgetSharedWorkspace"),
+    updateSharedWorkspaceRole: reject("updateSharedWorkspaceRole"),
   };
   impl.users = { idFromString: (id: string) => id, idFromName: (id: string) => id, get: () => user };
   return calls;
@@ -110,7 +110,7 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
     impl.bumpLastActive();
     await settle();
 
-    expect(calls).toEqual(["setGadgetLastActive"]);
+    expect(calls).toEqual(["setWorkspaceLastActive"]);
     expect(restarts).toEqual([RESTART_REASON]);
     // The restart is an error-level event carrying the rejection; the bump's own failure log is
     // still written.
@@ -266,7 +266,7 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
       },
     ]);
 
-    expect(calls).toEqual(["forgetSharedGadget", "updateSharedGadgetRole"]);
+    expect(calls).toEqual(["forgetSharedWorkspace", "updateSharedWorkspaceRole"]);
     expect(restarts).toEqual([RESTART_REASON]);
     expect(logged(warnings, "shared.gadget.access.refresh.failed")).toHaveLength(2);
   }));
@@ -353,7 +353,7 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
     impl.bumpLastActive();
     await settle();
 
-    expect(calls).toEqual(["syncWorkspaceOutputs", "listProvidedAccounts", "setGadgetLastActive"]);
+    expect(calls).toEqual(["syncWorkspaceOutputs", "listProvidedAccounts", "setWorkspaceLastActive"]);
     expect(restarts).toEqual([]);
     expect(logged(errors, "workspace.loop.limit.restart")).toEqual([]);
 
@@ -398,7 +398,7 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
       },
     })).rejects.toBe(error);
 
-    expect(calls).toEqual(["getGadget"]);
+    expect(calls).toEqual(["getWorkspace"]);
     expect(restarts).toEqual([RESTART_REASON]);
   }));
 

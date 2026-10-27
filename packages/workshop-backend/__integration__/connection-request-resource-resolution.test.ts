@@ -38,7 +38,7 @@ async function user(prefix: string) {
 
 async function request(input: { resourceUrl?: string }) {
   using session = await user("refining");
-  using workspace = await session.newGadget();
+  using workspace = await session.newWorkspace();
   const metadata = await workspace.getMetadata();
   const stub = exports.OverseerDurableObject.get(exports.OverseerDurableObject.idFromString(metadata.id));
   return runInDurableObject(stub, async instance => {
@@ -160,7 +160,7 @@ describe("connection request resource resolution", () => {
     await admin.setResourceEnabled("refining", CUSTOM, false);
     await control.setRefiningResolverAdvertised(false);
     using session = await user("stale");
-    using workspace = await session.newGadget();
+    using workspace = await session.newWorkspace();
     const metadata = await workspace.getMetadata();
     const stub = exports.OverseerDurableObject.get(exports.OverseerDurableObject.idFromString(metadata.id));
     await runInDurableObject(stub, async instance => {

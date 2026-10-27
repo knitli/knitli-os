@@ -63,7 +63,7 @@ it("PUB-R08 real workspace owner reaches SDK; wrong owner and initializing conne
   const otherSecret = await other.createAccount(otherName, otherName, new Uint8Array([1, 2, 3]));
   const id = exports.OverseerDurableObject.newUniqueId();
   const workspace = exports.OverseerDurableObject.get(id);
-  await user.newGadget(id.toString(), 'Publisher fixture');
+  await user.newWorkspace(id.toString(), 'Publisher fixture');
   // Initialize normally through existing owner authorization.
   using opened = await workspace.open(user.id.toString(), name, () => {});
   let sessions = 0;
@@ -115,7 +115,7 @@ it("PUB-R09 a publisher session lists a provisional workspace with no chat activ
   const secret = await user.createAccount(name, name, new Uint8Array([1, 2, 3]));
   const id = exports.OverseerDurableObject.newUniqueId();
   const workspace = exports.OverseerDurableObject.get(id);
-  await user.newGadget(id.toString(), 'Publisher listing fixture');
+  await user.newWorkspace(id.toString(), 'Publisher listing fixture');
   using _opened = await workspace.open(user.id.toString(), name, () => {});
   await runInDurableObject(workspace, async instance => {
     const impl = (instance as unknown as { impl: any }).impl;
@@ -123,7 +123,7 @@ it("PUB-R09 a publisher session lists a provisional workspace with no chat activ
     impl.getGatekeeperFacet =
         async () => ({ startSession: async () => new PublisherFixtureSession() });
   });
-  const listed = async () => (await user.listGadgets()).some(g => g.id === id.toString());
+  const listed = async () => (await user.listWorkspaces()).some(g => g.id === id.toString());
   expect(await listed()).toBe(false);
   const response = await server.fetch(new Request(`https://workshop.invalid/api/mcp/${id}/1`, {
     method: 'POST', headers: { Authorization: `Bearer ${name}:${secret}`, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
@@ -139,7 +139,7 @@ it("PUB-R09 binding loopback sessions do not list a provisional workspace", asyn
   await user.createAccount(name, name, new Uint8Array([1, 2, 3]));
   const id = exports.OverseerDurableObject.newUniqueId();
   const workspace = exports.OverseerDurableObject.get(id);
-  await user.newGadget(id.toString(), 'Loopback listing fixture');
+  await user.newWorkspace(id.toString(), 'Loopback listing fixture');
   using _opened = await workspace.open(user.id.toString(), name, () => {});
   await runInDurableObject(workspace, async instance => {
     const impl = (instance as unknown as { impl: any }).impl;

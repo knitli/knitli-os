@@ -21,7 +21,7 @@ it("returns the committed prompt sequence, not an earlier message or a command e
       id: {toString: () => user.id},
       whoami: async () => user,
       getChatContext: async () => ({profile: user}),
-      setGadgetLastActive: async () => {},
+      setWorkspaceLastActive: async () => {},
     };
     impl.users = {idFromString: (id: string) => id, get: () => userStub};
     impl.ensureAmbientCapsules = async () => {};

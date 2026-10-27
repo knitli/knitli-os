@@ -10,10 +10,10 @@ import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import SandboxedGatekeeperApp, { type AdminResourceControl } from '../../../SandboxedGatekeeperApp'
 
 const mocks = vi.hoisted(() => {
-  const listGadgets = vi.fn<AuthenticatedApi['listGadgets']>(async () => [])
+  const listWorkspaces = vi.fn<AuthenticatedApi['listWorkspaces']>(async () => [])
   const getAdminApi = vi.fn<AuthenticatedApi['getAdminApi']>()
   const navigate = vi.fn<(options: unknown) => void>()
-  return { navigate, listGadgets, getAdminApi, authenticatedApi: { listGadgets, getAdminApi } }
+  return { navigate, listWorkspaces, getAdminApi, authenticatedApi: { listWorkspaces, getAdminApi } }
 })
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => mocks.navigate }))
 vi.mock('../../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: mocks.authenticatedApi }) }))

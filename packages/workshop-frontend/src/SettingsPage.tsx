@@ -8,6 +8,7 @@ import { User, Pencil, Check, X, Lock, Camera, Copy, Eye, EyeSlash } from '@phos
 import { useAvatar, invalidateAvatarCache } from './useAvatar'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import UsageSettings from './components/billing/UsageSettings'
+import { NotificationSettings } from './features/notifications/NotificationSettings'
 import { useDocumentTitle } from './useDocumentTitle'
 import { isImeComposing } from './keyboardEvent'
 import { NotificationsSetting } from './features/notifications/webPush/NotificationsSetting'
@@ -496,6 +497,7 @@ export default function SettingsPage() {
             <NotificationsSetting api={authenticatedApi} />
           </div>
         </section>
+        <NotificationSettings />
 
         {/* Usage & billing — only when the Cloudflare limits flow is enabled server-side */}
         <UsageSettings />

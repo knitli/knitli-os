@@ -581,8 +581,31 @@ Intentional, reviewed differences from upstream. Keep this current.
   `sharepoint-list.ts`.
 - **Why:** per-resource consent isolates an unconsented permission from the other resources; the
   initiator guard is required of every hand-rolled gatekeeper this installation uses.
-- **At sync:** nothing to reconcile in the package (upstream has none). If upstream ships its own
-  Microsoft gatekeeper, compare scopes and identity policy before choosing one.
+- **Upstream shipped its own (foundation `18ff6e72`, #902, 2026-10-27) -- DECIDED 2026-10-28
+  (maintainer): adopt upstream's `packages/gatekeeper-microsoft/` wholesale and retire ours, keeping
+  only the cherry-picks below.** Until this lands, the `Upstream divergence` check is red on `main`
+  (Tier-1 collision on `packages/gatekeeper-microsoft/` and its fixture bundle), so it is the first
+  job of the next sync (`fd624bc..6d3e744`, which also carries #907 and #910). Upstream's is a
+  broader, independent build (SharePoint/OneDrive incl. Word/PowerPoint/Excel edits, Outlook,
+  Calendar, Outlook hooks, optional multitenant mode; ~97 source files, design record
+  `plans/microsoft-365-gatekeeper.md`); ours is Outlook, read-only Teams and one SharePoint List.
+  Cherry-picks, each only **if upstream does not already cover it** -- verify first, then keep the
+  smallest fork-owned module plus a one-line seam, and record each kept one here:
+  1. **Tenant pinning and verified-domain checks.** Ours pins sign-in to one Entra tenant
+     (`TENANT_ID`) and admits members of verified domains only. A skim saw upstream check `tid` and
+     `aud` on the ID token but not a verified-domain check; confirm whether its single-tenant mode
+     enforces a pin and what `MICROSOFT_ALLOWED_TENANT_IDS` allows.
+  2. **Connect-initiator guard** (`observability/src/fork/connect-initiator.ts`; required of every
+     hand-rolled gatekeeper this installation uses). Check upstream's connect/reconnect routes; the
+     only `initiator` hits seen were in Outlook hooks, which is not the guard. Add the guard to the
+     adopted package if absent, and update `scripts/fork/connect-initiator-enforced.test.ts` (it
+     discovers hand-rolled gatekeepers, so the adopted one must be in `HAND_ROLLED` or covered).
+  3. **SharePoint List create retry** (`GadgetsActionId` marker column, so a retried create finds its
+     earlier row). Keep only if upstream's list creates are not already exactly-once.
+  **Dropped on purpose:** read-only Teams (not needed now; expect upstream to add it), the Outlook
+  reply-draft read-back, and the rest of ours. Remove the Tier-1 entries for the package and its
+  fixture bundle from `fork-boundary.json`, regenerate `scripts/release/testdata/golden-manifest.json`
+  (`UPDATE_GOLDEN=1`), and fix the two `scripts/run-dev-server.ts` entries to upstream's.
 
 ### Deployment worker configs are fork-managed upstream files (Tier 2)
 

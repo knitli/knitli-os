@@ -10,6 +10,7 @@
 // delivery stub (`[restore]` in outlook-gatekeeper.ts), which re-reads the message and decides with
 // the binding's own guard whether it is covered.
 
+import { guardedAlarmFor } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { DurableObject, RpcTarget, WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { sanitizeTitle } from "@gadgets/gatekeeper-kit/action-description";
@@ -223,6 +224,11 @@ export class OutlookHookDriver extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    // The flood-guarded alarm and kill switch (fork): #reschedule() re-arms with no floor of its own.
+    await guardedAlarmFor(this.ctx, this.env, "microsoft.outlook-hooks", () => this.#alarmBody());
+  }
+
+  async #alarmBody(): Promise<void> {
     const kv = this.ctx.storage.kv;
     if (this.#registrations().length > 0) {
       await this.#ensureSubscriptions();

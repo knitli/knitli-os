@@ -60,6 +60,7 @@ not connected. A completed connect or `revoke()` deletes it. When it fires the h
 | `gatekeeper-google` `UserAccount` | `google.connect-timeout` | SAFE |
 | `gatekeeper-homeassistant` | `homeassistant.connect-timeout` | SAFE |
 | `gatekeeper-linear` | `linear.connect-timeout` | SAFE |
+| `gatekeeper-microsoft` `UserAccount` | `microsoft.connect-timeout` | SAFE |
 | `gatekeeper-notion` | `notion.connect-timeout` | SAFE |
 | `gatekeeper-slack` | `slack.connect-timeout` | SAFE |
 | `gatekeeper-spotify` | `spotify.connect-timeout` | SAFE |
@@ -78,6 +79,7 @@ not connected. A completed connect or `revoke()` deletes it. When it fires the h
 | `gatekeeper-google` `ChatHookDriver` (`chat-hooks.ts`) | `#reschedule` to the earliest of queue retry, subscription renewal or expiry | failures are caught per message and renewal and write a later time first | `guardedAlarmFor` key `google.chat-hooks` | GUARDED |
 | `gatekeeper-google` `GmailHookDriver` (`gmail-hooks.ts`) | `#reschedule`; `syncAt` and `watch.renewAt` default to `now` when unset | a sync or watch step that throws leaves them at `now` | `guardedAlarmFor` key `google.gmail-hooks` | GUARDED |
 | `gatekeeper-github` `GitHubHookDriver` (`github-hooks.ts`) | `#reschedule` to the earliest webhook check or queued delivery retry | a failing check or delivery re-arms for its next retry | kill switch (`github.hooks`) | SAFE — the kill switch stops the work; retries remain bounded by the queue's own backoff. |
+| `gatekeeper-microsoft` `OutlookHookDriver` (`outlook-hooks.ts`) | `#reschedule` to the earliest queue retry, subscription renewal or sync | a sync or delivery step that fails re-arms for its next time | `guardedAlarmFor` key `microsoft.outlook-hooks` | GUARDED |
 | `gatekeeper-x` `UserAccount` (`x.ts`) | one alarm at the connect timeout from `setCallback()` | none; deletes the account if the flow never completed | kill switch (`x.account-timeout`) | SAFE |
 
 ## Flood threshold
@@ -105,7 +107,7 @@ A workload that legitimately nears the threshold is not a loop: raise the consta
 per-instance state, set where the deploy service sets other instance vars, and manifest-lib
 deliberately does not template those. To halt alarms an operator must set it on every Worker that
 defines an alarm: `workshop-backend`, `gatekeeper-scheduler`, `gatekeeper-google`, and the
-cloudflare, confluence, email, github, gitlab, homeassistant, linear, notion, slack, spotify,
+cloudflare, confluence, email, github, gitlab, homeassistant, linear, microsoft, notion, slack, spotify,
 supabase, x, zoominfo, mcp and mcp-portal gatekeepers. A Worker without the var keeps running its
 alarms. Whether the deploy service can set an arbitrary var on every Worker of an instance is
 outside this repository; confirm that before relying on the switch. Locally, set it in the Worker's

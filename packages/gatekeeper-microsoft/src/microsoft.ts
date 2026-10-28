@@ -27,6 +27,7 @@ import type {
   VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { workerVersionTag } from "@gadgets/workshop-shared/gatekeeper";
+import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { initiatorAllows, refuseForeignBrowser } from "@gadgets/observability/fork/connect-initiator";
 import type { CfAccessEnv } from "@gadgets/observability/access";
 import {
@@ -734,6 +735,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "microsoft.connect-timeout")) return;
     // Drop the account if the connect flow never completed.
     if (!this.#creds.stored()) await this.ctx.storage.deleteAll();
   }

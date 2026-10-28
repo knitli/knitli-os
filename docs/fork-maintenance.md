@@ -570,6 +570,9 @@ Intentional, reviewed differences from upstream. Keep this current.
   (the callback's refusal branch consumes the nonce). Pinned structurally by
   `scripts/fork/connect-initiator-enforced.test.ts` (Microsoft has a wider window there than the
   others, for that branch). No behavioural workerd test yet.
+- **Kept: alarm kill switch.** Upstream's two `alarm()` handlers (`UserAccount` connect timeout,
+  `OutlookHookDriver`) start with `haltIfAlarmsDisabled` / `guardedAlarmFor`, as the coverage test
+  requires; both are listed in `docs/alarm-audit.md`.
 - **Retired cherry-picks (checked against upstream):** tenant pinning is covered
   (`MICROSOFT_TENANT_ID` pins sign-in and compares the token's `tid`; `organizations` needs an
   explicit `MICROSOFT_ALLOWED_TENANT_IDS`). The create-retry marker column is not needed: upstream's

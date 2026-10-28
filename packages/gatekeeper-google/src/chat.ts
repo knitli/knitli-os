@@ -186,8 +186,9 @@ class ChatStore {
   }
 
   /**
-   * Run one write to Google, first marking the action uncertain so rejectAction refuses it until
-   * an apply finishes. A definitive refusal of the first write proves nothing landed, so it clears.
+   * Run one write to Google, first marking the action uncertain so a retry looks for what an
+   * earlier attempt may have written. A definitive refusal of the first write proves nothing
+   * landed, so it clears.
    */
   async attemptWrite<T>(id: number, write: () => Promise<T>): Promise<T> {
     const first = !this.wasAttempted(id);
@@ -207,6 +208,22 @@ class ChatStore {
 
   wasAttempted(id: number): boolean {
     return this.#kv.get(`chat:attempted:${id}`) !== undefined;
+  }
+
+  /** Remember a send denied after an attempt, which Google may still have posted. */
+  markWithdrawnAttempt(id: number): void {
+    this.#kv.put(`chat:withdrawnAttempt:${id}`, true);
+    // Action ids count up, so the lowest are the oldest.
+    const ids = [...this.#kv.list({ prefix: "chat:withdrawnAttempt:" })]
+      .map(([key]) => Number(key.slice("chat:withdrawnAttempt:".length)))
+      .toSorted((a, b) => a - b);
+    for (const old of ids.slice(0, Math.max(0, ids.length - MAX_WITHDRAWN_ATTEMPTS))) {
+      this.#kv.delete(`chat:withdrawnAttempt:${old}`);
+    }
+  }
+
+  wasWithdrawnAttempt(id: number): boolean {
+    return this.#kv.get(`chat:withdrawnAttempt:${id}`) !== undefined;
   }
 
   /** Later edits queued against `from` now expect `to`, the form Chat stored it in. */
@@ -440,7 +457,11 @@ function resolveMessage(
   const sent = ctx.store.sentMessage(queued);
   if (sent !== undefined) return { committed: sent };
   const action = ctx.store.get(queued);
-  if (action?.type !== "sendMessage") throw new Error("This message was never created.");
+  if (action?.type !== "sendMessage") {
+    throw new Error(ctx.store.wasWithdrawnAttempt(queued)
+      ? `This message was denied, ${WITHDRAWN_ATTEMPT}`
+      : "This message was never created.");
+  }
   if (action.threadName) resolveThread(ctx, action.threadName);
   return { queued, action };
 }
@@ -461,8 +482,9 @@ function resolveThread(ctx: ChatScope, name: string) {
   if (id !== undefined) {
     const action = ctx.store.get(id);
     if (action?.type !== "sendMessage" || !action.startsThread) {
-      throw new Error(
-        "This thread's first message was rejected, so the thread doesn't exist. Reject anything queued in it.");
+      throw new Error(ctx.store.wasWithdrawnAttempt(id)
+        ? `This thread's first message was denied, ${WITHDRAWN_ATTEMPT} Reject anything queued in it.`
+        : "This thread's first message was rejected, so the thread doesn't exist. Reject anything queued in it.");
     }
     return { name, spaceName: requireInScope(ctx, action.spaceName), pending: true };
   }
@@ -679,6 +701,10 @@ async function queueChatMessage(
 
 /** Most people besides the caller that a direct message or group chat can be set up with. */
 const MAX_CONVERSATION_PEOPLE = 49;
+/** Sends denied after an attempt that are remembered; the oldest go first. */
+const MAX_WITHDRAWN_ATTEMPTS = 100;
+const WITHDRAWN_ATTEMPT = "but an earlier attempt may already have posted it in Google Chat. " +
+  "Read the conversation before posting it again.";
 
 const LEAVE_YOURSELF_OUT = "Leave yourself out: you are in every conversation you send to.";
 
@@ -798,7 +824,7 @@ async function openConversation(
   if (found) return found.spaceName;
   const spaceName = await store.attemptWrite(actionId,
     () => api.setupConversation(ids, store.setupRequestWith(people, requestId)));
-  // An empty conversation shows nobody anything, so the send stays rejectable until it posts.
+  // An empty conversation shows nobody anything, so a retry has nothing to look for until it posts.
   store.clearAttempt(actionId);
   // Google leaves out of a group chat anyone who blocks the caller, and a replayed setup returns the
   // group as it is now, so posting could reach other people than were approved.
@@ -822,7 +848,7 @@ async function hasExactly(api: ChatApi, spaceName: string, ids: readonly string[
 /** The name a send to exactly some people gives its message, so that a retry can find it. */
 const clientMessageId = (action: ChatSendMessageAction) => `client-${action.requestId}`;
 
-/** Once its target is deleted, nothing an earlier attempt wrote remains, so the action may be rejected. */
+/** Once its target is deleted, nothing an earlier attempt wrote remains for a retry to find. */
 function deletedTarget(store: ChatStore, actionId: number, cause: unknown): Error {
   store.clearAttempt(actionId);
   return new Error("This message was deleted in Google Chat, so this change can no longer be applied. " +
@@ -1617,7 +1643,8 @@ export class GoogleChatGatekeeperImpl
     // A retry may follow a post that landed, so it leaves the attempt mark as it is.
     if (!await hasExactly(api, spaceName, recipients)) {
       throw new Error("This Google Chat conversation no longer holds exactly the people this message is for, " +
-        `so this attempt posted nothing.${retried ? "" : " Reject this message."}`);
+        `so this attempt posted nothing.${retried ? " An earlier attempt may already have posted it." : ""} ` +
+        "Deny this message to clear it.");
     }
     return { spaceName };
   }
@@ -1746,14 +1773,10 @@ export class GoogleChatGatekeeperImpl
     if (this.#inFlight.has(actionId)) {
       throw new Error("This Google Chat action is being applied and can no longer be rejected.");
     }
-    if (store.wasAttempted(actionId)) {
-      throw new Error(
-        "This Google Chat action may already have reached Google. Apply it again to finish it, " +
-        "then undo it if it isn't wanted.");
-    }
     // Later actions in the same conversation were written against a simulation that included
     // this one, so the gadget has to start again.
     const restart = store.listForSpace(chatActionSpaceName(action)).some(entry => entry.id > actionId);
+    if (action.type === "sendMessage" && store.wasAttempted(actionId)) store.markWithdrawnAttempt(actionId);
     store.remove(actionId);
     return restart ? { restart } : undefined;
   }

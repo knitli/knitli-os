@@ -59,7 +59,7 @@ class TestAdmin extends RpcTarget {
 }
 const adminStub = (admin: TestAdmin) => new RpcStub(admin) as unknown as RpcStubType<AdminApi>
 const auth = (whoami: () => Promise<AiChatAuthorInfo>, amIAdmin: () => Promise<boolean>, getAdminApi: () => Promise<RpcStubType<AdminApi>>) => ({
-  whoami: vi.fn<AuthenticatedApi['whoami']>(whoami), amIAdmin: vi.fn<AuthenticatedApi['amIAdmin']>(amIAdmin), getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(getAdminApi), listGadgets: async () => [],
+  whoami: vi.fn<AuthenticatedApi['whoami']>(whoami), amIAdmin: vi.fn<AuthenticatedApi['amIAdmin']>(amIAdmin), getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(getAdminApi), listWorkspaces: async () => [],
 })
 const Probe = () => {
   const { currentUser, isAdmin, isCurrentUserConfirmed } = useAuthenticatedApi()

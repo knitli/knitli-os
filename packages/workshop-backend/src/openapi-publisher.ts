@@ -120,7 +120,7 @@ export async function handleOpenApiPublisher(
         }
       }
 
-      const gadget = await authenticated.openGadget(match[1]);
+      const gadget = await authenticated.openWorkspace(match[1]);
       owned.push(gadget);
       requireOpen();
       const client = await gadget.getGatekeeperById(Number(match[2]));

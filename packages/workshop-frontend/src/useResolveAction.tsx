@@ -6,6 +6,7 @@ import type {
 } from '@gadgets/workshop-shared/api'
 import { CreationAccountModal } from './components/CreationAccountModal'
 import { resumeConnection } from './connectionPause'
+import { rpcFailureDescription } from './rpcErrors'
 
 type ActionDecision = 'approve' | 'deny'
 
@@ -36,7 +37,7 @@ export function useResolveAction(
       console.error(`Failed to ${decision} action:`, error)
       toasts.add({
         title: `Failed to ${decision} action`,
-        description: error instanceof Error ? error.message : undefined,
+        description: rpcFailureDescription(error),
         variant: 'error',
       })
     } finally {

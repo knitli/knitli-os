@@ -2,47 +2,61 @@ import { describe, expect, it, vi } from 'vitest'
 import workerSource from '../../../../public/sw.js?raw'
 
 // public/sw.js is plain script: run it against a fake worker scope and drive its listeners.
-function loadWorker(windows: unknown[]) {
+// Upstream's own cases (central-service payloads, click routing) are in
+// features/notifications/serviceWorker.test.ts; these pin what this fork's channel adds.
+function loadWorker(windows: unknown[] = [], subscription: unknown = null) {
   const listeners = new Map<string, (event: unknown) => void>()
-  const openWindow = vi.fn<(url: string) => Promise<void>>(async () => {})
+  const showNotification = vi.fn<(title: string, options: object) => Promise<void>>(async () => {})
   const scope = {
     addEventListener: (type: string, listener: (event: unknown) => void) => listeners.set(type, listener),
     location: { origin: 'https://workshop.example' },
-    clients: { matchAll: async () => windows, openWindow, claim: async () => {} },
+    registration: { showNotification, pushManager: { getSubscription: async () => subscription } },
+    clients: { matchAll: async () => windows, claim: async () => {} },
     skipWaiting: () => {},
   }
   new Function('self', workerSource)(scope)
-  return { listeners, openWindow }
+  return { listeners, showNotification }
 }
 
-async function click(listeners: Map<string, (event: unknown) => void>, url: string) {
+async function dispatch(listeners: Map<string, (event: unknown) => void>, type: string, event: object) {
   let done: Promise<unknown> = Promise.resolve()
-  listeners.get('notificationclick')!({
-    notification: { close: () => {}, data: { url } },
-    waitUntil: (promise: Promise<unknown>) => { done = promise },
-  })
+  listeners.get(type)!({ ...event, waitUntil: (promise: Promise<unknown>) => { done = promise } })
   await done
 }
 
-describe('service worker notification click', () => {
-  const URL_ = 'https://workshop.example/workspace/a?chat=1'
+describe('service worker, fork channel', () => {
+  const push = (body: unknown) => ({ data: { json: () => body } })
 
-  it('falls back to the next window, then to opening one, when a window has gone away', async () => {
-    const gone = { navigate: vi.fn<(url: string) => Promise<void>>(), focus: vi.fn<() => Promise<void>>(async () => { throw new Error('inactive') }) }
-    const alive = { navigate: vi.fn<(url: string) => Promise<void>>(async () => {}), focus: vi.fn<() => Promise<void>>(async () => {}) }
-    const { listeners, openWindow } = loadWorker([gone, alive])
-    await click(listeners, URL_)
-    expect(alive.navigate).toHaveBeenCalledWith(URL_)
-    expect(openWindow).not.toHaveBeenCalled()
+  it('shows a Declarative Web Push notification and keeps its click on this origin', async () => {
+    const { listeners, showNotification } = loadWorker()
+    await dispatch(listeners, 'push', push({
+      web_push: 8030,
+      notification: { title: 'Done', body: 'Build finished', tag: 't', navigate: '/workspace/a?chat=1' },
+    }))
+    expect(showNotification).toHaveBeenCalledWith(
+      'Done', { body: 'Build finished', tag: 't', data: { path: '/workspace/a?chat=1' } })
 
-    const onlyGone = loadWorker([gone])
-    await click(onlyGone.listeners, URL_)
-    expect(onlyGone.openWindow).toHaveBeenCalledWith(URL_)
+    await dispatch(listeners, 'push', push({ notification: { title: 'x', navigate: 'https://evil.example/x' } }))
+    expect(showNotification).toHaveBeenLastCalledWith('x', expect.objectContaining({ data: { path: '/' } }))
   })
 
-  it('never opens another origin', async () => {
-    const { listeners, openWindow } = loadWorker([])
-    await click(listeners, 'https://evil.example/x')
-    expect(openWindow).not.toHaveBeenCalled()
+  it('leaves a push Safari already showed alone', async () => {
+    const { listeners, showNotification } = loadWorker()
+    await dispatch(listeners, 'push', { notification: {}, data: undefined })
+    expect(showNotification).not.toHaveBeenCalled()
+  })
+
+  it('unsubscribes the browser when the page asks at sign-out', async () => {
+    const unsubscribe = vi.fn<() => Promise<boolean>>(async () => true)
+    const { listeners } = loadWorker([], { unsubscribe })
+    await dispatch(listeners, 'message', { data: { type: 'release-push-subscription' } })
+    expect(unsubscribe).toHaveBeenCalled()
+  })
+
+  it('wakes open pages when the browser replaces the subscription', async () => {
+    const page = { postMessage: vi.fn<(message: unknown) => void>() }
+    const { listeners } = loadWorker([page])
+    await dispatch(listeners, 'pushsubscriptionchange', {})
+    expect(page.postMessage).toHaveBeenCalledWith({ type: 'push-subscription-changed' })
   })
 })

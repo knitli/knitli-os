@@ -5,14 +5,14 @@
  */
 export async function runAuthorizedCollaboratorBookkeeping<OwnerProfile>({
   resolveOwnerProfile,
-  recordSharedGadgetOpen,
+  recordSharedWorkspaceOpen,
   reconcileRevokedListing,
   syncOutputs,
   isAuthorized,
   reportError,
 }: {
   resolveOwnerProfile: () => Promise<OwnerProfile>;
-  recordSharedGadgetOpen: (ownerProfile: OwnerProfile) => Promise<void>;
+  recordSharedWorkspaceOpen: (ownerProfile: OwnerProfile) => Promise<void>;
   reconcileRevokedListing: () => Promise<void>;
   syncOutputs: () => Promise<void>;
   isAuthorized: () => boolean;
@@ -39,14 +39,14 @@ export async function runAuthorizedCollaboratorBookkeeping<OwnerProfile>({
   }
 
   try {
-    await recordSharedGadgetOpen(ownerProfile);
+    await recordSharedWorkspaceOpen(ownerProfile);
   } catch (error) {
     reportError("record", error);
     if (!isAuthorized()) await reconcile();
     return;
   }
 
-  // recordSharedGadgetOpen() is a remote write with ambiguous completion on failure. If authority
+  // recordSharedWorkspaceOpen() is a remote write with ambiguous completion on failure. If authority
   // changed while it ran, explicitly reconcile the possibly-created listing before returning.
   if (!isAuthorized()) {
     await reconcile();

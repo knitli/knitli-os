@@ -6,10 +6,10 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { newMessagePortRpcSession, RpcTarget, type RpcStub } from 'capnweb'
 import {
-  createOpenGadgetError,
-  OPEN_GADGET_ERROR_CODES,
+  createOpenWorkspaceError,
+  OPEN_WORKSPACE_ERROR_CODES,
   type AuthenticatedApi,
-  type GadgetMetadata,
+  type WorkspaceMetadata,
   type Overseer,
 } from '@gadgets/workshop-shared/api'
 import WorkspaceOpenErrorPage from './components/WorkspaceOpenErrorPage'
@@ -38,7 +38,7 @@ function disposableStub<T extends object>(value: T, dispose = vi.fn<() => void>(
 }
 
 function api(overseer: RpcStub<Overseer>): RpcStub<AuthenticatedApi> {
-  return { openGadget: () => overseer } as unknown as RpcStub<AuthenticatedApi>
+  return { openWorkspace: () => overseer } as unknown as RpcStub<AuthenticatedApi>
 }
 
 // How the app consumes a failed call. Not `expect(call).rejects`: vitest's matcher handles an
@@ -60,7 +60,7 @@ const METADATA = {
   id: 'workspace-1',
   title: 'Quarterly planning',
   provisional: false,
-} as GadgetMetadata
+} as WorkspaceMetadata
 
 function WorkspaceProbe({ authenticatedApi }: { authenticatedApi: RpcStub<AuthenticatedApi> }) {
   const state = useWorkspaceOpen({
@@ -134,7 +134,7 @@ describe('useWorkspaceOpen', () => {
     const firstSubscriptionDispose = vi.fn<() => void>()
     const firstOverseer = disposableStub({
       subscribeToMetadata: vi.fn<
-        (callback: (metadata: GadgetMetadata) => void) => Promise<RpcStub<{}>>
+        (callback: (metadata: WorkspaceMetadata) => void) => Promise<RpcStub<{}>>
       >(async callback => {
           callback(METADATA)
           return disposableStub({}, firstSubscriptionDispose) as RpcStub<{}>
@@ -143,7 +143,7 @@ describe('useWorkspaceOpen', () => {
     const deniedOverseerDispose = vi.fn<() => void>()
     const deniedOverseer = disposableStub({
       subscribeToMetadata: vi.fn<() => Promise<RpcStub<{}>>>(async () => {
-        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied)
+        throw createOpenWorkspaceError(OPEN_WORKSPACE_ERROR_CODES.workspaceAccessDenied)
       }),
     }, deniedOverseerDispose) as unknown as RpcStub<Overseer>
 
@@ -166,7 +166,7 @@ describe('useWorkspaceOpen', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const overseer = disposableStub({
       subscribeToMetadata: vi.fn<() => Promise<RpcStub<{}>>>(async () => {
-        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.shareLinksDisabled)
+        throw createOpenWorkspaceError(OPEN_WORKSPACE_ERROR_CODES.shareLinksDisabled)
       }),
     }) as unknown as RpcStub<Overseer>
 
@@ -184,7 +184,7 @@ describe('useWorkspaceOpen', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     let cancel!: (reason?: string) => void
     const authenticatedApi = {
-      openGadget: (_id: string, _shareKey: string | undefined, configure: { configure(needs: unknown[]): Promise<unknown> }) =>
+      openWorkspace: (_id: string, _shareKey: string | undefined, configure: { configure(needs: unknown[]): Promise<unknown> }) =>
         disposableStub({
           subscribeToMetadata: async () => {
             await configure.configure([{ gatekeeperId: 30, vendorId: 'memory', resourceTitle: 'Knitli Memory', ambient: true }])
@@ -216,7 +216,7 @@ describe('useWorkspaceOpen', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     let state!: ReturnType<typeof useWorkspaceOpen>
     const authenticatedApi = {
-      openGadget: (_id: string, _shareKey: string | undefined, configure: { configure(needs: unknown[]): Promise<unknown> }) =>
+      openWorkspace: (_id: string, _shareKey: string | undefined, configure: { configure(needs: unknown[]): Promise<unknown> }) =>
         disposableStub({
           subscribeToMetadata: async () => {
             await configure.configure([{ gatekeeperId: 30, vendorId: 'memory', resourceTitle: 'Knitli Memory', ambient: true }])
@@ -259,7 +259,7 @@ describe('useWorkspaceOpen', () => {
         if (this.server.resetting) throw new Error(RESET)
         return METADATA
       }
-      subscribeToMetadata(callback: (metadata: GadgetMetadata) => void) {
+      subscribeToMetadata(callback: (metadata: WorkspaceMetadata) => void) {
         callback(METADATA)
         return new RpcTarget()
       }
@@ -271,7 +271,7 @@ describe('useWorkspaceOpen', () => {
       opens = 0
       probes = 0
       resetting = false
-      openGadget() {
+      openWorkspace() {
         this.opens++
         return new OverseerTarget(this)
       }

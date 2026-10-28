@@ -10,7 +10,7 @@ import { AdminGatekeeperAppsPanel } from './AdminGatekeeperAppsPanel'
 
 const state = vi.hoisted(() => ({
   navigate: vi.fn<(options: unknown) => void>(),
-  authenticatedApi: { listGadgets: vi.fn<AuthenticatedApi['listGadgets']>(async () => []) },
+  authenticatedApi: { listWorkspaces: vi.fn<AuthenticatedApi['listWorkspaces']>(async () => []) },
 }))
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => state.navigate }))
 vi.mock('../../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: state.authenticatedApi }) }))
@@ -106,7 +106,7 @@ describe('AdminGatekeeperAppsPanel presentation containment', () => {
 
   it('B-HOST-016 gives an admin frame no workspace-title or navigation capability', async () => {
     const privateWorkspaceId = 'a'.repeat(64)
-    state.authenticatedApi.listGadgets.mockResolvedValueOnce([{ id: privateWorkspaceId, title: 'Private workspace' }] as never)
+    state.authenticatedApi.listWorkspaces.mockResolvedValueOnce([{ id: privateWorkspaceId, title: 'Private workspace' }] as never)
     frame = { iframeHtml: '<!doctype html><title>fixture</title>', ui: new RpcStub(new EmptyUi()) }
     const admin = {
       listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
@@ -140,7 +140,7 @@ describe('AdminGatekeeperAppsPanel presentation containment', () => {
       settle(() => ambient.openPrompt('private prompt')),
     ])
     expect.soft(results).toEqual([{ status: 'rejected' }, { status: 'rejected' }, { status: 'rejected' }])
-    expect.soft(state.authenticatedApi.listGadgets).not.toHaveBeenCalled()
+    expect.soft(state.authenticatedApi.listWorkspaces).not.toHaveBeenCalled()
     expect.soft(state.navigate).not.toHaveBeenCalled()
   })
 })

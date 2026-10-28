@@ -46,6 +46,9 @@ declare global {
       CFOS_INSTALL_ID?: string;           // this installation's central identity
       CFOS_INSTALL_KEY_ID?: string;       // active signing-key generation
       CFOS_INSTALL_PRIVATE_KEY?: string;  // secret: base64 PKCS#8 P-256 key that signs requests
+      // Browser push alone needs this VAPID key, which browsers subscribe with; without it the
+      // profile page offers no browser notifications, and native push is unaffected.
+      NOTIFICATION_WEB_PUSH_PUBLIC_KEY?: string;
 
       // Fork: Web Push (src/fork/web-push.ts). The secret is an ECDSA P-256 private JWK as JSON;
       // the public key is derived from it. Unset (or without PUBLIC_BASE_URL), Web Push is off.

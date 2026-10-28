@@ -64,7 +64,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
       listGatekeeperAdminApps: async () => [{ id: 'openapi', title: 'Segments and catalog' }],
       getGatekeeperAdminApp: async () => frame(),
     } as unknown as RpcStubType<AdminApi>
-    state.authenticatedApi = { getAdminApi: async () => admin, listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: async () => admin, listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
     await act(async () => root!.render(<AdminPage />))
     await act(async () => button(container!, 'Gatekeepers').click())
@@ -93,7 +93,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
       listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
       getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()),
     } as unknown as RpcStubType<AdminApi>
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
     await act(async () => root!.render(<AdminPage />))
     await vi.waitFor(() => expect(button(container!, 'Gatekeepers')).toBeTruthy())
@@ -128,7 +128,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
       listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
       getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()),
     } as unknown as RpcStubType<AdminApi>
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
     await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click())
     await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click())
@@ -161,7 +161,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
       getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()),
     } as unknown as RpcStubType<AdminApi>
     const adminB = { getSettings: vi.fn<AdminApi['getSettings']>(async () => view(true)), listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => []) } as unknown as RpcStubType<AdminApi>
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => adminA), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => adminA), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
     await act(async () => root!.render(<AdminPage />))
     await act(async () => button(container!, 'Gatekeepers').click())
@@ -173,7 +173,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
     window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
     void client.setResourceEnabled(PATTERN, true)
     await vi.waitFor(() => expect(adminA.getSettings).toHaveBeenCalledTimes(4))
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => adminB), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => adminB), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     await act(async () => root!.render(<AdminPage />))
     await vi.waitFor(() => expect(adminB.getSettings).toHaveBeenCalledOnce())
     await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(true))
@@ -188,19 +188,19 @@ describe('AdminPage gatekeeper resource refresh', () => {
     let enabled = false; let reads = 0; const stale = deferred<AdminSettingsView>()
     const adminA = { getSettings: vi.fn<AdminApi['getSettings']>(async () => { reads += 1; return reads === 4 ? stale.promise : view(enabled) }), setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>(async (_v, _p, next) => { enabled = next }), listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()) } as unknown as RpcStubType<AdminApi>
     const adminB = { getSettings: vi.fn<AdminApi['getSettings']>(async () => view(true)), listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => []) } as unknown as RpcStubType<AdminApi>
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => adminA), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => adminA), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
     await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click()); await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click()); await vi.waitFor(() => expect(container!.querySelector('iframe')).not.toBeNull())
     const iframe = container.querySelector('iframe')!; const { port1, port2 } = new MessageChannel(); client = newMessagePortRpcSession<Host>(port1); window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [port2] }))
     void client.setResourceEnabled(PATTERN, true); await vi.waitFor(() => expect(adminA.getSettings).toHaveBeenCalledTimes(4))
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => adminB), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>; await act(async () => root!.render(<AdminPage />)); await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(true))
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => adminB), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>; await act(async () => root!.render(<AdminPage />)); await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(true))
     await act(async () => stale.resolve(view(false))); expect(resourceSwitch(container).checked).toBe(true); expect(state.toast).not.toHaveBeenCalled()
   })
 
   it('B-PARENT-002 contains a parent refresh failure after a committed frame write', async () => {
     let enabled = false; let reads = 0
     const admin = { getSettings: vi.fn<AdminApi['getSettings']>(async () => { reads += 1; if (reads === 4 || reads === 5) throw new Error('refresh failed'); return view(enabled) }), setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>(async (_vendor, _pattern, next) => { enabled = next }), listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()) } as unknown as RpcStubType<AdminApi>
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
     await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click())
     await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click())
@@ -237,7 +237,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
           : secondWrite.promise.then(() => { authoritativeOtherEnabled = enabled })),
       listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => []),
     } as unknown as RpcStubType<AdminApi>
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div'))
     root = createRoot(container)
     await act(async () => root!.render(<AdminPage />))
@@ -267,7 +267,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
   it('B-PARENT-003 applies only the newest overlapping refresh on one AdminApi', async () => {
     let enabled = false; let reads = 0; const first = deferred<AdminSettingsView>(); const second = deferred<AdminSettingsView>()
     const admin = { getSettings: vi.fn<AdminApi['getSettings']>(async () => { reads += 1; if (reads === 4) return first.promise; if (reads === 7) return second.promise; return view(enabled) }), setResourceEnabled: vi.fn<AdminApi['setResourceEnabled']>(async (_vendor, _pattern, next) => { enabled = next }), listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]), getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()) } as unknown as RpcStubType<AdminApi>
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div')); root = createRoot(container)
     await act(async () => root!.render(<AdminPage />)); await act(async () => button(container!, 'Gatekeepers').click()); await vi.waitFor(() => expect(resourceSwitch(container!).checked).toBe(false)); await act(async () => button(container!, 'OpenAPI').click()); await act(async () => button(container!, 'Manage OpenAPI segments').click()); await vi.waitFor(() => expect(container!.querySelector('iframe')).not.toBeNull())
     const { port1, port2 } = new MessageChannel(); client = newMessagePortRpcSession<Host>(port1); const iframe = container.querySelector('iframe')!
@@ -301,7 +301,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
       listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
       getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()),
     } as unknown as RpcStubType<AdminApi>
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div'))
     root = createRoot(container)
     await act(async () => root!.render(<AdminPage />))
@@ -346,7 +346,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
       listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
       getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()),
     } as unknown as RpcStubType<AdminApi>
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div'))
     root = createRoot(container)
     await act(async () => root!.render(<AdminPage />))
@@ -392,7 +392,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
       listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
       getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()),
     } as unknown as RpcStubType<AdminApi>
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div'))
     root = createRoot(container)
     await act(async () => root!.render(<AdminPage />))
@@ -439,7 +439,7 @@ describe('AdminPage gatekeeper resource refresh', () => {
       listGatekeeperAdminApps: vi.fn<AdminApi['listGatekeeperAdminApps']>(async () => [{ id: 'openapi', title: 'OpenAPI segments' }]),
       getGatekeeperAdminApp: vi.fn<AdminApi['getGatekeeperAdminApp']>(async () => frame()),
     } as unknown as RpcStubType<AdminApi>
-    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listGadgets: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
+    state.authenticatedApi = { getAdminApi: vi.fn<AuthenticatedApi['getAdminApi']>(async () => admin), listWorkspaces: async () => [] } as unknown as RpcStubType<AuthenticatedApi>
     container = document.body.appendChild(document.createElement('div'))
     root = createRoot(container)
     await act(async () => root!.render(<AdminPage />))

@@ -287,9 +287,26 @@ Intentional, reviewed differences from upstream. Keep this current.
   the 10-device limit.
 - **At sync:** Tier 2 for the seams only; if upstream reshapes `publishNotification()`, keep the
   single `deliverWebPush()` call after the acknowledgement check and before the platform delivery.
-  `sw.js`: the next sync must merge upstream's notification worker and ours into one file that
+  `sw.js`: merged with upstream's notification worker in the 2026-10-27 sync into one file that
   keeps both jobs above (the `pushsubscriptionchange` wake and the sign-out release) and still has no
   `fetch` handler.
+
+- **Coexists with upstream's browser push (2026-10-27 sync, upstream #812):** upstream now offers
+  its own "Browser notifications" switch (`features/notifications/NotificationSettings.tsx`,
+  `BrowserPushBridge`), which registers the browser with the Cloudflare-operated notification
+  service through `registerNotificationDevice` and appears only when `NOTIFICATION_WEB_PUSH_PUBLIC_KEY`
+  is set. Ours does not need that service, so it stays. The two are meant to be mutually exclusive
+  per deployment: a deployment with the platform service configures upstream's, a self-hosted one
+  configures `WEB_PUSH_VAPID_PRIVATE_KEY`. A browser holds one push subscription per service-worker
+  registration and key, so enabling both on one deployment would have them replace each other's.
+  `SettingsPage.tsx` renders upstream's switch and then ours; ours says "not enabled on this
+  deployment" when unconfigured, which is a duplicate row to tidy if upstream's is shown. `sw.js`
+  is now upstream's worker plus ours: its push handler accepts upstream's `{title, body, path, tag}`
+  and our Declarative `{notification}` payloads, notification clicks use upstream's `path` +
+  `cloudflare-os:open-notification` message, and the `release-push-subscription` and
+  `pushsubscriptionchange` handlers (and `skipWaiting`/`claim`) are ours. Drop our channel if
+  upstream's service gains a self-hosted mode. Decided (2026-10-28, maintainer): the fork's channel is the default; upstream's
+  switch stays in place for deployments that configure the platform service instead.
 
 ### Spreadsheet attachments
 
@@ -482,7 +499,7 @@ Intentional, reviewed differences from upstream. Keep this current.
   (`assertGatekeeperObserverReadinessNow`) is gone — a widening restarts every live session instead,
   so each client re-verifies at its own next open — while `isRevocationPaused()` and
   `assertNoRevocationPending()` still gate the revocation window, and `open()` calls all three.
-  `SharingManager.hasAnyShares()` (deleted upstream by #382) and `GadgetMetadata.sharingProhibited`
+  `SharingManager.hasAnyShares()` (deleted upstream by #382) and `WorkspaceMetadata.sharingProhibited`
   (renamed upstream by #381) are re-added as fork-owned for the owner-only tier.
 - **Why:** Restricted data follows upstream's verified-sharing model; the AI executor's private
   results (and any future owner-only source) need the absolute no-sharing tier upstream removed, and
@@ -684,6 +701,21 @@ authorizes a read after fetching it.
   sessions on revocation via `RpcStub.revocable()`"), which needs a patched workerd. If that lands on
   `foundation/main`, the gate, `runRevocationCleanup()` and this whole divergence entry should be
   able to go.
+- **Seams added by the 2026-10-27 sync (foundation `fd624bcd`).**
+  - Upstream #895 renamed the `AuthenticatedApi` gadget methods to workspace names (`openWorkspace`,
+    `newWorkspace`, `newWorkspaceFromBlueprint`, `listWorkspaces`), the gadget metadata types to
+    `WorkspaceMetadata*`, the open-gadget error-code family to `OPEN_WORKSPACE_*`, and the User DO
+    methods (`getWorkspace`, `setWorkspaceLastActive`, `ensureWorkspaceRegistered`,
+    `recordSharedWorkspaceOpen`, ...). Fork code and tests were renamed to match; the fork-owned
+    `collaborator-bookkeeping.ts` option followed. The integration-test session's own `openGadget`
+    is not that API and keeps its name.
+  - `server.ts` import line: upstream's list plus `ModelReasoningInfo`, `WebPushSubscriptionInfo`,
+    `SESSION_IDLE_CLOSE_CODE`. `api.ts` keeps `WebPushSubscriptionInfo` beside upstream's
+    `WebPushSubscription` (different shape, different RPC), and `SESSION_IDLE_CLOSE_CODE`.
+  - Upstream's root `AGENTS.md` became an index of per-package guides; the fork paragraph sits above
+    it, and the `#enforceGatekeeperResourcePolicy()` sentence moved to `workshop-backend/AGENTS.md`.
+  - `reviewedSurvivors`: acks added for four false positives (a test constant, a private
+    skill-parsing method and two DOM style properties; see the file); the stale `isWorktreeId` ack was dropped.
 - **Seams added by the 2026-10-23 sync (foundation `ec22b00`).**
   - `overseer.ts` `openGatekeeperSession`: upstream's agent-spawner queue choice
     (`AgentSpawnerQueueImpl` vs `ApprovalQueueImpl`, #808) sits between our two collaborator-coverage

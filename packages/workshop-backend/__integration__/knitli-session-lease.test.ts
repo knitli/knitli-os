@@ -107,14 +107,14 @@ describe("workspace client-activity lease", () => {
   it("ends a workspace nothing has touched for a lease, and tells the browser why", async () => {
     const logs = spyOnLogs();
     const { session, authenticated } = await signIn();
-    const workspace = await authenticated.newGadget();
+    const workspace = await authenticated.newWorkspace();
     const metadata = await workspace.getMetadata();
     const subscription = await workspace.subscribeToMetadata(() => {});
 
     advanceBeyondTheLease();
     // Traffic that never reaches this workspace is not activity on it.
     await session.publicApi.ping();
-    expect(await authenticated.listGadgets()).toBeInstanceOf(Array);
+    expect(await authenticated.listWorkspaces()).toBeInstanceOf(Array);
     await runAlarm(metadata.id);
 
     expect(await waitFor("the idle close", () => session.closes[0]))
@@ -128,7 +128,7 @@ describe("workspace client-activity lease", () => {
   it("renews on a client call and re-arms the alarm a lease after that call", async () => {
     const logs = spyOnLogs();
     const { session, authenticated } = await signIn();
-    const workspace = await authenticated.newGadget();
+    const workspace = await authenticated.newWorkspace();
     const metadata = await workspace.getMetadata();
 
     vi.setSystemTime(Date.now() + 2 * 60_000);
@@ -152,7 +152,7 @@ describe("workspace client-activity lease", () => {
   it("defers to outstanding agent work and reaps once the work is gone", async () => {
     const logs = spyOnLogs();
     const { session, authenticated } = await signIn();
-    using workspace = await authenticated.newGadget();
+    using workspace = await authenticated.newWorkspace();
     const metadata = await workspace.getMetadata();
 
     // A recorded call to a callable agent: agent work without a model to run it. The reap is
@@ -180,9 +180,9 @@ describe("workspace client-activity lease", () => {
 
   it("closes the socket only once no workspace is left open on the session", async () => {
     const { session, authenticated } = await signIn();
-    const first = await authenticated.newGadget();
+    const first = await authenticated.newWorkspace();
     const firstId = (await first.getMetadata()).id;
-    using second = await authenticated.newGadget();
+    using second = await authenticated.newWorkspace();
     const secondId = (await second.getMetadata()).id;
 
     // The first workspace's lease is what ends it, while the second is live on the same socket.
@@ -202,9 +202,9 @@ describe("workspace client-activity lease", () => {
 
   it("keeps the idle close pending when a later non-idle release empties the socket", async () => {
     const { session, authenticated } = await signIn();
-    const idleOne = await authenticated.newGadget();
+    const idleOne = await authenticated.newWorkspace();
     const idleId = (await idleOne.getMetadata()).id;
-    const temporary = await authenticated.newGadget();
+    const temporary = await authenticated.newWorkspace();
     const temporaryId = (await temporary.getMetadata()).id;
 
     advanceBeyondTheLease();
@@ -222,9 +222,9 @@ describe("workspace client-activity lease", () => {
 
   it("keeps the idle close pending across an open that fails", async () => {
     const { session, authenticated } = await signIn();
-    const idleOne = await authenticated.newGadget();
+    const idleOne = await authenticated.newWorkspace();
     const idleId = (await idleOne.getMetadata()).id;
-    const live = await authenticated.newGadget();
+    const live = await authenticated.newWorkspace();
 
     advanceBeyondTheLease();
     await live.getMetadata();
@@ -232,7 +232,7 @@ describe("workspace client-activity lease", () => {
     await settle();
     expect(session.closes).toEqual([]);
 
-    await expect(authenticated.openGadget(exports.OverseerDurableObject.newUniqueId().toString()))
+    await expect(authenticated.openWorkspace(exports.OverseerDurableObject.newUniqueId().toString()))
         .rejects.toThrow();
     live[Symbol.dispose]();
     expect(await waitFor("the idle close", () => session.closes[0]))
@@ -242,9 +242,9 @@ describe("workspace client-activity lease", () => {
   it("shares the open count across authenticated capabilities on one socket", async () => {
     const { session, authenticated, token } = await signIn();
     const second = await session.publicApi.authenticate(token);
-    const first = await authenticated.newGadget();
+    const first = await authenticated.newWorkspace();
     const firstId = (await first.getMetadata()).id;
-    using other = await second.newGadget();
+    using other = await second.newWorkspace();
     const otherId = (await other.getMetadata()).id;
 
     // The first capability's workspace idles while the second capability's is live on the socket.
@@ -264,7 +264,7 @@ describe("workspace client-activity lease", () => {
   it("releases a workspace once when the client vanishes mid-call, and never loops", async () => {
     const logs = spyOnLogs();
     const { session, authenticated } = await signIn();
-    const workspace = await authenticated.newGadget();
+    const workspace = await authenticated.newWorkspace();
     const metadata = await workspace.getMetadata();
 
     const lost = workspace.listActions({ filter: "action" }).catch(() => "lost");
@@ -284,7 +284,7 @@ describe("workspace client-activity lease", () => {
 
   it("leaves another concern's alarm behind when it ends the object", async () => {
     const { authenticated } = await signIn();
-    using workspace = await authenticated.newGadget();
+    using workspace = await authenticated.newWorkspace();
     const metadata = await workspace.getMetadata();
 
     // A delivered external-message response is kept for a day: a legitimate deadline the expiry
@@ -307,7 +307,7 @@ describe("workspace client-activity lease", () => {
     await env.BLUEPRINTS.delete(SESSION_LEASE_KEY);
     if (value !== null) await env.BLUEPRINTS.put(SESSION_LEASE_KEY, value);
     const { session, authenticated } = await signIn();
-    using workspace = await authenticated.newGadget();
+    using workspace = await authenticated.newWorkspace();
     const metadata = await workspace.getMetadata();
 
     advanceBeyondTheLease();
@@ -324,7 +324,7 @@ describe("workspace client-activity lease", () => {
       async () => {
     const logs = spyOnLogs();
     const { authenticated } = await signIn();
-    using workspace = await authenticated.newGadget();
+    using workspace = await authenticated.newWorkspace();
     const metadata = await workspace.getMetadata();
     await runInDurableObject(overseerStub(metadata.id), instance => {
       asImpl(instance).runAlarmTasks = async () => { throw new Error("delivery failed"); };
@@ -341,7 +341,7 @@ describe("workspace client-activity lease", () => {
 
   it("does not arm the lease for a caller who has no access to the workspace", async () => {
     const owner = await signIn();
-    const workspace = await owner.authenticated.newGadget();
+    const workspace = await owner.authenticated.newWorkspace();
     const metadata = await workspace.getMetadata();
     workspace[Symbol.dispose]();
     advanceBeyondTheLease();
@@ -350,15 +350,15 @@ describe("workspace client-activity lease", () => {
 
     // A fresh incarnation, opened by a stranger: denied, and nothing is left armed.
     const stranger = await signIn();
-    await expect(stranger.authenticated.openGadget(metadata.id)).rejects.toThrow();
+    await expect(stranger.authenticated.openWorkspace(metadata.id)).rejects.toThrow();
     expect(await scheduledAlarm(metadata.id)).toBe(null);
   });
 
   it("does not let a failed open leak a count that would stop the idle close", async () => {
     const { session, authenticated } = await signIn();
-    using workspace = await authenticated.newGadget();
+    using workspace = await authenticated.newWorkspace();
     const metadata = await workspace.getMetadata();
-    await expect(authenticated.openGadget(exports.OverseerDurableObject.newUniqueId().toString()))
+    await expect(authenticated.openWorkspace(exports.OverseerDurableObject.newUniqueId().toString()))
         .rejects.toThrow();
 
     advanceBeyondTheLease();

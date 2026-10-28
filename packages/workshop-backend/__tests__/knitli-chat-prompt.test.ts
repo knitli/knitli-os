@@ -121,7 +121,7 @@ async function withOwnerOverseer(
       id: { toString: () => USER.id },
       whoami: async () => USER,
       getChatContext: async () => ({ profile: USER }),
-      setGadgetLastActive: async () => {},
+      setWorkspaceLastActive: async () => {},
     };
     impl.users = { idFromString: (id: string) => id, get: () => userStub };
     impl.ensureAmbientCapsules = async () => {};

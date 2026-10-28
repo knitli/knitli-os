@@ -18,7 +18,7 @@ function setup(vendorId = "native") {
   const session = { describePublisherSurface: vi.fn(async () => surface), callTool: vi.fn(async () => pending), getActionResult: vi.fn(async () => pending), [Symbol.dispose]: () => disposed.push("session") };
   const client = { getCreationSpec: vi.fn(async () => ({ type: "gatekeeper", vendorId })), openSession: vi.fn(async () => session), [Symbol.dispose]: () => disposed.push("client") };
   const gadget = { getGatekeeperById: vi.fn(async () => client), [Symbol.dispose]: () => disposed.push("gadget") };
-  const authenticated = { openGadget: vi.fn(async () => gadget) };
+  const authenticated = { openWorkspace: vi.fn(async () => gadget) };
   const api = { authenticate: vi.fn(async () => authenticated), authenticateFromCfAccess: vi.fn(async () => authenticated) };
   const factory = vi.fn(() => api as unknown as PublicApi);
   const ctx = createExecutionContext();
@@ -72,12 +72,12 @@ describe("publisher admission", () => {
     const response = await handleOpenApiPublisher(s.request('', { body }), s.config, s.ctx, s.factory);
     expect(response.status).toBe(413); expect(cancel).toHaveBeenCalledOnce();
     expect(s.api.authenticate).toHaveBeenCalledWith('test:token');
-    expect(s.authenticated.openGadget).not.toHaveBeenCalled();
+    expect(s.authenticated.openWorkspace).not.toHaveBeenCalled();
   });
   it.each(['{', '[]', '[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]', '{}'])("PUB-R09 rejects invalid RPC before capabilities: %s", async body => {
     const s = setup();
     expect((await handleOpenApiPublisher(s.request(body), s.config, s.ctx, s.factory)).status).toBe(400);
-    expect(s.authenticated.openGadget).not.toHaveBeenCalled();
+    expect(s.authenticated.openWorkspace).not.toHaveBeenCalled();
   });
   it.each(['plain', 'openapi_installer', 'nativeextra'])("PUB-R14 rejects ineligible vendor %s before session", async vendor => {
     const s = setup(vendor);
@@ -87,7 +87,7 @@ describe("publisher admission", () => {
   });
   it.each(['search', 'execute'])("caps UTF-8 %s source before opening capabilities", async name => {
     const s = setup(); expect((await s.send(call('é'.repeat(PUBLISHER_CODE_BYTES / 2 + 1), name))).status).toBe(413);
-    expect(s.authenticated.openGadget).not.toHaveBeenCalled();
+    expect(s.authenticated.openWorkspace).not.toHaveBeenCalled();
   });
   it("caps spec without publishing a partial catalog", async () => {
     const s = setup(); s.surface.tools[0].description = 'x'.repeat(2 * 1024 * 1024);
@@ -247,7 +247,7 @@ describe("PR34 whole-request budget and response correlation", () => {
       else { abort.abort(); await vi.advanceTimersByTimeAsync(0); }
       expect(completed?.status).toBe(reason !== 'abort' ? 504 : 499);
       expect(cancelled).toHaveBeenCalledOnce();
-      expect(s.authenticated.openGadget).not.toHaveBeenCalled();
+      expect(s.authenticated.openWorkspace).not.toHaveBeenCalled();
       await waitOnExecutionContext(s.ctx);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
@@ -271,7 +271,7 @@ describe("PR34 whole-request budget and response correlation", () => {
       await started; await vi.advanceTimersByTimeAsync(60_000);
       expect(completed?.status).toBe(504); expect(vi.getTimerCount()).toBe(0);
       release(); await waitOnExecutionContext(s.ctx);
-      expect(s.authenticated.openGadget).not.toHaveBeenCalled();
+      expect(s.authenticated.openWorkspace).not.toHaveBeenCalled();
     } finally { release(); await response; await waitOnExecutionContext(s.ctx); vi.useRealTimers(); }
   });
   it.each([0, '', 'request-correlation'])("echoes exact valid ID %j on code, spec and native failures", async id => {
@@ -282,7 +282,7 @@ describe("PR34 whole-request budget and response correlation", () => {
     const large = await spec.send({ ...list, id });
     expect(large.status).toBe(413); expect(await large.json()).toMatchObject({ id, error: { code: -32603 } });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const native = setup(); native.authenticated.openGadget.mockRejectedValue(new Error('No such gatekeeper id: 7'));
+    const native = setup(); native.authenticated.openWorkspace.mockRejectedValue(new Error('No such gatekeeper id: 7'));
     const unavailable = await native.send({ ...list, id });
     expect(unavailable.status).toBe(403); expect(await unavailable.json()).toMatchObject({ id, error: { code: -32603, message: "Publisher connection unavailable." } });
     expect(warn).toHaveBeenCalledWith(expect.objectContaining({ event: "publisher.native.failed", error: expect.stringContaining("No such gatekeeper id: 7") }));
@@ -292,7 +292,7 @@ describe("PR34 whole-request budget and response correlation", () => {
     for (const failure of ['code', 'spec', 'native']) {
       const s = setup();
       if (failure === 'spec') s.surface.tools[0].description = 'x'.repeat(2 * 1024 * 1024);
-      if (failure === 'native') s.authenticated.openGadget.mockRejectedValue(new Error('unavailable'));
+      if (failure === 'native') s.authenticated.openWorkspace.mockRejectedValue(new Error('unavailable'));
       const message = failure === 'code' ? call('x'.repeat(PUBLISHER_CODE_BYTES + 1)) : list;
       const { id: _id, ...notification } = message;
       const response = await s.send(notification);
@@ -302,7 +302,7 @@ describe("PR34 whole-request budget and response correlation", () => {
   it.each([{ ...list, id: null }, { ...list, id: true }, { ...list, id: {} }, { jsonrpc: '2.0', id: 'not-a-request', result: {} }])("invalid envelope has null ID before native capabilities", async message => {
     const s = setup(); const response = await s.send(message);
     expect(response.status).toBe(400); expect(await response.json()).toMatchObject({ id: null, error: { code: -32600 } });
-    expect(s.authenticated.openGadget).not.toHaveBeenCalled();
+    expect(s.authenticated.openWorkspace).not.toHaveBeenCalled();
   });
 });
 

@@ -563,9 +563,24 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "isWorktreeId",
-      "path": "packages/workshop-frontend/src/GadgetEditor.tsx",
-      "reason": "Upstream's own local helper in this file, still defined and used there (#808 removed only its other call site); the file's remaining use is upstream's."
+      "token": "POLICY",
+      "path": "packages/gatekeeper-email/__tests__/fork/send.test.ts",
+      "reason": "A local test constant in the fork's own file; upstream's #883 removed an unrelated `POLICY` from the slides blueprint."
+    },
+    {
+      "token": "parseAgentSkill",
+      "path": "packages/gatekeeper-context/src/context-collection.ts",
+      "reason": "Upstream's own private `#parseAgentSkill` method, still defined and used there; #840 reshaped the name elsewhere."
+    },
+    {
+      "token": "paddingTop",
+      "path": "packages/workshop-frontend/src/GatekeeperModal.tsx",
+      "reason": "A computed DOM style property read in the modal's scroll measurement; upstream's #883 removed an unrelated slides-blueprint property."
+    },
+    {
+      "token": "paddingBottom",
+      "path": "packages/workshop-frontend/src/GatekeeperModal.tsx",
+      "reason": "As paddingTop: a computed DOM style property, unrelated to the slides blueprint."
     }
   ]
 }

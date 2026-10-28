@@ -31,7 +31,7 @@ async function withRemoveClient(
     impl.users = {
       idFromString: (id: string) => id,
       get: () => ({ id: { toString: () => USER.id }, whoami: async () => USER,
-                    recordSharedGadgetOpen: async () => {} }),
+                    recordSharedWorkspaceOpen: async () => {} }),
     };
     impl.ensureAmbientCapsules = async () => {};
     impl.syncOutputsTo = async () => true;

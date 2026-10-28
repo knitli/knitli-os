@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { RpcPromise, RpcStub, RpcTarget } from 'capnweb'
 import type {
   AuthenticatedApi,
-  GadgetMetadata,
+  WorkspaceMetadata,
   ObserverAccountChoice,
   ObserverBindingNeed,
   ObserverConfigCallback,
@@ -75,7 +75,7 @@ type ObserverConfigState = {
 type Options = {
   id: string | undefined
   authenticatedApi: RpcStub<AuthenticatedApi>
-  onMetadata: (metadata: GadgetMetadata) => void
+  onMetadata: (metadata: WorkspaceMetadata) => void
   onShareKeyConsumed: () => void
   onInvalidShareKey: () => void
 }
@@ -88,7 +88,7 @@ export function useWorkspaceOpen({
   onInvalidShareKey,
 }: Options) {
   const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
-  const [metadata, setMetadata] = useState<GadgetMetadata | null>(null)
+  const [metadata, setMetadata] = useState<WorkspaceMetadata | null>(null)
   const [error, setError] = useState<WorkspaceLoadError | null>(null)
   const [connectionLost, setConnectionLost] = useState(false)
   const [observerConfig, setObserverConfig] = useState<ObserverConfigState | null>(null)
@@ -170,7 +170,7 @@ export function useWorkspaceOpen({
 
         // One reopen per opened handle, then a fresh open that replays state to the subscribers.
         const observed = observeDoResets(
-          authenticatedApi.openGadget(id, shareKey, configureObservers),
+          authenticatedApi.openWorkspace(id, shareKey, configureObservers),
           resetError => {
             // No `cancelled` check: a replaced attempt has already released this observer.
             if (doResetReopen !== undefined) return
@@ -213,7 +213,7 @@ export function useWorkspaceOpen({
         if (cancelled) return
         // A deliberate pause drops the socket under whatever this open was waiting on, so the
         // rejection describes the pause, not the workspace: no error page, no report. The re-render
-        // that follows re-issues openGadget, which queues on the parked connection until resume.
+        // that follows re-issues openWorkspace, which queues on the parked connection until resume.
         if (isConnectionPaused()) return
         console.error('Failed to load gadget:', caught)
 
@@ -261,7 +261,7 @@ export function useWorkspaceOpen({
     }
   }, [id, authenticatedApi, reloadNonce])
 
-  // An unanswered observer dialog is not work: the server is parked inside openGadget waiting on
+  // An unanswered observer dialog is not work: the server is parked inside openWorkspace waiting on
   // this client, holding the workspace open, so the idle pause may land under it. Cancel the dialog
   // then, as its own Cancel button would; resuming re-opens the workspace, which asks again.
   useEffect(() => {

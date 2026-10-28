@@ -126,7 +126,7 @@ export async function openFakeOverseer(
         get: () => ({
           id: { toString: () => userId },
           whoami: async () => ({ id: "profile-id", name: "Test User" }),
-          recordSharedGadgetOpen: async () => {},
+          recordSharedWorkspaceOpen: async () => {},
         }),
       },
       storage: Object.assign(storage, {

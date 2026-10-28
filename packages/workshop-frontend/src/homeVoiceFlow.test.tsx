@@ -10,7 +10,7 @@ const state = vi.hoisted(() => ({
   navigate: vi.fn<(options: unknown) => void>(),
   api: {
     listModels: vi.fn<() => Promise<Array<{ id: string; name: string; type: string }>>>().mockResolvedValue([{ id: "model", name: "Model", type: "agent" }]),
-    newGadget: vi.fn<() => object>(),
+    newWorkspace: vi.fn<() => object>(),
     createVoiceSession: vi.fn<(mode: string) => Promise<object>>().mockResolvedValue({
       id: "voice-home", url: "/api/voice/home", expiresAt: Date.now() + 60_000,
       session: { close: async () => {}, [Symbol.dispose]: () => {} },
@@ -61,7 +61,7 @@ it("renders Home dictation from SDK wire frames in the real editor and sends spe
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   // Audio capture is the only SDK behavior replaced; wire parsing and listeners stay real.
   const startCall = vi.spyOn(VoiceClient.prototype, "startCall").mockResolvedValue(undefined);
-  state.api.newGadget.mockReturnValue({
+  state.api.newWorkspace.mockReturnValue({
     newChat: state.newChat, getMetadata: async () => ({ id: "workspace" }), [Symbol.dispose]: () => {},
   });
   const container = document.createElement("div");
@@ -82,7 +82,7 @@ it("renders Home dictation from SDK wire frames in the real editor and sends spe
   expect(container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.disabled).toBe(true);
   await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.click());
   expect(state.newChat).not.toHaveBeenCalled();
-  expect(state.api.newGadget).not.toHaveBeenCalled();
+  expect(state.api.newWorkspace).not.toHaveBeenCalled();
   await act(async () => {
     socket.receive({ type: "transcript_interim", text: "" });
     socket.receive({ type: "voice_transcript", sessionId: "voice-home", turnId: "first", mode: "dictate", text: "First sentence." });

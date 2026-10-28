@@ -215,7 +215,7 @@ describe("observer readiness and privacy", () => {
       using aliceApi = await signUp(publicApi, alice);
       using _bobApi = await signUp(publicApi, bob);
       const aliceAccount = await provisionAccount(aliceApi);
-      using ownerWorkspace = await aliceApi.newGadget();
+      using ownerWorkspace = await aliceApi.newWorkspace();
       if (!(await ownerWorkspace.addCollaborator(bob, "build"))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
@@ -232,7 +232,7 @@ describe("observer readiness and privacy", () => {
       using aliceApi = await signUp(publicApi, alice);
       using _bobApi = await signUp(publicApi, bob);
       const aliceAccount = await provisionAccount(aliceApi);
-      using ownerWorkspace = await aliceApi.newGadget();
+      using ownerWorkspace = await aliceApi.newWorkspace();
       using ownerOnly = await ownerWorkspace.newGatekeeper(
         aliceAccount.id,
         thingUrl("owner-only-sticky"),
@@ -268,7 +268,7 @@ describe("observer readiness and privacy", () => {
       using bobApi = await signUp(publicApi, bob);
       const bobAccount = await provisionAccount(bobApi);
 
-      using ownerWorkspace = await aliceApi.newGadget();
+      using ownerWorkspace = await aliceApi.newWorkspace();
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
       if (!(await ownerWorkspace.addCollaborator(bob, "build"))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
@@ -276,7 +276,7 @@ describe("observer readiness and privacy", () => {
 
       // Bob is admitted while the workspace has no account-requiring connections, then leaves. A
       // restart severs live sessions, so with nobody connected the late connection disturbs no one.
-      (await bobApi.openGadget(gadgetId))[Symbol.dispose]();
+      (await bobApi.openWorkspace(gadgetId))[Symbol.dispose]();
 
       const aliceAccount = await provisionAccount(aliceApi);
       using late = await ownerWorkspace.newGatekeeper(aliceAccount.id, thingUrl("late-build"));
@@ -294,7 +294,7 @@ describe("observer readiness and privacy", () => {
       );
       const callback = stubFor(recorder);
       try {
-        (await bobApi.openGadget(gadgetId, undefined, callback))[Symbol.dispose]();
+        (await bobApi.openWorkspace(gadgetId, undefined, callback))[Symbol.dispose]();
       } finally {
         callback[Symbol.dispose]();
       }
@@ -310,7 +310,7 @@ describe("observer readiness and privacy", () => {
       using bobApi = await signUp(publicApi, bob);
       const bobAccount = await provisionAccount(bobApi);
 
-      using ownerWorkspace = await aliceApi.newGadget();
+      using ownerWorkspace = await aliceApi.newWorkspace();
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
       if (!(await ownerWorkspace.addCollaborator(bob, "build"))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
@@ -320,7 +320,7 @@ describe("observer readiness and privacy", () => {
       // identity race (the controlled in-scope test below owns that assertion), but to prove the
       // zero-scope admission record survives repeated opens and the later connection is still
       // verified at the next one.
-      const opened = await Promise.all([bobApi.openGadget(gadgetId), bobApi.openGadget(gadgetId)]);
+      const opened = await Promise.all([bobApi.openWorkspace(gadgetId), bobApi.openWorkspace(gadgetId)]);
       for (const workspace of opened) workspace[Symbol.dispose]();
 
       const aliceAccount = await provisionAccount(aliceApi);
@@ -336,7 +336,7 @@ describe("observer readiness and privacy", () => {
       const callback = stubFor(recorder);
       let bobWorkspace!: RpcStub<Overseer>;
       try {
-        bobWorkspace = await bobApi.openGadget(gadgetId, undefined, callback);
+        bobWorkspace = await bobApi.openWorkspace(gadgetId, undefined, callback);
       } finally {
         callback[Symbol.dispose]();
       }
@@ -356,7 +356,7 @@ describe("observer readiness and privacy", () => {
       const resourceUrl = thingUrl("add-observer-barrier");
       const key = barrierKey("add-observer", resourceUrl);
 
-      using ownerWorkspace = await aliceApi.newGadget();
+      using ownerWorkspace = await aliceApi.newWorkspace();
       using connection = await ownerWorkspace.newGatekeeper(aliceAccount.id, resourceUrl);
       if (!connection) throw new Error("Failed to create the admission-race connection");
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
@@ -372,8 +372,8 @@ describe("observer readiness and privacy", () => {
       const firstCallback = stubFor(recorder);
       const secondCallback = stubFor(recorder);
       const openPromises = [
-        bobApi.openGadget(gadgetId, undefined, firstCallback),
-        bobApi.openGadget(gadgetId, undefined, secondCallback),
+        bobApi.openWorkspace(gadgetId, undefined, firstCallback),
+        bobApi.openWorkspace(gadgetId, undefined, secondCallback),
       ];
       let barrierReleased = false;
       try {
@@ -410,7 +410,7 @@ describe("observer readiness and privacy", () => {
       const resourceUrl = thingUrl("add-observer-barrier-open-race");
       const key = barrierKey("add-observer", resourceUrl);
 
-      using ownerWorkspace = await aliceApi.newGadget();
+      using ownerWorkspace = await aliceApi.newWorkspace();
       using connection = await ownerWorkspace.newGatekeeper(aliceAccount.id, resourceUrl);
       if (!connection) throw new Error("Failed to create open-race connection");
       using _gadget = await ownerWorkspace.createGadget(
@@ -429,7 +429,7 @@ describe("observer readiness and privacy", () => {
       );
       const callback = stubFor(recorder);
       await controlBarrier("arm-barrier", key);
-      const opening = bobApi.openGadget(gadgetId, undefined, callback);
+      const opening = bobApi.openWorkspace(gadgetId, undefined, callback);
       const openingSettlement = settleWithin("the paused collaborator open", opening);
       try {
         await waitForBarrier(key);
@@ -452,7 +452,7 @@ describe("observer readiness and privacy", () => {
       try {
         const freshBobApi = await logIn(freshPublicApi, bob);
         try {
-          expect((await freshBobApi.listGadgets()).some(({ id }) => id === gadgetId)).toBe(false);
+          expect((await freshBobApi.listWorkspaces()).some(({ id }) => id === gadgetId)).toBe(false);
           expect(
             (await freshBobApi.listOutputs()).outputs.some(
               ({ workspaceId }) => workspaceId === gadgetId,
@@ -477,7 +477,7 @@ describe("observer readiness and privacy", () => {
       const resourceUrl = thingUrl("start-session-barrier");
       const key = barrierKey("start-session", resourceUrl);
 
-      using ownerWorkspace = await aliceApi.newGadget();
+      using ownerWorkspace = await aliceApi.newWorkspace();
       using connection = await ownerWorkspace.newGatekeeper(aliceAccount.id, resourceUrl);
       if (!connection) throw new Error("Failed to create the start-session race connection");
       using gadget = await ownerWorkspace.createGadget("Start race", undefined, "TEST_GADGET");
@@ -489,7 +489,7 @@ describe("observer readiness and privacy", () => {
       // This unbound connection is outside Bob's initial use scope, so his open stores an empty
       // observer choice. He stays connected: binding the connection while his use session is live
       // is the widening that restarts the workspace, severing the session being opened mid-flight.
-      const bobHeld = await bobApi.openGadget(gadgetId);
+      const bobHeld = await bobApi.openWorkspace(gadgetId);
       const connId = await connection.getId();
       await controlBarrier("arm-barrier", key);
       const opening = connection.openSession();
@@ -506,12 +506,12 @@ describe("observer readiness and privacy", () => {
 
       // Everyone re-opens against the widened scope: the owner gets a working session, and Bob's
       // re-open verifies exactly the newly in-scope connection. The session open is part of the
-      // probe: openGadget succeeding does not mean the abort landed yet.
+      // probe: openWorkspace succeeding does not mean the abort landed yet.
       const reopened = await waitFor("the owner to reconnect to the restarted workspace", async () => {
         const freshPublicApi = connect(harness.url);
         try {
           const freshAliceApi = await logIn(freshPublicApi, alice);
-          const freshOwner = await freshAliceApi.openGadget(gadgetId);
+          const freshOwner = await freshAliceApi.openWorkspace(gadgetId);
           const freshConnection = await freshOwner.getGatekeeperById(connId);
           const freshSession = await freshConnection.openSession();
           return { freshAliceApi, freshOwner, freshPublicApi, freshConnection, freshSession };
@@ -537,7 +537,7 @@ describe("observer readiness and privacy", () => {
         const bobFreshApi = await logIn(bobFresh, bob);
         const reconfigureCallback = stubFor(reconfigureRecorder);
         try {
-          (await bobFreshApi.openGadget(gadgetId, undefined, reconfigureCallback))[Symbol.dispose]();
+          (await bobFreshApi.openWorkspace(gadgetId, undefined, reconfigureCallback))[Symbol.dispose]();
         } finally {
           reconfigureCallback[Symbol.dispose]();
         }
@@ -556,7 +556,7 @@ describe("observer readiness and privacy", () => {
       const aliceAccount = await provisionAccount(aliceApi);
       const resourceUrl = thingUrl("owner-only-describe-barrier");
       const key = barrierKey("describe", resourceUrl);
-      using ownerWorkspace = await aliceApi.newGadget();
+      using ownerWorkspace = await aliceApi.newWorkspace();
       using existing = await ownerWorkspace.newGatekeeper(
         aliceAccount.id,
         thingUrl("describe-existing"),
@@ -598,7 +598,7 @@ describe("observer readiness and privacy", () => {
       const bobAccount = await provisionAccount(bobApi);
       const resourceUrl = thingUrl("revocation-restart");
 
-      using ownerWorkspace = await aliceApi.newGadget();
+      using ownerWorkspace = await aliceApi.newWorkspace();
       using connection = await ownerWorkspace.newGatekeeper(aliceAccount.id, resourceUrl);
       if (!connection) throw new Error("Failed to create the revocation-race connection");
       const { id: gadgetId, title: originalTitle } = await ownerWorkspace.getMetadata();
@@ -613,7 +613,7 @@ describe("observer readiness and privacy", () => {
       const callback = stubFor(recorder);
       let bobWorkspace!: RpcStub<Overseer>;
       try {
-        bobWorkspace = await bobApi.openGadget(gadgetId, undefined, callback);
+        bobWorkspace = await bobApi.openWorkspace(gadgetId, undefined, callback);
       } finally {
         callback[Symbol.dispose]();
       }
@@ -642,7 +642,7 @@ describe("observer readiness and privacy", () => {
           const freshPublicApi = connect(harness.url);
           try {
             const freshAliceApi = await logIn(freshPublicApi, alice);
-            const freshOwner = await freshAliceApi.openGadget(gadgetId);
+            const freshOwner = await freshAliceApi.openWorkspace(gadgetId);
             return { freshAliceApi, freshOwner, freshPublicApi };
           } catch {
             freshPublicApi[Symbol.dispose]();
@@ -661,7 +661,7 @@ describe("observer readiness and privacy", () => {
 
         const freshBobApi = await logIn(reopened.freshPublicApi, bob);
         try {
-          await expect(freshBobApi.openGadget(gadgetId)).rejects.toThrow(
+          await expect(freshBobApi.openWorkspace(gadgetId)).rejects.toThrow(
             /access|not found|permission/i,
           );
         } finally {
@@ -683,7 +683,7 @@ describe("observer readiness and privacy", () => {
       const aliceAccount = await provisionAccount(aliceApi);
       const bobAccount = await provisionAccount(bobApi);
 
-      using ownerWorkspace = await aliceApi.newGadget();
+      using ownerWorkspace = await aliceApi.newWorkspace();
       using connection = await ownerWorkspace.newGatekeeper(aliceAccount.id, thingUrl("use-bound"));
       if (!connection) throw new Error("Failed to create the test connection");
       const connId = await connection.getId();
@@ -697,7 +697,7 @@ describe("observer readiness and privacy", () => {
       // An unbound connection is outside a use collaborator's scope, so Bob is admitted with an
       // empty choice set while the owner already holds a session to that connection. He stays
       // connected: binding it widens his live session's scope, which restarts the workspace.
-      const bobHeld = await bobApi.openGadget(gadgetId);
+      const bobHeld = await bobApi.openWorkspace(gadgetId);
 
       // Queue one action and one (disabled) hook while the connection is still outside Bob's
       // scope. Both records must survive the restart their widening causes.
@@ -729,13 +729,13 @@ describe("observer readiness and privacy", () => {
 
       // Everyone re-opens against the widened scope. The queued action and hook survived, the hook
       // enables without a second restart (its connection is already in scope via the binding), and
-      // fresh sessions work. The session open is part of the probe: openGadget succeeding does not
+      // fresh sessions work. The session open is part of the probe: openWorkspace succeeding does not
       // mean the abort landed yet.
       const reopened = await waitFor("the owner to reconnect to the restarted workspace", async () => {
         const freshPublicApi = connect(harness.url);
         try {
           const freshAliceApi = await logIn(freshPublicApi, alice);
-          const freshOwner = await freshAliceApi.openGadget(gadgetId);
+          const freshOwner = await freshAliceApi.openWorkspace(gadgetId);
           const freshConnection = await freshOwner.getGatekeeperById(connId);
           const freshSession = await freshConnection.openSession();
           return { freshAliceApi, freshOwner, freshPublicApi, freshConnection, freshSession };
@@ -772,7 +772,7 @@ describe("observer readiness and privacy", () => {
         const bobFreshApi = await logIn(bobFresh, bob);
         const configure = stubFor(recorder);
         try {
-          (await bobFreshApi.openGadget(gadgetId, undefined, configure))[Symbol.dispose]();
+          (await bobFreshApi.openWorkspace(gadgetId, undefined, configure))[Symbol.dispose]();
         } finally {
           configure[Symbol.dispose]();
         }
@@ -806,12 +806,12 @@ describe("observer readiness and privacy", () => {
       expect(createdIds).toHaveLength(1);
       const [workspaceId] = createdIds;
 
-      using ownerWorkspace = await aliceApi.openGadget(workspaceId);
+      using ownerWorkspace = await aliceApi.openWorkspace(workspaceId);
       if (!(await ownerWorkspace.addCollaborator(bob, "build"))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
       // Admit Bob while scope is empty, then add a connection he has not configured.
-      (await bobApi.openGadget(workspaceId))[Symbol.dispose]();
+      (await bobApi.openWorkspace(workspaceId))[Symbol.dispose]();
       const aliceAccount = await provisionAccount(aliceApi);
       using _late = await ownerWorkspace.newGatekeeper(aliceAccount.id, thingUrl("external-late"));
 

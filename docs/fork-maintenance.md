@@ -305,8 +305,8 @@ Intentional, reviewed differences from upstream. Keep this current.
   and our Declarative `{notification}` payloads, notification clicks use upstream's `path` +
   `cloudflare-os:open-notification` message, and the `release-push-subscription` and
   `pushsubscriptionchange` handlers (and `skipWaiting`/`claim`) are ours. Drop our channel if
-  upstream's service gains a self-hosted mode. Open decision for the maintainers: whether to hide our
-  row when upstream's is configured.
+  upstream's service gains a self-hosted mode. Decided (2026-10-28, maintainer): the fork's channel is the default; upstream's
+  switch stays in place for deployments that configure the platform service instead.
 
 ### Spreadsheet attachments
 

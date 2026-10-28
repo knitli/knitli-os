@@ -1988,14 +1988,17 @@ describe("getDecisionModel routing", () => {
     user: "owner-456", source: "model-binding", gadgetId: "gadget-789", automated: true,
   };
 
-  // pi's classify() takes no fetch from getDecisionModel on HTTP routes, so it uses the global one.
-  beforeEach(() => {
-    capturedRequests.length = 0;
+  // The direct route and the HTTPS gateway route both reach the network through the global fetch.
+  function stubGatewayFetch(respond: () => Response) {
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = new Request(input, init);
       capturedRequests.push({ url: request.url, headers: request.headers, body: await request.text() });
-      return Response.json({ success: true, result: CLEF_RESULT });
+      return respond();
     });
+  }
+  beforeEach(() => {
+    capturedRequests.length = 0;
+    stubGatewayFetch(() => Response.json({ success: true, result: CLEF_RESULT }));
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -2018,16 +2021,31 @@ describe("getDecisionModel routing", () => {
   });
 
   it("decides through the platform gateway over HTTPS with the gateway token", async () => {
+    // The gateway passes Workers AI's bare result through, as the binding's run() returns it.
+    stubGatewayFetch(() => Response.json(CLEF_RESULT));
     const decide = getDecisionModel(env(), CLEF_CONFIG, GADGET_INITIATOR, METADATA_CONTEXT);
 
     expect((await decide(CONTEXT)).answers).toEqual(ANSWERS);
     const [request] = capturedRequests;
-    expect(request.url).toBe(
-        "https://gateway.ai.cloudflare.com/v1/gateway-account-id/platform-gateway/workers-ai/run");
-    // Workers AI's /run checks `authorization` itself; the gateway checks its own header.
-    expect(request.headers.get("authorization")).toBe("Bearer gateway-token");
+    expect(request.url).toBe("https://gateway.ai.cloudflare.com/v1/gateway-account-id/" +
+        "platform-gateway/workers-ai/run/@cf/cloudflare/clef");
+    // An `authorization` header would be forwarded to Workers AI as the credential, in place of
+    // the one the gateway supplies.
+    expect(request.headers.has("authorization")).toBe(false);
     expect(request.headers.get("cf-aig-authorization")).toBe("Bearer gateway-token");
     expect(JSON.parse(request.headers.get("cf-aig-metadata")!)).toEqual(GATEWAY_METADATA);
+    expect(JSON.parse(request.body)).toEqual(WIRE_INPUT);
+  });
+
+  it("reports a gateway refusal as an error result", async () => {
+    stubGatewayFetch(() => Response.json(
+        { success: false, errors: [{ message: "Authentication error" }] }, { status: 401 }));
+    const decide = getDecisionModel(env(), CLEF_CONFIG, GADGET_INITIATOR, METADATA_CONTEXT);
+
+    expect(await decide(CONTEXT)).toMatchObject({
+      stopReason: "error",
+      errorMessage: expect.stringContaining("Authentication error"),
+    });
   });
 
   describe("over the Workers AI binding", () => {

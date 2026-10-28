@@ -1092,33 +1092,44 @@ export function getDecisionModel(env: Cloudflare.Env, config: AiModelConfig,
         { apiKey: config.apiToken, headers: config.extraHeaders });
   }
   const metadata = buildMetadata(initiator, metadataContext);
+  // pi's System One transport POSTs {model, input} as Workers AI's REST API takes them and reads
+  // back the REST envelope; both gateway routes take the bare input and return the bare result.
+  // pi requires a key, which goes unsent.
+  const piInput = async (init?: RequestInit) =>
+      (await new Response(init?.body).json<{ input: Record<string, unknown> }>()).input;
   const binding = gwConfig.bindingFor(config.provider);
   if (binding) {
     // The gateway's passthrough refuses /run even with the binding's identity, so binding
-    // requests take the binding's own run(), which reaches the same gateway. pi's System One
-    // transport POSTs {model, input} as Workers AI's REST API takes them and reads back the REST
-    // envelope; run() takes and returns the bare values. pi requires a key, which goes unsent.
+    // requests take the binding's own run(), which reaches the same gateway.
     return modelAt(catalog.baseUrl, {
       apiKey: CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL,
-      fetch: async (_url, init) => {
-        const { model, input } = JSON.parse(init!.body as string);
-        const result = await binding.run(model, input, { gateway: { id: gwConfig.gateway, metadata } });
-        return Response.json({ success: true, result });
-      },
+      fetch: async (_url, init) => Response.json({ success: true, result: await binding.run(
+          config.model, await piInput(init), { gateway: { id: gwConfig.gateway, metadata } }) }),
     });
   }
-  // Unlike the chat route, /run wants a Workers AI credential as `Authorization`, and a request
-  // sending this token there is refused even when the token grants Workers AI. Until AI Gateway
-  // authenticates /run as it does chat, this route fails, so the docs have such deployments
-  // disable decision models.
-  return modelAt(
-      `https://gateway.ai.cloudflare.com/v1/${gwConfig.accountId}/${gwConfig.gateway}/workers-ai`, {
-        apiKey: gwConfig.apiToken,
+  // Over HTTPS the gateway supplies Workers AI's credential only to a request that names the model
+  // in the path and carries no `Authorization`, which it would otherwise forward to Workers AI as
+  // the credential. A failure goes back to pi as is, for its retries and error message.
+  const gatewayUrl =
+      `https://gateway.ai.cloudflare.com/v1/${gwConfig.accountId}/${gwConfig.gateway}`;
+  return modelAt(catalog.baseUrl, {
+    apiKey: CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL,
+    fetch: async (_url, init) => {
+      const response = await fetch(`${gatewayUrl}/workers-ai/run/${config.model}`, {
+        method: "POST",
         headers: {
+          "content-type": "application/json",
           "cf-aig-authorization": `Bearer ${gwConfig.apiToken}`,
           "cf-aig-metadata": JSON.stringify(metadata),
         },
+        body: JSON.stringify(await piInput(init)),
+        signal: init?.signal,
       });
+      return response.ok
+          ? Response.json({ success: true, result: await response.json() })
+          : response;
+    },
+  });
 }
 
 // =======================================================================================

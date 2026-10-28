@@ -555,57 +555,33 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **Why:** Both are data-only additions to existing upstream sets — the cheapest possible shape for
   an upstream edit, and the shape to aim for elsewhere.
 
-### Microsoft 365 gatekeeper (ported from `twinprime19/cloudflare-os`, 2026-10-10)
+### Microsoft 365 gatekeeper: upstream's package, plus the connect-initiator guard (2026-10-28 sync)
 
-- **Where:** `packages/gatekeeper-microsoft/` (Tier 1). Upstream-file seams: two entries in
-  `scripts/run-dev-server.ts` (`SHARED_GATEKEEPER_CREDS` and `PASSTHROUGH_GATEKEEPER_VARS`), one
-  entry in `HAND_ROLLED` in `scripts/fork/connect-initiator-enforced.test.ts` (fork-owned), and the
-  regenerated `scripts/release/testdata/golden-manifest.json` plus its fixture bundle.
-- **What:** Entra ID sign-in pinned to one tenant (`TENANT_ID`, members on verified domains only),
-  an Outlook mailbox, read-only Teams and a SharePoint List, each connected on its own.
-- **Divergences from the source fork, which sync will not reconcile for us:** no connect-everything
-  path (`connectAccount` treats omitted `resourceUrlPatterns` as the Outlook mailbox only, against
-  the contract's "omitted = all resource types", and refuses an explicit `[]`; and recorded refresh scopes cover
-  only what Entra reported granted); SharePoint `createItem` always goes through approval, with
-  none of the fork's auto-apply rule or provisional-id machinery, and each create is stamped with a
-  `GadgetsActionId` marker column (added to the user's list on the first approved create) so a retry
-  finds its earlier row, with Outlook reply drafts reconciled by read-back instead; the sign-in profile hints
-  (`getAuthenticatedProfile`, `providesAuthProfile`) are not ported because the Workshop contract
-  here has no such hook; the connect-initiator guard above is applied, which the source fork lacks.
-- **SharePoint observers write, but cannot read rows:** a list-bound gadget admits collaborators who
-  can open the list, and every row read names all of them in `excludeObservers`, so rows are
-  unreadable (for the owner too) while any collaborator is authorized, and no collaborator is added
-  once rows were read. The session carries no caller identity, so the contract cannot allow a read
-  for the owner and refuse it for a collaborator. A Workshop change that passes the caller into the
-  session would let the owner keep row reads; the logic is `#authorizeRows` and `addObserver` in
-  `sharepoint-list.ts`.
-- **Why:** per-resource consent isolates an unconsented permission from the other resources; the
-  initiator guard is required of every hand-rolled gatekeeper this installation uses.
-- **Upstream shipped its own (foundation `18ff6e72`, #902, 2026-10-27) -- DECIDED 2026-10-28
-  (maintainer): adopt upstream's `packages/gatekeeper-microsoft/` wholesale and retire ours, keeping
-  only the cherry-picks below.** Until this lands, the `Upstream divergence` check is red on `main`
-  (Tier-1 collision on `packages/gatekeeper-microsoft/` and its fixture bundle), so it is the first
-  job of the next sync (`fd624bc..6d3e744`, which also carries #907 and #910). Upstream's is a
-  broader, independent build (SharePoint/OneDrive incl. Word/PowerPoint/Excel edits, Outlook,
-  Calendar, Outlook hooks, optional multitenant mode; ~97 source files, design record
-  `plans/microsoft-365-gatekeeper.md`); ours is Outlook, read-only Teams and one SharePoint List.
-  Cherry-picks, each only **if upstream does not already cover it** -- verify first, then keep the
-  smallest fork-owned module plus a one-line seam, and record each kept one here:
-  1. **Tenant pinning and verified-domain checks.** Ours pins sign-in to one Entra tenant
-     (`TENANT_ID`) and admits members of verified domains only. A skim saw upstream check `tid` and
-     `aud` on the ID token but not a verified-domain check; confirm whether its single-tenant mode
-     enforces a pin and what `MICROSOFT_ALLOWED_TENANT_IDS` allows.
-  2. **Connect-initiator guard** (`observability/src/fork/connect-initiator.ts`; required of every
-     hand-rolled gatekeeper this installation uses). Check upstream's connect/reconnect routes; the
-     only `initiator` hits seen were in Outlook hooks, which is not the guard. Add the guard to the
-     adopted package if absent, and update `scripts/fork/connect-initiator-enforced.test.ts` (it
-     discovers hand-rolled gatekeepers, so the adopted one must be in `HAND_ROLLED` or covered).
-  3. **SharePoint List create retry** (`GadgetsActionId` marker column, so a retried create finds its
-     earlier row). Keep only if upstream's list creates are not already exactly-once.
-  **Dropped on purpose:** read-only Teams (not needed now; expect upstream to add it), the Outlook
-  reply-draft read-back, and the rest of ours. Remove the Tier-1 entries for the package and its
-  fixture bundle from `fork-boundary.json`, regenerate `scripts/release/testdata/golden-manifest.json`
-  (`UPDATE_GOLDEN=1`), and fix the two `scripts/run-dev-server.ts` entries to upstream's.
+- **Where:** `packages/gatekeeper-microsoft/` is upstream's (foundation `18ff6e72`, #902), adopted
+  wholesale; our earlier port from `twinprime19/cloudflare-os` (Outlook, read-only Teams, one
+  SharePoint List) is retired and lives only in git history (`a3fa50e` and earlier). The one fork
+  edit is `src/microsoft.ts` (Tier 2).
+- **Kept: connect-initiator guard.** Upstream's connect and reconnect routes do not check who the
+  link was issued to; the fork requires it of every hand-rolled gatekeeper this installation uses.
+  The seam in `microsoft.ts` is the kit-pattern one `gatekeeper-linear` uses: `initiator` stored
+  in the connect nonce record (`setCallback`, `prepareReconnect`, threaded from `connectAccount`,
+  `reconnect` and `ensureResources`), `UserAccount.initiatorMatches()`, and a
+  `refuseForeignBrowser()` call before `beginOAuthFlow` and before the OAuth callback does anything
+  (the callback's refusal branch consumes the nonce). Pinned structurally by
+  `scripts/fork/connect-initiator-enforced.test.ts` (Microsoft has a wider window there than the
+  others, for that branch). No behavioural workerd test yet.
+- **Retired cherry-picks (checked against upstream):** tenant pinning is covered
+  (`MICROSOFT_TENANT_ID` pins sign-in and compares the token's `tid`; `organizations` needs an
+  explicit `MICROSOFT_ALLOWED_TENANT_IDS`). The create-retry marker column is not needed: upstream's
+  `createListItem` is `claimBeforeApply` and raises `ActionOutcomeUnknownError` rather than
+  re-adding a row that may exist, so it is at-most-once (ours was exactly-once on retry).
+- **Not ported, maintainer's call:** ours refused guests (members on the tenant's verified domains
+  only); upstream's `acceptsTenant()` lets a guest of the pinned tenant connect, by design. A guest
+  gets only what their own delegated token allows, so this is a policy preference rather than a
+  hole. Re-adding it would be a check after `acceptAuthCode` in `microsoft.ts` against
+  `directory.ts`'s verified-domain list.
+- **At sync:** Tier 2 for that file only. If upstream adds its own initiator binding, delete ours
+  and remove the Microsoft entry from `HAND_ROLLED` only if its guard stays structurally visible.
 
 ### Deployment worker configs are fork-managed upstream files (Tier 2)
 

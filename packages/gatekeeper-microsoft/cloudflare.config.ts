@@ -27,5 +27,10 @@ export default defineGadgetsWorker({
 export const wrangler = DEFAULT_GATEKEEPER_WRANGLER;
 
 export const migrations: DurableObjectMigration[] = [
-  { tag: "v0", new_sqlite_classes: ["UserAccount", "SharePointGatekeeper", "OutlookGatekeeper", "OutlookHookDriver", "CalendarGatekeeper"] },
+  // Fork: the history of the fork's earlier Microsoft Worker (still deployed) is kept verbatim, and
+  // upstream's classes are added after it. The retired classes stay exported by src/fork/retired-classes.ts.
+  { tag: "v0", new_sqlite_classes: ["UserAccount", "OutlookMailGatekeeperImpl"] },
+  { tag: "v1", new_sqlite_classes: ["TeamsGatekeeperImpl"] },
+  { tag: "v1-sharepoint-list", new_sqlite_classes: ["SharePointListGatekeeperImpl"] },
+  { tag: "v2-upstream-m365", new_sqlite_classes: ["SharePointGatekeeper", "OutlookGatekeeper", "OutlookHookDriver", "CalendarGatekeeper"] },
 ];

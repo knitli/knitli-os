@@ -570,6 +570,17 @@ Intentional, reviewed differences from upstream. Keep this current.
   (the callback's refusal branch consumes the nonce). Pinned structurally by
   `scripts/fork/connect-initiator-enforced.test.ts` (Microsoft has a wider window there than the
   others, for that branch). No behavioural workerd test yet.
+- **Kept: migration history of the old Worker.** The fork's earlier Microsoft Worker was deployed
+  (unused, but its setup or sign-in state may be persisted), with migrations `v0`
+  (`UserAccount`, `OutlookMailGatekeeperImpl`), `v1` (`TeamsGatekeeperImpl`) and
+  `v1-sharepoint-list` (`SharePointListGatekeeperImpl`). `cloudflare.config.ts` keeps those tags
+  verbatim and appends `v2-upstream-m365` for upstream's four new classes; `src/fork/retired-classes.ts`
+  (Tier 1) keeps the three retired classes exported as empty Durable Objects, via one
+  `export *` line in `microsoft.ts`, so the history stays valid on existing and fresh deploys and
+  nothing is deleted. **Not done, maintainer's call:** a `deleted_classes` migration (destroys their
+  state), and whether the existing `UserAccount` objects still work: upstream's account reads a different
+  storage layout, so an old connection reads as unconnected and must be reconnected, and its old
+  keys remain unread. Nothing is migrated or cleared.
 - **Kept: alarm kill switch.** Upstream's two `alarm()` handlers (`UserAccount` connect timeout,
   `OutlookHookDriver`) start with `haltIfAlarmsDisabled` / `guardedAlarmFor`, as the coverage test
   requires; both are listed in `docs/alarm-audit.md`.

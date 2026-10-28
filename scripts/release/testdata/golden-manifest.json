@@ -822,12 +822,30 @@
         {
           "new_sqlite_classes": [
             "UserAccount",
+            "OutlookMailGatekeeperImpl"
+          ],
+          "tag": "v0"
+        },
+        {
+          "new_sqlite_classes": [
+            "TeamsGatekeeperImpl"
+          ],
+          "tag": "v1"
+        },
+        {
+          "new_sqlite_classes": [
+            "SharePointListGatekeeperImpl"
+          ],
+          "tag": "v1-sharepoint-list"
+        },
+        {
+          "new_sqlite_classes": [
             "SharePointGatekeeper",
             "OutlookGatekeeper",
             "OutlookHookDriver",
             "CalendarGatekeeper"
           ],
-          "tag": "v0"
+          "tag": "v2-upstream-m365"
         }
       ],
       "modules": [

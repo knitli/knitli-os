@@ -107,6 +107,7 @@ import CALENDAR_CONFIGURATOR_HTML from "./generated/calendar-configurator-ui.txt
 import OUTLOOK_CONFIGURATOR_HTML from "./generated/outlook-configurator-ui.txt";
 import SHAREPOINT_CONFIGURATOR_HTML from "./generated/sharepoint-configurator-ui.txt";
 
+export * from "./fork/retired-classes";
 export { CalendarGatekeeper } from "./calendar-gatekeeper";
 export { CalendarReaderImpl, CalendarSessionImpl } from "./calendar-session";
 export { OutlookGatekeeper } from "./outlook-gatekeeper";

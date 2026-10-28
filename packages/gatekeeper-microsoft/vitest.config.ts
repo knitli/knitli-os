@@ -8,6 +8,8 @@ export default defineConfig({
   test: {
     include: ["__tests__/*.test.ts", "__tests__/content/*.test.ts"],
     environment: "node",
+    // Fork: the docx byte-for-byte test takes ~3 s alone and exceeds 5 s on the CI runner (docs/fork-maintenance.md).
+    testTimeout: 30_000,
     alias: {
       // Lets modules that declare a Durable Object or an `RpcTarget` be imported at all. See the
       // stub for what it does and does not provide.

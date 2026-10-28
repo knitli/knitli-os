@@ -573,6 +573,9 @@ Intentional, reviewed differences from upstream. Keep this current.
 - **Kept: alarm kill switch.** Upstream's two `alarm()` handlers (`UserAccount` connect timeout,
   `OutlookHookDriver`) start with `haltIfAlarmsDisabled` / `guardedAlarmFor`, as the coverage test
   requires; both are listed in `docs/alarm-audit.md`.
+- **Kept: unit-test timeout.** `vitest.config.ts` sets `testTimeout: 30_000`: upstream's
+  `docx-edit` "byte for byte" test takes ~3 s alone and timed out at the 5 s default on this
+  repo's CI runner twice. Drop it if upstream raises the limit or speeds the test.
 - **Retired cherry-picks (checked against upstream):** tenant pinning is covered
   (`MICROSOFT_TENANT_ID` pins sign-in and compares the token's `tid`; `organizations` needs an
   explicit `MICROSOFT_ALLOWED_TENANT_IDS`). The create-retry marker column is not needed: upstream's

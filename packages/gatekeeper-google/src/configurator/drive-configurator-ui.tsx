@@ -35,6 +35,8 @@ const EDITORS: Record<OfficeKind, { pattern: string; path: string; title: string
 const OFFICE_IMPORT_GRANT = "https://docs.google.com/import";
 const ACCESS_POLL_MS = 2_000;
 const ACCESS_WAIT_MS = 3 * 60_000;
+/** How long a file check runs before saying so, so a quick one does not flash a notice. */
+const CHECKING_NOTICE_DELAY_MS = 400;
 
 /** The whole account's node, the picker's root. */
 const ROOT_ID = "drive";
@@ -170,6 +172,20 @@ const modified = (value: string | undefined): string | undefined => {
     : undefined;
 };
 
+const SIZE_UNITS = ["B", "KB", "MB", "GB", "TB"];
+
+/** "1.5 MB", in binary units (1 KB = 1024 bytes), going up a unit once the number would show 1024. */
+const size = (bytes: number | undefined): string | undefined => {
+  if (bytes === undefined) return undefined;
+  let value = bytes;
+  let unit = 0;
+  while (Math.round(value) >= 1024 && unit < SIZE_UNITS.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value < 10 ? Number(value.toFixed(1)) : Math.round(value)} ${SIZE_UNITS[unit]}`;
+};
+
 // A folder or shared drive grant reaches everything in it, checked again on every read.
 const CONTAINER_CHOICE = { subtitle: "All of its contents, including anything added later" };
 
@@ -180,8 +196,19 @@ const toAncestor = (
 ): ConfiguratorUIHierarchyAncestor =>
   ({ id, title, selectable: listable === true && patternOf(id, accepted) !== undefined, choice: CONTAINER_CHOICE });
 
-/** A folder whose children this account cannot list cannot be opened or bound, only seen. */
+/**
+ * Docs, Sheets and Slides files the latest listing or lookup of each showed to be native. Choosing
+ * one connects it as it is without asking Drive again, since `inspectFile` decides from that same type.
+ */
+const natives = new Set<string>();
+
+/**
+ * A folder whose children this account cannot list cannot be opened or bound, only seen. Records in
+ * {@link natives} whether a Docs, Sheets or Slides file is native.
+ */
 const toItem = (node: DriveNode, accepted: readonly string[] | undefined): ConfiguratorUIHierarchyItem => {
+  const editor = editorOf(node.id);
+  if (editor) natives[node.mimeType === EDITORS[editor].mimeType ? "add" : "delete"](node.id);
   const container = node.kind !== "file" && (node.kind !== "folder" || node.listable === true);
   return {
     id: node.id,
@@ -189,6 +216,7 @@ const toItem = (node: DriveNode, accepted: readonly string[] | undefined): Confi
     kind: container ? "container" : "leaf",
     icon: iconOf(node),
     subtitle: [modified(node.modifiedTime), node.detail].filter(Boolean).join(" · ") || undefined,
+    meta: size(node.size),
     selectable: (container || node.kind === "file") && patternOf(node.id, accepted) !== undefined,
     choice: container ? CONTAINER_CHOICE : undefined,
     path: node.path?.map(ancestor => toAncestor(ancestor, accepted)),
@@ -252,7 +280,7 @@ type Busy = "converting" | "waiting";
  */
 type Flow =
   | { step: "idle" }
-  | { step: "inspecting"; target: string }
+  | { step: "inspecting"; target: string; slow?: true }
   | { step: "unsupported"; target: string }
   | { step: "refused"; target: string; message: string }
   | { step: "office"; target: string; file: OfficeFile; busy?: Busy; error?: string }
@@ -296,11 +324,18 @@ async function inspect(ui: DriveConfiguratorRpc, target: string): Promise<Flow> 
 
 /**
  * Inspects `target` into `flow`, resolving to its `checked` value: `target` when it connects as it
- * is, else null. Undefined when a later choice superseded it.
+ * is, else null. Undefined when a later choice superseded it. `rerender` shows the check's notice
+ * once it is slow.
  */
-async function check(ui: DriveConfiguratorRpc, target: string): Promise<string | null | undefined> {
+async function check(ui: DriveConfiguratorRpc, target: string, rerender?: () => void): Promise<string | null | undefined> {
   const run = begin({ step: "inspecting", target });
+  const slow = setTimeout(() => {
+    if (run !== generation) return;
+    flow = { step: "inspecting", target, slow: true };
+    rerender?.();
+  }, CHECKING_NOTICE_DELAY_MS);
   const next = await inspect(ui, target);
+  clearTimeout(slow);
   if (run !== generation) return undefined;
   flow = next;
   return next.step === "idle" ? target : null;
@@ -316,7 +351,12 @@ async function choose(context: Context, target: string | null) {
     setValues({ target, checked: null });
     return;
   }
-  const checking = check(ui, target);
+  if (natives.has(target)) {
+    begin({ step: "idle" });
+    setValues({ target, checked: target });
+    return;
+  }
+  const checking = check(ui, target, () => setValues({}));
   setValues({ target, checked: null });
   const checked = await checking;
   if (checked !== undefined) setValues({ checked });
@@ -436,7 +476,7 @@ function officeNotices(context: Context) {
   // A notice describes the file chosen now; a choice the picker let go of takes its notice with it.
   if (flow.target !== context.values.target) return null;
   const product = EDITORS[editorOf(flow.target)!].title;
-  if (flow.step === "inspecting") return <Notice>Checking the file…</Notice>;
+  if (flow.step === "inspecting") return flow.slow ? <Notice>Checking the file…</Notice> : null;
   if (flow.step === "unsupported") {
     return <Notice tone="error">
       {`This file isn't a Google ${product} file, or an Office file that can be converted into one.`}

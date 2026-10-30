@@ -751,14 +751,28 @@ export interface AuthenticatedApi extends RpcTarget {
   hasPasswordLogin(): Promise<boolean>;
 
   /**
-   * Register one of the user's devices for push: the native app's one-time central device
+   * Register one of the user's devices for push: an older native app's one-time central device
    * registration, or this browser's Web Push subscription. Each registered device gets push; a
    * device that registers again replaces its own subscription. The deployment never receives an
    * APNs device token or Cloudflare account token. A browser's subscription passes through it to
-   * the central notification service, which delivers to an endpoint only for its most recent
-   * registration.
+   * the central notification service under this user's opaque installation-local identity; the
+   * service delivers to an endpoint only for its most recent registration.
    */
   registerNotificationDevice(registration: string | WebPushSubscription): Promise<void>;
+
+  /**
+   * Claim a new native registration using this user's CFOS authorization, not legacy OAuth.
+   * This is separate from `registerNotificationDevice()` because legacy and authorized native
+   * registrations have the same opaque string shape; only the native protocol version identifies
+   * which central exchange is valid.
+   */
+  registerAuthorizedNotificationDevice(deviceRegistrationId: string): Promise<void>;
+
+  /**
+   * Authorize native push enrollment as this CFOS user. The single-use central grant is bound to
+   * this installation and user; it carries no provider token or Dashboard credential.
+   */
+  authorizeNotificationDevice(): Promise<string>;
 
   /**
    * Subscribe while this client can visibly present notifications. Dispose the returned handle
@@ -2248,16 +2262,24 @@ export type CloudflareAccountOption = {
   accountName: string;
 };
 
-/** Supported AI providers. */
-export type AiModelProvider = "openai" | "anthropic" | "google" | "cloudflare" | "ollama";
+/**
+ * Supported AI providers. "cloudflare-auto-router" is AI Gateway's Auto Router, which picks the
+ * model behind each request (see AUTO_ROUTER_MODEL_ID); it exists only inside a gateway.
+ */
+export type AiModelProvider =
+    "openai" | "anthropic" | "google" | "cloudflare" | "ollama" | "cloudflare-auto-router";
+
+/** The model ID of AI Gateway's Auto Router, the one model of "cloudflare-auto-router". */
+export const AUTO_ROUTER_MODEL_ID = "cloudflare/auto";
 
 /** Information about the AI gateway configuration. Returned by `AuthenticatedApi.getAiConfig()`. */
 export type AiGatewayInfo = {
   enabled: true;
   /**
    * The providers the deployment enables: the ones CF_AI_GATEWAY_PROVIDERS lists and the ones its
-   * admin turned on (see AdminApi.setGatewayProviderEnabled). A user can add a model of their own
-   * under these only.
+   * admin turned on (see AdminApi.setGatewayProviderEnabled), less "cloudflare-auto-router",
+   * whose one model is the deployment's alone. A user can add a model of their own under these
+   * only.
    */
   enabledProviders: AiModelProvider[];
   /**
@@ -2343,6 +2365,16 @@ export type GatewayModelSettings = {
    * most the model's AdminModelView.maxCompactionInputBudget.
    */
   compactionInputBudget?: number;
+
+  /**
+   * For the Auto Router model only: the gateway models it may pick, as the gateway names them
+   * (`anthropic/claude-sonnet-5.5`, `openai/gpt-6-luna`, `@cf/*\/*`; `*` matches one segment).
+   * Unset, it picks among every model of the enabled providers. Each name must belong to an
+   * enabled provider, and a name whose provider is later turned off leaves the pool. The server
+   * refuses the list on any other model, and refuses an empty list or a malformed or foreign
+   * name; a name the gateway does not know fails each request, which the model's test reports.
+   */
+  allowedModels?: string[];
 };
 
 /**
@@ -2376,6 +2408,9 @@ export type GatewayModel = {
 
   /** Display name. */
   name: string;
+
+  /** The line the pickers show under the name, when SUGGESTED_MODELS gives the model one. */
+  description?: string;
 
   /** The maximum tokens one request may total. */
   contextWindow: number;
@@ -2475,10 +2510,10 @@ export type AdminGatewayProvider = {
  * carries a message on one line, cut short: what the provider or the gateway answered, or why no
  * answer came. It carries the HTTP status of the response only when the model runtime reports
  * one, which it does not for every provider (a failed Google request has none): the message then
- * says what there is.
+ * says what there is. A pass of the Auto Router model names the gateway model that answered.
  */
 export type GatewayModelTest = { model: string } &
-    ({ ok: true } | { ok: false; status?: number; message: string });
+    ({ ok: true; routedModel?: string } | { ok: false; status?: number; message: string });
 
 /**
  * One request of AdminApi.testNewGatewayModel(): its result, and the reasoning level it asked
@@ -2558,7 +2593,16 @@ export type AiModelConfig = {
    * deployment's admin added to its AI Gateway.
    */
   capabilities?: GatewayModelCapabilities;
+
+  /** The pool the Auto Router model picks from; absent, the gateway's default pool applies. */
+  autoRouterPool?: AutoRouterPool;
 };
+
+/**
+ * The Auto Router model's pool: the listed gateway model names of enabled providers (see
+ * GatewayModelSettings.allowedModels), or else the enabled providers' every model.
+ */
+export type AutoRouterPool = { models: string[] } | { providers: AiModelProvider[] };
 
 /**
  * An `AiModelConfig` whose secrets may be withheld, so that a stored configuration can be shown
@@ -2569,7 +2613,7 @@ export type AiModelConfig = {
  */
 export type RedactedAiModelConfig = Omit<AiModelConfig,
     "apiToken" | "extraHeaders" | "reasoning" | "compactionInputBudget" | "behavesLike" |
-    "capabilities"> & {
+    "capabilities" | "autoRouterPool"> & {
   /** `AiModelConfig.apiToken`, or null if withheld. */
   apiToken: string | null;
 
@@ -2607,6 +2651,9 @@ export type ModelKind = "language" | "decision";
 type SuggestedModel = {
   name: string;
 
+  /** A line the model pickers show under the name, when the name alone doesn't say what it does. */
+  description?: string;
+
   /** The maximum tokens one request may total. */
   contextWindow: number;
 
@@ -2634,6 +2681,18 @@ type SuggestedModel = {
 
 // The literal is kept apart from the export so SuggestedModelId can derive the model ids from it.
 const SUGGESTED_MODEL_CATALOG = {
+  // First so that, when its provider is on, Auto leads the model pickers and is the model a new
+  // user or chat gets by default.
+  "cloudflare-auto-router": {
+    // The router answers with whichever model it picks, so the window is the smallest documented
+    // in its pool (https://developers.cloudflare.com/ai-gateway/features/auto-router/#models:
+    // Workers AI's gpt-oss-20b, 128K), and the output limit is reserved as Workers AI reserves
+    // one, in case a Workers AI model is picked.
+    [AUTO_ROUTER_MODEL_ID]: {
+      name: "Auto", description: "Best model for each request",
+      contextWindow: 128000, outputLimit: WORKERS_AI_OUTPUT_LIMIT,
+    },
+  },
   "cloudflare": {
     "@cf/moonshotai/kimi-k2.7-code": {
       name: "Kimi K2.7 Code (Workers AI)", contextWindow: 262144,
@@ -4386,6 +4445,13 @@ export type AiChatAuthorInfo = {
 
   /** Display name for author, e.g. "Kenton Varda" or "GPT" */
   name: string;
+
+  /**
+   * For a model offered by `listModels()`, a line the pickers show under its name, when the name
+   * alone doesn't say what the model does (the Auto Router's "Best model for each request").
+   * Not carried on a message's author.
+   */
+  description?: string;
 
   /**
    * The user's preferred email address for git commits they author, set via

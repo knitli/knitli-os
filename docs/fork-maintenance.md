@@ -717,6 +717,15 @@ authorizes a read after fetching it.
   sessions on revocation via `RpcStub.revocable()`"), which needs a patched workerd. If that lands on
   `foundation/main`, the gate, `runRevocationCleanup()` and this whole divergence entry should be
   able to go.
+- **Seams added by the 2026-10-30 update (foundation `0483e888`).**
+  - `fork/reasoning-levels.ts`: `APP_PROVIDER_PI_SHAPE` is keyed by every `AiModelConfig["provider"]`, so
+    upstream #935's `cloudflare-auto-router` needed an entry (the typecheck catches a new provider).
+    Auto Router declares `reasoning: false` upstream, so it resolves to no levels (`null`).
+  - `server.ts`/`admin-settings.ts` import lines: upstream's list (it dropped `AiModelProvider` from
+    `server.ts`; #935 added `MAX_ALLOWED_MODELS`/`isAllowedModelName`) plus our `ModelReasoningInfo`,
+    `WebPushSubscriptionInfo`, `SESSION_IDLE_CLOSE_CODE` and `enabledResourcePatterns`.
+  - Upstream #875 reshaped `notification-service` calls in `user.ts` (`#notificationSubject`); our single
+    `deliverWebPush()` call in `publishNotification()` is untouched.
 - **Seams added by the 2026-10-27 sync (foundation `fd624bcd`).**
   - Upstream #895 renamed the `AuthenticatedApi` gadget methods to workspace names (`openWorkspace`,
     `newWorkspace`, `newWorkspaceFromBlueprint`, `listWorkspaces`), the gadget metadata types to

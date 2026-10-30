@@ -6,10 +6,10 @@ import { validateRpc } from 'capnweb-validate';
 import { createWorkshopLogger } from "./observability";
 import { sanitizeBlueprintOutput } from './blueprint-archive.js';
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, readBlueprintKvRecord, serializeFeaturedBlueprints } from './storage-schema/blueprints-kv.js';
-import { MAX_AGENT_HINT, defaultOutputFormatId, enabledResourcePatterns, isUpdateCheckInterval, isUpdateHours, listPromotedFormats, normalizeAdminConfig, reorderFormats, sanitizeAddedModel, sanitizeModelSettings, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
+import { MAX_AGENT_HINT, MAX_ALLOWED_MODELS, defaultOutputFormatId, enabledResourcePatterns, isAllowedModelName, isUpdateCheckInterval, isUpdateHours, listPromotedFormats, normalizeAdminConfig, reorderFormats, sanitizeAddedModel, sanitizeModelSettings, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
 import { makeAdminSettingsStorage, type AdminConfig, type AdminSettingsStorage, type FormatCuration } from './storage-schema/admin-settings-storage.js';
 import { getModelTokenLimits } from './agent-compaction.js';
-import { AiGatewayConfig, GatewayModels, assertGatewayProvider, gatewayModelConfig, gatewayRunConfig, getAiGatewayConfig, isCatalogModel } from './ai-gateway.js';
+import { AUTO_ROUTER_PROVIDER_NAMES, AiGatewayConfig, GatewayModels, assertGatewayProvider, gatewayModelConfig, gatewayRunConfig, getAiGatewayConfig, isCatalogModel } from './ai-gateway.js';
 import { AgentTurnError, completeText } from './ai-invoke.js';
 import { gatewayBuiltInReasoning, gatewayReasoningLevels, getModel, isRuntimeModel } from './ai-models.js';
 import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
@@ -781,7 +781,8 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
    */
   async setGatewayModelSettings(modelId: string, settings: GatewayModelSettings): Promise<void> {
     await this.#mutateAdminConfig(config => {
-      let model = new GatewayModels(this.#requireGateway(), config).get(modelId);
+      let models = new GatewayModels(this.#requireGateway(), config);
+      let model = models.get(modelId);
       if (!model) throw new Error(`No such model: ${modelId}`);
       let budget = settings.compactionInputBudget;
       if (budget !== undefined) {
@@ -793,6 +794,38 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
         if (!Number.isSafeInteger(budget) || budget <= 0 || budget > max) {
           throw new Error(`The compaction budget of the "${model.name}" model must be a whole ` +
               `number of tokens from 1 to ${max}.`);
+        }
+      }
+      let allowed = settings.allowedModels;
+      if (allowed !== undefined) {
+        if (model.provider !== "cloudflare-auto-router") {
+          throw new Error("Only the Auto Router model takes a list of allowed models.");
+        }
+        if (allowed.length === 0) {
+          throw new Error("List at least one model for Auto Router to pick from, or leave the " +
+              "list unset for the models of every enabled provider.");
+        }
+        if (allowed.length > MAX_ALLOWED_MODELS) {
+          throw new Error(`List at most ${MAX_ALLOWED_MODELS} models for Auto Router.`);
+        }
+        let malformed = allowed.find(name => !isAllowedModelName(name.trim()));
+        if (malformed !== undefined) {
+          throw new Error(`"${malformed}" is not a gateway model name: name a model as ` +
+              "provider/model, like anthropic/claude-sonnet-5.5, or a provider's every model, " +
+              "like anthropic/*.");
+        }
+        // The list narrows the pool; it must not reach a provider the Models tab doesn't show. A
+        // stored name whose provider was turned off since stays, as the pool leaves it out, so
+        // that the model's other settings can still be saved.
+        let stored = config.modelSettings[modelId]?.allowedModels ?? [];
+        let foreign = allowed.find(name =>
+            !models.enablesProviderOf(name.trim()) && !stored.includes(name.trim()));
+        if (foreign !== undefined) {
+          let prefixes = models.addableProviders
+              .flatMap(provider => AUTO_ROUTER_PROVIDER_NAMES[provider]?.prefix ?? []);
+          let among = prefixes.map(prefix => `${prefix}…`).join(", ");
+          throw new Error(`"${foreign}" names a provider this deployment hasn't turned on, and ` +
+              `Auto Router picks only among those that are on${among && `: ${among}`}.`);
         }
       }
       let entries = entriesWithout(config.modelSettings, modelId);
@@ -965,6 +998,8 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     let signal = AbortSignal.timeout(test.timeoutMs);
     let startedAt = Date.now();
     let failure: { status?: number, message: string } | undefined;
+    // The gateway model Auto Router answered with, where the model is the router.
+    let routedModel: string | undefined;
     try {
       let handle = getModel(this.env, config,
           { type: "user", id: adminUserId, name: adminUserId });
@@ -978,6 +1013,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
         // answer without asking the provider.
         headers: { "cf-aig-skip-cache": "true" },
       });
+      routedModel = handle.lastResponse?.routedModel;
     } catch (error) {
       // The signal is this call's own, so nothing but the timeout aborts it.
       let message = signal.aborted
@@ -994,7 +1030,9 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       event: test.event, modelId: model, outcome: failure ? "error" : "ok",
       statusCode: failure?.status, durationMs: Date.now() - startedAt,
     });
-    return failure ? { model, ok: false, ...failure } : { model, ok: true };
+    return failure
+        ? { model, ok: false, ...failure }
+        : { model, ok: true, ...(routedModel !== undefined && { routedModel }) };
   }
 
   /** Set whether users may add models of their own to the ones the gateway provides. */

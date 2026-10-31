@@ -1510,6 +1510,8 @@ export type AdminSettingsView = {
   banner: BannerConfig;
   /** Accent color hex, or "" for the default theme. */
   accentColor: string;
+  /** The hosts `webFetch` may reach in a workspace that has observed restricted data. */
+  restrictedWebFetchHosts: string[];
   /** Every bound gatekeeper and its resource types, with enabled state (not hidden when disabled). */
   resourceVendors: AdminResourceVendor[];
   /** The blueprints promoted as standard output formats, in menu order (including disabled ones). */
@@ -1863,6 +1865,14 @@ export interface AdminApi {
 
   /** Delete one prompt preset. Chats using it fall back to the built-in default. */
   deletePromptPreset(id: string): Promise<void>;
+
+  /**
+   * Replace the hosts `webFetch` may reach in a workspace that has observed restricted data. Each
+   * entry is an exact host name, so a subdomain needs its own entry. Entries are trimmed and
+   * lowercased, and duplicates and blank entries are dropped. Rejects an entry that is not an ASCII
+   * host name, such as one with a scheme, port, path or wildcard. Resolves to the list as stored.
+   */
+  setRestrictedWebFetchHosts(hosts: string[]): Promise<string[]>;
 
   /**
    * Enable or disable a single gatekeeper resource type, keyed by vendor id + resource urlPattern.
@@ -2838,8 +2848,9 @@ export type WorkspaceMetadata = {
   /**
    * True when the workspace has observed data marked `containsRestrictedData` (see
    * `ObservationDescription`). It can still be shared, with collaborators verified per
-   * gatekeeper (if `ownerInvitesOnly` is also set, only the owner can add them), but can no longer
-   * fetch from the public web, and every action requires manual approval.
+   * gatekeeper (if `ownerInvitesOnly` is also set, only the owner can add them), but its web
+   * fetches reach only the hosts the deployment admin trusts (none by default), and every action
+   * requires manual approval.
    */
   containsRestrictedData?: boolean;
 

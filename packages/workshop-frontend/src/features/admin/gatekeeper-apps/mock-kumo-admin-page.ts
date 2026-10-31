@@ -12,6 +12,7 @@ export function mockKumoAdminPage(toast: (value: unknown) => void): Record<strin
     Button: ({ children, ...props }: Record<string, any>) =>
       createElement("button", props, children),
     Input: (props: Record<string, any>) => createElement("input", props),
+    TagInput: () => null,
     Textarea: (props: Record<string, any>) => createElement("textarea", props),
     Switch: ({ checked, onCheckedChange, ...props }: Record<string, any>) =>
       createElement("input", {

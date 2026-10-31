@@ -41,6 +41,7 @@ vi.mock('@cloudflare/kumo', async () => {
   )
   return {
     Dialog,
+    TagInput: () => null,
     Button: ({ children, ...props }: Record<string, any>) =>
       React.createElement('button', props, children),
     // Map Kumo's onValueChange onto change events so tests can drive the fields.

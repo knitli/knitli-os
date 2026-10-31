@@ -1,821 +1,302 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-
-import { claimsChallengeValue } from "../src/auth-retry";
-import { GraphApiError, GraphMailApi, assertGraphUrl, graphUrl, validateSearchQuery } from "../src/graph-api";
-import { fetchProfilePhoto } from "../src/microsoft-api";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  DownloadTooLargeError, GraphApi, GraphApiError, GraphThrottledError, GraphTransportError, errorForResponse, isDownloadHost, isGraphUrl,
+  isOutcomeUnknown,
+} from "../src/graph-api";
 
 type Call = { url: string; init: RequestInit };
 
-function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify(body), {
-    status, headers: { "Content-Type": "application/json", ...headers },
-  });
-}
-
-/** Route every fetch through `handler`, recording what the client sent. */
-function stubFetch(handler: (call: Call) => Response | Promise<Response>): Call[] {
+/** A fetch that answers from a script, recording every request. */
+function scripted(...answers: (Response | (() => Response) | Error)[]) {
   const calls: Call[] = [];
-  vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit = {}) => {
-    calls.push({ url, init });
-    return await handler({ url, init });
-  }));
-  return calls;
+  const fetch = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    calls.push({ url: String(input), init });
+    const next = answers.shift();
+    if (next === undefined) throw new Error(`unexpected request to ${String(input)}`);
+    if (next instanceof Error) throw next;
+    return typeof next === "function" ? next() : next;
+  });
+  return { api: new GraphApi("token-123", { fetch: fetch as typeof globalThis.fetch }), calls };
 }
 
-function prefer(call: Call): string {
-  return new Headers(call.init.headers).get("Prefer") ?? "";
+const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+const header = (call: Call, name: string) => (call.init.headers as Record<string, string>)[name];
+
+/** Runs a request to completion while its retries sleep on fake timers. */
+async function settle<T>(promise: Promise<T>): Promise<T> {
+  const outcome = promise.then(value => ({ value }), error => ({ error }));
+  await vi.runAllTimersAsync();
+  const result = await outcome;
+  if ("error" in result) throw result.error;
+  return result.value;
 }
 
-function newApi(opts: { onCredentialsRejected?: (detail: string) => Promise<void> } = {}) {
-  return new GraphMailApi(async () => "access-token", opts);
-}
-
-const MESSAGE = {
-  id: "AAMkImmutable1",
-  subject: "Quarterly report",
-  from: { emailAddress: { address: "bob@example.com", name: "Bob" } },
-  toRecipients: [{ emailAddress: { address: "me@example.com" } }],
-  ccRecipients: [],
-  receivedDateTime: "2026-08-01T10:00:00Z",
-  isRead: false,
-  hasAttachments: true,
-  bodyPreview: "Numbers attached",
-  parentFolderId: "folder-inbox",
-  webLink: "https://outlook.office.com/mail/deeplink",
-  conversationId: "conv-1",
-};
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["setTimeout"] });
+});
 
 afterEach(() => {
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
-describe("URL construction", () => {
-  it("percent-encodes every path segment", () => {
-    const url = graphUrl(["me", "messages", "id/with?weird#chars", "move"]);
-
-    expect(url).toBe(
-      "https://graph.microsoft.com/v1.0/me/messages/id%2Fwith%3Fweird%23chars/move");
-  });
-
-  it("encodes query values instead of interpolating them", () => {
-    const url = graphUrl(["me", "messages"], {
-      $search: "\"from:bob&$top=999\"", $top: "25",
-    });
-
-    // The system option names stay literal; the value cannot start a second parameter.
-    expect(url).toBe(
-      "https://graph.microsoft.com/v1.0/me/messages" +
-      "?$search=%22from%3Abob%26%24top%3D999%22&$top=25");
-    expect(new URL(url).searchParams.get("$top")).toBe("25");
-  });
-
-  it("keeps an agent-supplied id inside one path segment", async () => {
-    const calls = stubFetch(() => jsonResponse(MESSAGE));
-    const hostileId = "../../users/victim@example.com/messages/stolen";
-
-    await newApi().getMessage(hostileId);
-
-    expect(calls[0].url).toBe(
-      `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(hostileId)}` +
-      `?$select=${encodeURIComponent(
-        "id,subject,from,replyTo,toRecipients,ccRecipients,receivedDateTime,isRead," +
-        "hasAttachments,bodyPreview,parentFolderId,webLink,conversationId")}`);
-    // /v1.0/me/messages/<id> — the id never becomes extra path segments.
-    expect(new URL(calls[0].url).pathname.split("/")).toHaveLength(5);
-  });
-
-  it("refuses a dot or empty segment, which URL parsing would collapse", () => {
-    // `/v1.0/me/mailFolders/..` would normalize to `/v1.0/me` — a different endpoint, reached with
-    // this mailbox's bearer token.
-    expect(() => graphUrl(["me", "mailFolders", ".."])).toThrow(/Refusing the path segment/);
-    expect(() => graphUrl(["me", "mailFolders", "."])).toThrow(/Refusing the path segment/);
-    expect(() => graphUrl(["me", "mailFolders", ""])).toThrow(/Refusing the path segment/);
-    // A dot inside an id is still an ordinary character.
-    expect(graphUrl(["me", "mailFolders", "a..b"]))
-      .toBe("https://graph.microsoft.com/v1.0/me/mailFolders/a..b");
-  });
-
-  it("rejects a relative folder id before any request is made", async () => {
-    const calls = stubFetch(() => jsonResponse({}));
-
-    // `getFolder` is the only place an agent-supplied id reaches a path (message ids come from
-    // Graph itself); a move's destination travels in the JSON body, where it cannot retarget a URL.
-    await expect(newApi().getFolder("..")).rejects.toThrow(/Refusing the path segment/);
-
-    expect(calls).toHaveLength(0);
+describe("isGraphUrl", () => {
+  it.each([
+    ["https://graph.microsoft.com/v1.0/me", true],
+    ["https://graph.microsoft.com/v1.0/sites?search=x&$skiptoken=abc", true],
+    ["https://graph.microsoft.com/beta/me", false],
+    ["https://graph.microsoft.com/v1.0", false],
+    ["http://graph.microsoft.com/v1.0/me", false],
+    ["https://graph.microsoft.com:8443/v1.0/me", false],
+    ["https://user:pass@graph.microsoft.com/v1.0/me", false],
+    ["https://graph.microsoft.com.evil.example/v1.0/me", false],
+    ["https://contoso.sharepoint.com/v1.0/me", false],
+    ["not a url", false],
+  ])("%s → %s", (url, expected) => {
+    expect(isGraphUrl(url)).toBe(expected);
   });
 });
 
-const LADDER = [
-  "https://graph.microsoft.com/v1.0/me/photos/240x240/$value",
-  "https://graph.microsoft.com/v1.0/me/photo/$value",
-  "https://graph.microsoft.com/v1.0/me/photos/96x96/$value",
-];
-
-function photo(byteLength: number, contentType = "image/jpeg"): Response {
-  return new Response(new Uint8Array(byteLength).fill(1), {
-    headers: { "Content-Type": contentType },
-  });
-}
-
-describe("profile photo size ladder", () => {
-  it("stops reading a photo that declares no length once it passes the limit", async () => {
-    let pulled = 0;
-    const calls = stubFetch(() => new Response(new ReadableStream<Uint8Array>({
-      pull(controller) {
-        pulled += 64 * 1024;
-        controller.enqueue(new Uint8Array(64 * 1024));
-        if (pulled > 64 * 1024 * 1024) controller.close();
-      },
-    }), { headers: { "Content-Type": "image/jpeg" } }));
-
-    await expect(fetchProfilePhoto("access-token")).resolves.toBeNull();
-
-    // Every rung was cut off at the limit, nowhere near the 64 MiB the stream would have supplied.
-    expect(pulled).toBeLessThan(4 * 1024 * 1024);
-    expect(calls.length).toBeGreaterThan(0);
-  });
-
-  it("asks for the avatar-sized rendition first and stops there", async () => {
-    const calls = stubFetch(() => photo(1024));
-
-    await expect(fetchProfilePhoto("access-token")).resolves.toMatchObject({
-      mimeType: "image/jpeg",
-    });
-
-    expect(calls.map(call => call.url)).toEqual([LADDER[0]]);
-    expect(new Headers(calls[0].init.headers).get("Authorization")).toBe("Bearer access-token");
-  });
-
-  it("walks the rungs in order when each one comes back unusable", async () => {
-    // Nothing at 240px, and an original too big to hand on. These responses declare no length, so
-    // the size is discovered by reading them.
-    const calls = stubFetch(call => call.url === LADDER[2]
-      ? photo(2048)
-      : call.url === LADDER[1] ? photo(200 * 1024) : new Response(null, { status: 404 }));
-
-    await expect(fetchProfilePhoto("access-token")).resolves.toMatchObject({
-      mimeType: "image/jpeg",
-    });
-
-    expect(calls.map(call => call.url)).toEqual(LADDER);
-  });
-
-  it("skips a rung that declares an oversize length without reading its body", async () => {
-    // The original is served at whatever size it was uploaded, so buffering it only to measure it
-    // would spend the sign-in's latency budget on bytes that are then discarded.
-    let bodyReads = 0;
-    let bodiesDropped = 0;
-    const declared = 200 * 1024;
-    // highWaterMark 0 so the stream buffers nothing on its own: a pull here means a real read.
-    const declaredOversize = () => new Response(
-      new ReadableStream({
-        pull(controller) {
-          bodyReads++;
-          controller.enqueue(new Uint8Array(declared));
-          controller.close();
-        },
-        cancel() { bodiesDropped++; },
-      }, { highWaterMark: 0 }),
-      {
-        headers: { "Content-Type": "image/jpeg", "Content-Length": String(declared) },
-      });
-
-    const calls = stubFetch(call => call.url === LADDER[2] ? photo(2048) : declaredOversize());
-
-    await expect(fetchProfilePhoto("access-token")).resolves.toMatchObject({
-      mimeType: "image/jpeg",
-    });
-
-    expect(calls.map(call => call.url)).toEqual(LADDER);
-    expect(bodyReads).toBe(0);
-    expect(bodiesDropped).toBe(2);
-  });
-
-  it("gives up after the last rung instead of throwing", async () => {
-    const calls = stubFetch(() => new Response(null, { status: 404 }));
-
-    await expect(fetchProfilePhoto("access-token")).resolves.toBeNull();
-
-    expect(calls.map(call => call.url)).toEqual(LADDER);
+describe("isDownloadHost", () => {
+  it.each([
+    ["https://contoso.sharepoint.com/_layouts/15/download.aspx?tempauth=x", true],
+    ["https://contoso-my.sharepoint.com/personal/p/_layouts/15/download.aspx", true],
+    ["https://southcentralus1-mediap.svc.ms/transform/pdf", true],
+    ["http://contoso.sharepoint.com/download", false],
+    ["https://contoso.sharepoint.com:444/download", false],
+    ["https://user@contoso.sharepoint.com/download", false],
+    ["https://contoso.sharepoint.com.evil.example/download", false],
+    ["https://a.b.sharepoint.com/download", false],
+    ["https://graph.microsoft.com/v1.0/me", false],
+    ["https://evil.example/svc.ms", false],
+  ])("%s → %s", (url, expected) => {
+    expect(isDownloadHost(url)).toBe(expected);
   });
 });
 
-describe("pagination link pinning", () => {
-  it("accepts a Graph link", () => {
-    expect(assertGraphUrl("https://graph.microsoft.com/v1.0/me/messages?$skiptoken=abc"))
-      .toContain("graph.microsoft.com");
+describe("errorForResponse", () => {
+  it("keeps Graph's code, the innermost code and the request ID", () => {
+    const error = errorForResponse(new Response(null, { status: 409, headers: { "request-id": "req-1" } }), {
+      error: { code: "nameAlreadyExists", message: "Name already exists", innerError: { code: "a", innerError: { code: "b" } } },
+    });
+    expect(error).toMatchObject({ status: 409, code: "nameAlreadyExists", innerCode: "b", requestId: "req-1", message: "Name already exists" });
+    expect(error.isNameConflict).toBe(true);
+    expect(error.isConflict).toBe(false);
   });
 
-  it("rejects a link on any other origin", () => {
-    expect(() => assertGraphUrl("https://graph.microsoft.com.evil.example/v1.0/me/messages"))
-      .toThrow(/outside https:\/\/graph.microsoft.com/);
-    expect(() => assertGraphUrl("http://graph.microsoft.com/v1.0/me/messages"))
-      .toThrow(/outside https:\/\/graph.microsoft.com/);
-    expect(() => assertGraphUrl("not a url")).toThrow(/malformed pagination link/);
+  it.each([
+    [401, "Microsoft 365 did not accept this connection's credentials."],
+    [403, "You don't have permission to do that in Microsoft 365."],
+    [404, "That item doesn't exist, or you don't have access to it."],
+  ])("uses its own wording for %i, never Graph's (which can carry server paths)", (status, message) => {
+    const error = errorForResponse(new Response(null, { status }), { error: { code: "x", message: "/sites/Secret/Shared Documents/plan.docx" } });
+    expect(error.message).toBe(message);
   });
 
-  it("refuses to follow an off-origin nextLink returned by a listing", async () => {
-    stubFetch(() => jsonResponse({
-      value: [MESSAGE],
-      "@odata.nextLink": "https://attacker.example/v1.0/me/messages?$skiptoken=abc",
+  it("falls back to plain wording when Graph explains nothing", () => {
+    expect(errorForResponse(new Response(null, { status: 423 }), null).message).toMatch(/locked/);
+    expect(errorForResponse(new Response(null, { status: 418 }), "teapot").message).toBe("Microsoft Graph answered with HTTP 418.");
+  });
+
+  it("reads 429, and 503 with Retry-After, as throttling with a retry time", () => {
+    const before = Date.now();
+    const throttled = errorForResponse(new Response(null, { status: 429, headers: { "retry-after": "30" } }), null);
+    expect(throttled).toBeInstanceOf(GraphThrottledError);
+    expect((throttled as GraphThrottledError).retryAt).toBeGreaterThanOrEqual(before + 30_000);
+    expect(throttled.message).toMatch(/Try again after \d\d:\d\d:\d\d UTC\./);
+    expect(errorForResponse(new Response(null, { status: 503, headers: { "retry-after": "1" } }), null)).toBeInstanceOf(GraphThrottledError);
+    expect(errorForResponse(new Response(null, { status: 503 }), null)).not.toBeInstanceOf(GraphThrottledError);
+  });
+
+  it("classifies a 412 and a non-name 409 as the object having changed", () => {
+    expect(errorForResponse(new Response(null, { status: 412 }), null).isConflict).toBe(true);
+    expect(errorForResponse(new Response(null, { status: 409 }), { error: { code: "resourceModified" } }).isConflict).toBe(true);
+  });
+});
+
+describe("isOutcomeUnknown", () => {
+  it("is true for a lost answer or a server failure, not for throttling or a refusal", () => {
+    expect(isOutcomeUnknown(new GraphTransportError("x"))).toBe(true);
+    expect(isOutcomeUnknown(new GraphApiError(502, "x"))).toBe(true);
+    expect(isOutcomeUnknown(new GraphThrottledError(503, undefined))).toBe(false);
+    expect(isOutcomeUnknown(new GraphApiError(404, "x"))).toBe(false);
+  });
+});
+
+describe("GraphApi.request", () => {
+  it("sends the token, user agent and query to Graph, never following a redirect", async () => {
+    const { api, calls } = scripted(json({ ok: 1 }));
+    expect(await api.get("/me", { query: { $select: "id", skip: undefined } })).toEqual({ ok: 1 });
+    expect(calls[0].url).toBe("https://graph.microsoft.com/v1.0/me?%24select=id");
+    expect(header(calls[0], "authorization")).toBe("Bearer token-123");
+    expect(header(calls[0], "user-agent")).toMatch(/^ISV\|Cloudflare\|/);
+    expect(calls[0].init.redirect).toBe("manual");
+  });
+
+  it("refuses to send the token anywhere but Graph's pinned version", async () => {
+    const { api, calls } = scripted();
+    await expect(api.get("https://evil.example/v1.0/me")).rejects.toThrow(/outside Microsoft Graph/);
+    await expect(api.get("https://graph.microsoft.com/beta/me")).rejects.toThrow(/outside Microsoft Graph/);
+    expect(calls).toEqual([]);
+  });
+
+  it("follows a full nextLink on Graph", async () => {
+    const { api, calls } = scripted(json({ value: [] }));
+    await api.get("https://graph.microsoft.com/v1.0/sites?$skiptoken=abc");
+    expect(calls[0].url).toBe("https://graph.microsoft.com/v1.0/sites?$skiptoken=abc");
+  });
+
+  it("sends a JSON body, raw bytes, If-Match and Prefer as asked", async () => {
+    const { api, calls } = scripted(json({}), json({}));
+    await api.request("PATCH", "/x", { body: { a: 1 }, ifMatch: "\"c:1\"", prefer: ["a", "b"] });
+    expect(calls[0].init.body).toBe("{\"a\":1}");
+    expect(header(calls[0], "content-type")).toBe("application/json");
+    expect(header(calls[0], "if-match")).toBe("\"c:1\"");
+    expect(header(calls[0], "prefer")).toBe("a, b");
+    await api.request("PUT", "/y", { rawBody: "text", contentType: "text/plain" });
+    expect(calls[1].init.body).toBe("text");
+    expect(header(calls[1], "content-type")).toBe("text/plain");
+  });
+
+  it("answers 204 and allowed statuses with null, and find() with null for 403 and 404", async () => {
+    const { api } = scripted(new Response(null, { status: 204 }), json({ error: {} }, 404), json({ error: {} }, 403),
+      json({ error: {} }, 404), json({ error: {} }, 401));
+    expect(await api.request("DELETE", "/x")).toBeNull();
+    expect(await api.request("GET", "/x", { allow: [404] })).toBeNull();
+    expect(await api.find("/x")).toBeNull();
+    expect(await api.find("/x")).toBeNull();
+    await expect(api.find("/x")).rejects.toMatchObject({ status: 401, isAuthError: true });
+  });
+
+  it("retries a short throttle, whatever the method, then succeeds", async () => {
+    const { api, calls } = scripted(json({}, 429, { "retry-after": "1" }), json({}, 429, { "retry-after": "0" }), json({ done: true }));
+    expect(await settle(api.request("POST", "/x", { body: {} }))).toEqual({ done: true });
+    expect(calls).toHaveLength(3);
+  });
+
+  it("gives up after three throttled attempts", async () => {
+    const { api, calls } = scripted(...[1, 2, 3].map(() => () => json({}, 429, { "retry-after": "0" })));
+    await expect(settle(api.get("/x"))).rejects.toBeInstanceOf(GraphThrottledError);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("hands a long throttle back to the caller rather than waiting", async () => {
+    const { api, calls } = scripted(json({}, 429, { "retry-after": "120" }));
+    const error = await settle(api.get("/x")).catch(caught => caught) as GraphThrottledError;
+    expect(error).toBeInstanceOf(GraphThrottledError);
+    expect(error.retryAt).toBeGreaterThan(Date.now() + 100_000);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("retries a 503 without Retry-After for a GET, but never for a write that may have landed", async () => {
+    const reads = scripted(json({}, 503), json({}, 504), json({ ok: true }));
+    expect(await settle(reads.api.get("/x"))).toEqual({ ok: true });
+    expect(reads.calls).toHaveLength(3);
+
+    const writes = scripted(json({}, 503));
+    const error = await settle(writes.api.request("POST", "/x", { body: {} })).catch(caught => caught);
+    expect(error).toMatchObject({ status: 503 });
+    expect(isOutcomeUnknown(error)).toBe(true);
+    expect(writes.calls).toHaveLength(1);
+  });
+
+  it("reports a dropped connection as an unknown outcome", async () => {
+    const { api } = scripted(new TypeError("network"));
+    await expect(api.request("POST", "/x")).rejects.toBeInstanceOf(GraphTransportError);
+  });
+
+  it("answers a non-JSON error page by its status", async () => {
+    const { api } = scripted(new Response("<html>Bad gateway</html>", { status: 400 }));
+    await expect(api.get("/x")).rejects.toMatchObject({ status: 400, message: "Microsoft Graph answered with HTTP 400." });
+  });
+});
+
+describe("GraphApi.batch", () => {
+  const get = (id: string) => ({ id, method: "GET" as const, url: `drives/b!x/items/${id}` });
+
+  it("sends nothing for no requests", async () => {
+    const { api, calls } = scripted();
+    expect(await api.batch([])).toEqual(new Map());
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses more than Graph's limit of 20, and absolute or rooted URLs", async () => {
+    const { api } = scripted();
+    await expect(api.batch(Array.from({ length: 21 }, (_, index) => get(String(index))))).rejects.toThrow(/at most 20/);
+    await expect(api.batch([{ id: "1", method: "GET", url: "/me" }])).rejects.toThrow(/relative/);
+    await expect(api.batch([{ id: "1", method: "GET", url: "https://evil.example/x" }])).rejects.toThrow(/relative/);
+  });
+
+  it("maps each answer to its request, keeping per-request statuses and skipping junk", async () => {
+    const { api, calls } = scripted(json({
+      responses: [{ id: "a", status: 200, body: { id: "A" } }, { id: "b", status: 403, body: { error: {} } }, null, { id: 3, status: 200 }],
     }));
-
-    await expect(newApi().listMessages()).rejects.toThrow(/outside https:\/\/graph.microsoft.com/);
+    const answers = await api.batch([get("a"), get("b")]);
+    expect(calls[0].url).toBe("https://graph.microsoft.com/v1.0/$batch");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ requests: [get("a"), get("b")] });
+    expect([...answers.values()]).toEqual([{ id: "a", status: 200, body: { id: "A" } }, { id: "b", status: 403, body: { error: {} } }]);
   });
 
-  it("follows a Graph nextLink", async () => {
-    const calls = stubFetch(call => call.url.includes("skiptoken")
-      ? jsonResponse({ value: [{ ...MESSAGE, id: "AAMkImmutable2" }] })
-      : jsonResponse({
-        value: [MESSAGE],
-        "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skiptoken=abc",
-      }));
+  it("refuses an answer with no responses as a 502", async () => {
+    const { api } = scripted(json({}));
+    await expect(api.batch([get("a")])).rejects.toMatchObject({ status: 502 });
+  });
+});
 
-    const first = await newApi().listMessages();
-    expect(first.nextLink).toBeDefined();
-    const second = await newApi().nextMessagePage(first.nextLink!);
+describe("GraphApi.download", () => {
+  const redirect = (location: string, status = 302) => new Response(null, { status, headers: { location } });
+  const bytes = (body: string, headers: Record<string, string> = {}) => new Response(body, { status: 200, headers });
 
-    expect(second.items[0].id).toBe("AAMkImmutable2");
+  it("follows the one redirect to SharePoint, without the token", async () => {
+    const { api, calls } = scripted(redirect("https://contoso.sharepoint.com/_layouts/15/download.aspx?tempauth=x"),
+      bytes("hello", { "content-type": "text/plain" }));
+    const download = await api.download("/drives/b!x/items/1/content", 1024, { format: "pdf" });
+    expect(new TextDecoder().decode(download.bytes)).toBe("hello");
+    expect(download.contentType).toBe("text/plain");
+    expect(calls[0].url).toBe("https://graph.microsoft.com/v1.0/drives/b!x/items/1/content?format=pdf");
+    expect(header(calls[0], "authorization")).toBe("Bearer token-123");
+    expect(calls[1].url).toBe("https://contoso.sharepoint.com/_layouts/15/download.aspx?tempauth=x");
+    expect(header(calls[1], "authorization")).toBeUndefined();
+    expect(calls[1].init.redirect).toBe("manual");
+  });
+
+  it.each([
+    "https://evil.example/steal",
+    "http://contoso.sharepoint.com/download",
+    "https://graph.microsoft.com/v1.0/other",
+  ])("refuses a redirect to %s without requesting it", async location => {
+    const { api, calls } = scripted(redirect(location));
+    await expect(api.download("/drives/b!x/items/1/content", 1024)).rejects.toThrow(/redirected the download somewhere unexpected/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("refuses a redirect with no location", async () => {
+    const { api } = scripted(new Response(null, { status: 302 }));
+    await expect(api.download("/x/content", 1024)).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("follows no second redirect, even to an allowed host", async () => {
+    const { api, calls } = scripted(redirect("https://contoso.sharepoint.com/a"), redirect("https://contoso.sharepoint.com/b"));
+    await expect(api.download("/x/content", 1024)).rejects.toBeInstanceOf(GraphApiError);
     expect(calls).toHaveLength(2);
   });
 
-  it("stops walking folders at the page cap", async () => {
-    let page = 0;
-    const calls = stubFetch(() => jsonResponse({
-      value: [{ id: `folder-${page++}`, displayName: "Folder" }],
-      "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/mailFolders?$skiptoken=next",
-    }));
-
-    const folders = await newApi().listFolders();
-
-    expect(folders).toHaveLength(10);
-    expect(calls).toHaveLength(10);
-  });
-});
-
-describe("reply draft detection", () => {
-  const draft = (preview: string) => ({ id: `draft-${preview}`, bodyPreview: preview });
-  const nextPage = (token: string) =>
-    `https://graph.microsoft.com/v1.0/me/mailFolders/drafts/messages?$skiptoken=${token}`;
-
-  /** getMessage for the id lookup, then `pages` in order for the draft search. */
-  function stubDraftSearch(pages: unknown[]): Call[] {
-    let page = 0;
-    return stubFetch(call => call.url.includes(`/messages/${MESSAGE.id}`)
-      ? jsonResponse(MESSAGE)
-      : jsonResponse(pages[Math.min(page++, pages.length - 1)]));
-  }
-
-  it("finds the original past a first page of later drafts", async () => {
-    const later = Array.from({ length: 10 }, (_, i) => draft(`later draft ${i}`));
-    const calls = stubDraftSearch([
-      { value: later, "@odata.nextLink": nextPage("p2") },
-      { value: [draft("thanks, sending it over")] },
-    ]);
-
-    const found = await newApi().hasReplyDraft(
-        MESSAGE.id, "thanks, sending it over", "2026-08-01T09:00:00Z");
-
-    expect(found).toBe(true);
-    expect(calls).toHaveLength(3);
+  it("refuses a file declared larger than the cap before reading it", async () => {
+    const { api } = scripted(bytes("x".repeat(10), { "content-length": "4096" }));
+    await expect(api.download("/x/content", 1024)).rejects.toBeInstanceOf(DownloadTooLargeError);
   });
 
-  it("reports no draft only after the terminal page", async () => {
-    const calls = stubDraftSearch([
-      { value: [draft("unrelated")], "@odata.nextLink": nextPage("p2") },
-      { value: [draft("also unrelated")] },
-    ]);
-
-    const found = await newApi().hasReplyDraft(MESSAGE.id, "thanks", "2026-08-01T09:00:00Z");
-
-    expect(found).toBe(false);
-    expect(calls).toHaveLength(3);
+  it("refuses a file that turns out larger than the cap while reading", async () => {
+    const { api } = scripted(bytes("x".repeat(2048)));
+    const error = await api.download("/x/content", 1024).catch(caught => caught);
+    expect(error).toBeInstanceOf(DownloadTooLargeError);
+    expect(error.maxBytes).toBe(1024);
   });
 
-  it("stops following draft pages at the cap instead of walking forever", async () => {
-    const calls = stubDraftSearch([{
-      value: [draft("unrelated")],
-      "@odata.nextLink": nextPage("again"),
-    }]);
-
-    const found = await newApi().hasReplyDraft(MESSAGE.id, "thanks", "2026-08-01T09:00:00Z");
-
-    expect(found).toBe(false);
-    expect(calls).toHaveLength(11);
-  });
-
-  it("refuses an off-origin draft nextLink", async () => {
-    stubDraftSearch([{
-      value: [draft("unrelated")],
-      "@odata.nextLink": "https://attacker.example/v1.0/me/messages?$skiptoken=abc",
-    }]);
-
-    await expect(newApi().hasReplyDraft(MESSAGE.id, "thanks", "2026-08-01T09:00:00Z"))
-        .rejects.toThrow(/outside https:\/\/graph.microsoft.com/);
-  });
-});
-
-describe("folder traversal", () => {
-  it("descends into nested folders, which the root listing omits", async () => {
-    // /me/mailFolders returns only the root's children, so "Clients/Acme" is reachable only via
-    // childFolders.
-    const calls = stubFetch(call => {
-      const path = new URL(call.url).pathname;
-      if (path.endsWith("/me/mailFolders")) {
-        return jsonResponse({ value: [
-          { id: "inbox", displayName: "Inbox", childFolderCount: 0 },
-          { id: "clients", displayName: "Clients", childFolderCount: 2 },
-        ] });
-      }
-      if (path.endsWith("/mailFolders/clients/childFolders")) {
-        return jsonResponse({ value: [
-          { id: "acme", displayName: "Acme", parentFolderId: "clients", childFolderCount: 1 },
-          { id: "globex", displayName: "Globex", parentFolderId: "clients", childFolderCount: 0 },
-        ] });
-      }
-      if (path.endsWith("/mailFolders/acme/childFolders")) {
-        return jsonResponse({ value: [
-          { id: "acme-2026", displayName: "2026", parentFolderId: "acme", childFolderCount: 0 },
-        ] });
-      }
-      throw new Error(`unexpected request: ${call.url}`);
-    });
-
-    const folders = await newApi().listFolders();
-
-    // Breadth-first: shallow folders first.
-    expect(folders.map(folder => folder.name))
-      .toEqual(["Inbox", "Clients", "Acme", "Globex", "2026"]);
-    expect(folders.find(folder => folder.id === "acme")!.parentFolderId).toBe("clients");
-    // Leaves are never visited: 1 root + 2 parents with children, not 1 + 5.
-    expect(calls).toHaveLength(3);
-  });
-
-  it("costs exactly one request for a mailbox with no subfolders", async () => {
-    const calls = stubFetch(() => jsonResponse({ value: [
-      { id: "inbox", displayName: "Inbox", childFolderCount: 0 },
-      { id: "archive", displayName: "Archive" },
-    ] }));
-
-    expect(await newApi().listFolders()).toHaveLength(2);
-    expect(calls).toHaveLength(1);
-  });
-
-  it("bounds a pathologically nested mailbox by total requests", async () => {
-    let created = 0;
-    const calls = stubFetch(() => jsonResponse({
-      value: [{ id: `folder-${created++}`, displayName: "Folder", childFolderCount: 1 }],
-    }));
-
-    const folders = await newApi().listFolders();
-
-    expect(calls).toHaveLength(25);
-    expect(folders).toHaveLength(25);
-  });
-});
-
-describe("request headers", () => {
-  it("sends the immutable-id preference on every request", async () => {
-    // One body that satisfies every read shape: a collection and a single entity.
-    const calls = stubFetch(() => jsonResponse({ ...MESSAGE, displayName: "Inbox", value: [MESSAGE] }));
-    const api = newApi();
-
-    await api.listMessages();
-    await api.listMessages({ folderId: "folder-inbox" });
-    await api.searchMessages("from:bob@example.com");
-    await api.getMessage(MESSAGE.id);
-    await api.getMessageBody(MESSAGE.id);
-    await api.listFolders();
-    await api.getFolder("folder-inbox");
-    await api.setMessageRead(MESSAGE.id, true);
-    await api.moveMessage(MESSAGE.id, "folder-archive");
-    await api.createReplyDraft(MESSAGE.id, "thanks", false);
-    await api.createReplyDraft(MESSAGE.id, "thanks", true);
-
-    expect(calls.length).toBe(11);
-    for (const call of calls) {
-      expect(prefer(call)).toContain('IdType="ImmutableId"');
-    }
-  });
-
-  it("asks for plain-text bodies on reads only", async () => {
-    const calls = stubFetch(() => jsonResponse(MESSAGE));
-    const api = newApi();
-
-    await api.getMessage(MESSAGE.id);
-    await api.setMessageRead(MESSAGE.id, true);
-
-    expect(prefer(calls[0])).toContain('outlook.body-content-type="text"');
-    expect(prefer(calls[1])).not.toContain("outlook.body-content-type");
-    expect(calls[1].init.method).toBe("PATCH");
-  });
-});
-
-describe("reads", () => {
-  it("maps a message onto the agent-facing shape", async () => {
-    stubFetch(() => jsonResponse({ value: [MESSAGE] }));
-
-    const page = await newApi().listMessages();
-
-    expect(page.items[0]).toEqual({
-      id: "AAMkImmutable1",
-      subject: "Quarterly report",
-      from: { address: "bob@example.com", name: "Bob" },
-      to: [{ address: "me@example.com" }],
-      cc: [],
-      receivedAt: new Date("2026-08-01T10:00:00Z"),
-      isRead: false,
-      hasAttachments: true,
-      preview: "Numbers attached",
-      folderId: "folder-inbox",
-      webLink: "https://outlook.office.com/mail/deeplink",
-      conversationId: "conv-1",
-    });
-  });
-
-  it("orders listings newest-first but never orders a search", async () => {
-    const calls = stubFetch(() => jsonResponse({ value: [] }));
-    const api = newApi();
-
-    await api.listMessages();
-    await api.searchMessages("invoice");
-
-    expect(calls[0].url).toContain("$orderby=receivedDateTime%20desc");
-    expect(calls[1].url).not.toContain("orderby");
-    expect(calls[1].url).toContain("$search=%22invoice%22");
-  });
-
-  it("rejects a search query that would break out of the quoted KQL string", () => {
-    expect(() => validateSearchQuery("subject:\"x\" OR from:ceo@example.com"))
-      .toThrow(/double quotes/);
-    expect(() => validateSearchQuery("   ")).toThrow(/must not be empty/);
-    expect(() => validateSearchQuery("a".repeat(401))).toThrow(/at most 400/);
-    expect(validateSearchQuery("  from:bob  ")).toBe("from:bob");
-  });
-});
-
-describe("error taxonomy", () => {
-  it("retries a plain 401 once with a fresh token", async () => {
-    const tokens = ["stale", "fresh"];
-    let issued = 0;
-    const calls = stubFetch(call =>
-      new Headers(call.init.headers).get("Authorization") === "Bearer fresh"
-        ? jsonResponse({ value: [MESSAGE] })
-        : jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, 401));
-
-    const api = new GraphMailApi(async () => tokens[Math.min(issued++, 1)]);
-    const page = await api.listMessages();
-
-    expect(page.items).toHaveLength(1);
-    expect(calls).toHaveLength(2);
-  });
-
-  it("reports credentials dead when the refreshed token is refused as well", async () => {
-    const rejected: [string, string][] = [];
-    const calls = stubFetch(() => jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, 401));
-    let issued = 0;
-    const api = new GraphMailApi(async () => `token-${++issued}`, {
-      onCredentialsRejected: async (detail, token) => { rejected.push([detail, token]); },
-    });
-
-    await expect(api.listMessages()).rejects.toThrow();
-
-    // One refresh, then the second 401 is the credentials' fault and is reported once.
-    expect(calls).toHaveLength(2);
-    expect(rejected).toEqual([["unauthorized after a refresh", "token-2"]]);
-  });
-
-  it("does not report a 401 that the refresh cured", async () => {
-    const rejected: string[] = [];
-    stubFetch(call =>
-      new Headers(call.init.headers).get("Authorization") === "Bearer token-2"
-        ? jsonResponse({ value: [MESSAGE] })
-        : jsonResponse({ error: { code: "InvalidAuthenticationToken" } }, 401));
-    let issued = 0;
-    const api = new GraphMailApi(async () => `token-${++issued}`, {
-      onCredentialsRejected: async detail => { rejected.push(detail); },
-    });
-
-    await api.listMessages();
-
-    expect(rejected).toEqual([]);
-  });
-
-  it("reports a claims-challenge 401 as credential death and does not retry", async () => {
-    const rejected: string[] = [];
-    const calls = stubFetch(() => jsonResponse(
-      { error: { code: "InvalidAuthenticationToken", message: "policy" } }, 401, {
-        "WWW-Authenticate":
-          'Bearer realm="", error="insufficient_claims", claims="eyJhY2Nlc3NfdG9rZW4ifQ=="',
-      }));
-
-    const api = newApi({
-      onCredentialsRejected: async detail => { rejected.push(detail); },
-    });
-
-    const error = await api.listMessages().catch(err => err);
-
-    expect(error).toBeInstanceOf(GraphApiError);
-    expect((error as GraphApiError).credentialsRejected).toBe(true);
-    expect((error as GraphApiError).message).toMatch(/sign in again/i);
-    expect(rejected).toEqual(["insufficient_claims"]);
-    // One attempt only: another token carries the same claims.
-    expect(calls).toHaveLength(1);
-  });
-
-  it("reports a continuous-access challenge that carries claims under another error code",
-     async () => {
-    // The revocation shape: Entra answers `error="invalid_token"` and puts the demand in `claims`.
-    // Keying detection on the `insufficient_claims` string alone would retry this forever.
-    const blob = "eyJhY2Nlc3NfdG9rZW4iOnsibmJmIjp7ImVzc2VudGlhbCI6dHJ1ZX19fQ==";
-    const rejected: string[] = [];
-    const calls = stubFetch(() => jsonResponse(
-      { error: { code: "InvalidAuthenticationToken", message: "revoked" } }, 401, {
-        "WWW-Authenticate":
-          `Bearer realm="", authorization_uri="https://login.microsoftonline.com/common", ` +
-          `error="invalid_token", claims="${blob}"`,
-      }));
-
-    const api = newApi({ onCredentialsRejected: async detail => { rejected.push(detail); } });
-
-    const error = await api.listMessages().catch(err => err) as GraphApiError;
-
-    expect(error.credentialsRejected).toBe(true);
-    expect(rejected).toEqual(["invalid_token"]);
-    expect(calls).toHaveLength(1);
-    // The opaque policy demand is for a token request, never for a human-readable message.
-    expect(error.message).not.toContain(blob);
-    expect(rejected[0]).not.toContain(blob);
-  });
-
-  it("surfaces a 403 as a permission problem", async () => {
-    stubFetch(() => jsonResponse(
-      { error: { code: "ErrorAccessDenied", message: "Access is denied." } }, 403));
-
-    const error = await newApi().listMessages().catch(err => err) as GraphApiError;
-
-    expect(error.status).toBe(403);
-    expect(error.code).toBe("ErrorAccessDenied");
-    expect(error.message).toMatch(/not permitted/i);
-    expect(error.credentialsRejected).toBe(false);
-  });
-
-  it("honors Retry-After on a 429 and gives up with a throttling error", async () => {
-    const calls = stubFetch(() => jsonResponse(
-      { error: { code: "ApplicationThrottled", message: "slow down" } }, 429,
-      { "Retry-After": "0" }));
-
-    const error = await newApi().listMessages().catch(err => err) as GraphApiError;
-
-    expect(error.status).toBe(429);
-    expect(error.message).toMatch(/throttling/i);
-    expect(calls).toHaveLength(3);
-  });
-
-  it("replays a throttled write, which Graph rejects before applying it", async () => {
-    let attempts = 0;
-    stubFetch(() => ++attempts === 1
-      ? jsonResponse({ error: { code: "ApplicationThrottled" } }, 429, { "Retry-After": "0" })
-      : new Response(null, { status: 204 }));
-
-    await newApi().setMessageRead(MESSAGE.id, true);
-
-    expect(attempts).toBe(2);
-  });
-
-  it("explains a 404 in mailbox terms", async () => {
-    stubFetch(() => jsonResponse(
-      { error: { code: "ErrorItemNotFound", message: "The specified object was not found." } },
-      404));
-
-    const error = await newApi().getMessage(MESSAGE.id).catch(err => err) as GraphApiError;
-
-    expect(error.status).toBe(404);
-    expect(error.code).toBe("ErrorItemNotFound");
-    expect(error.message).toMatch(/no longer exists/i);
-  });
-});
-
-const ATTACHMENTS = [
-  {
-    "@odata.type": "#microsoft.graph.fileAttachment",
-    id: "att-file", name: "report.pdf", contentType: "application/pdf", size: 2048,
-    isInline: false,
-  },
-  {
-    "@odata.type": "#microsoft.graph.itemAttachment",
-    id: "att-item", name: "Forwarded thread", contentType: "message/rfc822", size: 4096,
-    isInline: false,
-  },
-  {
-    "@odata.type": "#microsoft.graph.referenceAttachment",
-    id: "att-ref", name: "Budget.xlsx", contentType: "application/octet-stream", size: 0,
-    isInline: false,
-  },
-  {
-    "@odata.type": "#microsoft.graph.fileAttachment",
-    id: "att-inline", name: "logo.png", contentType: "image/png", size: 512, isInline: true,
-  },
-  // A type this code has never seen. It must not be treated as downloadable.
-  { "@odata.type": "#microsoft.graph.someFutureAttachment", id: "att-new", size: 10 },
-];
-
-/** Answers attachment metadata from ATTACHMENTS and serves `$value` as `bytes`. */
-function attachmentRoute(bytes = new Uint8Array(2048)) {
-  return (call: Call): Response => {
-    const path = new URL(call.url).pathname;
-    if (path.endsWith("/$value")) return new Response(bytes);
-    if (path.endsWith("/attachments")) return jsonResponse({ value: ATTACHMENTS });
-    const found = ATTACHMENTS.find(attachment => path.endsWith(`/attachments/${attachment.id}`));
-    if (found) return jsonResponse(found);
-    throw new Error(`unexpected request: ${call.url}`);
-  };
-}
-
-describe("attachments", () => {
-  it("lists metadata without asking Graph for any content", async () => {
-    const calls = stubFetch(attachmentRoute());
-
-    const attachments = await newApi().listAttachments(MESSAGE.id);
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0].url).toContain(
-      `$select=${encodeURIComponent("id,name,contentType,size,isInline")}`);
-    // contentBytes is what a bare listing would return: megabytes per file attachment.
-    expect(calls[0].url).not.toContain("contentBytes");
-    expect(prefer(calls[0])).toContain('IdType="ImmutableId"');
-    expect(attachments).toEqual([
-      {
-        id: "att-file", name: "report.pdf", mimeType: "application/pdf", sizeBytes: 2048,
-        isInline: false, kind: "file",
-      },
-      {
-        id: "att-item", name: "Forwarded thread", mimeType: "message/rfc822", sizeBytes: 4096,
-        isInline: false, kind: "item",
-      },
-      {
-        id: "att-ref", name: "Budget.xlsx", mimeType: "application/octet-stream", sizeBytes: 0,
-        isInline: false, kind: "reference",
-      },
-      {
-        id: "att-inline", name: "logo.png", mimeType: "image/png", sizeBytes: 512,
-        isInline: true, kind: "file",
-      },
-      {
-        id: "att-new", name: "(unnamed attachment)", mimeType: "application/octet-stream",
-        sizeBytes: 10, isInline: false, kind: "item",
-      },
-    ]);
-  });
-
-  it("refuses a listing Graph split across pages instead of truncating it", async () => {
-    // A partial listing is indistinguishable from a complete one to the caller and to the audit
-    // trail, so it is an error rather than a short answer.
-    const calls = stubFetch(() => jsonResponse({
-      value: [ATTACHMENTS[0]],
-      "@odata.nextLink":
-        `https://graph.microsoft.com/v1.0/me/messages/${MESSAGE.id}/attachments?$skiptoken=abc`,
-    }));
-
-    await expect(newApi().listAttachments(MESSAGE.id)).rejects.toThrow(
-      /cannot be listed completely here/);
-    // One request; no page was followed.
-    expect(calls).toHaveLength(1);
-  });
-
-  it("downloads a file attachment from its $value endpoint", async () => {
-    const calls = stubFetch(attachmentRoute(new Uint8Array(2048).fill(7)));
-
-    const { info, content } = await newApi().getAttachmentBytes(MESSAGE.id, "att-file");
-
-    expect(info.name).toBe("report.pdf");
-    expect(content.byteLength).toBe(2048);
-    expect(new Uint8Array(content)[0]).toBe(7);
-    // Metadata first, then the bytes.
-    expect(calls).toHaveLength(2);
-    expect(calls[1].url).toBe(
-      `https://graph.microsoft.com/v1.0/me/messages/${MESSAGE.id}/attachments/att-file/$value`);
-    expect(prefer(calls[1])).toContain('IdType="ImmutableId"');
-  });
-
-  it("rejects a relative attachment id before any request is made", async () => {
-    const calls = stubFetch(() => jsonResponse(ATTACHMENTS[0]));
-
-    // An attachment id is agent-supplied and reaches a URL path, so it takes the same treatment a
-    // folder id does.
-    await expect(newApi().getAttachmentBytes(MESSAGE.id, "..")).rejects.toThrow(
-      /Refusing the path segment/);
-    expect(calls).toHaveLength(0);
-  });
-
-  it("refuses kinds that carry no file bytes, naming what each one actually is", async () => {
-    const calls = stubFetch(attachmentRoute());
-    const api = newApi();
-
-    await expect(api.getAttachmentBytes(MESSAGE.id, "att-item"))
-      .rejects.toThrow(/is an Outlook item attached to this message/);
-    await expect(api.getAttachmentBytes(MESSAGE.id, "att-ref"))
-      .rejects.toThrow(/is a link to a file stored in OneDrive or SharePoint/);
-    await expect(api.getAttachmentBytes(MESSAGE.id, "att-new"))
-      .rejects.toThrow(/is an Outlook item attached to this message/);
-
-    // Metadata only: nothing was downloaded for any of the three.
-    expect(calls).toHaveLength(3);
-    expect(calls.some(call => call.url.endsWith("/$value"))).toBe(false);
-  });
-
-  it("names neither the attachment nor its size in a refusal made before the read is authorized", async () => {
-    stubFetch(call => jsonResponse(call.url.includes("att-big")
-      ? { ...ATTACHMENTS[0], name: "secret-merger.pdf", size: 10 * 1024 * 1024 + 7 }
-      : { ...ATTACHMENTS[0], name: "secret-merger.pdf", "@odata.type": "#microsoft.graph.itemAttachment" }));
-    const api = newApi();
-
-    for (const id of ["att-big", "att-item"]) {
-      const error = await api.getAttachmentBytes(MESSAGE.id, id).catch((err: unknown) => err);
-      expect(String(error)).not.toContain("secret-merger");
-      expect(String(error)).not.toContain("10485767");
-    }
-  });
-
-  it("refuses an oversized attachment from its metadata, before downloading it", async () => {
-    const calls = stubFetch(call => new URL(call.url).pathname.endsWith("/$value")
-      ? new Response(new Uint8Array(1024))
-      : jsonResponse({ ...ATTACHMENTS[0], size: 10 * 1024 * 1024 + 1 }));
-
-    await expect(newApi().getAttachmentBytes(MESSAGE.id, "att-file"))
-      .rejects.toThrow(/over the 10485760-byte limit .* not downloaded/s);
-
-    expect(calls).toHaveLength(1);
-  });
-
-  it("refuses a body that arrives over the cap despite an in-range declared size", async () => {
-    // Graph's `size` counts the stored form, so it should exceed the raw bytes — a body larger than
-    // its own metadata means the pre-check cannot be the only gate.
-    stubFetch(call => new URL(call.url).pathname.endsWith("/$value")
-      ? new Response(new Uint8Array(10 * 1024 * 1024 + 1))
-      : jsonResponse({ ...ATTACHMENTS[0], size: 1024 }));
-
-    await expect(newApi().getAttachmentBytes(MESSAGE.id, "att-file"))
-      .rejects.toThrow(/returned more than the 10485760-byte limit/);
-  });
-
-  it("surfaces a Graph error from the metadata read in mailbox terms", async () => {
-    stubFetch(() => jsonResponse(
-      { error: { code: "ErrorItemNotFound", message: "attachment not found" } }, 404));
-
-    const error = await newApi().getAttachmentBytes(MESSAGE.id, "att-file")
-      .catch(err => err) as GraphApiError;
-
-    expect(error.status).toBe(404);
-    expect(error.message).toMatch(/no longer exists/i);
-  });
-});
-
-describe("writes", () => {
-  it("builds the documented mailbox write requests", async () => {
-    const calls = stubFetch(() => new Response(null, { status: 204 }));
-    const api = newApi();
-
-    await api.setMessageRead(MESSAGE.id, false);
-    await api.moveMessage(MESSAGE.id, "folder-archive");
-    await api.createReplyDraft(MESSAGE.id, "on it", true);
-
-    expect(calls[0].init.method).toBe("PATCH");
-    expect(calls[0].init.body).toBe(JSON.stringify({ isRead: false }));
-    expect(calls[1].url).toMatch(/\/me\/messages\/AAMkImmutable1\/move$/);
-    expect(calls[1].init.body).toBe(JSON.stringify({ destinationId: "folder-archive" }));
-    expect(calls[2].url).toMatch(/\/me\/messages\/AAMkImmutable1\/createReplyAll$/);
-    expect(calls[2].init.body).toBe(JSON.stringify({ comment: "on it" }));
-  });
-
-  it("refuses an oversized reply body before sending anything", async () => {
-    const calls = stubFetch(() => new Response(null, { status: 204 }));
-
-    await expect(newApi().createReplyDraft(MESSAGE.id, "x".repeat(64 * 1024 + 1), false))
-      .rejects.toThrow(/at most/);
-
-    expect(calls).toHaveLength(0);
-  });
-});
-
-describe("claimsChallengeValue", () => {
-  const encode = (json: string) => btoa(json);
-
-  it("decodes the directive Graph sends with a claims challenge", () => {
-    const json = '{"access_token":{"nbf":{"essential":true,"value":"1"}}}';
-
-    expect(claimsChallengeValue(`Bearer realm="", error="insufficient_claims", claims="${encode(json)}"`))
-      .toBe(json);
-  });
-
-  it("is null when there is none, or it is not usable", () => {
-    expect(claimsChallengeValue(null)).toBeNull();
-    expect(claimsChallengeValue('Bearer error="invalid_token"')).toBeNull();
-    expect(claimsChallengeValue('Bearer claims="!!not-base64!!"')).toBeNull();
-    expect(claimsChallengeValue(`Bearer claims="${encode("not json")}"`)).toBeNull();
-    expect(claimsChallengeValue(`Bearer claims="${encode(JSON.stringify({ a: "x".repeat(5000) }))}"`))
-      .toBeNull();
+  it("maps a refused download onto Graph's errors, and a lost one onto a transport error", async () => {
+    const refused = scripted(json({ error: { code: "itemNotFound" } }, 404));
+    await expect(refused.api.download("/x/content", 1024)).rejects.toMatchObject({ status: 404, code: "itemNotFound" });
+    const lost = scripted(new TypeError("reset"));
+    await expect(lost.api.download("/x/content", 1024)).rejects.toBeInstanceOf(GraphTransportError);
   });
 });

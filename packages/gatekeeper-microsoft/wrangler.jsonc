@@ -15,6 +15,9 @@
       "invocation_logs": false
     }
   },
+  "ai": {
+    "binding": "AI"
+  },
   "build": {
     "command": "pnpm exec capnweb-validate build --out .wrangler/validate",
     "watch_dir": "src"
@@ -47,6 +50,15 @@
       "tag": "v1-sharepoint-list",
       "new_sqlite_classes": [
         "SharePointListGatekeeperImpl"
+      ]
+    },
+    {
+      "tag": "v2-upstream-m365",
+      "new_sqlite_classes": [
+        "SharePointGatekeeper",
+        "OutlookGatekeeper",
+        "OutlookHookDriver",
+        "CalendarGatekeeper"
       ]
     }
   ]

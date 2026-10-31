@@ -1,15 +1,23 @@
 import { createObservabilityContext } from "@gadgets/observability/observability-context";
 
-/** Observability fields emitted by the Microsoft gatekeeper. */
+/** Observability fields emitted by the Microsoft 365 gatekeeper. */
 export type MicrosoftObservabilityFields = {
   vendorId: string;
-  /** `urlPattern` of the grantable resource an event is about. */
-  resource: string;
-  /** OAuth scopes a consent round trip asked for and did not come back with. Names only. */
-  missingScopes: string[];
-  /** OAuth scopes the grant does cover, so the delta can be read without a second lookup. */
-  grantedScopes: string[];
+  /** An HTTP status Graph answered with. */
+  status: number;
+  /** Graph's error `code`, which never carries request content. */
+  graphCode: string;
+  /** Why Microsoft refused an authorization: an AADSTS code, or OAuth's `error`. */
+  oauthError: string;
+  /** Graph's `request-id` response header, which Microsoft support asks for. */
+  requestId: string;
+  /** An action id, for apply-time events. */
+  action: number;
+  /** The binding's scope kind (`all`, `site`, `folder`, ...). */
+  scopeKind: string;
+  /** How many items an event concerns. */
+  count: number;
 };
 
-/** Ambient observability fields for one Microsoft gatekeeper operation. */
+/** Ambient observability fields for one Microsoft 365 gatekeeper operation. */
 export const obsContext = createObservabilityContext<MicrosoftObservabilityFields>();

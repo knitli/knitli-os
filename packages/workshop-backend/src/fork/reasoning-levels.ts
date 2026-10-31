@@ -51,6 +51,8 @@ const APP_PROVIDER_PI_SHAPE: Record<AiModelConfig["provider"], {pi: string, api:
   "cloudflare": {pi: "cloudflare-workers-ai", api: "openai-completions"},
   // Ollama has no pi catalog; its models resolve through fork overrides only.
   "ollama": {pi: "ollama", api: "openai-completions"},
+  // Auto Router has no pi catalog and offers no reasoning levels (ai-models.ts), so it yields null.
+  "cloudflare-auto-router": {pi: "cloudflare-auto-router", api: "openai-completions"},
 };
 
 /**

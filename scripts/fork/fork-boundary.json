@@ -237,8 +237,8 @@
       "reason": "The AI Executor gatekeeper, bound by the outer deployment rather than deployed as its own worker; zero conflict surface by construction."
     },
     {
-      "path": "packages/gatekeeper-microsoft/",
-      "reason": "Microsoft 365 gatekeeper (Entra sign-in, Outlook, Teams, SharePoint List) ported from twinprime19/cloudflare-os; upstream has no such package, so it cannot conflict."
+      "path": "packages/gatekeeper-microsoft/src/fork/",
+      "reason": "Stub Durable Object classes of the fork's retired Microsoft Worker, kept exported so its migration history stays valid; upstream has no such directory."
     },
     {
       "path": "packages/integration-tests/__tests__/fork/",
@@ -435,10 +435,6 @@
     {
       "path": "scripts/release/testdata/fixture-bundles/gatekeeper-ai-executor/ai-executor.js",
       "reason": "Release-manifest fixture bundle for the fork-owned AI executor gatekeeper."
-    },
-    {
-      "path": "scripts/release/testdata/fixture-bundles/gatekeeper-microsoft/microsoft.js",
-      "reason": "Release-manifest fixture bundle for the fork-owned Microsoft gatekeeper."
     },
     {
       "path": "packages/workshop-backend/src/openapi-publisher.ts",

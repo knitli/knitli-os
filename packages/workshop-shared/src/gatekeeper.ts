@@ -390,7 +390,7 @@ export type SupportedResource = {
    *
    * Each type is still granted separately: holding a grant for one does not cover the others. The
    * configurator offers only the types the account has granted, and the Workshop asks for the rest
-   * in a single consent request, so group only types that need the same authorization.
+   * in a single consent request, so a user connecting any type on the card is asked for all of them.
    */
   groupedWith?: string;
 }
@@ -1538,7 +1538,8 @@ export type ObservationDescription = {
    * - Every collaborator must pass this gatekeeper's `addObserver()` to open the gadget, so a
    *   gatekeeper whose `addObserver()` always throws makes the gadget effectively unshareable
    *   once it has made one of these observations.
-   * - Once observed, the gadget enters a restricted mode: no public-web fetches, and every action
+   * - Once observed, the gadget enters a restricted mode: web fetches reach only the hosts the
+   *   deployment admin trusts with such data (none by default), and every action
    *   requires manual approval -- auto-approval rules are suspended. The approver is shown the
    *   action's full `description` and is responsible for checking it contains none of the
    *   restricted data. An action whose description is not complete

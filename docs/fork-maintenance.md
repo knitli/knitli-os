@@ -359,9 +359,11 @@ Intentional, reviewed differences from upstream. Keep this current.
   the restart *before* the cross-DO cleanup rather than after it, via `runRevocationCleanup()`,
   which is what shrinks that window to nothing.
 - **2026-11-03 sync:** the restart now delegates to upstream's `scheduleAccessRestart()` (sync,
-  100 ms delay, abort) instead of copying its body, and calls it synchronously before the gate
-  closes; the fork adds only `blockConcurrencyWhile` around it. Upstream's `observer-ledger` tests
-  stub `scheduleAccessRestart` to count restarts, which the copied body bypassed.
+  100 ms delay, abort) instead of copying its body; the fork adds only `blockConcurrencyWhile`
+  around it, and the call must stay inside that callback (its storage flush needs an input event,
+  so calling it before the gate closes deadlocks). Upstream's `observer-ledger` tests stub
+  `scheduleAccessRestart` to count restarts, which the copied body bypassed; the one assertion
+  that counted right after the read now uses `vi.waitFor`, as the callback runs a tick later.
 - **Why:** Authorization is only checked at `open()`, so a collaborator whose access was just revoked
   keeps a usable session for the length of that window. Our
   `severs retained collaborator writes and preserves owner state across revocation restart` test

@@ -6513,9 +6513,11 @@ class OverseerImpl implements AgentHooks {
   scheduleRevocationRestart(blockNewInputs = true, reason?: string): void {
     if (this.#revocationRestartScheduled) return;
     this.#revocationRestartScheduled = true;
-    let restart = this.scheduleAccessRestart(
+    // The storage flush inside scheduleAccessRestart needs an input event to complete, so it must
+    // run inside the callback (exempt from the gate it holds), never before the gate closes.
+    let restart = () => this.scheduleAccessRestart(
         reason ?? "Gadget restarted to revoke access for a removed collaborator.");
-    this.ctx.waitUntil(blockNewInputs ? this.ctx.blockConcurrencyWhile(() => restart) : restart);
+    this.ctx.waitUntil(blockNewInputs ? this.ctx.blockConcurrencyWhile(restart) : restart());
   }
 
   // - `ctx.abort()` does not respect the output gate, so we explicitly flush the triggering change

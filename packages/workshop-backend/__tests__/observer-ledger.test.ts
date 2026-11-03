@@ -273,7 +273,7 @@ describe("observation persistence", () => {
     // Nothing latched, so the retried read still revokes the link-joined collaborator.
     await read();
     expect(impl.storage.ownerInvitesOnly.get()).toBe(true);
-    expect(world.restarts).toHaveLength(1);
+    await vi.waitFor(() => expect(world.restarts).toHaveLength(1));
   }));
 });
 

@@ -768,6 +768,19 @@ authorizes a read after fetching it.
     (`awaitingGrant`, `resources`); `initialResourceUrlPattern` still picks the pre-filled type.
   - `gatekeeper-context/src/library-read.ts`: the private-collection attribution of the top-level
     listing now reads `listPrivateLibrary()`, since upstream dropped the cached enabled set.
+    2026-11-03 sync (upstream #881/#896): reads report collections as `subresources` for the kernel
+    ledger to check, so the same listing now reports its private collections that way (upstream
+    still reports none for the top-level listing); `library-read.test.ts` pins it.
+  - `overseer.ts` observer admission (2026-11-03, upstream #881 `ObserverLedger`): `ensureObserver`
+    keeps the fork's per-profile serialization and `admittedAs` stamp around upstream's
+    ledger-based body (`observerScope()`, scope-change re-passes). Where upstream returns early for
+    a profile with no in-scope connection, the fork still persists an empty observer record so the
+    attestation and later scope expansion can see that collaborator. `authorizeObservation` is
+    upstream's ledger callback plus the owner-only tier (`prohibitWorkspaceSharing` check and latch)
+    and the `runRevocationCleanup` routing for the `ownerInvitesOnly` latch.
+    `#prepareChatMessage` takes upstream's `chatId` before the fork's `hasSpeech`/`allowEmpty`.
+  - `rateLimitedCapability.ts`: the fork's disposal behaviour stays; its tests moved to
+    `rateLimitedCapability.fork.test.ts` when upstream #947 added its own test file at the old path.
 
 ### Credential mutation transaction hook
 

@@ -52,7 +52,7 @@ export const WorkspaceNotificationsMenu = ({ workspaceId, mute, onMuteChange }: 
   if (muteDescription) {
     return (
       <DropdownMenu.Item onClick={() => setMute(undefined)} className={MENU_ITEM}>
-        <Bell size={13} className="mr-2" /> Unmute notifications
+        <Bell size={13} /> Unmute notifications
       </DropdownMenu.Item>
     )
   }
@@ -60,7 +60,7 @@ export const WorkspaceNotificationsMenu = ({ workspaceId, mute, onMuteChange }: 
   return (
     <DropdownMenu.Sub>
       <DropdownMenu.SubTrigger className={MENU_ITEM}>
-        <BellSlash size={13} className="mr-2" /> Mute notifications
+        <BellSlash size={13} /> Mute notifications
       </DropdownMenu.SubTrigger>
       <DropdownMenu.SubContent className={MENU_CONTENT} style={MENU_POSITIONER_STYLE}>
         <DropdownMenu.Group>

@@ -10,6 +10,7 @@
     "./actions": "./src/actions.ts",
     "./auth-retry": "./src/auth-retry.ts",
     "./cache": "./src/cache.ts",
+    "./ci": "./src/ci.ts",
     "./connect-handshake": "./src/connect-handshake.ts",
     "./connect-nonce": "./src/connect-nonce.ts",
     "./connect-pages": "./src/connect-pages.ts",
@@ -45,7 +46,7 @@
     "@gadgets/observability": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "diff": "catalog:",
-    "jose": "^6.2.12"
+    "jose": "^6.2.13"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "catalog:",

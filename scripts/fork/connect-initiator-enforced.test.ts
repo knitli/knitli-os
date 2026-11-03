@@ -18,18 +18,20 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const read = (path: string): string => readFileSync(join(root, path), "utf8");
 
 /** Each gatekeeper, and the account calls that must not be reachable without the guard. */
-const HAND_ROLLED: Array<{ file: string; guarded: string[] }> = [
+const HAND_ROLLED: Array<{ file: string; guarded: string[]; window?: number }> = [
   { file: "packages/gatekeeper-github/src/github.ts", guarded: ["beginOAuthFlow", "acceptAuthCode"] },
   { file: "packages/gatekeeper-linear/src/linear.ts", guarded: ["beginOAuthFlow", "acceptAuthCode"] },
   { file: "packages/gatekeeper-cloudflare/src/cloudflare.ts", guarded: ["beginOAuthFlow", "acceptAuthCode"] },
-  { file: "packages/gatekeeper-microsoft/src/microsoft.ts", guarded: ["beginOAuthFlow", "acceptAuthCode"] },
+  // The callback's guard sits above its OAuth-refusal branch, which consumes the nonce, so the
+  // account call is further below it than in the others.
+  { file: "packages/gatekeeper-microsoft/src/microsoft.ts", guarded: ["beginOAuthFlow", "acceptAuthCode"], window: 1500 },
   // The callback's refusal route consumes the nonce too, so the guard sits above both.
   { file: "packages/gatekeeper-x/src/x.ts", guarded: ["beginOAuthFlow", "acceptAuthCode"] },
   // No OAuth step: the connect link itself completes the account, so `complete` is the only call.
   { file: "packages/gatekeeper-email/src/email.ts", guarded: ["complete"] },
 ];
 
-for (const { file, guarded } of HAND_ROLLED) {
+for (const { file, guarded, window = 400 } of HAND_ROLLED) {
   test(`${file} stores and compares the connect initiator`, () => {
     const source = read(file);
     assert.match(source, /from "@gadgets\/observability\/fork\/connect-initiator"/,
@@ -52,7 +54,7 @@ for (const { file, guarded } of HAND_ROLLED) {
       const guard = refusals.filter((at) => at < call).at(-1);
       assert.notEqual(guard, undefined, `${file} calls stub.${method}( with no preceding refusal`);
       // The guard must be the nearest thing above the call, not a leftover from an earlier route.
-      assert.ok(call - guard! < 400,
+      assert.ok(call - guard! < window,
         `${file}'s refusal is ${call - guard!} characters above stub.${method}(, which is another route's`);
     }
   });

@@ -693,7 +693,8 @@ that disclosure with a synthetic collection ID instead.
 
 ### Scope describes the disclosure
 
-`ObservationScope` describes what a read reveals: `baseline`, `collections`, or `withholdFromObservers`.
+`ObservationScope` describes what a read reveals: `baseline`, `collections`, `withholdFromObservers`,
+or `subresources` (see [Subresources the Workshop checks](#subresources-the-workshop-checks)).
 
 A **collection** is a provider-side access-controlled grouping — a Confluence space, a Jira project, a
 GitHub repo — whose ACL governs the items the read returned. Pass the ids of those groupings, not
@@ -714,6 +715,49 @@ collection ids would name a check nothing performs, so declare those reads `{ ki
 the provider can revoke child access independently, that is the wrong strategy, not the wrong
 scope. A custom strategy declares its own `aclChecks`, and only the `per-read` arm may carry
 `prepare`, so claiming a check it does not implement will not compile.
+
+### Subresources the Workshop checks
+
+A `{ kind: "subresources", ids }` scope reports the read's access dependencies as
+`ObservationDescription.subresources`, and the Workshop checks them in place of the strategy. It
+asks the gatekeeper's `verifyObserverAccess()` about every collaborator who can see the chat or
+gadget that made the read, refuses the read if any is denied, and checks the recorded ids again at
+each collaborator's admission. The gate prepares, excludes and fences nothing for such a read, so it
+adds nothing to the binding's tracked collections. The scope is chosen per read, so a binding
+converts one read path at a time:
+
+1. Name every dependency the read has, in canonical spelling, not only those new to the binding:
+   the Workshop records them per chat or gadget, so a repeat in another context is a new
+   requirement there. Pass `[]` for a read the admission baseline alone restricts. Unlike
+   `collections`, an empty list is accepted, so a cursor page that disclosed nothing needs no
+   separate branch unless its absence is itself restricted.
+2. Implement `verifyObserverAccess()` on the binding's Durable Object with `observerAccessVerifier`,
+   over the oracle the binding already gives `trackedCollectionObservers`:
+
+   ```ts
+   const access = {
+     hasCollectionAccess: (verifier: MyVerifierApi, ids: readonly string[]) => verifier.canAccess(ids),
+   };
+
+   #observers = trackedCollectionObservers({ kv: this.ctx.storage.kv, ...access });
+   #verify = observerAccessVerifier(access);
+
+   async verifyObserverAccess(
+     observers: { id: string; verifier: Fetcher<GatekeeperUserVerifier> }[],
+     subresources: string[],
+   ) {
+     return this.#verify(observers, subresources);
+   }
+   ```
+
+   It judges each observer by the verifier that call brings and caches nothing. Make the oracle
+   throw when it cannot tell — expired credentials, a provider outage: the tracker excludes one
+   observer whose oracle throws, but here the throw fails the call, as the Workshop expects, while
+   `false` would deny without saying why.
+3. Keep the strategy. Its `addObserver()` still enforces the admission baseline, everything
+   recorded before a path converted, and every read still on another scope. An owner-only read stays
+   on `withholdFromObservers` until the binding reports an id its oracle grants only to the owner:
+   `[]` would share it with every admitted collaborator.
 
 ### A cursor authorizes everything it hands out
 
@@ -839,6 +883,8 @@ The kit supplies defaults where they apply across consumers:
 | cursor `maxProviderPagesPerCall` | 10 |
 | `OAuthClient` `timeoutMs` | 30 000 ms |
 | `OAuthClient` `maxResponseBytes` | 64 KiB |
+| `readCiLog` `retainBytes` / `maxBytes` | 8 MiB / 128 MiB |
+| `CiLogCache` `ttlMs` / `maxTotalBytes` | 1 hour / 32 MiB |
 
 The kit requires values where no general default is safe:
 
@@ -924,6 +970,12 @@ shallow-info.
   so an oversized HTML error page still yields its first bytes. Never redact its result: the cut can
   split an echoed secret. Read a body that may echo a credential whole with `readTextCapped` and
   redact before cutting. Use `readTextCapped` whenever the whole body must be read, JSON included.
+- Read CI job logs with `readCiLog`, not `readTextCapped`: a long log is legitimately larger than
+  any whole-body cap, and `readCiLog` streams it, keeps only the tail, and still counts every
+  line, so `pageCiLog` numbers lines over the whole log. Pass agent-supplied page options to
+  `pageCiLog` untouched; it validates them. Put only finished logs in `CiLogCache`, and revalidate
+  a hit against the provider (log erased, job deleted, access lost) before serving it — the cache
+  holds bytes, not authority.
 - Use `normalizeVendorEndpoint` for user-supplied provider base URLs. It validates that one URL and
   is not a fetch policy: fetch with `redirect: "manual"`, or re-validate each `Location` and drop
   origin-scoped headers when the origin changes, or a redirect carries `Authorization` off the

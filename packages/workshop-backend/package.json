@@ -32,8 +32,8 @@
     "diff": "catalog:",
     "diff3": "0.0.3",
     "fflate": "0.8.3",
-    "isomorphic-git": "^1.43.1",
-    "jose": "^6.2.12",
+    "isomorphic-git": "^1.44.4",
+    "jose": "^6.2.13",
     "pako": "^3.0.2",
     "yjs": "^13.6.33",
     "zod": "catalog:"

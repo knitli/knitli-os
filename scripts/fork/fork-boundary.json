@@ -373,8 +373,8 @@
       "reason": "Regression test for the fork-owned executor form model."
     },
     {
-      "path": "packages/workshop-frontend/src/rateLimitedCapability.test.ts",
-      "reason": "Regression test for fork-owned rate-limited capability behavior."
+      "path": "packages/workshop-frontend/src/rateLimitedCapability.fork.test.ts",
+      "reason": "Regression test for fork-owned rate-limited capability disposal, split out when upstream #947 added its own rateLimitedCapability.test.ts so that file stays byte-identical."
     },
     {
       "path": "packages/workshop-frontend/src/GatekeeperModal.fork.test.tsx",

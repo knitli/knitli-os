@@ -6513,12 +6513,9 @@ class OverseerImpl implements AgentHooks {
   scheduleRevocationRestart(blockNewInputs = true, reason?: string): void {
     if (this.#revocationRestartScheduled) return;
     this.#revocationRestartScheduled = true;
-    let restart = async () => {
-      await this.ctx.storage.sync();
-      await scheduler.wait(100);
-      this.ctx.abort(reason ?? "Gadget restarted to revoke access for a removed collaborator.");
-    };
-    this.ctx.waitUntil(blockNewInputs ? this.ctx.blockConcurrencyWhile(restart) : restart());
+    let restart = this.scheduleAccessRestart(
+        reason ?? "Gadget restarted to revoke access for a removed collaborator.");
+    this.ctx.waitUntil(blockNewInputs ? this.ctx.blockConcurrencyWhile(() => restart) : restart);
   }
 
   // - `ctx.abort()` does not respect the output gate, so we explicitly flush the triggering change

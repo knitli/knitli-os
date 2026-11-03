@@ -358,6 +358,10 @@ Intentional, reviewed differences from upstream. Keep this current.
   revocation landing in storage and the abort. `removeCollaborator()`/`revokeShareLink()` also arm
   the restart *before* the cross-DO cleanup rather than after it, via `runRevocationCleanup()`,
   which is what shrinks that window to nothing.
+- **2026-11-03 sync:** the restart now delegates to upstream's `scheduleAccessRestart()` (sync,
+  100 ms delay, abort) instead of copying its body, and calls it synchronously before the gate
+  closes; the fork adds only `blockConcurrencyWhile` around it. Upstream's `observer-ledger` tests
+  stub `scheduleAccessRestart` to count restarts, which the copied body bypassed.
 - **Why:** Authorization is only checked at `open()`, so a collaborator whose access was just revoked
   keeps a usable session for the length of that window. Our
   `severs retained collaborator writes and preserves owner state across revocation restart` test

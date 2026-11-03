@@ -236,12 +236,13 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
       },
     });
 
-    // A user-caller action naming a chat posts its card through the owner's chat context.
+    // A gadget-caller action naming a chat posts its card through the owner's chat context (a
+    // user caller's chat is a slash command's, whose own event already shows it).
     // Association is fire-and-forget, so settle before asserting.
     await impl.submitAction(1, 0, {
       title: "Do it", description: "Does it.", descriptionIsComplete: true,
       implementsRevert: false,
-    }, { from: "user", chatId: 7 });
+    }, { from: "gadget", gadgetId: 100, chatId: 7 });
     await settle();
 
     expect(calls).toEqual(["getChatContext"]);

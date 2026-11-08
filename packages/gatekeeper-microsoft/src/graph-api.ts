@@ -1,812 +1,478 @@
-// Microsoft Graph mail client.
-//
-// Every mailbox request in this package goes through `GraphMailApi.#request()`. That single
-// chokepoint is what guarantees the two properties the rest of the code depends on:
-//
-//   - `Prefer: IdType="ImmutableId"` on EVERY request. Outlook's default message ids change when a
-//     message moves between folders, and this gatekeeper captures ids when an action is queued and
-//     uses them again when the action is approved — possibly minutes later, after a user drag, an
-//     inbox rule, or an earlier approved move has relocated the message. Immutable ids are the only
-//     ids that still resolve then.
-//   - Bearer injection and the 401 / claims-challenge / throttling policy, via `fetchWithAuthRetry`.
-//
-// URL construction is likewise centralized: ids and search terms reach this file from an agent, so
-// path segments are percent-encoded and every query parameter goes through `URLSearchParams`.
-// Interpolating either raw would let a crafted id escape into the path or into OData syntax.
+// The only code that talks HTTP to Microsoft Graph and holds a token. Every request goes to
+// graph.microsoft.com/v1.0 with a timeout and a capped body read, and never follows a redirect on
+// its own: a file's `/content` redirect to a pre-authenticated download URL is followed by hand,
+// only to SharePoint or its conversion host, without the token. Failures map onto a credential
+// rejection (401), throttling, a refusal, and an unknown outcome (a timeout or dropped connection).
 
-import { pathSegment } from "@gadgets/gatekeeper-kit/endpoint";
-import {
-  ResponseTooLargeError, readBytesCapped, readTextCapped,
-} from "@gadgets/gatekeeper-kit/response-body";
-import {
-  AccessTokenProvider, CredentialsRejectedReporter, claimsChallengeDetail, fetchWithAuthRetry,
-} from "./auth-retry";
-import type { OutlookAttachmentInfo, OutlookFolderInfo, OutlookMessageInfo } from "./types";
+import { ResponseTooLargeError, readBytesCapped, readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
+import { GRAPH_BASE, VENDOR_ID } from "./microsoft-env";
+import { obsContext } from "./observability";
 
-/** Graph's origin. Pagination links are pinned to it; see `assertGraphUrl`. */
-export const GRAPH_ORIGIN = "https://graph.microsoft.com";
+const logger = obsContext.createLogger({ component: "gatekeeper.microsoft.graph", vendorId: VENDOR_ID });
 
-const GRAPH_BASE = `${GRAPH_ORIGIN}/v1.0`;
-
-/** Per-attempt ceiling on a Graph round trip. */
-export const GRAPH_TIMEOUT_MS = 20 * 1000;
-
-/** Longest provider error text echoed into an error a user or agent can see. */
-const MAX_GRAPH_ERROR_CHARS = 500;
-
-/** Message fields every listing and metadata read selects. Keeps payloads bounded. */
-const MESSAGE_SELECT = [
-  "id", "subject", "from", "replyTo", "toRecipients", "ccRecipients", "receivedDateTime", "isRead",
-  "hasAttachments", "bodyPreview", "parentFolderId", "webLink", "conversationId",
-].join(",");
+const REQUEST_TIMEOUT_MS = 30_000;
+const DOWNLOAD_TIMEOUT_MS = 60_000;
+/** The redirect statuses a download follows: Graph answers 302, and a 303 or 308 means the same for a GET. */
+const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+/** Graph's largest JSON page (999 list items with every field) is a few megabytes. */
+const MAX_JSON_BYTES = 8 * 1024 * 1024;
+/** How long a throttled request may be told to wait and still be retried here, not by the caller. */
+const MAX_RETRY_WAIT_MS = 10_000;
+const MAX_ATTEMPTS = 3;
+/** Graph's own limit on requests in one `$batch`. */
+export const MAX_BATCH_REQUESTS = 20;
+/** How often a batch resends the requests Graph throttled, and the longest it waits between. */
+const BATCH_THROTTLE_RETRIES = 3;
+const MAX_BATCH_THROTTLE_WAIT_MS = 5_000;
 
 /**
- * Attachment fields every attachment read selects.
- *
- * Selecting is what keeps a listing cheap: without `$select`, Graph returns `contentBytes` for
- * every file attachment, so listing a message with a 9 MiB PDF would download the PDF.
- *
- * Only properties of the base `microsoft.graph.attachment` type may appear here — Graph rejects a
- * `$select` naming a property that exists solely on a derived type (`contentBytes`, `contentId`).
- * `@odata.type` is deliberately absent for the same reason: it is OData control information rather
- * than a property, and Graph emits it anyway, because the collection is declared as the base type
- * while every instance is one of the derived ones.
+ * Microsoft asks ISVs to decorate their traffic so throttling can tell callers apart; see
+ * "Best practices for avoiding throttling" in the SharePoint docs.
  */
-const ATTACHMENT_SELECT = ["id", "name", "contentType", "size", "isInline"].join(",");
+const USER_AGENT = "ISV|Cloudflare|Gadgets/1.0";
 
-/**
- * Ceiling on a single attachment read, in bytes.
- *
- * Mirrors the workshop's 10 MiB document limit (`MAX_CONVERTIBLE_DOCUMENT_BYTES` in
- * workshop-backend). It is repeated here as a literal rather than imported: this gatekeeper is its
- * own worker and must bound its RPC payloads whatever the application on the other side does.
- */
-export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MiB
+/** Hosts a download redirect may lead to: SharePoint itself, and its media/conversion service. */
+const DOWNLOAD_HOSTS = [/^[a-z0-9-]+\.sharepoint\.com$/, /^[a-z0-9-]+\.svc\.ms$/];
 
-// `childFolderCount` is what makes the folder walk cheap: a folder reporting none is never asked
-// for its children.
-const FOLDER_SELECT = [
-  "id", "displayName", "parentFolderId", "totalItemCount", "unreadItemCount", "childFolderCount",
-].join(",");
-
-/** Page sizes Graph is asked for. `$top` above 100 is rejected for mail collections. */
-export const DEFAULT_MESSAGE_PAGE_SIZE = 25;
-const MAX_MESSAGE_PAGE_SIZE = 50;
-
-/**
- * Ceilings on the folder walk, which pages internally rather than through a cursor. Three
- * independent bounds: pages within one collection, requests across the whole nested walk, and
- * folders returned.
- */
-const FOLDER_PAGE_SIZE = 100;
-const MAX_FOLDER_PAGES = 10;
-const MAX_FOLDER_REQUESTS = 25;
-const MAX_FOLDERS = 500;
-
-/** Longest KQL search string accepted from an agent. */
-const MAX_SEARCH_QUERY_CHARS = 400;
-
-/** Longest reply body accepted, matching the cap the mail UIs impose in practice. */
-export const MAX_REPLY_BODY_BYTES = 64 * 1024;
-
-/** How much of a reply's text a draft preview is compared on; previews are cut near 255 characters. */
-const DRAFT_MATCH_CHARS = 200;
-
-/**
- * Draft-search pages read before reporting no draft. Ten drafts a page, so a retry still finds the
- * original past dozens of later drafts; past that the search stops rather than walking a
- * pathological (or hostile, endlessly-linked) collection, and the retry creates a visibly
- * duplicate draft instead of wedging the action behind a lookup that never ends.
- */
-const MAX_DRAFT_PAGES = 10;
-
-/**
- * `comment` as the HTML Graph puts in the draft. The comment lands in an HTML body, so markup in it
- * would be rendered, with links and all, while the approver saw it as literal text. Escaped, the
- * draft shows exactly the characters that were approved; line breaks become `<br>` since HTML
- * would otherwise collapse them.
- */
-export function commentAsHtml(comment: string): string {
-  return comment
-      .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-      .replaceAll("\r\n", "\n").replaceAll("\n", "<br>");
-}
-
-function collapseWhitespace(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
-}
-
-/**
- * Largest Graph response read when fetching a message body. The text is sender-controlled, and
- * Graph can wrap it in markup or escapes, so this sits well above the character ceiling below.
- */
-const MAX_MESSAGE_RESPONSE_BYTES = 2 * 1024 * 1024;
-
-/** Longest message body returned to the caller; the rest is cut off and flagged. */
-export const MAX_MESSAGE_BODY_CHARS = 256 * 1024;
-
-type GraphRecipient = {
-  emailAddress?: { address?: string; name?: string };
-};
-
-/**
- * The apply-retry precondition for one message: where it is, whether it is read, and the
- * provider revision. Kept out of the agent-facing info types: it is sync machinery, not data.
- */
-export type MessageRevision = { folderId: string | undefined; read: boolean; changeKey: string };
-
-type GraphMessage = {
-  id?: string;
-  changeKey?: string;
-  subject?: string;
-  from?: GraphRecipient;
-  replyTo?: GraphRecipient[];
-  toRecipients?: GraphRecipient[];
-  ccRecipients?: GraphRecipient[];
-  receivedDateTime?: string;
-  isRead?: boolean;
-  hasAttachments?: boolean;
-  bodyPreview?: string;
-  parentFolderId?: string;
-  webLink?: string;
-  conversationId?: string;
-  body?: { contentType?: string; content?: string };
-};
-
-type GraphMailFolder = {
-  id?: string;
-  displayName?: string;
-  parentFolderId?: string;
-  totalItemCount?: number;
-  unreadItemCount?: number;
-  childFolderCount?: number;
-};
-
-type GraphAttachment = {
-  /** OData type annotation: `#microsoft.graph.fileAttachment` and friends. */
-  "@odata.type"?: string;
-  id?: string;
-  name?: string;
-  contentType?: string;
-  size?: number;
-  isInline?: boolean;
-};
-
-/** Graph's collection envelope: the items, plus a link to the rest when there is more. */
-export type GraphCollection<T> = {
-  value?: T[];
-  "@odata.nextLink"?: string;
-};
-
-/** A page of results plus the link to the next one, when Graph offers it. */
-export type GraphPage<T> = {
-  items: T[];
-  nextLink?: string;
-};
-
-/**
- * A Graph failure, classified by what the caller can do about it.
- *
- * `credentialsRejected` marks the claims-challenge case: the account has already been told its
- * credentials are dead, and no retry will help until the user reconnects.
- */
+/** Graph refused a request. `message` is Graph's own explanation, which never carries credentials. */
 export class GraphApiError extends Error {
   readonly status: number;
-  readonly code: string;
-  readonly credentialsRejected: boolean;
+  /** Graph's error `code`, e.g. `itemNotFound`, `accessDenied`, `resourceModified`. */
+  readonly code?: string;
+  /** The innermost error code, which is often the precise one (`nameAlreadyExists`). */
+  readonly innerCode?: string;
+  /** Graph's `request-id`, which Microsoft support asks for. */
+  readonly requestId?: string;
 
-  constructor(
-      status: number, code: string, message: string, opts: { credentialsRejected?: boolean } = {}) {
+  constructor(status: number, message: string, details: { code?: string; innerCode?: string; requestId?: string } = {}) {
     super(message);
     this.name = "GraphApiError";
     this.status = status;
-    this.code = code;
-    this.credentialsRejected = opts.credentialsRejected ?? false;
+    this.code = details.code;
+    this.innerCode = details.innerCode;
+    this.requestId = details.requestId;
+  }
+
+  /** Graph refused the credentials, as opposed to the request. */
+  get isAuthError(): boolean {
+    return this.status === 401;
+  }
+
+  /** The object does not exist, or the user cannot see it: Graph does not say which. */
+  get isNotFound(): boolean {
+    return this.status === 404;
+  }
+
+  /** The object changed since the caller read it: a failed `If-Match` (412), or a 409 other than a name collision. */
+  get isConflict(): boolean {
+    return this.status === 412 || (this.status === 409 && this.code !== "nameAlreadyExists"
+      && this.innerCode !== "nameAlreadyExists");
+  }
+
+  /** A name collided with an existing item. */
+  get isNameConflict(): boolean {
+    return this.status === 409 && (this.code === "nameAlreadyExists" || this.innerCode === "nameAlreadyExists");
   }
 }
 
-/** Cap a provider string before it is echoed into an error a user or agent can see. */
-export function truncate(value: string, max = MAX_GRAPH_ERROR_CHARS): string {
-  return value.length > max ? `${value.slice(0, max)}…` : value;
+/** Graph is throttling this app or user, and asked to wait longer than is reasonable inline. */
+export class GraphThrottledError extends GraphApiError {
+  /** When to try again, in epoch milliseconds, if Graph said. */
+  readonly retryAt?: number;
+
+  constructor(status: number, retryAt: number | undefined, requestId?: string) {
+    const when = retryAt === undefined ? "" : ` Try again after ${new Date(retryAt).toISOString().slice(11, 19)} UTC.`;
+    super(status, `Microsoft 365 is limiting how fast this account can make requests.${when}`,
+      { code: "throttled", requestId });
+    this.name = "GraphThrottledError";
+    this.retryAt = retryAt;
+  }
 }
 
 /**
- * Build a Graph URL from already-decoded path segments and query parameters.
- *
- * Segments are percent-encoded individually, so an id containing `/`, `?`, `#` or `..` stays one
- * segment instead of rewriting the request path. Every parameter value is percent-encoded, so an
- * OData operator or an `&` inside a search term cannot terminate the value it sits in or add a
- * parameter.
- *
- * Parameter NAMES are written literally, which is what keeps the OData system options readable as
- * `$select` rather than `%24select`. That is safe only because every name comes from a literal in
- * this file — no caller-supplied string ever becomes a parameter name.
- *
- * Empty and dot segments are rejected rather than encoded: percent-encoding leaves `.` and `..`
- * intact, and URL parsing collapses them at request time, so an id of `..` would retarget the
- * request one level up the path (`/me/mailFolders/..` becomes `/me`) with the bearer token
- * attached. Refusing them keeps "one segment stays one segment" literally true.
+ * The request may have reached Graph, but no answer came back: a timeout or a dropped connection.
+ * Whether a write took effect is unknown.
  */
-export function graphUrl(segments: string[], params?: Record<string, string>): string {
-  let path = segments.map(pathSegment).join("/");
-  return `${GRAPH_BASE}/${path}${queryString(params)}`;
-}
-
-function queryString(params?: Record<string, string>): string {
-  let query = Object.entries(params ?? {})
-      .map(([name, value]) => `${name}=${encodeURIComponent(value)}`)
-      .join("&");
-  return query ? `?${query}` : "";
-}
-
-/**
- * Build the Graph URL that addresses a SharePoint site by its host and server-relative path.
- *
- * Graph addresses a site as `/sites/{hostname}:/{site-path}`, which `graphUrl` cannot express: the
- * whole `contoso.sharepoint.com:/sites/HR` string is one addressable unit, but it contains the `/`
- * separators that `graphUrl` exists to encode away. So it is assembled here instead, under the same
- * guard — every component goes through `pathSegment`, so a component of `..` is refused rather
- * than being allowed to collapse the path onto a different site (or off `/sites` entirely) with this
- * account's bearer token attached.
- *
- * `sitePath` is the decoded server-relative path with no trailing slash (`/sites/HR`,
- * `/teams/HR/sub`), as `parseSharePointListUrl` produces it; empty addresses the tenant root site.
- * This is the only place that shape is built.
- */
-export function graphSiteByPathUrl(
-    hostname: string, sitePath: string, params?: Record<string, string>): string {
-  let host = pathSegment(hostname);
-  let relative = sitePath.startsWith("/") ? sitePath.slice(1) : sitePath;
-  if (!relative) return `${GRAPH_BASE}/sites/${host}${queryString(params)}`;
-  let path = relative.split("/").map(pathSegment).join("/");
-  return `${GRAPH_BASE}/sites/${host}:/${path}${queryString(params)}`;
-}
-
-/**
- * Return `url` if it is a Graph URL, otherwise throw.
- *
- * Applied to every `@odata.nextLink` before it is followed. The fetch helper attaches this
- * mailbox's bearer token to whatever URL it is given, so following a link to another origin would
- * hand the token to that host. Graph controls the link today; this makes a compromised or spoofed
- * response unable to exfiltrate the token regardless.
- */
-export function assertGraphUrl(url: string): string {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new Error("Microsoft Graph returned a malformed pagination link.");
+export class GraphTransportError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "GraphTransportError";
   }
-  if (parsed.origin !== GRAPH_ORIGIN) {
-    throw new Error(
-        `Microsoft Graph returned a pagination link outside ${GRAPH_ORIGIN}; refusing to follow it.`);
+}
+
+/** Whether an error from anywhere in this gatekeeper is Graph refusing the credentials. */
+export function isGraphAuthError(error: unknown): boolean {
+  return error instanceof GraphApiError && error.isAuthError;
+}
+
+/** Whether a write's outcome is unknown: Graph may have applied it without saying so. */
+export function isOutcomeUnknown(error: unknown): boolean {
+  return error instanceof GraphTransportError
+    || (error instanceof GraphApiError && error.status >= 500 && !(error instanceof GraphThrottledError));
+}
+
+type GraphErrorBody = { error?: { code?: unknown; message?: unknown; innerError?: unknown; innererror?: unknown } };
+
+/** The deepest `code` in Graph's nested `innerError` chain. */
+function innermostCode(error: GraphErrorBody["error"]): string | undefined {
+  let code: string | undefined;
+  let inner: unknown = error?.innerError ?? error?.innererror;
+  for (let depth = 0; depth < 8 && inner !== null && typeof inner === "object"; depth++) {
+    const record = inner as Record<string, unknown>;
+    if (typeof record.code === "string") code = record.code;
+    inner = record.innerError ?? record.innererror;
   }
-  return parsed.toString();
+  return code;
 }
 
-function addressFrom(recipient: GraphRecipient | undefined) {
-  let address = recipient?.emailAddress?.address;
-  if (typeof address !== "string" || !address) return undefined;
-  let name = recipient?.emailAddress?.name;
-  return {
-    address,
-    ...(typeof name === "string" && name ? { name } : {}),
-  };
-}
-
-function addressesFrom(recipients: GraphRecipient[] | undefined) {
-  if (!Array.isArray(recipients)) return [];
-  return recipients
-      .map(addressFrom)
-      .filter((entry): entry is { address: string; name?: string } => entry !== undefined);
-}
-
-function messageInfoFrom(message: GraphMessage): OutlookMessageInfo {
-  if (typeof message.id !== "string" || !message.id) {
-    throw new Error("Microsoft Graph returned a message without an id.");
+/** The plain-language refusal for a status Graph explained badly or not at all. */
+function fallbackMessage(status: number): string {
+  switch (status) {
+    case 401: return "Microsoft 365 did not accept this connection's credentials.";
+    case 403: return "You don't have permission to do that in Microsoft 365.";
+    case 404: return "That item doesn't exist, or you don't have access to it.";
+    case 409: return "That conflicts with something that already exists.";
+    case 412: return "It changed since it was last read.";
+    case 423: return "It is locked, probably because someone has it open for editing.";
+    case 507: return "The site or OneDrive is out of storage.";
+    default: return `Microsoft Graph answered with HTTP ${status}.`;
   }
-  let received = message.receivedDateTime ? new Date(message.receivedDateTime) : new Date(0);
-  let from = addressFrom(message.from);
-  let replyTo = addressesFrom(message.replyTo);
-  return {
-    id: message.id,
-    subject: message.subject ?? "(no subject)",
-    ...(from ? { from } : {}),
-    ...(replyTo.length > 0 ? { replyTo } : {}),
-    to: addressesFrom(message.toRecipients),
-    cc: addressesFrom(message.ccRecipients),
-    receivedAt: Number.isNaN(received.valueOf()) ? new Date(0) : received,
-    isRead: message.isRead === true,
-    hasAttachments: message.hasAttachments === true,
-    preview: message.bodyPreview ?? "",
-    ...(message.parentFolderId ? { folderId: message.parentFolderId } : {}),
-    ...(message.webLink ? { webLink: message.webLink } : {}),
-    ...(message.conversationId ? { conversationId: message.conversationId } : {}),
-  };
 }
 
-function folderInfoFrom(folder: GraphMailFolder): OutlookFolderInfo {
-  if (typeof folder.id !== "string" || !folder.id) {
-    throw new Error("Microsoft Graph returned a mail folder without an id.");
+/** The longest a Retry-After is believed: an absurd one would otherwise make an unrepresentable date. */
+const MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/** When a throttled response says to retry, in epoch milliseconds, at most a day out. */
+function retryAtOf(response: Response): number | undefined {
+  const header = response.headers.get("retry-after");
+  if (header === null) return undefined;
+  const seconds = Number(header);
+  const at = Number.isFinite(seconds) && seconds >= 0 ? Date.now() + seconds * 1000 : Date.parse(header);
+  return Number.isFinite(at) ? Math.min(at, Date.now() + MAX_RETRY_AFTER_MS) : undefined;
+}
+
+/** Maps a failed response onto this gatekeeper's error classes. */
+export function errorForResponse(response: Response, body: unknown): GraphApiError {
+  const requestId = response.headers.get("request-id") ?? undefined;
+  if (response.status === 429 || (response.status === 503 && response.headers.has("retry-after"))) {
+    return new GraphThrottledError(response.status, retryAtOf(response), requestId);
   }
-  return {
-    id: folder.id,
-    name: folder.displayName ?? "(unnamed folder)",
-    ...(folder.parentFolderId ? { parentFolderId: folder.parentFolderId } : {}),
-    totalItemCount: typeof folder.totalItemCount === "number" ? folder.totalItemCount : 0,
-    unreadItemCount: typeof folder.unreadItemCount === "number" ? folder.unreadItemCount : 0,
-  };
+  const error = (body !== null && typeof body === "object" ? (body as GraphErrorBody).error : undefined);
+  const code = typeof error?.code === "string" ? error.code : undefined;
+  const innerCode = innermostCode(error);
+  const graphMessage = typeof error?.message === "string" ? error.message.trim() : "";
+  // Graph's messages for 401/403/404 name nothing useful ("The resource could not be found."), and
+  // some carry server-relative paths, so those statuses get fixed wording.
+  const message = graphMessage && response.status !== 404 && response.status !== 403 && response.status !== 401
+    ? graphMessage : fallbackMessage(response.status);
+  return new GraphApiError(response.status, message, { code, innerCode, requestId });
 }
 
-/**
- * Classify an attachment from its OData type annotation.
- *
- * Anything not recognized as a file or a reference is reported as `"item"`, the kind that carries
- * no downloadable bytes. That is the safe default: a type this code has never seen is not something
- * `/$value` can be assumed to serve, and misreporting it as a file would turn a Graph error into an
- * unexplained download failure.
- */
-function attachmentKind(odataType: string | undefined): OutlookAttachmentInfo["kind"] {
-  let type = (odataType ?? "").replace(/^#/, "").toLowerCase();
-  if (type === "microsoft.graph.fileattachment") return "file";
-  if (type === "microsoft.graph.referenceattachment") return "reference";
-  return "item";
-}
-
-function attachmentInfoFrom(attachment: GraphAttachment): OutlookAttachmentInfo {
-  if (typeof attachment.id !== "string" || !attachment.id) {
-    throw new Error("Microsoft Graph returned an attachment without an id.");
-  }
-  return {
-    id: attachment.id,
-    name: attachment.name ?? "(unnamed attachment)",
-    mimeType: attachment.contentType ?? "application/octet-stream",
-    sizeBytes: typeof attachment.size === "number" && attachment.size > 0 ? attachment.size : 0,
-    isInline: attachment.isInline === true,
-    kind: attachmentKind(attachment["@odata.type"]),
-  };
-}
-
-/**
- * Validate an agent-supplied KQL search string.
- *
- * A double quote would close the quoted KQL literal the term is wrapped in, turning the rest of the
- * term into search syntax; rejecting it keeps the value a value. The length cap keeps a pathological
- * query from becoming a Graph error loop.
- */
-export function validateSearchQuery(query: string): string {
-  let trimmed = query.trim();
-  if (!trimmed) throw new Error("Search query must not be empty.");
-  if (trimmed.length > MAX_SEARCH_QUERY_CHARS) {
-    throw new Error(`Search query must be at most ${MAX_SEARCH_QUERY_CHARS} characters.`);
-  }
-  if (trimmed.includes("\"")) {
-    throw new Error("Search query must not contain double quotes.");
-  }
-  return trimmed;
-}
-
-function pageSize(requested: number | undefined): string {
-  let size = requested ?? DEFAULT_MESSAGE_PAGE_SIZE;
-  if (!Number.isFinite(size)) size = DEFAULT_MESSAGE_PAGE_SIZE;
-  return String(Math.min(Math.max(Math.trunc(size), 1), MAX_MESSAGE_PAGE_SIZE));
-}
-
-export type GraphMailApiOptions = {
-  /** Called when Graph answers a claims challenge, so the account can be marked dead. */
-  onCredentialsRejected?: CredentialsRejectedReporter;
+/** A request inside a `$batch`. Its `url` is relative to the Graph version root. */
+export type BatchRequest = {
+  id: string;
+  method: "GET";
+  url: string;
+  headers?: Record<string, string>;
 };
 
-export class GraphMailApi {
-  #getAccessToken: AccessTokenProvider;
-  #onCredentialsRejected: CredentialsRejectedReporter | undefined;
+/** One answer from a `$batch`, matched to its request by `id`. */
+export type BatchResponse = { id: string; status: number; body: unknown };
 
-  constructor(getAccessToken: AccessTokenProvider, opts: GraphMailApiOptions = {}) {
-    this.#getAccessToken = getAccessToken;
-    this.#onCredentialsRejected = opts.onCredentialsRejected;
+/** What `request()` takes beyond the method and path. */
+export type RequestOptions = {
+  query?: Record<string, string | number | undefined>;
+  body?: unknown;
+  /** Bytes or text sent as-is, with `contentType`. */
+  rawBody?: Uint8Array | string;
+  contentType?: string;
+  /** Applies the change only if the object's eTag still matches. */
+  ifMatch?: string;
+  /** Graph `Prefer` values, e.g. `HonorNonIndexedQueriesWarningMayFailRandomly`. */
+  prefer?: string[];
+  /** Statuses answered with `null` rather than thrown, for existence checks. */
+  allow?: readonly number[];
+};
+
+/** A downloaded file's bytes, capped, with what Graph said about them. */
+export type Download = { bytes: Uint8Array; contentType: string | null };
+
+/** The download would exceed the cap the caller set. */
+export class DownloadTooLargeError extends Error {
+  constructor(readonly maxBytes: number) {
+    super(`The file is larger than the ${Math.round(maxBytes / (1024 * 1024))} MB this can read.`);
+    this.name = "DownloadTooLargeError";
   }
+}
 
-  /**
-   * The one place a Graph request is made.
-   *
-   * `Prefer: IdType="ImmutableId"` is set here, unconditionally, so no call site can forget it. The
-   * text body preference is added to reads, where it is what Graph honors: it makes message bodies
-   * come back as plain text rather than HTML that would have to be sanitized before an agent sees
-   * it.
-   */
-  async #request(url: string, init: RequestInit = {}): Promise<Response> {
-    let method = (init.method ?? "GET").toUpperCase();
-    let headers = new Headers(init.headers);
-    let prefer = ['IdType="ImmutableId"'];
-    if (method === "GET") prefer.push('outlook.body-content-type="text"');
-    headers.set("Prefer", prefer.join(", "));
-    if (!headers.has("Accept")) headers.set("Accept", "application/json");
-    if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-
-    return await fetchWithAuthRetry(url, { ...init, headers }, this.#getAccessToken, {
-      timeoutMs: GRAPH_TIMEOUT_MS,
-      ...(this.#onCredentialsRejected
-          ? { onCredentialsRejected: this.#onCredentialsRejected }
-          : {}),
-    });
-  }
-
-  async #fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-    let response = await this.#request(url, init);
-    if (!response.ok) throw await this.#toError(response);
-    if (response.status === 204) return undefined as T;
-    return await response.json<T>();
-  }
-
-  /**
-   * Read a response body as bytes, cut off past `maxBytes`. Used only for `/$value`, which
-   * serves no JSON.
-   */
-  async #fetchBytes(url: string, maxBytes: number): Promise<ArrayBuffer> {
-    let response = await this.#request(url, { headers: { Accept: "*/*" } });
-    if (!response.ok) throw await this.#toError(response);
-    // Streamed under the cap rather than buffered whole: attachment metadata can omit or
-    // understate the size, and a body over the cap must cost the cap, not the whole download.
-    // The helper builds an exact-size buffer, so no copy is needed.
-    return (await readBytesCapped(response, maxBytes)).buffer as ArrayBuffer;
-  }
-
-  async #send(url: string, init: RequestInit): Promise<void> {
-    let response = await this.#request(url, init);
-    if (!response.ok) throw await this.#toError(response);
-    await response.body?.cancel();
-  }
-
-  /** Map a non-2xx Graph response onto an error stating what the caller can do about it. */
-  async #toError(response: Response): Promise<GraphApiError> {
-    let body = await response.json<{ error?: { code?: unknown; message?: unknown } }>()
-        .catch(() => undefined);
-    let code = typeof body?.error?.code === "string" ? body.error.code : "";
-    let detail = truncate(
-        typeof body?.error?.message === "string" && body.error.message
-            ? body.error.message
-            : `${response.status} ${response.statusText}`);
-
-    if (response.status === 401) {
-      let claims = claimsChallengeDetail(response.headers.get("WWW-Authenticate"));
-      if (claims) {
-        // fetchWithAuthRetry has already reported this to the account, which is what makes the
-        // Workshop offer a reconnect. Nothing here retries.
-        return new GraphApiError(401, code || claims,
-            "Microsoft requires this account to sign in again before the mailbox can be used " +
-            `(${claims}). Please reconnect the account.`,
-            { credentialsRejected: true });
-      }
-      return new GraphApiError(401, code || "unauthenticated",
-          `Microsoft rejected the mailbox credentials (${detail}).`);
-    }
-
-    if (response.status === 403) {
-      return new GraphApiError(403, code || "forbidden",
-          "This Microsoft connection is not permitted to perform that mailbox operation " +
-          `(${detail}). Reconnect the account and grant mailbox access.`);
-    }
-
-    if (response.status === 404) {
-      return new GraphApiError(404, code || "notFound",
-          `That mailbox item no longer exists (${detail}).`);
-    }
-
-    if (response.status === 429) {
-      let retryAfter = response.headers.get("Retry-After");
-      return new GraphApiError(429, code || "activityLimitReached",
-          "Microsoft Graph is throttling this mailbox" +
-          (retryAfter ? `; retry in ${truncate(retryAfter, 20)} seconds` : "") + ".");
-    }
-
-    if (response.status >= 500) {
-      return new GraphApiError(response.status, code || "serviceError",
-          `Microsoft Graph is temporarily unavailable (${detail}).`);
-    }
-
-    return new GraphApiError(response.status, code || "unknown",
-        `Microsoft Graph request failed: ${response.status}${code ? ` ${code}` : ""} — ${detail}`);
-  }
-
-  // ── Reads ─────────────────────────────────────────────────────────────────────
-
-  /**
-   * Every mail folder in the mailbox, including nested ones.
-   *
-   * `GET /me/mailFolders` returns only the root folder's children, so each folder that reports
-   * children is visited in turn — otherwise a message could never be moved into a subfolder,
-   * because its id would never be discoverable. The walk is breadth-first (shallow folders, the
-   * ones a user actually names, are found first) and bounded three ways: total requests, pages per
-   * collection, and folders returned. Folders reporting no children are never visited, so a flat
-   * mailbox costs exactly the requests the old root-only listing did.
-   */
-  async listFolders(): Promise<OutlookFolderInfo[]> {
-    let folders: OutlookFolderInfo[] = [];
-    // `undefined` stands for the mailbox root, whose children come from a different path.
-    let pending: (string | undefined)[] = [undefined];
-    let requests = 0;
-
-    while (pending.length > 0 && requests < MAX_FOLDER_REQUESTS && folders.length < MAX_FOLDERS) {
-      let parentId = pending.shift();
-      let url: string | undefined = parentId === undefined
-          ? graphUrl(["me", "mailFolders"], {
-              $select: FOLDER_SELECT,
-              $top: String(FOLDER_PAGE_SIZE),
-              // Hidden folders (recoverable items, sync artifacts) are not places to file mail.
-              includeHiddenFolders: "false",
-            })
-          : graphUrl(["me", "mailFolders", parentId, "childFolders"], {
-              $select: FOLDER_SELECT,
-              $top: String(FOLDER_PAGE_SIZE),
-            });
-
-      for (let page = 0;
-           url && page < MAX_FOLDER_PAGES && requests < MAX_FOLDER_REQUESTS;
-           page++) {
-        requests++;
-        let body: GraphCollection<GraphMailFolder> =
-            await this.#fetchJson<GraphCollection<GraphMailFolder>>(url);
-        for (let folder of body.value ?? []) {
-          if (folders.length >= MAX_FOLDERS) return folders;
-          folders.push(folderInfoFrom(folder));
-          if (folder.id && typeof folder.childFolderCount === "number" &&
-              folder.childFolderCount > 0) {
-            pending.push(folder.id);
-          }
-        }
-        let next = body["@odata.nextLink"];
-        url = next ? assertGraphUrl(next) : undefined;
-      }
-    }
-    return folders;
-  }
-
-  async getFolder(folderId: string): Promise<OutlookFolderInfo> {
-    let folder = await this.#fetchJson<GraphMailFolder>(
-        graphUrl(["me", "mailFolders", folderId], { $select: FOLDER_SELECT }));
-    return folderInfoFrom(folder);
-  }
-
-  /**
-   * First page of messages, newest first. Omit `folderId` to read across the whole mailbox.
-   */
-  async listMessages(opts: { folderId?: string; pageSize?: number } = {})
-      : Promise<GraphPage<OutlookMessageInfo>> {
-    let segments = opts.folderId
-        ? ["me", "mailFolders", opts.folderId, "messages"]
-        : ["me", "messages"];
-    return await this.#messagePage(graphUrl(segments, {
-      $select: MESSAGE_SELECT,
-      $top: pageSize(opts.pageSize),
-      $orderby: "receivedDateTime desc",
-    }));
-  }
-
-  /**
-   * First page of messages matching a KQL search.
-   *
-   * `$orderby` is deliberately absent: Graph rejects it alongside `$search`, and results come back
-   * in relevance order instead.
-   */
-  async searchMessages(query: string, opts: { pageSize?: number } = {})
-      : Promise<GraphPage<OutlookMessageInfo>> {
-    let validated = validateSearchQuery(query);
-    return await this.#messagePage(graphUrl(["me", "messages"], {
-      $select: MESSAGE_SELECT,
-      $top: pageSize(opts.pageSize),
-      $search: `"${validated}"`,
-    }));
-  }
-
-  /** Follow a `@odata.nextLink` produced by a previous page. */
-  async nextMessagePage(nextLink: string): Promise<GraphPage<OutlookMessageInfo>> {
-    return await this.#messagePage(assertGraphUrl(nextLink));
-  }
-
-  async #messagePage(url: string): Promise<GraphPage<OutlookMessageInfo>> {
-    let body = await this.#fetchJson<GraphCollection<GraphMessage>>(url);
-    let next = body["@odata.nextLink"];
-    return {
-      items: (body.value ?? []).map(messageInfoFrom),
-      // Validated on arrival, not only when followed, so a bad link fails the page that produced it.
-      ...(next ? { nextLink: assertGraphUrl(next) } : {}),
-    };
-  }
-
-  async getMessage(messageId: string): Promise<OutlookMessageInfo> {
-    let message = await this.#fetchJson<GraphMessage>(
-        graphUrl(["me", "messages", messageId], { $select: MESSAGE_SELECT }));
-    return messageInfoFrom(message);
-  }
-
-  /**
-   * The state an apply retry compares against: where the message is, whether it is read, and the
-   * provider revision, which changes on every write. A retry may only reapply when all three still
-   * match what the first attempt saw — otherwise the message changed after that attempt (possibly
-   * by the attempt itself, whose answer was lost, followed by the user) and replaying would undo
-   * newer edits. Separated from `getMessage` so the agent-facing info stays free of sync machinery.
-   */
-  async getMessageRevision(messageId: string): Promise<MessageRevision> {
-    let message = await this.#fetchJson<GraphMessage>(graphUrl(["me", "messages", messageId],
-        { $select: "id,parentFolderId,isRead,changeKey" }));
-    if (!message.changeKey) {
-      throw new Error(
-          `Microsoft Graph did not report a revision for message ${messageId}, so a retried ` +
-          "action cannot prove the message is unchanged. Reject it and submit it again.");
-    }
-    return {
-      folderId: message.parentFolderId,
-      read: message.isRead === true,
-      changeKey: message.changeKey,
-    };
-  }
-
-  /** The message body as plain text (see the text body preference on reads). */
-  async getMessageBody(messageId: string): Promise<string> {
-    let response = await this.#request(
-        graphUrl(["me", "messages", messageId], { $select: "id,body" }));
-    if (!response.ok) throw await this.#toError(response);
-    // The body is whatever the sender wrote, so it is read under a byte cap rather than buffered
-    // whole. A message too large to read fails with a reason instead of exhausting the Worker.
-    let text: string;
-    try {
-      text = await readTextCapped(response, MAX_MESSAGE_RESPONSE_BYTES);
-    } catch (err) {
-      if (err instanceof ResponseTooLargeError) {
-        throw new Error("This message is too large to read here. Open it in Outlook instead.", { cause: err });
-      }
-      throw err;
-    }
-    let message = JSON.parse(text) as GraphMessage;
-    let content = typeof message.body?.content === "string" ? message.body.content : "";
-    return content.length > MAX_MESSAGE_BODY_CHARS
-        ? `${content.slice(0, MAX_MESSAGE_BODY_CHARS)}\n[message body truncated]`
-        : content;
-  }
-
-  /**
-   * Metadata for every attachment on a message, without any content.
-   *
-   * One request, no pagination loop: a message holds a handful of attachments and Graph returns
-   * them in a single page. A `@odata.nextLink` here would mean a message with more attachments than
-   * Outlook itself permits, and paging a mailbox on the caller's behalf is not this method's job --
-   * so such a listing is refused rather than truncated. A short answer must never be mistakable for
-   * a complete one, by the caller or by the audit trail that records what was listed.
-   */
-  async listAttachments(messageId: string): Promise<OutlookAttachmentInfo[]> {
-    let body = await this.#fetchJson<GraphCollection<GraphAttachment>>(
-        graphUrl(["me", "messages", messageId, "attachments"], { $select: ATTACHMENT_SELECT }));
-    if (body["@odata.nextLink"]) {
-      throw new Error(
-          "This message carries more attachments than Outlook returns in one page, so they " +
-          "cannot be listed completely here. Open the message in Outlook to see them all.");
-    }
-    return (body.value ?? []).map(attachmentInfoFrom);
-  }
-
-  /** Metadata for one attachment, without its content. */
-  async #getAttachment(messageId: string, attachmentId: string): Promise<OutlookAttachmentInfo> {
-    let attachment = await this.#fetchJson<GraphAttachment>(
-        graphUrl(["me", "messages", messageId, "attachments", attachmentId],
-                 { $select: ATTACHMENT_SELECT }));
-    return attachmentInfoFrom(attachment);
-  }
-
-  /**
-   * One file attachment's raw bytes, with the metadata that describes them.
-   *
-   * Metadata is read first so a kind that has no bytes, or a file over the cap, costs one small
-   * request instead of a download that is then thrown away. Graph's `size` counts the stored
-   * (base64) form of a file attachment, so it slightly overstates the file — a file just under the
-   * cap can therefore be refused here. No compensation math: refusing marginally early is the safe
-   * direction, and the streaming cap below is authoritative for what actually arrives.
-   */
-  async getAttachmentBytes(messageId: string, attachmentId: string)
-      : Promise<{ info: OutlookAttachmentInfo; content: ArrayBuffer }> {
-    let info = await this.#getAttachment(messageId, attachmentId);
-
-    // These refusals happen before the read is authorized, so none of them names the attachment or
-    // its size: that is mailbox data, and the audited listAttachments() is where it comes from.
-    if (info.kind === "item") {
-      throw new Error(
-          "That attachment is an Outlook item attached to this message (an email, event or " +
-          "contact), not a file, so it has no file contents to read.");
-    }
-    if (info.kind === "reference") {
-      throw new Error(
-          "That attachment is a link to a file stored in OneDrive or SharePoint, not a copy of " +
-          "the file, so the mailbox holds no contents to read. Open the link in Outlook instead.");
-    }
-    if (info.sizeBytes > MAX_ATTACHMENT_BYTES) {
-      throw new Error(
-          `That attachment is over the ${MAX_ATTACHMENT_BYTES}-byte limit for reading an ` +
-          "attachment. It was not downloaded.");
-    }
-
-    // `$value` is written literally for the same reason the OData query options are: it is a
-    // fixed segment from this file, not caller data, and percent-encoding it would ask Graph for a
-    // child named "%24value". The id before it is still encoded by graphUrl().
-    let content: ArrayBuffer;
-    try {
-      content = await this.#fetchBytes(
-          `${graphUrl(["me", "messages", messageId, "attachments", attachmentId])}/$value`,
-          MAX_ATTACHMENT_BYTES);
-    } catch (err) {
-      if (!(err instanceof ResponseTooLargeError)) throw err;
-      throw new Error(
-          `That attachment returned more than the ${MAX_ATTACHMENT_BYTES}-byte limit for reading ` +
-          "an attachment.", { cause: err });
-    }
-    return { info, content };
-  }
-
-  // ── Writes ────────────────────────────────────────────────────────────────────
-  //
-  // Only the gatekeeper's approved-action executor calls these. Session methods queue actions and
-  // return nothing; nothing below runs before a human (or policy) approves.
-
-  async setMessageRead(messageId: string, read: boolean): Promise<void> {
-    await this.#send(graphUrl(["me", "messages", messageId]), {
-      method: "PATCH",
-      body: JSON.stringify({ isRead: read }),
-    });
-  }
-
-  /**
-   * Move a message to another folder. The message keeps its immutable id, which is why a queued
-   * action still resolves after an unrelated move.
-   */
-  async moveMessage(messageId: string, destinationFolderId: string): Promise<void> {
-    await this.#send(graphUrl(["me", "messages", messageId, "move"]), {
-      method: "POST",
-      body: JSON.stringify({ destinationId: destinationFolderId }),
-    });
-  }
-
-  /**
-   * Create a reply draft in the mailbox's Drafts folder, with `comment` inserted above the quoted
-   * original. Nothing is sent: the user reviews and sends the draft from Outlook.
-   */
-  /**
-   * Whether a draft reply to this message's conversation, starting with `comment`, was created at or
-   * after `since` (an ISO timestamp). Used before replaying a draft whose first attempt may have
-   * landed with its answer lost: createReply makes a new draft every time, so replaying blind
-   * leaves two. The comment sits at the top of the draft, so it is what a draft's preview begins
-   * with; a comment that says nothing cannot be recognised and reports no draft. Pages past the
-   * first are followed (each link origin-checked like every other followed nextLink) so a draft
-   * is not missed for falling outside one `$top` window.
-   */
-  async hasReplyDraft(messageId: string, comment: string, since: string): Promise<boolean> {
-    let wanted = collapseWhitespace(comment).slice(0, DRAFT_MATCH_CHARS);
-    if (!wanted) return false;
-    let conversationId = (await this.getMessage(messageId)).conversationId;
-    if (!conversationId) return false;
-    let url: string | undefined = graphUrl(["me", "mailFolders", "drafts", "messages"], {
-      $filter: `conversationId eq '${conversationId.replaceAll("'", "''")}' and ` +
-          `createdDateTime ge ${since}`,
-      $select: "id,bodyPreview",
-      $top: "10",
-    });
-    for (let page = 0; url !== undefined && page < MAX_DRAFT_PAGES; page++) {
-      let body: GraphCollection<GraphMessage> =
-          await this.#fetchJson<GraphCollection<GraphMessage>>(url);
-      let match = (body.value ?? []).some(draft =>
-          collapseWhitespace(draft.bodyPreview ?? "").startsWith(wanted));
-      if (match) return true;
-      let next = body["@odata.nextLink"];
-      url = next ? assertGraphUrl(next) : undefined;
-    }
+/** Whether `url` is a Graph URL this client may request: the pinned origin and version. */
+export function isGraphUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === new URL(GRAPH_BASE).origin && parsed.pathname.startsWith("/v1.0/")
+      && parsed.username === "" && parsed.password === "";
+  } catch {
     return false;
   }
+}
 
-  async createReplyDraft(messageId: string, comment: string, replyAll: boolean): Promise<void> {
-    if (new TextEncoder().encode(comment).byteLength > MAX_REPLY_BODY_BYTES) {
-      throw new Error(`Reply body must be at most ${MAX_REPLY_BODY_BYTES} bytes.`);
+/** Whether a download redirect may be followed: https, to SharePoint or its media service, no credentials. */
+export function isDownloadHost(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && parsed.username === "" && parsed.password === ""
+      && (parsed.port === "" || parsed.port === "443")
+      && DOWNLOAD_HOSTS.some(pattern => pattern.test(parsed.hostname));
+  } catch {
+    return false;
+  }
+}
+
+/** Waits `ms`, for a throttled retry. */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/** A Graph client for one access token. Cheap to construct; holds no state beyond the token. */
+export class GraphApi {
+  readonly #token: string;
+  readonly #fetch: typeof fetch;
+
+  constructor(accessToken: string, options: { fetch?: typeof fetch } = {}) {
+    this.#token = accessToken;
+    this.#fetch = options.fetch ?? ((input, init) => fetch(input, init));
+  }
+
+  /** A GET returning JSON. `path` is relative to `/v1.0`, or a full Graph URL from a `nextLink`. */
+  async get<T>(path: string, options: Omit<RequestOptions, "body" | "rawBody"> = {}): Promise<T> {
+    return await this.request<T>("GET", path, options) as T;
+  }
+
+  /** A GET that answers `null` for a 404 or 403 rather than throwing. */
+  async find<T>(path: string, options: Omit<RequestOptions, "body" | "rawBody" | "allow"> = {}): Promise<T | null> {
+    return await this.request<T>("GET", path, { ...options, allow: [403, 404] });
+  }
+
+  /**
+   * One request, retried inline while Graph throttles it for a short while. A throttled request
+   * was never processed, so retrying it is safe whatever the method. A 503/504 without
+   * `Retry-After` is retried only for a GET, since a write may have landed.
+   */
+  async request<T>(method: string, path: string, options: RequestOptions = {}): Promise<T | null> {
+    const url = this.#url(path, options.query);
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${this.#token}`,
+      accept: "application/json",
+      "user-agent": USER_AGENT,
+    };
+    if (options.ifMatch !== undefined) headers["if-match"] = options.ifMatch;
+    if (options.prefer?.length) headers.prefer = options.prefer.join(", ");
+    let body: BodyInit | undefined;
+    if (options.rawBody !== undefined) {
+      body = options.rawBody;
+      headers["content-type"] = options.contentType ?? "application/octet-stream";
+    } else if (options.body !== undefined) {
+      body = JSON.stringify(options.body);
+      headers["content-type"] = "application/json";
     }
-    let action = replyAll ? "createReplyAll" : "createReply";
-    await this.#send(graphUrl(["me", "messages", messageId, action]), {
+
+    for (let attempt = 1; ; attempt++) {
+      let response: Response;
+      try {
+        response = await this.#fetch(url, {
+          method, headers, body, redirect: "manual", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+      } catch (error) {
+        throw new GraphTransportError("Microsoft Graph did not answer in time.", { cause: error });
+      }
+      if (response.status === 204) return null;
+      const parsed = await this.#readJson(response);
+      if (response.ok) return parsed as T;
+      if (options.allow?.includes(response.status)) return null;
+      const error = errorForResponse(response, parsed);
+      const retryable = error instanceof GraphThrottledError
+        || (method === "GET" && (response.status === 503 || response.status === 504));
+      const wait = error instanceof GraphThrottledError && error.retryAt !== undefined
+        ? error.retryAt - Date.now() : 1000 * attempt;
+      if (retryable && attempt < MAX_ATTEMPTS && wait <= MAX_RETRY_WAIT_MS) {
+        await sleep(Math.max(0, wait));
+        continue;
+      }
+      if (response.status >= 500 || error instanceof GraphThrottledError) {
+        logger.warn("Graph request failed", {
+          event: "graph.request.failed", status: response.status, graphCode: error.code, requestId: error.requestId,
+        });
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Starts Graph's asynchronous copy of a drive item and returns the monitor URL its progress is
+   * read from. The copy is SharePoint's own, so it keeps the file's metadata and sensitivity label.
+   */
+  async startCopy(path: string, body: unknown, query?: Record<string, string>): Promise<string> {
+    const response = await this.#fetch(this.#url(path, query), {
       method: "POST",
-      body: JSON.stringify({ comment: commentAsHtml(comment) }),
+      headers: {
+        authorization: `Bearer ${this.#token}`, accept: "application/json", "user-agent": USER_AGENT,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+      redirect: "manual",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    }).catch(error => {
+      throw new GraphTransportError("Microsoft Graph did not answer in time.", { cause: error });
     });
+    if (response.status !== 202) throw errorForResponse(response, await this.#readJson(response));
+    const location = response.headers.get("location");
+    if (location === null || !isDownloadHost(location)) {
+      throw new GraphApiError(502, "Microsoft Graph sent no usable progress link for the copy.");
+    }
+    return location;
+  }
+
+  /**
+   * Reads a copy's progress. The monitor URL is pre-authenticated and served by SharePoint, so it is
+   * fetched without the credential, and only from a SharePoint host.
+   */
+  async copyProgress(monitorUrl: string): Promise<{ status: string; resourceId?: string; error?: string }> {
+    if (!isDownloadHost(monitorUrl)) throw new GraphApiError(502, "Refusing to follow a copy's progress link outside SharePoint.");
+    const response = await this.#fetch(monitorUrl, {
+      headers: { accept: "application/json", "user-agent": USER_AGENT }, redirect: "manual", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    }).catch(error => {
+      throw new GraphTransportError("SharePoint did not report the copy's progress in time.", { cause: error });
+    });
+    // A finished copy may answer with a redirect to the new item instead of its status.
+    if (response.status === 303 || response.status === 302) {
+      const id = /\/items\/([^/?]+)/.exec(response.headers.get("location") ?? "")?.[1];
+      return id ? { status: "completed", resourceId: decodeURIComponent(id) } : { status: "completed" };
+    }
+    const body = await this.#readJson(response) as { status?: unknown; resourceId?: unknown; error?: { message?: unknown } } | null;
+    if (!response.ok || body === null || typeof body.status !== "string") {
+      throw new GraphApiError(response.status >= 400 ? response.status : 502, "SharePoint sent an unreadable copy status.");
+    }
+    return {
+      status: body.status,
+      ...(typeof body.resourceId === "string" ? { resourceId: body.resourceId } : {}),
+      ...(typeof body.error?.message === "string" ? { error: body.error.message } : {}),
+    };
+  }
+
+  /**
+   * Runs up to `MAX_BATCH_REQUESTS` GETs in one round trip. Each answer keeps its own status, so a
+   * caller probing access reads a 403 or 404 per item.
+   */
+  async batch(requests: readonly BatchRequest[]): Promise<Map<string, BatchResponse>> {
+    if (requests.length === 0) return new Map();
+    if (requests.length > MAX_BATCH_REQUESTS) throw new Error(`A Graph batch holds at most ${MAX_BATCH_REQUESTS} requests.`);
+    for (const request of requests) {
+      if (request.url.startsWith("/") || /^[a-z]+:/i.test(request.url)) {
+        throw new Error("A batched request's URL must be relative to the Graph version root.");
+      }
+    }
+    const responses = new Map<string, BatchResponse>();
+    // Exchange runs at most four requests per mailbox at once and answers the rest of a batch 429,
+    // each with its own Retry-After: those are sent again, alone, after the longest wait asked.
+    let pending = requests;
+    for (let attempt = 0; pending.length > 0; attempt++) {
+      const answer = await this.request<{ responses?: unknown }>("POST", "/$batch", { body: { requests: pending } });
+      if (!answer || !Array.isArray(answer.responses)) throw new GraphApiError(502, "Microsoft Graph sent a malformed batch answer.");
+      let wait = 0;
+      const throttled = new Set<string>();
+      for (const entry of answer.responses as unknown[]) {
+        if (entry === null || typeof entry !== "object") continue;
+        const { id, status, body, headers } = entry as { id?: unknown; status?: unknown; body?: unknown; headers?: unknown };
+        if (typeof id !== "string" || typeof status !== "number") continue;
+        if (status === 429 && attempt < BATCH_THROTTLE_RETRIES) {
+          throttled.add(id);
+          const after = Number((headers as Record<string, unknown> | undefined)?.["Retry-After"] ?? (headers as Record<string, unknown> | undefined)?.["retry-after"]);
+          wait = Math.max(wait, Number.isFinite(after) ? Math.min(after * 1000, MAX_BATCH_THROTTLE_WAIT_MS) : 500);
+          continue;
+        }
+        responses.set(id, { id, status, body });
+      }
+      pending = pending.filter(request => throttled.has(request.id));
+      if (pending.length > 0) await sleep(wait);
+    }
+    return responses;
+  }
+
+  /**
+   * Downloads a file's bytes. Graph answers `/content` with a redirect to a pre-authenticated URL,
+   * which is a bearer capability: it is followed here, once, only to SharePoint's own hosts, and
+   * never handed to anyone.
+   * @param path The `/content` path, relative to `/v1.0`, with any `format` in `query`.
+   * @throws DownloadTooLargeError past `maxBytes`.
+   */
+  async download(path: string, maxBytes: number, query?: Record<string, string>): Promise<Download> {
+    const url = this.#url(path, query);
+    let response: Response;
+    try {
+      response = await this.#fetch(url, {
+        headers: { authorization: `Bearer ${this.#token}`, "user-agent": USER_AGENT },
+        redirect: "manual",
+        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+      });
+      if (REDIRECTS.has(response.status)) {
+        const location = response.headers.get("location");
+        await response.body?.cancel();
+        if (location === null || !isDownloadHost(location)) {
+          throw new GraphApiError(502, "Microsoft Graph redirected the download somewhere unexpected.");
+        }
+        // No Authorization header: the URL itself is the credential, and the host is not Graph.
+        response = await this.#fetch(location, {
+          headers: { "user-agent": USER_AGENT },
+          redirect: "manual",
+          signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+        });
+      }
+    } catch (error) {
+      if (error instanceof GraphApiError) throw error;
+      throw new GraphTransportError("Microsoft 365 did not send the file in time.", { cause: error });
+    }
+    if (!response.ok) {
+      throw errorForResponse(response, await this.#readJson(response).catch(() => null));
+    }
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      await response.body?.cancel();
+      throw new DownloadTooLargeError(maxBytes);
+    }
+    try {
+      return { bytes: await readBytesCapped(response, maxBytes), contentType: response.headers.get("content-type") };
+    } catch (error) {
+      if (error instanceof ResponseTooLargeError) throw new DownloadTooLargeError(maxBytes);
+      throw new GraphTransportError("The file download was interrupted.", { cause: error });
+    }
+  }
+
+  /** The full URL for `path`, refusing anything that is not Graph's pinned origin and version. */
+  #url(path: string, query?: Record<string, string | number | undefined>): string {
+    const url = /^https:/i.test(path) ? path : `${GRAPH_BASE}${path.startsWith("/") ? path : `/${path}`}`;
+    if (!isGraphUrl(url)) throw new Error("Refusing to send a Microsoft 365 credential outside Microsoft Graph.");
+    if (query === undefined) return url;
+    const parsed = new URL(url);
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined) parsed.searchParams.set(key, String(value));
+    }
+    return parsed.toString();
+  }
+
+  async #readJson(response: Response): Promise<unknown> {
+    let text: string;
+    try {
+      text = await readTextCapped(response, MAX_JSON_BYTES);
+    } catch (error) {
+      if (error instanceof ResponseTooLargeError) throw new GraphApiError(502, "Microsoft Graph sent an answer too large to read.");
+      throw new GraphTransportError("Microsoft Graph's answer was cut off.", { cause: error });
+    }
+    if (text === "") return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      // A non-JSON body (an HTML error page from a proxy) is answered by status alone.
+      return null;
+    }
   }
 }

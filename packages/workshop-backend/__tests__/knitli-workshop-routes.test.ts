@@ -5,7 +5,10 @@ import { createExecutionContext } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, ROUTER_TAG_PROBE_PATH, VERSION_PATH } from "@gadgets/workshop-shared/api";
 import server from "../src/server";
-import source from "../src/server.ts?raw";
+// A `.txt` symlink to server.ts, not `server.ts?raw`: capnweb-validate transforms a `?raw` import of a
+// decorated file at offsets that no longer match the wrapped text, and corrupts the string once
+// server.ts moves them. A Text module is left alone.
+import source from "../src/fork/server-source.txt";
 import { WORKSHOP_ROUTES } from "../src/fork/workshop-routes";
 import { SITE_LOGO_PATH } from "../src/site-logo";
 

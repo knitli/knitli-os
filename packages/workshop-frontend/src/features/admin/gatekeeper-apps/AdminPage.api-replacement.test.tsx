@@ -38,7 +38,7 @@ const deferred = <T,>() => {
 const user = (name: string): AiChatAuthorInfo => ({ type: 'user', id: name, name })
 const view = (siteName: string): AdminSettingsView => ({
   signupsEnabled: true, userSearchEnabled: false, siteName, instanceInstructions: '', announcement: '',
-  banner: { text: '', color: 'info' }, accentColor: '', formats: [], promptPresets: [],
+  banner: { text: '', color: 'info' }, accentColor: '', formats: [], promptPresets: [], restrictedWebFetchHosts: [],
   resourceVendors: [{ vendorId: 'openapi', autoProvisions: false, enabled: true, displayName: 'OpenAPI', resources: [{ urlPattern: PATTERN, title: 'Fixture resource', description: 'Fixture', enabled: true }] }],
   voice: DEFAULT_VOICE_CONFIG,
 })

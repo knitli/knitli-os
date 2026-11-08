@@ -19,7 +19,7 @@ import {
   runAgentLoopContinue, type AgentContext, type AgentEvent, type AgentTool,
 } from "@earendil-works/pi-agent-core";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
-import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
+import { createTwoFilesPatch, OMIT_HEADERS } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
 import {
   findCatalogChanges, formatAlwaysAvailableResourcesPrompt, formatCatalogChange,
@@ -629,10 +629,11 @@ export interface AgentHooks {
 
   /**
    * Returns the resources needed by `webFetch` to delegate document-to-Markdown conversion
-   * to Workers AI. Exposed as a narrow interface (rather than handing over the whole `env`)
-   * so the dependency surface stays explicit.
+   * to Workers AI, and the hosts it may reach in a workspace that has observed restricted data.
+   * Throws if that workspace may reach none. Exposed as a narrow interface (rather than handing
+   * over the whole `env`) so the dependency surface stays explicit.
    */
-  getWebFetchEnv(): WebFetchEnv;
+  getWebFetchEnv(): Promise<WebFetchEnv>;
 
   /**
    * Deployment-wide, admin-authored instructions to append to the agent's system prompt. Returns
@@ -3656,7 +3657,7 @@ async function runAgentPass(
       }),
       execute: async (toolCallId, {url, raw}) => {
         try {
-          let result = await webFetchImpl(hooks.getWebFetchEnv(), {url, raw});
+          let result = await webFetchImpl(await hooks.getWebFetchEnv(), {url, raw});
           // Cut the body, not the formatted result, so the frontmatter's `truncated` stays true
           // to the text and the recorded output is what the model saw. The header counts against
           // the cap too, so the formatted whole fits. Don't end on half of a surrogate pair: a
@@ -4630,6 +4631,10 @@ async function runAgentPass(
  * Renders one file's before/after as a git-style unified diff (headers only, `a/`\/`b/`
  * prefixes, `/dev/null` for a missing side). Shared by the replay path's user-change
  * observations and the Worktree binding's diff().
+ *
+ * The `---`/`+++` headers are written here, not by jsdiff, to keep the path verbatim: jsdiff
+ * (like git) C-quotes a path containing non-ASCII, `"` or `\`, which an agent reading the diff
+ * would then have to unescape before reusing the path.
  */
 export function formatUnifiedDiff(
     filename: string,
@@ -4637,17 +4642,13 @@ export function formatUnifiedDiff(
     newContent: string,
     oldExists: boolean,
     newExists: boolean): string | undefined {
-  return createTwoFilesPatch(
-      oldExists ? `a/${filename}` : "/dev/null",
-      newExists ? `b/${filename}` : "/dev/null",
-      oldContent,
-      newContent,
-      undefined,
-      undefined,
-      {
-        context: 3,
-        headerOptions: FILE_HEADERS_ONLY,
-      }).trimEnd();
+  let hunks = createTwoFilesPatch("", "", oldContent, newContent, undefined, undefined,
+                                  { context: 3, headerOptions: OMIT_HEADERS });
+  return [
+    `--- ${oldExists ? `a/${filename}` : "/dev/null"}`,
+    `+++ ${newExists ? `b/${filename}` : "/dev/null"}`,
+    hunks,
+  ].join("\n").trimEnd();
 }
 
 // =======================================================================================

@@ -715,11 +715,13 @@ describe("observer readiness and privacy", () => {
       await gadget.bind("TEST_THING", connId);
 
       // The restart severs every live session: nothing retained from before the bind may work.
-      // The fell-check takes any rejection (a call racing the abort can still land); afterwards
-      // every retained stub is dead, although the exact shape depends on where the abort caught
-      // it -- a retryable, a WebSocket close, or a client-side dispatch TypeError.
+      // The fell-check probes the owner's workspace stub, which fails only once the abort has
+      // landed: a retained session's observation is refused as soon as the connection is blocked
+      // pending the restart, before the abort, so it cannot tell the two apart. Afterwards every
+      // retained stub is dead, although the exact shape depends on where the abort caught it -- a
+      // retryable, a WebSocket close, or a client-side dispatch TypeError.
       await waitFor("the restart to fell the retained session", () =>
-        retainedSession.observe().then(() => null, () => true));
+        ownerWorkspace.getMetadata().then(() => null, () => true));
       const severed = /restart|abort|closed|disconnect|dispos|not a function/i;
       await expect(retainedSession.observe()).rejects.toThrow(severed);
       await expect(retainedSession.act()).rejects.toThrow(severed);

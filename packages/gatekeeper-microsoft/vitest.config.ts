@@ -3,16 +3,16 @@ import capnwebValidate from "capnweb-validate/vite";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  // The worker's RPC entrypoints carry `@validateRpc()`, which refuses to run untransformed.
+  // The configurator and session modules carry `@validateRpc()`, applied in memory as in the workerd project.
   plugins: [capnwebValidate()],
   test: {
-    include: ["__tests__/*.test.ts"],
+    include: ["__tests__/*.test.ts", "__tests__/content/*.test.ts"],
     environment: "node",
-    // Supplies the one workerd-only crypto primitive the OAuth nonce check calls.
-    setupFiles: ["./__tests__/stubs/workerd-crypto-shim.ts"],
+    // Fork: the docx byte-for-byte test takes ~3 s alone and exceeds 5 s on the CI runner (docs/fork-maintenance.md).
+    testTimeout: 30_000,
     alias: {
-      // Lets the worker module, which declares a Durable Object and RPC entrypoints, be imported at
-      // all. See the stub for what it does and does not provide.
+      // Lets modules that declare a Durable Object or an `RpcTarget` be imported at all. See the
+      // stub for what it does and does not provide.
       "cloudflare:workers": fileURLToPath(
         new URL("./__tests__/stubs/cloudflare-workers.ts", import.meta.url)),
     },

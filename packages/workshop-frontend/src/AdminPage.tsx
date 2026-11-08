@@ -18,6 +18,7 @@ import { AdminModelsPanel } from './features/ai-models/AdminModelsPanel'
 import { AdminUpdatesPanel } from './features/deployment-updates/AdminUpdatesPanel'
 import { latestReads } from './features/deployment-updates/latestReads'
 import { probeRouterTag } from './features/deployment-updates/probeRouterTag'
+import { RestrictedWebFetchHostsCard } from './features/web-fetch/RestrictedWebFetchHostsCard'
 import { isAdminTab, resolveAdminTab } from './adminTab'
 import { logRpcFailure } from './rpcErrors'
 
@@ -93,6 +94,8 @@ export default function AdminPage() {
   const [presetNameDraft, setPresetNameDraft] = useState('')
   const [presetTextDraft, setPresetTextDraft] = useState('')
   const [savingPreset, setSavingPreset] = useState(false)
+  // The hosts a workspace that has observed restricted data may still fetch from.
+  const [restrictedWebFetchHosts, setRestrictedWebFetchHosts] = useState<string[]>([])
 
   // Top-bar notice: last-saved value + current editor draft.
   const [savedAnnouncement, setSavedAnnouncement] = useState('')
@@ -192,6 +195,7 @@ export default function AdminPage() {
     setInstructionsDraft(view.instanceInstructions)
     setPromptPresets(view.promptPresets)
     setEditingPresetId(null)
+    setRestrictedWebFetchHosts(view.restrictedWebFetchHosts)
     setSavedAnnouncement(view.announcement)
     setAnnouncementDraft(view.announcement)
     setSavedBanner(view.banner)
@@ -1210,6 +1214,14 @@ export default function AdminPage() {
           onConfirm={() => { if (deletingPresetId) void handleDeletePreset(deletingPresetId) }}
         />
       </div>
+      )}
+
+      {activeTab === 'general' && (
+        <RestrictedWebFetchHostsCard
+          admin={admin.api}
+          hosts={restrictedWebFetchHosts}
+          onSaved={setRestrictedWebFetchHosts}
+        />
       )}
 
       {/* Gatekeeper resources */}

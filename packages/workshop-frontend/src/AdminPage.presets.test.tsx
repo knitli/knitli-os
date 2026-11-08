@@ -41,6 +41,7 @@ vi.mock('@cloudflare/kumo', async () => {
   )
   return {
     Dialog,
+    TagInput: () => null,
     Button: ({ children, ...props }: Record<string, any>) =>
       React.createElement('button', props, children),
     // Map Kumo's onValueChange onto change events so tests can drive the fields.
@@ -69,7 +70,7 @@ vi.mock('@cloudflare/kumo', async () => {
 const view = (promptPresets: PromptPreset[]): AdminSettingsView => ({
   signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '',
   banner: { text: '', color: 'info' }, accentColor: '', resourceVendors: [], formats: [],
-  promptPresets, voice: DEFAULT_VOICE_CONFIG,
+  promptPresets, restrictedWebFetchHosts: [], voice: DEFAULT_VOICE_CONFIG,
 })
 
 const state = vi.hoisted(() => {

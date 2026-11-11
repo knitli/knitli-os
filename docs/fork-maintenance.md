@@ -716,6 +716,20 @@ authorizes a read after fetching it.
 
 ## Open questions
 
+- **Decided 2026-11-11 (maintainer): adopt upstream's subresource-based observer verification, for
+  upstream's gatekeepers and for the fork's own.** Upstream's range `9092a4a..foundation/main`
+  (69 commits, 804 files) moved every gatekeeper to `ObservationDescription.subresources` +
+  `verifyObserverAccess()` (#979-#1011, #1019, #1020). A single merge conflicts in 51 files, 28
+  hunks in `overseer.ts` alone, because it reshapes the code under the fork's `attestAudience` /
+  `admittedAs`, revocation-gate and approval-continuation seams. Plan: sync in stages. Stage 1
+  (`9092a4a..b0ef1d1b`, the commits before the first observer migration, `a3a0de9a`) is merged as
+  its own PR. The observer-model commits follow as a separate, kernel-reviewed PR that re-derives
+  the audience attestation on top of the new admission model rather than keeping the old one, and
+  migrates the fork's own gatekeepers (email, ai-executor, messaging, memory, ...) to report
+  subresources and implement `verifyObserverAccess()`. Non-observer upstream commits interleaved
+  after that point (sharing, notifications, admin audit, ...) ride along with it, since a merge
+  cannot skip commits.
+
 - **Severing revoked sessions instead of gating the whole Durable Object.** The gate is a blunt
   instrument: it strands every queued input and abandons the cross-DO cleanup, when the only thing
   that must not run is a write through a capability the revocation just invalidated. Upstream is

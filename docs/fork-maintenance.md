@@ -1224,12 +1224,19 @@ ids are facet-local, not Activity ids.
 ### A new connection survives the restart its creation triggers
 
 - **Where:** fork-owned `packages/workshop-frontend/src/connectionRestartRecovery.ts`, called from
-  three upstream files: `Connections.tsx` (the Add connection `onCreated`, plus a latest-render
-  ref and an unmount guard), `features/chat/composer/useComposerResources.ts` (`createCapsule`
+  two upstream files now: `features/chat/composer/useComposerResources.ts` (`createCapsule`
   and `attachCreated` go through `consumeCreatedConnection`; a new optional `getOverseer`
   option, whose absence keeps upstream's behaviour) and `features/chat/composer/ChatComposer.tsx`
   (passes `getOverseer` through).
 - **Introduced:** knitli/knitli-site#640
+- **2026-11-11 sync:** the Connections panel's half is retired. Upstream #1018 ("Bind a new
+  connection after the restart its creation causes", 62d5bd2e) now keeps the pending bind in
+  `Connections.tsx` and runs it once the session is replaced (pinned by upstream's
+  `Connections.test.tsx`), so the fork's `Connections.tsx` call, latest-render ref and unmount guard
+  are gone, and the two `Connections.fork.test.tsx` cases for them were deleted. The composer path
+  and the helper stay; the modal's `onCreated` is upstream's `(gatekeeper, id)` and the modal now
+  pipelines `getId()` onto the creation, which the re-bind case in `GatekeeperModal.fork.test.tsx`
+  mimics. The panel's old note about connections lost to the restart applies to the composer only.
 - **What:** adding a connection while a "build" collaborator is connected restarts the workspace.
   The record is saved first, then the picker's follow-up (Connections' `bindWithSuggestedName`,
   the composer's `describe`/`getCreationSpec`) is refused or severed. On a restart-class failure
@@ -1253,9 +1260,9 @@ ids are facet-local, not Activity ids.
   own timeout, so a reconnect that never resolves stalls the retry as it stalls everything else.
 - **Test:** `packages/workshop-backend/__tests__/knitli-connection-restart-bind.test.ts` pins the
   host contract (refused before the reset, bound after it); `connectionRestartRecovery.test.ts`,
-  `Connections.fork.test.tsx`, `features/chat/composer/useComposerResources.fork.test.tsx` and
-  the re-bind case in `GatekeeperModal.fork.test.tsx` pin the client.
-- **At sync:** Tier 2 for the three upstream call sites. If upstream starts retrying the
+  `features/chat/composer/useComposerResources.fork.test.tsx` and the re-bind case in
+  `GatekeeperModal.fork.test.tsx` pin the client.
+- **At sync:** Tier 2 for the two upstream call sites. If upstream starts retrying the
   follow-up itself, or stops refusing the bind, drop the fork module and its call sites; if it
   reshapes `onCreated`, `createCapsule` or `attachCreated`, reapply the single call each.
 

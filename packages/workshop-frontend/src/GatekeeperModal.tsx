@@ -51,7 +51,7 @@ export interface GatekeeperModalProps {
    * Returns an overseer stub. Called only when actually creating a gatekeeper. This allows
    * the Home page to lazily provision a gadget on first use.
    *
-   * Fork: also called on open when `initialVendorId` is set, to ask the owner's always-on
+   * Fork: also called on open when `initialVendorId` is set and the viewer might have the vendor always on (no account of it, or a singleton one), to ask the owner's always-on
    * availability, so a caller passing `initialVendorId` must supply one that doesn't provision.
    */
   getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>
@@ -346,11 +346,17 @@ export default function GatekeeperModal({
   const viewerVendorAccounts = accounts.filter(account => account.vendorId === initialVendorId)
   const requestedVendorAccounts = viewerVendorAccounts
     .map(account => `${account.id}:${account.credentialsValid}`).join(',')
+  // Only a vendor that may be ambient waits: a viewer's non-singleton account of it means it can't be.
+  const mayBeAmbient = viewerVendorAccounts.length === 0 ||
+    viewerVendorAccounts.some(account => account.description.singleton)
+  // The query waits for the account list: a viewer with only ordinary accounts of the vendor can
+  // never have it ambient, and then the modal asks for the workspace only when adding.
+  const [accountsReady, setAccountsReady] = useState(false)
   const getOverseerRef = useRef(getOverseer)
   getOverseerRef.current = getOverseer
   useEffect(() => setOwnerAmbient(null), [open, initialVendorId])
   useEffect(() => {
-    if (!open || !initialVendorId) return
+    if (!open || !initialVendorId || !accountsReady || !mayBeAmbient) return
     let cancelled = false
     const settle = (status: AmbientVendorStatus | 'unknown') => {
       if (!cancelled) setOwnerAmbient({ accountsKey: requestedVendorAccounts, status })
@@ -365,16 +371,13 @@ export default function GatekeeperModal({
       cancelled = true
       clearTimeout(timeout)
     }
-  }, [open, initialVendorId, requestedVendorAccounts])
+  }, [open, initialVendorId, requestedVendorAccounts, accountsReady, mayBeAmbient])
   const requestedVendorSelected = initialVendorId !== undefined && selectedConnection?.vendorId === initialVendorId
   const viewerAlwaysOn = selectedConnection !== null && isAlwaysOn(selectedConnection, alwaysOnVendorIds)
   // An answer from before the viewer's accounts changed still stands unless the viewer now has the
   // singleton themselves, which is when the owner's answer is what the modal must show.
   const ownerStatus = ownerAmbient === null ||
     (ownerAmbient.accountsKey !== requestedVendorAccounts && viewerAlwaysOn) ? null : ownerAmbient.status
-  // Only a vendor that may be ambient waits: a viewer's non-singleton account of it means it can't be.
-  const mayBeAmbient = viewerVendorAccounts.length === 0 ||
-    viewerVendorAccounts.some(account => account.description.singleton)
   const checkingOwnerAmbient = requestedVendorSelected && ownerStatus === null && mayBeAmbient
   // A failed query falls back to the viewer's own accounts; handleAddAmbientToChat is authoritative.
   const addsAmbientToChat = requestedVendorSelected &&
@@ -542,6 +545,7 @@ export default function GatekeeperModal({
     if (!open) return
     let cancelled = false
     const accountMap = new Map<number, AccountOption>()
+    setAccountsReady(false)
 
     const subscriber = new AccountsSubscriberAdapter({
       add({ id, description, vendor, supportedResources, credentialsValid, vendorId }) {
@@ -559,12 +563,14 @@ export default function GatekeeperModal({
       ready() {
         if (cancelled) return
         setAccounts(Array.from(accountMap.values()))
+        setAccountsReady(true)
       },
     })
     const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
     subscription.catch(error => {
       if (cancelled) return
       logRpcFailure('Failed to subscribe to connected accounts:', error)
+      setAccountsReady(true)
     })
 
     return () => {

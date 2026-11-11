@@ -342,7 +342,7 @@ describe('GatekeeperModal ambient resource connections', () => {
   // requests it; the modal completes that request with the workspace's ambient gatekeeper.
   it('adds an always-on vendor to the requesting chat with its ambient gatekeeper', async () => {
     const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory', initialAccount: true, singleton: true })
-    const capability = { [Symbol.dispose]() {} }
+    const capability = { getId: async () => 7, [Symbol.dispose]() {} }
     const getAmbientGatekeeper = vi.fn<(vendorId: string) => Promise<typeof capability | null>>()
       .mockResolvedValue(capability)
     const onCreated = vi.fn<ComponentProps<typeof GatekeeperModal>['onCreated']>().mockResolvedValue(undefined)
@@ -360,7 +360,7 @@ describe('GatekeeperModal ambient resource connections', () => {
     await act(async () => add!.click())
 
     expect(getAmbientGatekeeper).toHaveBeenCalledExactlyOnceWith('memory')
-    expect(onCreated).toHaveBeenCalledExactlyOnceWith(capability)
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith(capability, 7)
     expect(testApi.startResourceConfigurator).not.toHaveBeenCalled()
   })
 
@@ -391,7 +391,7 @@ describe('GatekeeperModal ambient resource connections', () => {
 
   it('offers the owner\'s ambient gatekeeper to a collaborator without their own account', async () => {
     const testApi = buildApi({ autoProvisionsAccount: false, vendorId: 'memory' })
-    const capability = { [Symbol.dispose]() {} }
+    const capability = { getId: async () => 7, [Symbol.dispose]() {} }
     const getAmbientGatekeeper = vi.fn<(vendorId: string) => Promise<typeof capability>>().mockResolvedValue(capability)
     const ambientVendorStatus = ownerStatus('available')
     const onCreated = vi.fn<ComponentProps<typeof GatekeeperModal>['onCreated']>().mockResolvedValue(undefined)
@@ -408,7 +408,7 @@ describe('GatekeeperModal ambient resource connections', () => {
     const add = [...rendered.container.querySelectorAll('button')].find(button => button.textContent === 'Add to this chat')
     expect(add?.disabled).toBe(false)
     await act(async () => add!.click())
-    expect(onCreated).toHaveBeenCalledExactlyOnceWith(capability)
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith(capability, 7)
   })
 
   it('offers nothing to a collaborator with their own account when the owner lacks the vendor', async () => {
@@ -801,11 +801,13 @@ describe('GatekeeperModal ambient resource connections', () => {
       { urlPattern: BARE_MAIL, title: 'Mail', description: 'Mail.' },
       { urlPattern: BARE_CALENDAR, title: 'Calendar', description: 'Calendar.' },
     ] })
-    const capability = { [Symbol.dispose]() {} }
+    const capability = { getId: async () => 7, [Symbol.dispose]() {} }
+    // Upstream's hand-off pipelines getId() onto the creation, so the result is a promise with it.
     const newGatekeeper = vi.fn<(
       accountId: number,
       resourceUrl: string,
-    ) => Promise<typeof capability>>().mockResolvedValue(capability)
+    ) => Promise<typeof capability> & { getId(): Promise<number> }>(
+      () => Object.assign(Promise.resolve(capability), { getId: () => capability.getId() }))
     const onCreated = vi.fn<ComponentProps<typeof GatekeeperModal>['onCreated']>()
       .mockResolvedValue(undefined)
     const getOverseer = vi.fn<() => Promise<RpcStub<Overseer>>>()
@@ -820,7 +822,7 @@ describe('GatekeeperModal ambient resource connections', () => {
     const add = [...rendered.container.querySelectorAll('button')].find(button => button.textContent === 'Add connection')
     await act(async () => add!.click())
     expect(newGatekeeper).toHaveBeenCalledWith(42, NARROWED_MAIL)
-    expect(onCreated).toHaveBeenCalledWith(capability)
+    expect(onCreated).toHaveBeenCalledWith(capability, 7)
   })
 
   // Connections' onCreated: adding a connection while a build collaborator is connected restarts
@@ -831,8 +833,9 @@ describe('GatekeeperModal ambient resource connections', () => {
       { urlPattern: BARE_MAIL, title: 'Mail', description: 'Mail.' },
     ] })
     const capability = { getId: async () => 9, [Symbol.dispose]() {} }
-    const newGatekeeper = vi.fn<(accountId: number, resourceUrl: string) => Promise<typeof capability>>()
-      .mockResolvedValue(capability)
+    const newGatekeeper = vi.fn<(accountId: number, resourceUrl: string) =>
+      Promise<typeof capability> & { getId(): Promise<number> }>(
+      () => Object.assign(Promise.resolve(capability), { getId: () => capability.getId() }))
     const bindWithSuggestedName = vi.fn<(target: number, chatId?: number) => Promise<string>>()
       .mockRejectedValueOnce(new Error('The workspace is restarting to apply a connection change. Please retry.'))
       .mockResolvedValue('MAIL')

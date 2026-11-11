@@ -4097,11 +4097,9 @@ function ChatInterface({
 
           // After subscribing, load the list of chats and models
           // This is safe because subscription will catch any new activity
-          const [chats, models, presets, library] = await Promise.all([
+          const [chats, models] = await Promise.all([
             overseer.listChats(),
             overseer.listModels(),
-            overseer.listPromptPresets(),
-            authenticatedApi.listLibraryBlueprints(),
           ]);
 
           chats.forEach((chat) => {
@@ -4111,17 +4109,23 @@ function ChatInterface({
           setChatListReady(true);
 
           setAvailableModels(models);
-          // The prompt selector merges deployment presets with the user's prompt-marked
-          // library blueprints (filtered on the existing library, no new library system).
-          setPromptOptions([
-            ...presets.map((preset): PromptPresetOption =>
-                ({ kind: "admin", id: preset.id, name: preset.name })),
-            ...library
-              .filter((entry) => entry.metadata.prompt === true)
-              .map((entry): PromptPresetOption => ({
-                kind: "blueprint", id: entry.id, name: entry.metadata.title,
-              })),
-          ]);
+          // Fork: the prompt selector merges deployment presets with the user's prompt-marked
+          // library blueprints (filtered on the existing library, no new library system). Loaded
+          // beside the chat list, so a failure here never keeps conversations from loading.
+          void Promise.all([overseer.listPromptPresets(), authenticatedApi.listLibraryBlueprints()])
+            .then(([presets, library]) => {
+              if (!isMounted) return;
+              setPromptOptions([
+                ...presets.map((preset): PromptPresetOption =>
+                    ({ kind: "admin", id: preset.id, name: preset.name })),
+                ...library
+                  .filter((entry) => entry.metadata.prompt === true)
+                  .map((entry): PromptPresetOption => ({
+                    kind: "blueprint", id: entry.id, name: entry.metadata.title,
+                  })),
+              ]);
+            })
+            .catch((err) => { logRpcFailure("Failed to load prompt options:", err); });
 
           setSelectedModel(getStoredSelectedModel(models));
 

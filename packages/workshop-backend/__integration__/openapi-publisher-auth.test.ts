@@ -80,7 +80,7 @@ it("PUB-R08 real workspace owner reaches SDK; wrong owner and initializing conne
   expect(valid.status).toBe(200); expect(JSON.stringify(await valid.json())).toContain('search'); expect(sessions).toBe(1);
   expect((await send(`${otherName}:${otherSecret}`)).status).toBe(403); expect(sessions).toBe(1);
   // A real existing share must not bypass the native owner-only workspace policy.
-  expect(await opened.addCollaborator(otherName, 'use')).not.toBeNull();
+  expect(await opened.addCollaborator(otherName, 'workspace')).not.toBeNull();
   expect((await opened.listCollaborators()).some(c => c.profile.id === otherName)).toBe(true);
   await runInDurableObject(workspace, async instance => {
     const impl = (instance as unknown as { impl: any }).impl;

@@ -104,8 +104,10 @@ afterAll(() => {
 describe("Workshop AI executor administrator RPC bridge", () => {
   it("keeps ordinary admin settings available when inference is not bound", async () => {
     const withoutInference = new AdminApiImpl(
-      exports.AdminSettings.getByName(""),
+      { exports } as unknown as ExecutionContext,
+      env,
       "aibridgeadmin",
+      "api",
       undefined,
     );
 

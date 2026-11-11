@@ -256,7 +256,12 @@ the seams below were re-applied or retired on top of it.
   `observer-verification-failure` test replaces ours), the gated workspace-deletion path
   (`deleteSelf` is upstream's tombstone plus journaled user updates; `scheduleRevocationRestart(false)`
   has no caller now), `#useScopeGatekeeperIds`, and the fork's "role above your own" share check
-  (`#requireCanShare`).
+  (`#requireCanShare`). The window the deletion path leaves, between the tombstone and the restart,
+  is fenced by two fork lines instead of the gate: `isRevocationPaused()` is also true while
+  `storage.deleting` is set (observations, action and hook readiness, sharing expansion and open
+  handoffs already check it), and `applyPendingAction()` calls `assertNoRevocationPending()` first,
+  so approval, manual or automatic, cannot reach the world from a retained capability. Pinned by
+  `knitli-deletion-fence.test.ts`.
 - **Readiness gate no longer refuses legacy connections:** `assertGatekeeperObserverReadiness()` ended
   with `observerVendorId(record)`, which throws for a connection with no `creationSpec`; upstream's new
   property test (`durable-decision-resume`) stages writes through such a record in an owner-only
@@ -272,6 +277,12 @@ the seams below were re-applied or retired on top of it.
   `Connections.tsx` (`bindCreatedConnection`), superseded by upstream #1018, so the entry
   "A new connection survives the restart its creation triggers" now covers the composer only and
   `Connections.fork.test.tsx` / `GatekeeperModal.fork.test.tsx` carry the retired expectations.
+- **Bounded agent grep:** upstream's `matchBlob()` (#817) keeps every matching line of a streamed
+  file until the output budget applies. `scanWorkpieceForGrep()` takes an optional `maxMatches`
+  (default unbounded, so `Worktree.grep()` and `structuredGrep()` are as upstream), the matchers
+  take an optional `limit`, `GrepScan.truncated` marks the cut and `formatGrep()` says `N+ more`.
+  Only the agent's `grepWorkpiece()` passes a cap (`MAX_TOOL_RESULT_CHARS`, since every shown match
+  takes a character). Drop it if upstream bounds the scan itself.
 - **Not adopted (kept):** chat attachments still upload whole (`uploadChatAttachment`), not through
   upstream's streamed `uploadBlob`.
 

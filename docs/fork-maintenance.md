@@ -854,7 +854,7 @@ setup and their fixtures were removed once knitli-site's native OpenAPI connecto
 `scripts/fork/openapi-host-retired.test.ts` fails if any of it comes back. DO storage rows those
 features wrote are left in place; typed-storage ignores undeclared collections.
 
-### Connect links are bound to the initiating Access identity in four of twelve hand-rolled gatekeepers
+### Connect links are bound to the initiating Access identity in seven of sixteen hand-rolled gatekeepers
 
 - **Where:** `packages/observability/src/fork/connect-initiator.ts` (fork-owned), called from the
   `fetch` handlers and `UserAccount` classes of `packages/gatekeeper-{github,linear,email,cloudflare}`,
@@ -868,16 +868,18 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 - **Why:** the connect URL's nonce was the whole authorization. Anyone who obtained the link —
   a forwarded message, a shared screen, a shoulder — could complete the connection into the
   initiating user's account. #25 closed it for the MCP family and the OpenAPI connector; this
-  closes it for four of the gatekeepers that hand-roll their own account Durable Object.
-- **Scope, and the eight that are deliberately not fixed:** twelve gatekeepers hand-roll that
-  account shape. Four are fixed — `gatekeeper-{github,linear,cloudflare,email}`, the ones this
-  installation uses. The other eight — `gatekeeper-{google,confluence,notion,slack,supabase,spotify,
-  zoominfo,homeassistant}` — are left exactly as upstream wrote them, by the repository owner's
+  closes it for seven of the gatekeepers that hand-roll their own account Durable Object.
+- **Scope, and the nine that are deliberately not fixed:** sixteen gatekeepers hand-roll that
+  account shape. Seven are fixed — `gatekeeper-{github,linear,cloudflare,email,microsoft,x,pagerduty}`,
+  the ones this installation uses (pagerduty from the 2026-11-11 sync, upstream #1050, with the kit
+  `putInitiation` pattern: `initiator` rides the nonce record, `initiatorMatches()`, and
+  `refuseForeignBrowser()` above the authorize redirect and the callback). The other nine —
+  `gatekeeper-{google,confluence,gitlab,notion,slack,supabase,spotify,zoominfo,homeassistant}` — are left exactly as upstream wrote them, by the repository owner's
   explicit decision on 2026-09-12, because this installation does not use them; their connect links
   are still good for whoever holds the nonce. That decision is recorded as `OUT_OF_SCOPE` in
   `scripts/fork/connect-initiator-enforced.test.ts`, which discovers the hand-rolled set from source
-  rather than trusting a hardcoded list: a thirteenth that appears in neither list fails the suite,
-  so adopting one of the eight forces the fix rather than inheriting the gap silently.
+  rather than trusting a hardcoded list: a seventeenth that appears in neither list fails the suite,
+  so adopting one of the nine forces the fix rather than inheriting the gap silently.
 - **Scope expansion too, not only connect:** `GatekeeperUserImpl.ensureResources` mints a reconnect
   link when a connected Cloudflare account is missing an observability scope, and it was the one
   link-minting route left unbound among the four fixed vendors. `GatekeeperUser.ensureResources`,

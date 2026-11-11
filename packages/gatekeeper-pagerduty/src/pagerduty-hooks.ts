@@ -21,6 +21,7 @@ import { DurableObject, RpcTarget, WorkerEntrypoint, type RpcStub } from "cloudf
 import { validateRpc } from "capnweb-validate";
 import { DELIVERED_RETENTION_MS } from "@gadgets/gatekeeper-kit/hook-delivery-queue";
 import { HookRegistry, type HookCapabilities, type HookDelivery } from "@gadgets/gatekeeper-kit/hook-registry";
+import { guardedAlarmFor } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
 import { ResponseTooLargeError, readBytesCapped } from "@gadgets/gatekeeper-kit/response-body";
 import type {
   ApprovalQueue, HookController, HookDescription, HookInitiator, HookTargetMetadata,
@@ -257,6 +258,11 @@ export class PagerDutyHookDriver extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    // The flood-guarded alarm, as the other hook drivers use (fork).
+    await guardedAlarmFor(this.ctx, this.env, "pagerduty.hooks", () => this.#alarmBody());
+  }
+
+  async #alarmBody(): Promise<void> {
     await this.#hooks.run(Date.now());
     await this.#reschedule();
   }

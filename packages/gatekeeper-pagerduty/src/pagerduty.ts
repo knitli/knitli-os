@@ -14,6 +14,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type {
   AccountDescription,
   ConnectHandoff,
+  ConnectInitiator,
   Gatekeeper,
   GatekeeperConnectCallback,
   GatekeeperConnectOptions,
@@ -25,11 +26,14 @@ import type {
   VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { workerVersionTag } from "@gadgets/workshop-shared/gatekeeper";
+import { haltIfAlarmsDisabled } from "@gadgets/gatekeeper-kit/fork/alarm-guard";
+import { initiatorAllows, refuseForeignBrowser } from "@gadgets/observability/fork/connect-initiator";
+import type { CfAccessEnv } from "@gadgets/observability/access";
 import { KvTtlCache } from "@gadgets/gatekeeper-kit/cache";
 import {
   connectHandoffPageHtml, errorPageHtml, htmlResponse, INVALID_LINK_HTML,
 } from "@gadgets/gatekeeper-kit/connect-pages";
-import { NONCE_KEY, advanceToOAuth, claimOAuth, putInitiation } from "@gadgets/gatekeeper-kit/connect-handshake";
+import { NONCE_KEY, advanceToOAuth, claimOAuth, putInitiation, type StoredNonce } from "@gadgets/gatekeeper-kit/connect-handshake";
 import { CONNECT_TIMEOUT_MS, NONCE_BYTES, generateNonce } from "@gadgets/gatekeeper-kit/connect-nonce";
 import {
   CredentialCoordinator,
@@ -137,6 +141,8 @@ type ConnectAttempt = {
   startedUnder: string;
   /** Set when the link was minted to connect a new account, whose grant goes live. */
   firstConnect?: true;
+  /** The person the Workshop issued this connect link to; see `initiatorMatches` (fork). */
+  initiator?: ConnectInitiator;
 };
 
 /** A reconnect's grant, staged until the Workshop confirms the browser that finished it. */
@@ -217,7 +223,11 @@ export default {
       if (!env.CLIENT_ID || !env.CLIENT_SECRET) return htmlResponse(NOT_CONFIGURED_HTML);
       const previewOAuth = previewOAuthFor(env);
       if (previewOAuth instanceof Response) return previewOAuth;
-      const begun = await accountFor(ctx, path[0])?.beginOAuthFlow(path[1], previewOAuth.redirectUri);
+      const stub = accountFor(ctx, path[0]);
+      if (!stub) return htmlResponse(INVALID_LINK_HTML);
+      const refused = await refuseForeignBrowser(req, env as Env & CfAccessEnv, stub, logger);
+      if (refused) return refused;
+      const begun = await stub.beginOAuthFlow(path[1], previewOAuth.redirectUri);
       if (!begun) return htmlResponse(INVALID_LINK_HTML);
       const authorize = oauthClient(env).authorizationUrl({
         redirectUri: previewOAuth.redirectUri,
@@ -243,6 +253,9 @@ export default {
       }
       const stub = accountFor(ctx, doId);
       if (stub === null) return new Response("Error: malformed state", { status: 400 });
+      // Above the refusal branch too: it consumes the nonce, which a foreign browser must not.
+      const refused = await refuseForeignBrowser(req, env as Env & CfAccessEnv, stub, logger);
+      if (refused) return refused;
 
       if (url.searchParams.get("error")) {
         // The refusal ends the attempt: its nonce is consumed so a replayed callback cannot resume it.
@@ -286,11 +299,11 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
-                       _options?: GatekeeperConnectOptions): Promise<{ url: string }> {
+                       options?: GatekeeperConnectOptions): Promise<{ url: string }> {
     // Every resource type needs the same scopes, so `options.resourceUrlPatterns` narrows nothing.
     const userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     const initiationNonce = generateNonce();
-    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, initiationNonce);
+    await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, initiationNonce, options?.initiator);
     return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}` };
   }
 
@@ -337,16 +350,26 @@ export class UserAccount extends DurableObject<Env> {
   readonly #access = new KvTtlCache(this.ctx.storage.kv,
     () => this.#creds.stored() ? this.#creds.connectionGeneration() : undefined, { name: "access" });
 
-  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string): Promise<void> {
+  async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string,
+                    initiator?: ConnectInitiator): Promise<void> {
     if (!this.#creds.stored()) await this.ctx.storage.setAlarm(Date.now() + CONNECT_TIMEOUT_MS);
     this.ctx.storage.kv.put("callback", callback);
-    putInitiation<Pick<ConnectAttempt, "firstConnect">>(this.ctx.storage.kv, initiationNonce, Date.now(),
-      { firstConnect: true });
+    putInitiation<Pick<ConnectAttempt, "firstConnect" | "initiator">>(this.ctx.storage.kv, initiationNonce, Date.now(),
+      { firstConnect: true, initiator });
   }
 
   /** Arms a reconnect flow. */
-  async prepareReconnect(initiationNonce: string): Promise<void> {
-    putInitiation(this.ctx.storage.kv, initiationNonce, Date.now());
+  async prepareReconnect(initiationNonce: string, initiator?: ConnectInitiator): Promise<void> {
+    putInitiation<Pick<ConnectAttempt, "initiator">>(this.ctx.storage.kv, initiationNonce, Date.now(), { initiator });
+  }
+
+  /**
+   * Whether the browser presenting `accessEmail` may continue this connect: a link the Workshop
+   * bound to a person is theirs alone, and one issued without an initiator is good for whoever
+   * holds the nonce, as before (fork).
+   */
+  async initiatorMatches(accessEmail: string | null): Promise<boolean> {
+    return initiatorAllows(this.ctx.storage.kv.get<StoredNonce<Pick<ConnectAttempt, "initiator">>>(NONCE_KEY)?.initiator, accessEmail);
   }
 
   /** Swaps the initiation nonce for the OAuth-stage nonce and mints this flow's PKCE verifier. */
@@ -549,6 +572,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    if (await haltIfAlarmsDisabled(this.ctx, this.env, "pagerduty.connect-timeout")) return;
     // Drop the account if the connect flow never completed.
     if (!this.#creds.stored()) await this.ctx.storage.deleteAll();
   }
@@ -628,9 +652,9 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await accountOf(this.ctx).revoke();
   }
 
-  async reconnect(): Promise<{ url: string }> {
+  async reconnect(options?: { initiator?: ConnectInitiator }): Promise<{ url: string }> {
     const initiationNonce = generateNonce();
-    await accountOf(this.ctx).prepareReconnect(initiationNonce);
+    await accountOf(this.ctx).prepareReconnect(initiationNonce, options?.initiator);
     return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 

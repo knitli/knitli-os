@@ -9,7 +9,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import type {
   AuthenticatedApi, Overseer, PresenceParticipant, PresenceSubscriber,
 } from "@gadgets/workshop-shared/api";
-import { startHarness, type Harness } from "../src/harness.js";
+import { enableBoundGatekeeperResources, startHarness, type Harness } from "../src/harness.js";
 import {
   SCRIPTED_MODEL_ID, scriptedModelRouter, type ChatCompletionStep, type RoutedScriptedModel,
 } from "../src/mock-model.js";
@@ -45,6 +45,7 @@ let harness: Harness;
 beforeAll(async () => {
   network.install();
   harness = await startHarness({ gatekeepers: [githubGatekeeper()], enableGadgetExecution: true });
+  await enableBoundGatekeeperResources(harness); // fork: resources are opt-in
 });
 
 afterAll(async () => {

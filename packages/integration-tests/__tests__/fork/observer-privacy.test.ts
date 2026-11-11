@@ -482,14 +482,18 @@ describe("observer readiness and privacy", () => {
       if (!connection) throw new Error("Failed to create the start-session race connection");
       using gadget = await ownerWorkspace.createGadget("Start race", undefined, "TEST_GADGET");
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
-      if (!(await ownerWorkspace.addCollaborator(bob, { gadgetId: await gadget.getId() }))) {
+      const sharedGadgetId = await gadget.getId();
+      if (!(await ownerWorkspace.addCollaborator(bob, { gadgetId: sharedGadgetId }))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
 
-      // This unbound connection is outside Bob's initial use scope, so his open stores an empty
-      // observer choice. He stays connected: binding the connection while his use session is live
-      // is the widening that restarts the workspace, severing the session being opened mid-flight.
-      const bobHeld = await bobApi.openWorkspace(gadgetId);
+      // This unbound connection is outside the shared gadget's scope, so Bob's open of that gadget
+      // stores an empty observer choice. Upstream verifies a "use" collaborator per gadget (the
+      // workspace shell reads nothing), so he holds the gadget: binding the connection to it while
+      // his session is live is the widening that restarts the workspace (see
+      // OverseerImpl.#restartIfSessionsAffected), severing the session being opened mid-flight.
+      const bobHeldWorkspace = await bobApi.openWorkspace(gadgetId);
+      const bobHeld = await bobHeldWorkspace.getGadget(sharedGadgetId);
       const connId = await connection.getId();
       await controlBarrier("arm-barrier", key);
       const opening = connection.openSession();
@@ -503,9 +507,10 @@ describe("observer readiness and privacy", () => {
       // is that no session quietly survives the widening it raced.
       await expect(opening).rejects.toThrow(/restart|abort|closed|disconnect|dispos|not a function/i);
       bobHeld[Symbol.dispose]();
+      bobHeldWorkspace[Symbol.dispose]();
 
       // Everyone re-opens against the widened scope: the owner gets a working session, and Bob's
-      // re-open verifies exactly the newly in-scope connection. The session open is part of the
+      // re-open of the gadget verifies exactly the newly in-scope connection. The session open is part of the
       // probe: openWorkspace succeeding does not mean the abort landed yet.
       const reopened = await waitFor("the owner to reconnect to the restarted workspace", async () => {
         const freshPublicApi = connect(harness.url);
@@ -537,7 +542,8 @@ describe("observer readiness and privacy", () => {
         const bobFreshApi = await logIn(bobFresh, bob);
         const reconfigureCallback = stubFor(reconfigureRecorder);
         try {
-          (await bobFreshApi.openWorkspace(gadgetId, undefined, reconfigureCallback))[Symbol.dispose]();
+          using bobFreshWorkspace = await bobFreshApi.openWorkspace(gadgetId);
+          (await bobFreshWorkspace.getGadget(sharedGadgetId, reconfigureCallback))[Symbol.dispose]();
         } finally {
           reconfigureCallback[Symbol.dispose]();
         }
@@ -690,14 +696,18 @@ describe("observer readiness and privacy", () => {
       using retainedSession = (await connection.openSession()) as RpcStub<TestSessionApi>;
       using gadget = await ownerWorkspace.createGadget("Test Gadget", undefined, "TEST_GADGET");
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
-      if (!(await ownerWorkspace.addCollaborator(bob, { gadgetId: await gadget.getId() }))) {
+      const sharedGadgetId = await gadget.getId();
+      if (!(await ownerWorkspace.addCollaborator(bob, { gadgetId: sharedGadgetId }))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
 
-      // An unbound connection is outside a use collaborator's scope, so Bob is admitted with an
-      // empty choice set while the owner already holds a session to that connection. He stays
-      // connected: binding it widens his live session's scope, which restarts the workspace.
-      const bobHeld = await bobApi.openWorkspace(gadgetId);
+      // An unbound connection is outside the shared gadget's scope, so Bob is admitted to it with an
+      // empty choice set while the owner already holds a session to that connection. Upstream
+      // verifies a "use" collaborator per gadget, so he holds the gadget: binding the connection to
+      // it widens his live session's scope, which restarts the workspace (see
+      // OverseerImpl.#restartIfSessionsAffected).
+      const bobHeldWorkspace = await bobApi.openWorkspace(gadgetId);
+      const bobHeld = await bobHeldWorkspace.getGadget(sharedGadgetId);
 
       // Queue one action and one (disabled) hook while the connection is still outside Bob's
       // scope. Both records must survive the restart their widening causes.
@@ -728,6 +738,7 @@ describe("observer readiness and privacy", () => {
       await expect(retainedSession.bindHook()).rejects.toThrow(severed);
       await expect(ownerWorkspace.approveAction(pendingAction.id)).rejects.toThrow(severed);
       bobHeld[Symbol.dispose]();
+      bobHeldWorkspace[Symbol.dispose]();
 
       // Everyone re-opens against the widened scope. The queued action and hook survived, the hook
       // enables without a second restart (its connection is already in scope via the binding), and
@@ -764,7 +775,7 @@ describe("observer readiness and privacy", () => {
       }
 
       // Bob's pre-restart session died with the abort, so his re-open goes over a fresh
-      // connection and verifies exactly the newly in-scope connection.
+      // connection and verifies, as he gets the gadget, exactly the newly in-scope connection.
       const recorder = new ObserverConfigRecorder().alwaysChoose(
         bobAccount.id,
         MAX_OBSERVER_PROMPTS,
@@ -774,7 +785,8 @@ describe("observer readiness and privacy", () => {
         const bobFreshApi = await logIn(bobFresh, bob);
         const configure = stubFor(recorder);
         try {
-          (await bobFreshApi.openWorkspace(gadgetId, undefined, configure))[Symbol.dispose]();
+          using bobFreshWorkspace = await bobFreshApi.openWorkspace(gadgetId);
+          (await bobFreshWorkspace.getGadget(sharedGadgetId, configure))[Symbol.dispose]();
         } finally {
           configure[Symbol.dispose]();
         }

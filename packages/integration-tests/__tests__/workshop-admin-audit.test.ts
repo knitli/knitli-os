@@ -181,30 +181,44 @@ it("records every setting change, before it takes effect", async () => {
   last = await newSetting(last);
 
   // Past it, the values are excerpts from a little before their first difference.
-  const pattern = `https://gadgets-test.example/${"p".repeat(12_000 - 29)}`;
-  expect(pattern).toHaveLength(12_000);
-  const disabled = JSON.stringify([pattern]);
+  // Fork: resources are opt-in, so the audited setting is `enabledResources`, and a pattern is at
+  // most 2 KiB. Enable several until the vendor's list passes the cap: the fifth does.
+  const vendor = settings.resourceVendors.find(candidate => candidate.vendorId === TEST_VENDOR_ID);
+  const existing = !vendor || vendor.autoProvisions ? [] :
+      vendor.resources.filter(resource => resource.enabled).map(resource => resource.urlPattern);
+  const patterns = Array.from({ length: 5 }, (_, index) =>
+      `https://gadgets-test.example/${String(index).repeat(2_000 - 29)}`);
+  const shorter = JSON.stringify([...existing, ...patterns.slice(0, 4)]);
+  const longer = JSON.stringify([...existing, ...patterns]);
+  expect(shorter.length).toBeLessThanOrEqual(MAX_ADMIN_AUDIT_VALUE_LENGTH);
+  expect(longer.length).toBeGreaterThan(MAX_ADMIN_AUDIT_VALUE_LENGTH);
+  // The lists agree up to the closing bracket, and the excerpt starts 100 characters before it.
+  const offset = shorter.length - 1 - 100;
   try {
-    await admin.setResourceEnabled(TEST_VENDOR_ID, pattern, false);
+    for (const pattern of patterns) await admin.setResourceEnabled(TEST_VENDOR_ID, pattern, true);
     last = await newSetting(last);
     expect(last.method).toBe("setResourceEnabled");
     expect(last.changes).toHaveLength(1);
     const [change] = last.changes;
     expect(change).toMatchObject({
-      setting: "disabledResources", key: TEST_VENDOR_ID, excerpt: { offset: 0, afterLength: 12_004 },
+      setting: "enabledResources", key: TEST_VENDOR_ID,
+      excerpt: { offset, beforeLength: shorter.length, afterLength: longer.length },
     });
-    expect(change).not.toHaveProperty("before");
+    expect(change!.before!.length).toBeLessThanOrEqual(MAX_ADMIN_AUDIT_VALUE_LENGTH);
     expect(change!.after!.length).toBeLessThanOrEqual(MAX_ADMIN_AUDIT_VALUE_LENGTH);
-    expect(disabled.startsWith(change!.after!)).toBe(true);
+    expect(shorter.slice(offset).startsWith(change!.before!)).toBe(true);
+    expect(longer.slice(offset).startsWith(change!.after!)).toBe(true);
+
+    await admin.setResourceEnabled(TEST_VENDOR_ID, patterns[4]!, false);
+    last = await newSetting(last);
+    expect(last.changes).toEqual([expect.objectContaining({
+      setting: "enabledResources", key: TEST_VENDOR_ID,
+      excerpt: { offset, beforeLength: longer.length, afterLength: shorter.length },
+    })]);
   } finally {
-    await admin.setResourceEnabled(TEST_VENDOR_ID, pattern, true);
+    for (const pattern of patterns) await admin.setResourceEnabled(TEST_VENDOR_ID, pattern, false);
   }
-  last = await newSetting(last);
-  expect(last.method).toBe("setResourceEnabled");
-  expect(last.changes).toEqual([expect.objectContaining({
-    setting: "disabledResources", key: TEST_VENDOR_ID, excerpt: { offset: 0, beforeLength: 12_004 },
-  })]);
-  expect(last.changes[0]).not.toHaveProperty("after");
+  last = await newestSetting();
 
   try {
     await admin.setUpdateCheckIntervalMinutes(120);

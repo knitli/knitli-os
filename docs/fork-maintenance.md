@@ -995,6 +995,12 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   fork test files passed `tsc` and became silent `undefined`s at runtime (the bundler does no
   link-check). After any upstream move, grep the fork's test files for imports from the old
   module — a green typecheck does not cover them.
+- **Upstream integration tests edited for it (2026-11-11 sync):** `github-observers.test.ts` (new
+  upstream) gets the one-line `enableBoundGatekeeperResources(harness)` call every sibling suite
+  carries. `workshop-admin-audit.test.ts` pins the audit excerpt of a value past the cap through
+  `enabledResources`: no single pattern passes the cap (2 KiB each), so it enables five near-limit
+  patterns and asserts the fifth's before/after excerpts (offset 100 before the lists' first
+  difference), then disables them; upstream's version disables one 12,000-character pattern.
 
 ### Ambient-provisioned accounts bypass resource policy at minting
 

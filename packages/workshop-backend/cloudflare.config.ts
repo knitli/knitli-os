@@ -84,4 +84,7 @@ export const migrations: DurableObjectMigration[] = [
   { tag: "v3", new_sqlite_classes: ["UserDirectoryDurableObject"] },
   // Fork: voice session DO (see src/voice-session.ts).
   { tag: "v4", new_sqlite_classes: ["VoiceSession"] },
+  // Upstream's v4 (the deployment-wide admin audit log, admin-audit.ts) collides with our already-applied
+  // v4 VoiceSession tag, so it is appended under a fork tag; never renumber an applied tag.
+  { tag: "v4-upstream-admin-audit", new_sqlite_classes: ["AdminAuditDurableObject"] },
 ];

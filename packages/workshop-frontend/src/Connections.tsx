@@ -8,7 +8,7 @@ import {
   X,
 } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
-import { Overseer, GadgetClient, GadgetBindingInfo, BoundHookInfo, AuthenticatedApi, WorkpieceId } from '@gadgets/workshop-shared/api'
+import { Overseer, GadgetClient, GadgetBindingInfo, BoundHookInfo, AuthenticatedApi, WorkpieceId, GATEKEEPER_ERROR_CODES, getGatekeeperErrorCode } from '@gadgets/workshop-shared/api'
 import GatekeeperModal from './GatekeeperModal'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import { HookToggle, hookToggleFailureToast } from './components/HookToggle'
@@ -21,8 +21,8 @@ import {
   loadBindingCardData,
 } from './components/BlueprintBindingCard'
 import { reportIssue } from './errorReporting'
-import { bindCreatedConnection } from './connectionRestartRecovery'
 import { RemoveConnectionRow } from './features/connections/RemoveConnection'
+import { classifyRpcError, rpcFailureDescription } from './rpcErrors'
 import { isImeComposing } from './keyboardEvent'
 
 interface ConnectionsProps {
@@ -57,6 +57,10 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GadgetBindingInfo | null>(null)
   const toasts = useKumoToastManager()
+  // A connection created here whose bind the restart interrupted. Creating a vendor connection
+  // restarts the workspace while any "build" collaborator is live, the creator's own session
+  // included, and the doomed session refuses to bind it, so it is bound once the session is replaced.
+  const pendingBind = useRef<{ gatekeeperId: WorkpieceId; chatId?: number }>(undefined)
 
   const loadGatekeepers = async () => {
     try {
@@ -83,6 +87,18 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
     } finally {
       setLoading(false)
     }
+  }
+
+  const bindConnection = async (gatekeeperId: WorkpieceId, bindChatId: number | undefined) => {
+    await gadget.bindWithSuggestedName(gatekeeperId, bindChatId)
+    toasts.add({
+      title: bindChatId === undefined
+        ? 'Connection created successfully'
+        : "Connection created — accept the chat's changes to keep it",
+      variant: 'success',
+    })
+    await loadGatekeepers()
+    onConnectionsChange?.()
   }
 
   const handleToggleHook = async (id: number, enabled: boolean) => {
@@ -123,17 +139,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
     }
   }
 
-  // Fork: adding a connection can restart the workspace (see bindCreatedConnection), so its
-  // follow-up must reach the stubs and loader of whichever render is current, not the click's,
-  // and must go quiet if this panel unmounts while it waits for the reopen.
-  const latestRef = useRef({ gadget, loadGatekeepers })
-  latestRef.current = { gadget, loadGatekeepers }
-  const mountedRef = useRef(false)
-  useEffect(() => {
-    mountedRef.current = true
-    return () => { mountedRef.current = false }
-  }, [])
-
   // Keyed on the `gadget` stub rather than `overseer`, even though the load uses both. The gadget
   // stub is derived from the overseer by an effect in the parent, so on reconnect it arrives one
   // render *after* the replacement overseer: keying on `overseer` fired this load while `gadget`
@@ -151,6 +156,17 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
     if (isVisible) loadGatekeepers()
   }, [isVisible])
 
+  // Keyed on `gadget` alone: a new stub means a new session (a chat switch keeps the stub), so the
+  // pending bind runs once, in the replacement session, into the chat it was added from.
+  useEffect(() => {
+    const pending = pendingBind.current
+    if (!pending) return
+    pendingBind.current = undefined
+    bindConnection(pending.gatekeeperId, pending.chatId).catch((err) => {
+      console.error('Failed to bind connection:', err)
+      toasts.add({ title: 'Failed to add connection', description: rpcFailureDescription(err), variant: 'error' })
+    })
+  }, [gadget])
 
   // What an agent spawner created here may offer its agents: this gadget itself (under the same
   // `GADGET` name the gadget's own code uses) plus each of the gadget's bindings. All are enabled
@@ -473,20 +489,18 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
         onClose={() => setIsNewConnectionModalVisible(false)}
         getOverseer={() => overseer}
         spawnerEnvCandidates={spawnerEnvCandidates}
-        onCreated={async (gk) => {
+        onCreated={async (gk, gatekeeperId) => {
+          gk[Symbol.dispose]()
           try {
-            if (!await bindCreatedConnection(
-                gk, () => latestRef.current.gadget, chatId, () => mountedRef.current)) return
-            toasts.add({
-              title: chatId === undefined
-                ? 'Connection created successfully'
-                : "Connection created — accept the chat's changes to keep it",
-              variant: 'success',
-            })
-            await latestRef.current.loadGatekeepers()
-            onConnectionsChange?.()
-          } finally {
-            gk[Symbol.dispose]()
+            await bindConnection(gatekeeperId, chatId)
+          } catch (err) {
+            // Only the refusal and the browser losing its session are cured by the replacement
+            // session. A flagged reset can come from downstream (the vendor's describe()) over a
+            // healthy session that nothing replaces, so it stays with the modal like any other.
+            const pendingRestart = getGatekeeperErrorCode(err) === GATEKEEPER_ERROR_CODES.pendingRestart
+            if (!pendingRestart && classifyRpcError(err) !== 'connection') throw err
+            console.debug('Binding the new connection once the session is replaced:', err)
+            pendingBind.current = { gatekeeperId, chatId }
           }
         }}
       />

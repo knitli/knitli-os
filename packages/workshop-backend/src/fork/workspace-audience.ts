@@ -30,8 +30,8 @@ export interface AudienceSource {
     ownerInvitesOnly: { get(): boolean };
   };
   getOwnerProfileId(): Promise<string>;
-  getSharingManager(): Promise<{ getEffectiveRole(profileId: string): CollaboratorRole | undefined }>;
-  listObserverRequirements(role: CollaboratorRole): { gatekeeperId: number }[];
+  getSharingManager(): Promise<{ getEffectiveAccess(profileId: string): { role: CollaboratorRole } | undefined }>;
+  listObserverRequirements(grant: "workspace"): { gatekeeperId: number }[];
   isWorkspaceSharingProhibited(): boolean;
   assertNoRevocationPending(): void;
 }
@@ -58,12 +58,12 @@ export async function attestWorkspaceAudience(
   // A revocation mid-flight has not restarted the revoked collaborator's sessions yet.
   impl.assertNoRevocationPending();
   const sharingProhibited = impl.isWorkspaceSharingProhibited();
-  const buildScope = impl.listObserverRequirements("build").map(need => need.gatekeeperId);
+  const buildScope = impl.listObserverRequirements("workspace").map(need => need.gatekeeperId);
   const collaborators = new Set<string>();
-  // Materialized: getEffectiveRole lists storage too, and only one kv.list() iterator may be open.
+  // Materialized: getEffectiveAccess lists storage too, and only one kv.list() iterator may be open.
   for (const record of Array.from(impl.storage.observers.list())) {
     if (sharingProhibited) break;  // owner-only: nobody else, whatever the records say
-    if (record.profileId === owner || sharing.getEffectiveRole(record.profileId) !== "build") continue;
+    if (record.profileId === owner || sharing.getEffectiveAccess(record.profileId)?.role !== "build") continue;
     if (record.admittedAs !== "build") continue;
     if (buildScope.every(id => id in record.accountChoices)) collaborators.add(record.profileId);
   }
@@ -112,7 +112,7 @@ function generationsFor(observers: object): Map<string, number> {
 export async function beginAdmission(
     impl: {
       storage: { observers: object };
-      getSharingManager(): Promise<{ getEffectiveRole(profileId: string): CollaboratorRole | undefined }>;
+      getSharingManager(): Promise<{ getEffectiveAccess(profileId: string): { role: CollaboratorRole } | undefined }>;
     },
     profileId: string, role: CollaboratorRole): Promise<() => CollaboratorRole | undefined> {
   // Never throws: an uninitialized workspace (no owner to build the sharing graph from) still
@@ -121,7 +121,7 @@ export async function beginAdmission(
   const generations = generationsFor(impl.storage.observers);
   const start = generations.get(profileId) ?? 0;
   return () => (generations.get(profileId) ?? 0) === start &&
-      sharing?.getEffectiveRole(profileId) === role ? role : undefined;
+      sharing?.getEffectiveAccess(profileId)?.role === role ? role : undefined;
 }
 
 type ForgettableObservers = {
@@ -159,4 +159,19 @@ export function forgetBuildAdmission(observers: ForgettableObservers, observerId
 export function forgetContractedAdmissions(
     observers: ForgettableObservers, affected: readonly { profile: { id: string } }[]): void {
   for (const entry of affected) forget(observers, observers.get(entry.profile.id));
+}
+
+/**
+ * The admission of a build collaborator with no account-requiring connection in scope: upstream
+ * persists no observer record then, but the attestation counts only a record whose `admittedAs`
+ * says a build admission completed (a workspace whose only connections need no account, such as
+ * Messaging, would otherwise attest an empty audience). Call with the function beginAdmission()
+ * returned; it is read synchronously, right before the put.
+ */
+export function recordAccountlessAdmission(
+    observers: ForgettableObservers, profileId: string,
+    admittedAs: () => CollaboratorRole | undefined): void {
+  const record = observers.get(profileId) ??
+      { profileId, observerId: crypto.randomUUID(), accountChoices: {} };
+  observers.put({ ...record, admittedAs: admittedAs() });
 }

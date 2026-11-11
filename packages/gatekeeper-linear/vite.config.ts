@@ -1,28 +1,26 @@
 import gatekeeperConfiguratorConfig from "@gadgets/scripts/gatekeeper-configurator";
-import { vitestTask } from "@gadgets/scripts/vitest-task";
+import { withVitestTask } from "@gadgets/scripts/vitest-task";
 
 /**
- * Vite+ per-package settings: the shared gatekeeper-configurator tasks plus the workerd `test`
- * task, the same way gatekeeper-google composes it. Just one project here -- this package has no
- * pure-logic tests to justify a separate Node pass alongside the DO/RPC suite in workerd.
- * `test` depends on `build:configurator` because src/linear.ts (:73-75) imports the generated
- * configurator HTML that the test worker bundles; `build` also runs `tsconfig.test.json` so the
- * tests themselves type-check under CI.
+ * Vite+ per-package settings: the shared gatekeeper-configurator tasks plus a two-pass `test` task,
+ * pure logic in Node (upstream's `vitest.config.ts`) and the DO/RPC suite in workerd (fork,
+ * `vitest.worker.config.ts`), composed the way gatekeeper-github does. `test` depends on
+ * `build:configurator` because src/linear.ts imports the generated configurator HTML that the test
+ * worker bundles; `build` also runs `tsconfig.test.json` so the tests type-check under CI.
  */
+const config = withVitestTask(gatekeeperConfiguratorConfig, [
+  "vitest run",
+  "vitest run -c vitest.worker.config.ts",
+]);
+
 export default {
-  ...gatekeeperConfiguratorConfig,
+  ...config,
   run: {
-    ...gatekeeperConfiguratorConfig.run,
+    ...config.run,
     tasks: {
-      ...gatekeeperConfiguratorConfig.run.tasks,
-      build: {
-        ...gatekeeperConfiguratorConfig.run.tasks.build,
-        command: ["tsc", "tsc -p tsconfig.test.json"],
-      },
-      test: {
-        ...vitestTask("vitest run -c vitest.worker.config.ts"),
-        dependsOn: ["build:configurator"],
-      },
+      ...config.run.tasks,
+      build: { ...config.run.tasks.build, command: ["tsc", "tsc -p tsconfig.test.json"] },
+      test: { ...config.run.tasks.test, dependsOn: ["build:configurator"] },
     },
   },
 };

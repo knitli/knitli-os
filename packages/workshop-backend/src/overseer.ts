@@ -63,7 +63,7 @@ import {
   getAiGatewayLogCost,
   type AiGatewayLogRoute,
 } from "./ai-gateway";
-import { AgentGadgetInfo, AgentHooks, SeedBindingInfo, agentCodeChangeShape, alwaysAvailableResources, formatMissingBlueprintBindings, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type WorktreeTurnAccess, GIT_BINDING_NAME } from "./agent";
+import { AgentGadgetInfo, AgentHooks, SeedBindingInfo, agentCodeChangeShape, alwaysAvailableResources, formatMissingBlueprintBindings, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type WorktreeTurnAccess, GIT_BINDING_NAME, MAX_TOOL_RESULT_CHARS } from "./agent";
 import { WorktreeSessionImpl } from "./worktree-session";
 import { GitImpl } from "./git-binding";
 import { GadgetExportsImpl } from "./exports-session";
@@ -2595,7 +2595,10 @@ class OverseerImpl implements AgentHooks {
   // AgentHooks implementation: the grep tool's scan (see scanWorkpieceForGrep).
   grepWorkpiece(turn: WorktreeTurnAccess, workpieceId: WorkpieceId, base: string | undefined,
                 pattern: RegExp, path?: string): Promise<GrepScan> {
-    return scanWorkpieceForGrep(this.gitCache, turn, workpieceId, base, path, pattern);
+    // Fork: the agent shows at most MAX_TOOL_RESULT_CHARS of output (formatGrep), and every shown
+    // match takes a character, so retaining more than that only spends memory.
+    return scanWorkpieceForGrep(this.gitCache, turn, workpieceId, base, path, pattern,
+                                MAX_TOOL_RESULT_CHARS);
   }
 
   // Rebuild a chat's content -- `gadgetId -> (path -> text)` for every gadget whose files live
@@ -5475,6 +5478,9 @@ class OverseerImpl implements AgentHooks {
                            creation?: {creator: Fetcher<GatekeeperUserVerifier>,
                                        configuration: string | null}): Promise<void> {
     let id = record.gatekeeperId;
+    // Fork: approval (manual or automatic) applies a change in the world, so it is fenced while a
+    // revocation or deletion is in flight, as submitting and binding are.
+    this.assertNoRevocationPending();
     // A created resource exists only once its creation applies, and that stays pending until then.
     if (record.action !== "create" && this.creationPending(id)) {
       throw new Error("This resource doesn't exist yet. Approve its creation first.");
@@ -10781,7 +10787,10 @@ class OverseerImpl implements AgentHooks {
   }
 
   isRevocationPaused(): boolean {
-    return this.#activeRevocationMutations > 0 || this.#revocationRestartRequired;
+    // Fork: a deleting workspace is paused too, so what a retained capability reaches (observations,
+    // action and hook readiness, applyPendingAction) is fenced from the tombstone until the restart.
+    return this.#activeRevocationMutations > 0 || this.#revocationRestartRequired ||
+        this.storage.deleting.get();
   }
 
   assertNoRevocationPending(): void {

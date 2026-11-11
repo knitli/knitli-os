@@ -16,7 +16,11 @@ import { isPromptFileAnywhere } from "./fork/prompt-files";
  * search, and whether it named exactly one file (so output can omit the path prefix, as
  * `grep -n` does).
  */
-export type GrepScan = { matches: GrepMatch[], errors: GrepFileError[], single: boolean };
+export type GrepScan = {
+  matches: GrepMatch[], errors: GrepFileError[], single: boolean,
+  /** Fork: set when `scanWorkpieceForGrep()`'s `maxMatches` stopped the scan, so more matched. */
+  truncated?: true,
+};
 
 // One file to search: an overlay path (content in hand) or a base tree entry (blob by oid, in
 // the commit it was found in).
@@ -40,7 +44,8 @@ export async function scanWorkpieceForGrep(
         "pathEntryAtCommit" | "listCommitTreePaths" | "ensureBlobs" | "openBlob">,
     turn: Pick<WorktreeTurnAccess, "getOverlayFiles" | "getRemovedPaths">,
     workpieceId: WorkpieceId, base: string | undefined,
-    pathArg: string | string[] | undefined, pattern: RegExp): Promise<GrepScan> {
+    pathArg: string | string[] | undefined, pattern: RegExp,
+    maxMatches = Infinity): Promise<GrepScan> {
   let overlay = turn.getOverlayFiles(workpieceId);
   let removed = turn.getRemovedPaths(workpieceId);
 
@@ -126,14 +131,20 @@ export async function scanWorkpieceForGrep(
   // Each file is matched as it is read, so only one file's text is ever held at a time, and a
   // large blob's not even that.
   let matches: GrepMatch[] = [];
+  let truncated = false;
   for (let candidate of [...candidates.values()]
       .toSorted((a, b) => a.path < b.path ? -1 : 1)) {
     try {
       let value = "oid" in candidate ? candidate : overlay.get(candidate.path)!;
-      let found = typeof value === "string" ? matchLines(value, pattern)
+      // Fork: `maxMatches` bounds what is retained (a huge file of matching lines would otherwise
+      // be held whole before the caller's output budget applies); one extra match detects the cut.
+      let room = maxMatches - matches.length;
+      let found = typeof value === "string" ? matchLines(value, pattern, room + 1)
           : matchBlob(await gitCache.openBlob(value.oid, "base" in value ? value.base : undefined),
-                      pattern, candidate.path);
+                      pattern, candidate.path, room + 1);
+      if (found.length > room) { truncated = true; found.length = room; }
       for (let match of found) matches.push({ file: candidate.path, ...match });
+      if (truncated) break;
     } catch (err) {
       if (err instanceof UnreadableContentError) {
         errorByFile.set(candidate.path, err.message);
@@ -159,7 +170,7 @@ export async function scanWorkpieceForGrep(
   let errors = [...errorByFile]
       .map(([file, message]) => ({ file, error: message }))
       .toSorted((a, b) => a.file < b.file ? -1 : 1);
-  return { matches, errors, single };
+  return truncated ? { matches, errors, single, truncated } : { matches, errors, single };
 }
 
 /**
@@ -168,13 +179,15 @@ export async function scanWorkpieceForGrep(
  * stray `\r`. The RegExp may have arrived over RPC (structured clone); match against a fresh copy
  * with lastIndex reset per line, so a sticky or global flag can't skip lines.
  */
-export function matchLines(text: string, pattern: RegExp): { line: number, text: string }[] {
+export function matchLines(text: string, pattern: RegExp, limit = Infinity)
+    : { line: number, text: string }[] {
   let lines = text.split(/\r?\n/);
   if (lines.at(-1) === "") lines.pop();
   let test = lineMatcher(pattern);
   let out: { line: number, text: string }[] = [];
   for (let [index, line] of lines.entries()) {
     if (test(line)) out.push({ line: index + 1, text: line });
+    if (out.length >= limit) break;
   }
   return out;
 }
@@ -195,10 +208,10 @@ function lineMatcher(pattern: RegExp): (line: string) => boolean {
  * callers report as a skip note. (A streamed file with no newline at all is the one case that
  * still holds the file whole, as its single line.)
  */
-export function matchBlob(reader: BlobReader, pattern: RegExp, path: string)
+export function matchBlob(reader: BlobReader, pattern: RegExp, path: string, limit = Infinity)
     : { line: number, text: string }[] {
   if (reader.size <= MAX_BUFFERED_BLOB_SIZE) {
-    return matchLines(decodeBlobText(reader.read(0, reader.size), path), pattern);
+    return matchLines(decodeBlobText(reader.read(0, reader.size), path), pattern, limit);
   }
   let test = lineMatcher(pattern);
   let decoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
@@ -213,11 +226,14 @@ export function matchBlob(reader: BlobReader, pattern: RegExp, path: string)
       ++line;
       if (text.endsWith("\r")) text = text.slice(0, -1);
       if (test(text)) out.push({ line, text });
+      if (out.length >= limit) return out;
     }
   }
   // A final line without a newline keeps a trailing CR, as matchLines keeps it.
   partial += decoder.decode();
-  if (partial !== "" && test(partial)) out.push({ line: line + 1, text: partial });
+  if (partial !== "" && out.length < limit && test(partial)) {
+    out.push({ line: line + 1, text: partial });
+  }
   return out;
 }
 
@@ -236,7 +252,7 @@ export function formatGrep(scan: GrepScan, maxChars: number): string {
   // Whole lines while they fit. Room for a group's "N more" note is reserved before any of its
   // lines are taken, and for both groups before the first, so the notes fit whenever needed.
   let groups: [string[], (n: number) => string][] = [
-    [matches, n => `(${n} more matches not shown; narrow the pattern or path)`],
+    [matches, n => `(${n}${scan.truncated ? "+" : ""} more matches not shown; narrow the pattern or path)`],
     [skipped, n => `(${n} more files skipped)`],
   ];
   let out: string[] = [];

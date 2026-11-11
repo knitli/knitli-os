@@ -97,7 +97,7 @@ it("PUB-R08 real workspace owner reaches SDK; wrong owner and initializing conne
   await runInDurableObject(workspace, async instance => {
     const impl = (instance as unknown as { impl: any }).impl;
     const record = impl.storage.gatekeepers.get(1); delete record.initializing; impl.storage.gatekeepers.put(record);
-    const leave = impl.joinSession('use');
+    const leave = impl.joinSession({ kind: 'use', profileId: 'viewer' }, 100);
     try {
       const restart = vi.fn(); impl.scheduleAccessRestart = restart;
       impl.storage.gadgets.put({ type: 'gadget', id: 100, title: 'G', created: new Date(0), bindingName: 'G', bindings: {} });

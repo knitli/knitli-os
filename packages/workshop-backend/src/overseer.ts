@@ -10802,8 +10802,9 @@ class OverseerImpl implements AgentHooks {
     if (!this.storage.gatekeepers.get(gatekeeperId)) {
       throw new Error("This connection has been removed from the workspace.");
     }
-    let record = this.#readyGatekeeperRecord(gatekeeperId);
-    if (!observerVendorId(record)) return;
+    // A legacy connection (no creationSpec) is not refused here: it cannot verify collaborators,
+    // and admission refuses it for them (see observerVendorId in #inScopeGatekeepers).
+    this.#readyGatekeeperRecord(gatekeeperId);
   }
 
   // The connections of every enabled hook, by the gadget it wakes: its record's `gadgetId`, or

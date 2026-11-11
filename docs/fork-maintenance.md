@@ -255,6 +255,11 @@ the seams below were re-applied or retired on top of it.
   (`deleteSelf` is upstream's tombstone plus journaled user updates; `scheduleRevocationRestart(false)`
   has no caller now), `#useScopeGatekeeperIds`, and the fork's "role above your own" share check
   (`#requireCanShare`).
+- **Readiness gate no longer refuses legacy connections:** `assertGatekeeperObserverReadiness()` ended
+  with `observerVendorId(record)`, which throws for a connection with no `creationSpec`; upstream's new
+  property test (`durable-decision-resume`) stages writes through such a record in an owner-only
+  workspace. The throw is gone from the gate; admission still refuses a legacy connection for
+  collaborators (`#inScopeGatekeepers`).
 - **Kept as a divergence:** DO migration tag. Upstream's `v4` is `AdminAuditDurableObject`, which
   collides with our applied `v4` `VoiceSession`; it is appended as `v4-upstream-admin-audit` in
   `workshop-backend/cloudflare.config.ts` (and the golden manifest). Never renumber an applied tag.

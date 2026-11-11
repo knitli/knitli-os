@@ -65,6 +65,10 @@ describe("rejecting an action on a removed connection", () => {
           initiatorUserId: USER.id, initiator: USER, callbackInitiated: false });
 
         impl.removeGatekeeper(REMOVED);
+        // Upstream's chat fan-out schedules its own background work when a chat is written (see
+        // markChatDirty), so count only what rejecting adds: the auto-approval drain is the work
+        // this test pins, and a removed connection must schedule none.
+        let scheduledBefore = waited.length;
         // Approving it still refuses: it cannot apply without its connection.
         await expect(overseer.approveAction(7)).rejects.toThrow(/removed from the workspace/);
         impl.getGatekeeperFacet.mockClear();
@@ -77,13 +81,13 @@ describe("rejecting an action on a removed connection", () => {
         expect(impl.storage.activeAgents.get(CHAT_ID)).toBeUndefined();
         expect(impl.storage.chatMeta.get(CHAT_ID).activeAgent).toBeUndefined();
         expect(impl.getGatekeeperFacet).not.toHaveBeenCalledWith(REMOVED);
-        expect(waited).toHaveLength(0);
+        expect(waited.length).toBe(scheduledBefore);
 
         // A live connection is still told, and still drains.
         await overseer.rejectAction(8);
         expect(liveReject).toHaveBeenCalledWith(43);
         expect(impl.storage.actions.get(8).state).toBe("rejected");
-        expect(waited).toHaveLength(1);
+        expect(waited.length).toBeGreaterThan(scheduledBefore);
         await Promise.all(waited);
       } finally {
         overseer[Symbol.dispose]?.();

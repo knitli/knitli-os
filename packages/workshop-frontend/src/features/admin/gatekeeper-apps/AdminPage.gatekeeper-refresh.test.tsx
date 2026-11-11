@@ -41,7 +41,8 @@ function view(enabled: boolean, options: { vendorEnabled?: boolean; otherEnabled
   const resources = [{ urlPattern: PATTERN, title: 'Fixture resource', description: 'Fixture', enabled }]
   if (options.otherEnabled !== undefined) resources.push({ urlPattern: OTHER_PATTERN, title: 'Other resource', description: 'Other fixture', enabled: options.otherEnabled })
   const resourceVendors: AdminResourceVendor[] = [{ vendorId: 'openapi', autoProvisions: false, enabled: options.vendorEnabled ?? true, displayName: 'OpenAPI', resources }]
-  return { signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [], promptPresets: [], restrictedWebFetchHosts: [], voice: DEFAULT_VOICE_CONFIG }
+  return { signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [], promptPresets: [], restrictedWebFetchHosts: [], restrictedWebFetchApprovals: false,
+  adminAuditRetentionDays: { effective: 90, chosen: 90, min: 90 }, voice: DEFAULT_VOICE_CONFIG }
 }
 function missingVendorView(): AdminSettingsView {
   return { ...view(false), resourceVendors: [] }

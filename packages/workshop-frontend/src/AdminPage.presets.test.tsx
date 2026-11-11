@@ -70,7 +70,8 @@ vi.mock('@cloudflare/kumo', async () => {
 const view = (promptPresets: PromptPreset[]): AdminSettingsView => ({
   signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '',
   banner: { text: '', color: 'info' }, accentColor: '', resourceVendors: [], formats: [],
-  promptPresets, restrictedWebFetchHosts: [], voice: DEFAULT_VOICE_CONFIG,
+  promptPresets, restrictedWebFetchHosts: [], restrictedWebFetchApprovals: false,
+  adminAuditRetentionDays: { effective: 90, chosen: 90, min: 90 }, voice: DEFAULT_VOICE_CONFIG,
 })
 
 const state = vi.hoisted(() => {

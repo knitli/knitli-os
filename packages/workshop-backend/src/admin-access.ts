@@ -176,7 +176,7 @@ export function adminSettingChange(setting: string, key: string | undefined, bef
 
   let change: AdminSettingChange = { setting };
   // No real entry's id is this long, but setResourceEnabled() takes an unvalidated vendor id,
-  // which becomes a enabledResources key.
+  // which becomes a disabledResources key.
   if (key !== undefined) change.key = cutAdminAuditText(key, MAX_ADMIN_AUDIT_ARG_LENGTH);
 
   if ((b?.length ?? 0) <= MAX_ADMIN_AUDIT_VALUE_LENGTH &&

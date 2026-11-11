@@ -908,6 +908,7 @@ class TestSessionTarget extends RpcTarget implements TestSession {
         title: "Test action",
         description: "Records a fixture action.",
         implementsRevert: false,
+        autoApprovable: false,
       });
     } catch (error) {
       await this.state.discardAction(this.label, id);

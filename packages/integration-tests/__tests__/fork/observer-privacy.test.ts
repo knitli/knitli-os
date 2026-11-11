@@ -216,7 +216,7 @@ describe("observer readiness and privacy", () => {
       using _bobApi = await signUp(publicApi, bob);
       const aliceAccount = await provisionAccount(aliceApi);
       using ownerWorkspace = await aliceApi.newWorkspace();
-      if (!(await ownerWorkspace.addCollaborator(bob, "build"))) {
+      if (!(await ownerWorkspace.addCollaborator(bob, "workspace"))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
 
@@ -249,10 +249,10 @@ describe("observer readiness and privacy", () => {
       // Removing the policy-bearing connection must not erase confidentiality established by a
       // completed observation.
       await ownerOnly.remove();
-      await expect(ownerWorkspace.addCollaborator(bob, "build")).rejects.toThrow(
+      await expect(ownerWorkspace.addCollaborator(bob, "workspace")).rejects.toThrow(
         /cannot be shared|prevent leaks/i,
       );
-      await expect(ownerWorkspace.createShareLink("use")).rejects.toThrow(
+      await expect(ownerWorkspace.createShareLink("workspace")).rejects.toThrow(
         /cannot be shared|prevent leaks/i,
       );
       await expect(ownerWorkspace.getMetadata()).resolves.toMatchObject({
@@ -270,7 +270,7 @@ describe("observer readiness and privacy", () => {
 
       using ownerWorkspace = await aliceApi.newWorkspace();
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
-      if (!(await ownerWorkspace.addCollaborator(bob, "build"))) {
+      if (!(await ownerWorkspace.addCollaborator(bob, "workspace"))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
 
@@ -312,7 +312,7 @@ describe("observer readiness and privacy", () => {
 
       using ownerWorkspace = await aliceApi.newWorkspace();
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
-      if (!(await ownerWorkspace.addCollaborator(bob, "build"))) {
+      if (!(await ownerWorkspace.addCollaborator(bob, "workspace"))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
 
@@ -360,7 +360,7 @@ describe("observer readiness and privacy", () => {
       using connection = await ownerWorkspace.newGatekeeper(aliceAccount.id, resourceUrl);
       if (!connection) throw new Error("Failed to create the admission-race connection");
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
-      if (!(await ownerWorkspace.addCollaborator(bob, "build"))) {
+      if (!(await ownerWorkspace.addCollaborator(bob, "workspace"))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
 
@@ -419,7 +419,7 @@ describe("observer readiness and privacy", () => {
         "TEST_GADGET",
       );
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
-      if (!(await ownerWorkspace.addCollaborator(bob, "build"))) {
+      if (!(await ownerWorkspace.addCollaborator(bob, "workspace"))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
 
@@ -482,7 +482,7 @@ describe("observer readiness and privacy", () => {
       if (!connection) throw new Error("Failed to create the start-session race connection");
       using gadget = await ownerWorkspace.createGadget("Start race", undefined, "TEST_GADGET");
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
-      if (!(await ownerWorkspace.addCollaborator(bob, "use"))) {
+      if (!(await ownerWorkspace.addCollaborator(bob, { gadgetId: await gadget.getId() }))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
 
@@ -571,19 +571,19 @@ describe("observer readiness and privacy", () => {
         // unrelated established capability unusable while its describe RPC remains pending.
         using existingSession = await existing.openSession();
         existingSession[Symbol.dispose]();
-        await expect(ownerWorkspace.listObserverRequirements("build")).resolves.toEqual(
+        await expect(ownerWorkspace.listObserverRequirements("workspace")).resolves.toEqual(
           expect.arrayContaining([
             expect.objectContaining({ resourceUrl: thingUrl("describe-existing") }),
           ]),
         );
-        if (!(await ownerWorkspace.addCollaborator(bob, "build"))) {
+        if (!(await ownerWorkspace.addCollaborator(bob, "workspace"))) {
           throw new Error(`Failed to share the gadget with ${bob}`);
         }
       } finally {
         await controlBarrier("release-barrier", key);
       }
       await expect(publishing).rejects.toThrow(/owner-only.*shared/i);
-      await expect(ownerWorkspace.listObserverRequirements("build")).resolves.not.toEqual(
+      await expect(ownerWorkspace.listObserverRequirements("workspace")).resolves.not.toEqual(
         expect.arrayContaining([expect.objectContaining({ resourceUrl })]),
       );
     });
@@ -603,7 +603,7 @@ describe("observer readiness and privacy", () => {
       if (!connection) throw new Error("Failed to create the revocation-race connection");
       const { id: gadgetId, title: originalTitle } = await ownerWorkspace.getMetadata();
       const bobProfile = await bobApi.whoami();
-      if (!(await ownerWorkspace.addCollaborator(bob, "build"))) {
+      if (!(await ownerWorkspace.addCollaborator(bob, "workspace"))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
       const recorder = new ObserverConfigRecorder().alwaysChoose(
@@ -690,7 +690,7 @@ describe("observer readiness and privacy", () => {
       using retainedSession = (await connection.openSession()) as RpcStub<TestSessionApi>;
       using gadget = await ownerWorkspace.createGadget("Test Gadget", undefined, "TEST_GADGET");
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
-      if (!(await ownerWorkspace.addCollaborator(bob, "use"))) {
+      if (!(await ownerWorkspace.addCollaborator(bob, { gadgetId: await gadget.getId() }))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
 
@@ -809,7 +809,7 @@ describe("observer readiness and privacy", () => {
       const [workspaceId] = createdIds;
 
       using ownerWorkspace = await aliceApi.openWorkspace(workspaceId);
-      if (!(await ownerWorkspace.addCollaborator(bob, "build"))) {
+      if (!(await ownerWorkspace.addCollaborator(bob, "workspace"))) {
         throw new Error(`Failed to share the gadget with ${bob}`);
       }
       // Admit Bob while scope is empty, then add a connection he has not configured.

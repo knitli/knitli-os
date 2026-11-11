@@ -1274,6 +1274,7 @@ class OverseerImpl implements AgentHooks {
           this.logger.warn("user workspace cleanup deferred", {
             event: "shared.gadget.access.refresh.failed", gadgetId: this.ctx.id.toString(), error,
           });
+          this.restartIfLoopLimited(error);
         }
       }));
       if (this.storage.deleting.get() && ![...this.storage.pendingUserUpdates.list({limit: 1})].length) {

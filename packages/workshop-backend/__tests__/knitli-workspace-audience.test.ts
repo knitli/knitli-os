@@ -228,7 +228,7 @@ describe("attestAudience", () => {
         getVerifier: async () => ({}),
         listProvidedAccounts: async () => [],
         describeConnectedAccount: async () => null,
-      }, "build");
+      }, "workspace");
       expect((await queue.attestAudience()).collaborators).toEqual(["carol"]);
     });
   });
@@ -253,7 +253,7 @@ describe("attestAudience", () => {
         },
         listProvidedAccounts: async () => [],
         describeConnectedAccount: async () => null,
-      }, "build");
+      }, "workspace");
       await reached;
       await during(impl, sharing);
       release();
@@ -319,7 +319,7 @@ describe("attestAudience", () => {
         getVerifier: async () => ({}),
         listProvidedAccounts: async () => [],
         describeConnectedAccount: async () => null,
-      }, "build");
+      }, "workspace");
       expect((await queue.attestAudience()).collaborators).toEqual(["bob", "carol"]);
     });
   });

@@ -255,6 +255,11 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     let warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
     let calls = rejectUserCalls(impl, new Error(LOOP_LIMIT_MESSAGE));
+    // The journaled updates re-read each profile's access from the sharing graph, which this
+    // workspace has none of; the owner lookup it would build one from is refused too.
+    impl.getSharingManager = async () => ({
+      getEffectiveAccess: (id: string) => id === "demoted" ? { role: "use", gadgetIds: [] } : undefined,
+    });
 
     await impl.refreshAffectedCollaboratorListings([
       {
@@ -267,9 +272,11 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
       },
     ]);
 
-    expect(calls).toEqual(["forgetSharedWorkspace", "updateSharedWorkspaceRole"]);
+    // The role updates and the scoped Outputs refresh for the one who kept access all refuse.
+    expect(calls.toSorted()).toEqual(
+        ["forgetSharedWorkspace", "syncWorkspaceOutputs", "updateSharedWorkspaceRole"]);
     expect(restarts).toEqual([RESTART_REASON]);
-    expect(logged(warnings, "shared.gadget.access.refresh.failed")).toHaveLength(2);
+    expect(logged(warnings, "shared.gadget.access.refresh.failed")).toHaveLength(3);
   }));
 
   it("a refused blueprint propagation restarts the workspace",

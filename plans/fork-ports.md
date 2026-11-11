@@ -239,3 +239,13 @@ generation and GitHub write work; we have `gatekeeper-github`.
 The 18 forks where the compare call failed, forks pushed before 2026-09-26, and the niche vendor
 packages from `axelweichert` (owlOS, Etsy, Proxmox) and `kurono333333`. The `axelweichert` CI gates
 (a `--keep-vars` check and a live-vs-manifest var drift check) could be worth a separate look.
+
+## Deferred by the 2026-11-11 sync
+
+- **`htmlToMarkdown` hardening for the workspace-docs blueprint.** Upstream #884 replaced
+  `files/lib/markdown.ts` and its test; the fork's version (hidden content, `display:none`,
+  implicit closure, textarea, weights, escaping; 43 tests) is in `origin/main` history before the
+  stage-2 sync. Re-port it onto the new editor if pasted HTML from untrusted pages matters here.
+- **Streamed chat-attachment uploads.** The fork's staged `uploadChatAttachment` reads the whole
+  file into memory; upstream's `uploadBlob` streams.
+

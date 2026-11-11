@@ -230,6 +230,44 @@ wrong).
 
 Intentional, reviewed differences from upstream. Keep this current.
 
+### 2026-11-11 stage-2 sync: upstream's observer model, and what it retired in the fork
+
+Upstream `b0ef1d1..foundation/main` (see Open questions for the decision and the staging). The
+fork adopts upstream's session-holder, per-gadget access and subresource observer model wholesale;
+the seams below were re-applied or retired on top of it.
+
+- **Re-applied on the new model:**
+  - *Audience attestation* (`fork/workspace-audience.ts`): reads `getEffectiveAccess().role` and
+    `listObserverRequirements("workspace")`. A workspace-grant admission claims `admittedAs: "build"`
+    (`beginAdmission` at the top of `ensureObserver`); a gadget ("use") admission claims nothing and
+    never writes the marker. `recordAccountlessAdmission()` persists the record upstream no longer
+    writes when no account-requiring connection is in scope, so a Messaging-only workspace still
+    attests its build collaborators. Pinned by `knitli-workspace-audience.test.ts`.
+  - *Revocation gate*: unchanged in shape. `removeCollaborator`/`revokeShareLink` still run
+    `runRevocationCleanup` with the gate, now passing upstream's restart reasons and the new
+    `gadgetId` argument; the `ownerInvitesOnly` latch reuses the already-started listing refresh.
+  - *Loop-limit restart*: `restartIfLoopLimited` moved into `deliverUserUpdates()`'s catch and the
+    Outputs-refresh loop, where upstream now does the user-object calls (journaled, alarm-delivered).
+- **Retired for upstream's version:** `SessionKind`/`joinSession(kind)` (the unread `owner` count
+  went with it; `SessionHolder` instead), `KeyedAsyncSequencer` and per-profile admission
+  serialization (upstream #1001 shares one observer id across concurrent admissions, and its
+  `observer-verification-failure` test replaces ours), the gated workspace-deletion path
+  (`deleteSelf` is upstream's tombstone plus journaled user updates; `scheduleRevocationRestart(false)`
+  has no caller now), `#useScopeGatekeeperIds`, and the fork's "role above your own" share check
+  (`#requireCanShare`).
+- **Kept as a divergence:** DO migration tag. Upstream's `v4` is `AdminAuditDurableObject`, which
+  collides with our applied `v4` `VoiceSession`; it is appended as `v4-upstream-admin-audit` in
+  `workshop-backend/cloudflare.config.ts` (and the golden manifest). Never renumber an applied tag.
+- **Dropped, deferred (see `plans/fork-ports.md`):** the fork's ~890-line hardening of the
+  workspace-docs blueprint's `htmlToMarkdown` (hidden content, `display:none`, implicit closure,
+  textarea): upstream #884 replaced `markdown.ts` and has no equivalent; the git read path's
+  over-budget-blob refusal (upstream streams large files now); the fork's connection re-bind in
+  `Connections.tsx` (`bindCreatedConnection`), superseded by upstream #1018, so the entry
+  "A new connection survives the restart its creation triggers" now covers the composer only and
+  `Connections.fork.test.tsx` / `GatekeeperModal.fork.test.tsx` carry the retired expectations.
+- **Not adopted (kept):** chat attachments still upload whole (`uploadChatAttachment`), not through
+  upstream's streamed `uploadBlob`.
+
 ### Web Push channel
 
 - **Where:** `packages/workshop-backend/src/fork/web-push.ts` (Tier 1) and its regression test

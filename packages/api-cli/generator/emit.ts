@@ -189,7 +189,7 @@ export function buildTable(schema: Schema, apps: AppApi[] = []): ApiTable {
     appNodes[app.vendor] = prefixedName(app.vendor, app.schema.entry);
   }
   const api = buildGraph(schema, [root.service, schema.entry], (name) =>
-    name === schema.entry ? [...CREDENTIAL_METHODS, ...FORK_OMITTED_COMMANDS] : name === root.service ? ROOT_CREDENTIAL_METHODS : [], appNodes);
+    name === schema.entry ? CREDENTIAL_METHODS : name === "Overseer" ? FORK_OMITTED_COMMANDS : name === root.service ? ROOT_CREDENTIAL_METHODS : [], appNodes);
   for (const reserved of RESERVED_COMMANDS) {
     if (api.nodes[root.service]!.commands[reserved]) {
       throw new Error(`${root.service} has a method named "${reserved}", a word the CLI reserves`);

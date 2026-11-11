@@ -376,7 +376,7 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
       wrapUserDo: (stub: unknown) => impl.wrapUserDo(stub),
     } });
 
-    await expect(client.addCollaborator("ghost", "build")).rejects.toBe(error);
+    await expect(client.addCollaborator("ghost", "workspace")).rejects.toBe(error);
 
     // Opening the client probes the profile for presence first (also a wrapped stub).
     expect(calls).toEqual(["whoami", "whoamiIfExists"]);

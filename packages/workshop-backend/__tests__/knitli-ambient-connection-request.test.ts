@@ -180,7 +180,7 @@ describe("ambientVendorStatus", () => {
     let collaborator = await openFakeOverseer(seed(), {
       role: "use", implOverrides: {
         ownerAmbientVendorStatus,
-        authorizeCollaborator: async () => "build",
+        authorizeCollaborator: async () => ({ role: "build" }),
         getSharingManager: async () => ({ getEffectiveAccess: () => ({ role: "build" }) }),
       },
     });

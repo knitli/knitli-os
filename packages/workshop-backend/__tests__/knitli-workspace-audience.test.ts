@@ -37,7 +37,8 @@ const SEND_ACTION = {
 
 function addCollaborator(impl: any, sharing: any, id: string, role: "build" | "use",
     accountChoices: { [id: number]: number }): void {
-  sharing.addCollaborator({ caller: OWNER_CALLER, profile: { type: "user", id, name: id }, role });
+  sharing.addCollaborator({ caller: OWNER_CALLER, profile: { type: "user", id, name: id },
+      grant: role === "build" ? "workspace" : { gadgetId: "g1" } });
   impl.storage.observers.put(
       { profileId: id, observerId: `obs-${id}`, accountChoices, admittedAs: role });
 }
@@ -61,6 +62,7 @@ async function withWorkspace<T>(
     };
     impl.users = { idFromString: (id: string) => id, get: () => userStub };
     impl.ensureAmbientCapsules = async () => {};
+    impl.isShareableGadget = () => true;
     impl.syncOutputsTo = async () => true;
     let facet: Facet = { applied: [] };
     impl.getGatekeeperFacet = () => ({
@@ -204,7 +206,7 @@ describe("attestAudience", () => {
           { title: "Observation", description: "d", excludeObservers: ["obs-carol"] },
           { from: "agent", chatId: 1 });
       sharing.addCollaborator(
-          { caller: OWNER_CALLER, profile: { type: "user", id: "carol", name: "carol" }, role: "build" });
+          { caller: OWNER_CALLER, profile: { type: "user", id: "carol", name: "carol" }, grant: "workspace" });
       expect(sharing.getEffectiveAccess("carol")?.role).toBe("build");
       // The remembered accounts survive, so her next open re-verifies them without asking.
       expect(impl.storage.observers.get("carol").accountChoices).toEqual(ALL);
@@ -257,7 +259,7 @@ describe("attestAudience", () => {
       release();
       await open;
       sharing.addCollaborator(
-          { caller: OWNER_CALLER, profile: { type: "user", id: "carol", name: "carol" }, role: "build" });
+          { caller: OWNER_CALLER, profile: { type: "user", id: "carol", name: "carol" }, grant: "workspace" });
       let queue = await queueFor(overseer, facet, MESSAGING);
       return (await queue.attestAudience()).collaborators;
     });
@@ -273,7 +275,7 @@ describe("attestAudience", () => {
           { title: "Observation", description: "d", excludeObservers: ["obs-carol"] },
           { from: "agent", chatId: 1 });
       sharing.addCollaborator(
-          { caller: OWNER_CALLER, profile: { type: "user", id: "carol", name: "carol" }, role: "build" });
+          { caller: OWNER_CALLER, profile: { type: "user", id: "carol", name: "carol" }, grant: "workspace" });
     })).toEqual(["bob"]);
   });
 
@@ -297,8 +299,8 @@ describe("attestAudience", () => {
       let sharing = await impl.getSharingManager();
       addCollaborator(impl, sharing, "bob", "build", ALL);
       let carol = { type: "user", id: "carol", name: "carol" };
-      sharing.addCollaborator({ caller: OWNER_CALLER, profile: carol, role: "use" });
-      sharing.addCollaborator({ caller: { profileId: "bob", isOwner: false }, profile: carol, role: "build" });
+      sharing.addCollaborator({ caller: OWNER_CALLER, profile: carol, grant: { gadgetId: "g1" } });
+      sharing.addCollaborator({ caller: { profileId: "bob", isOwner: false }, profile: carol, grant: "workspace" });
       impl.storage.observers.put(
           { profileId: "carol", observerId: "obs-carol", accountChoices: ALL, admittedAs: "build" });
       let queue = await queueFor(overseer, facet, MESSAGING);
@@ -309,7 +311,7 @@ describe("attestAudience", () => {
           { title: "Latch", description: "d", ownerInvitesOnly: true }, CALLER);
       expect(sharing.getEffectiveAccess("carol")?.role).toBe("use");
       await impl.authorizeObservation(OTHER, { title: "Build-only", description: "d" }, CALLER);
-      sharing.addCollaborator({ caller: OWNER_CALLER, profile: carol, role: "build" });
+      sharing.addCollaborator({ caller: OWNER_CALLER, profile: carol, grant: "workspace" });
       expect(sharing.getEffectiveAccess("carol")?.role).toBe("build");
       expect((await queue.attestAudience()).collaborators).toEqual(["bob"]);
 
@@ -332,7 +334,7 @@ describe("attestAudience", () => {
       addCollaborator(impl, sharing, "dave", "build", ALL);
       sharing.addCollaborator({
         caller: { profileId: "dave", isOwner: false },
-        profile: { type: "user", id: "carol", name: "carol" }, role: "build",
+        profile: { type: "user", id: "carol", name: "carol" }, grant: "workspace",
       });
       impl.storage.observers.put(
           { profileId: "carol", observerId: "obs-carol", accountChoices: ALL, admittedAs: "build" });
@@ -349,7 +351,7 @@ describe("attestAudience", () => {
 
       // Re-adding Dave restores Carol through his edge.
       sharing.addCollaborator(
-          { caller: OWNER_CALLER, profile: { type: "user", id: "dave", name: "dave" }, role: "build" });
+          { caller: OWNER_CALLER, profile: { type: "user", id: "dave", name: "dave" }, grant: "workspace" });
       let queue = await queueFor(overseer, facet, MESSAGING);
       expect((await queue.attestAudience()).collaborators).toEqual(["bob"]);
     });
@@ -397,7 +399,7 @@ describe("attestAudience", () => {
 
 function downgradeToUse(sharing: any, id: string): void {
   sharing.removeCollaborator(OWNER_CALLER, id, []);
-  sharing.addCollaborator({ caller: OWNER_CALLER, profile: { type: "user", id, name: id }, role: "use" });
+  sharing.addCollaborator({ caller: OWNER_CALLER, profile: { type: "user", id, name: id }, grant: { gadgetId: "g1" } });
 }
 
 // A gatekeeper that moves data out re-checks the audience when the action is applied, which can be

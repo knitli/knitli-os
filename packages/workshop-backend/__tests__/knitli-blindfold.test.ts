@@ -480,6 +480,16 @@ describe("worktree-binding blindfold", () => {
         let sep = oid.indexOf(":");
         return textByOid(oid.slice(0, sep), oid.slice(sep + 1));
       },
+      // Upstream's grep reads blobs through a BlobReader; text this small is read whole.
+      openBlob: async (oid: string) => {
+        let sep = oid.indexOf(":");
+        let bytes = new TextEncoder().encode(textByOid(oid.slice(0, sep), oid.slice(sep + 1)));
+        return {
+          size: bytes.length,
+          read: (offset: number, length: number) => bytes.subarray(offset, offset + length),
+          pieces: function* () { yield bytes; },
+        };
+      },
       hasLocalObject: () => true,
       ensureGitObjects: async () => {},
       ensureBlobs: async () => new Set<string>(),

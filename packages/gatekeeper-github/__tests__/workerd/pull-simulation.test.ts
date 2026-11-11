@@ -920,7 +920,7 @@ describe("pull request merge base without queued pushes", () => {
     const providerMessage = `private provider response: deleted repository for ${BASE}...${OLD}`;
     vi.stubGlobal("fetch", async (...args: Parameters<typeof fetch>) => {
       const url = new URL(args[0] instanceof Request ? args[0].url : args[0].toString());
-      if (url.pathname === `/repos/${OWNER}/${REPO}/compare/${BASE}...${OLD}`) {
+      if (url.pathname === `${new URL(API_BASE).pathname}/compare/${BASE}...${OLD}`) {
         failedCompares++;
         return Response.json({ message: providerMessage }, { status });
       }

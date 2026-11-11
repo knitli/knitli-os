@@ -243,7 +243,9 @@ the seams below were re-applied or retired on top of it.
     never writes the marker. `recordAccountlessAdmission()` persists the record upstream no longer
     writes when no account-requiring connection is in scope, so a Messaging-only workspace still
     attests its build collaborators. Pinned by `knitli-workspace-audience.test.ts`.
-  - *Revocation gate*: unchanged in shape. `removeCollaborator`/`revokeShareLink` still run
+  - *Revocation gate*: unchanged in shape, and `runRevocationCleanup()` now also passes the unawaited
+    cleanup to `ctx.waitUntil()` (`keepAlive`), as upstream's paths do, so upstream's
+    `observer-scope-restart` ordering test passes unmodified. `removeCollaborator`/`revokeShareLink` still run
     `runRevocationCleanup` with the gate, now passing upstream's restart reasons and the new
     `gadgetId` argument; the `ownerInvitesOnly` latch reuses the already-started listing refresh.
   - *Loop-limit restart*: `restartIfLoopLimited` moved into `deliverUserUpdates()`'s catch and the

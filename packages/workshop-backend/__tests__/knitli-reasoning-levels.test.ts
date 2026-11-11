@@ -10,7 +10,7 @@ import { ADMIN_CONFIG_KEY } from "../src/storage-schema/blueprints-kv.js";
 import { getModel, type ModelHandle } from "../src/ai-models.js";
 import {
   defaultReasoningEffort, isReasoningLevel, modelReasoningForConfig,
-  reasoningLevelsForMap, resolveThinkingLevelMap,
+  piCatalogThinkingLevelMap, reasoningLevelsForMap, resolveThinkingLevelMap,
 } from "../src/fork/reasoning-levels.js";
 
 declare module "cloudflare:workers" {
@@ -264,7 +264,11 @@ describe("makeHandle thinking-level wiring", () => {
     let handle = getModel(gatewayEnv(), {
       provider: "anthropic", model: "claude-opus-5", apiToken: "",
     }, INITIATOR);
-    expect(handle.model.thinkingLevelMap).toEqual({ off: null, xhigh: "xhigh", max: "max" });
+    // Whatever pi's catalog carries, unchanged: asserted against the catalog itself so a pi bump
+    // that edits the map (1.5.0 dropped `off: null`) does not break a test of pass-through.
+    let catalog = piCatalogThinkingLevelMap("anthropic", "claude-opus-5");
+    expect(catalog).toBeDefined();
+    expect(handle.model.thinkingLevelMap).toEqual(catalog);
   });
 
   it("attaches no map where neither source has one", () => {

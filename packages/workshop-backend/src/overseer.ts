@@ -14280,6 +14280,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       refreshListings: () => this.impl.refreshAffectedCollaboratorListings(affected),
       scheduleRestart: () => this.impl.scheduleRevocationRestart(true,
           "Gadget restarted to revoke access for a removed collaborator."),
+      keepAlive: work => this.impl.ctx.waitUntil(work.catch(error => {
+        this.impl.logger.warn("failed to clean up after collaborator removal", {
+          event: "sharing.collaborator.removal.cleanup.failed", error,
+        });
+      })),
     });
     // Only restart if someone actually lost access or was downgraded (kept users are already
     // excluded). A no-op removal -- e.g. severing a share-link edge nobody relied on -- shouldn't
@@ -14318,6 +14323,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       refreshListings: () => this.impl.refreshAffectedCollaboratorListings(affected),
       scheduleRestart: () => this.impl.scheduleRevocationRestart(true,
           "Gadget restarted to revoke access for a revoked share link."),
+      keepAlive: work => this.impl.ctx.waitUntil(work.catch(error => {
+        this.impl.logger.warn("failed to clean up after share link revocation", {
+          event: "sharing.link.revocation.cleanup.failed", error,
+        });
+      })),
     });
     // Only restart if someone actually lost access or was downgraded (see removeCollaborator).
     return affected;

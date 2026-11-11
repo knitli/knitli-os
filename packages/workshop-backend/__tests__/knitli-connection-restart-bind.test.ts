@@ -71,7 +71,7 @@ describe("binding a connection whose creation restarted the workspace", () => {
 
   it("is refused before the reset and succeeds for the same id after it", withRestartedImpl(
     async (impl, restarts) => {
-      impl.joinSession("build");
+      impl.joinSession({ kind: "build", profileId: "collab" });
       seedGadget(impl, 100);
 
       let added = await impl.addGatekeeper({} as any, CONNECTION_SPEC);

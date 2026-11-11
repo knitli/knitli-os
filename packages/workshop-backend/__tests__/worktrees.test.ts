@@ -238,20 +238,25 @@ describe("createWorktree", () => {
     addChat(impl, 2);
     const hidden = await commitFiles(impl, { "private.txt": "other chat contents" });
     await impl.createWorktree("Other chat", 2, hidden);
-    const read = vi.spyOn(impl.gitCache, "readLocalObject");
+    // Any of the store's read doors: upstream's chunked store no longer funnels them all through
+    // readLocalObject(). (resolveCommitId()/fetchCommit() are where a prefix is refused, so they
+    // are not reads of the hidden commit.)
+    const reads = ["readLocalObject", "localObjectType", "hasLocalObject", "openLocalBlob"].map(
+        method => vi.spyOn(impl.gitCache, method as "readLocalObject"));
+    const readCount = () => reads.reduce((total, spy) => total + spy.mock.calls.length, 0);
     try {
       for (const length of [4, 12, 39]) {
         const prefix = hidden.slice(0, length);
         await expect(impl.createWorktree("Restricted chat", 1, prefix)).rejects.toThrow(new Error(
           `${JSON.stringify(prefix)} is not a full git commit id: expected 40 lowercase hex digits.`));
       }
-      expect(read).not.toHaveBeenCalled();
+      expect(readCount()).toBe(0);
       // Deliberately supplying the full bearer capability still grants access.
       const created = await impl.createWorktree("Shared capability", 1, hidden);
       expect(created.baseCommit).toBe(hidden);
-      expect(read).toHaveBeenCalled();
+      expect(readCount()).toBeGreaterThan(0);
     } finally {
-      read.mockRestore();
+      for (const spy of reads) spy.mockRestore();
     }
   }));
 

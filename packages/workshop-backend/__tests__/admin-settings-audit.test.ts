@@ -220,7 +220,8 @@ describe("AdminSettings records each admin's change before making it", () => {
     });
 
     const vendor = "v".repeat(300);
-    await inDo(admin => admin.updateAdminConfig({ enabledResources: { [vendor]: ["pattern"] } }, ACTOR));
+    await inDo(admin => admin.updateAdminConfig(
+        { enabledResources: { vendor: [pattern], [vendor]: ["pattern"] } }, ACTOR));
     expect(records()[1]!.changes).toStrictEqual([{
       setting: "enabledResources",
       key: `${"v".repeat(MAX_ADMIN_AUDIT_ARG_LENGTH - 1)}…`,

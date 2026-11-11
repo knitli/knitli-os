@@ -92,6 +92,13 @@ export interface AppApi {
 export const CREDENTIAL_METHODS = ["authenticate", "authenticateFromCfAccess", "createAccount", "login"];
 
 /**
+ * Fork: methods the CLI does not offer. getAmbientGatekeeper is a UI-only second route to a
+ * GatekeeperClient that sorts before get-gatekeeper-by-id, so `search` would show it as the way to
+ * reach every connection method.
+ */
+const FORK_OMITTED_COMMANDS = ["getAmbientGatekeeper"];
+
+/**
  * The root's methods that take password hashes, which the CLI could only take from argv (or a file
  * written for the purpose): not commands either.
  */
@@ -182,7 +189,7 @@ export function buildTable(schema: Schema, apps: AppApi[] = []): ApiTable {
     appNodes[app.vendor] = prefixedName(app.vendor, app.schema.entry);
   }
   const api = buildGraph(schema, [root.service, schema.entry], (name) =>
-    name === schema.entry ? CREDENTIAL_METHODS : name === root.service ? ROOT_CREDENTIAL_METHODS : [], appNodes);
+    name === schema.entry ? [...CREDENTIAL_METHODS, ...FORK_OMITTED_COMMANDS] : name === root.service ? ROOT_CREDENTIAL_METHODS : [], appNodes);
   for (const reserved of RESERVED_COMMANDS) {
     if (api.nodes[root.service]!.commands[reserved]) {
       throw new Error(`${root.service} has a method named "${reserved}", a word the CLI reserves`);

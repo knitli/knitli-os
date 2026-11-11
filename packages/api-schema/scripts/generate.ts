@@ -66,10 +66,7 @@ export const AGENT_ROOT = "AuthenticatedApi";
  * Methods an agent never calls: it is handed an already-authenticated stub, so the ways to obtain
  * or change credentials are left out of its surface, with whatever only they reach.
  */
-export const AGENT_OMIT = ["authenticate", "authenticateFromCfAccess", "createAccount", "login", "changePassword",
-  // Fork: a UI-only second route to a GatekeeperClient, which `search` would otherwise show as the
-  // way to reach every connection method (it sorts before get-gatekeeper-by-id).
-  "getAmbientGatekeeper"];
+export const AGENT_OMIT = ["authenticate", "authenticateFromCfAccess", "createAccount", "login", "changePassword"];
 
 const DTS_HEADER =
   "Generated from packages/workshop-shared/src/api.ts by packages/api-schema/scripts/generate.ts -- do not edit.\n" +

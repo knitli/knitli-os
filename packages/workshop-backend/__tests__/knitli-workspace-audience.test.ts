@@ -339,7 +339,7 @@ describe("attestAudience", () => {
       impl.storage.observers.put(
           { profileId: "carol", observerId: "obs-carol", accountChoices: ALL, admittedAs: "build" });
       let affected = sharing.removeCollaborator(OWNER_CALLER, "dave", []);
-      expect(affected.map((entry: any) => entry.newRole)).toEqual([null, null]);
+      expect(affected.map((entry: any) => entry.newAccess)).toEqual([null, null]);
 
       let facetFor = impl.getGatekeeperFacet;
       impl.getGatekeeperFacet = (id: number) =>

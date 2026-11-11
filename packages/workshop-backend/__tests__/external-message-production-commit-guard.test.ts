@@ -110,7 +110,7 @@ function installExternalCollaboratorFakes(
     },
   };
   const sharing = {
-    getEffectiveRole: () => revoked ? undefined : "build",
+    getEffectiveAccess: () => revoked ? undefined : { role: "build" },
   };
   impl.ownerId = "owner-do";
   impl.storage.ownerId.put("owner-do");

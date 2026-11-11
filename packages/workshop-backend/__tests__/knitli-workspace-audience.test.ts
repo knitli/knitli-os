@@ -205,7 +205,7 @@ describe("attestAudience", () => {
           { from: "agent", chatId: 1 });
       sharing.addCollaborator(
           { caller: OWNER_CALLER, profile: { type: "user", id: "carol", name: "carol" }, role: "build" });
-      expect(sharing.getEffectiveRole("carol")).toBe("build");
+      expect(sharing.getEffectiveAccess("carol")?.role).toBe("build");
       // The remembered accounts survive, so her next open re-verifies them without asking.
       expect(impl.storage.observers.get("carol").accountChoices).toEqual(ALL);
     });
@@ -307,10 +307,10 @@ describe("attestAudience", () => {
       const CALLER = { from: "agent", chatId: 1 };
       await impl.authorizeObservation(MESSAGING,
           { title: "Latch", description: "d", ownerInvitesOnly: true }, CALLER);
-      expect(sharing.getEffectiveRole("carol")).toBe("use");
+      expect(sharing.getEffectiveAccess("carol")?.role).toBe("use");
       await impl.authorizeObservation(OTHER, { title: "Build-only", description: "d" }, CALLER);
       sharing.addCollaborator({ caller: OWNER_CALLER, profile: carol, role: "build" });
-      expect(sharing.getEffectiveRole("carol")).toBe("build");
+      expect(sharing.getEffectiveAccess("carol")?.role).toBe("build");
       expect((await queue.attestAudience()).collaborators).toEqual(["bob"]);
 
       await impl.ensureObserver("carol", {

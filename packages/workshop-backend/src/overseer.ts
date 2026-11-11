@@ -5920,7 +5920,7 @@ class OverseerImpl implements AgentHooks {
     }
 
     // Revocation-pause only, not the full observer readiness: an unrelated legacy connection
-    // must not turn the observation path into an error (see #inRoleVerificationScope), and
+    // must not turn the observation path into an error (see #inScopeGatekeepers), and
     // collaborator coverage is enforced at admission, not per read (upstream #382).
     this.assertNoRevocationPending();
 

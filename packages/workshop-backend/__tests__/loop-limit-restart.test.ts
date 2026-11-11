@@ -259,11 +259,11 @@ describe("restarting a workspace whose loop counter is exhausted", () => {
     await impl.refreshAffectedCollaboratorListings([
       {
         profile: { type: "user", id: "gone", name: "Gone" }, addedBy: [],
-        oldRole: "build", newRole: null,
+        oldAccess: { role: "build" }, newAccess: null,
       },
       {
         profile: { type: "user", id: "demoted", name: "Demoted" }, addedBy: [],
-        oldRole: "build", newRole: "use",
+        oldAccess: { role: "build" }, newAccess: { role: "use", gadgetIds: [] },
       },
     ]);
 

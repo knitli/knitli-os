@@ -249,7 +249,7 @@ function fakeHooks(overrides: {
     describeStandardFormats: async () => "",
     listConnectableVendors: async () => [],
     consumeCapturedActions: () => undefined,
-    consumeCapturedConnectionRequests: () => [],
+    consumeCapturedDecisionRequests: () => [],
     commitAgentStep: async () => false,
     takeSteers: () => [],
     getChatModelData: () => undefined,

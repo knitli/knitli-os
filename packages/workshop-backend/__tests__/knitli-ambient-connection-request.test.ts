@@ -181,7 +181,7 @@ describe("ambientVendorStatus", () => {
       role: "use", implOverrides: {
         ownerAmbientVendorStatus,
         authorizeCollaborator: async () => "build",
-        getSharingManager: async () => ({ getEffectiveRole: () => "build" }),
+        getSharingManager: async () => ({ getEffectiveAccess: () => ({ role: "build" }) }),
       },
     });
     expect(await askStatuses(owner)).toEqual({ memory: "reconnect", messaging: "absent", notes: "available" });

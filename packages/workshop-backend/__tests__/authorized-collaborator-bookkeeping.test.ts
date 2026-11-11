@@ -40,7 +40,7 @@ describe("authorized collaborator bookkeeping", () => {
         updateSharedWorkspaceRole: async () => events.push("update-role"),
       };
       const sharing = {
-        getEffectiveRole: () => authorized ? "build" : undefined,
+        getEffectiveAccess: () => authorized ? { role: "build" } : undefined,
       };
 
       impl.ownerId = ownerUserId;

@@ -81,7 +81,7 @@ async function withPublishHarness(
       BLUEPRINT_CONTENT: { put: async () => {}, delete: async () => {} },
     };
     let commitFiles = async (entries: Record<string, string>): Promise<string> =>
-        await impl.gitStore.writeFilesAsCommit(new Map(Object.entries(entries)), {
+        await impl.gitCache.writeFilesAsCommit(new Map(Object.entries(entries)), {
           parents: [],
           author: { name: "Alice", email: "alice@example.com" },
           message: "test commit",

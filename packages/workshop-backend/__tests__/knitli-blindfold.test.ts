@@ -76,7 +76,7 @@ function baseHooks(overrides: Record<string, any> = {}): AgentHooks {
     describeStandardFormats: async () => "",
     listConnectableVendors: async () => [],
     consumeCapturedActions: () => undefined,
-    consumeCapturedConnectionRequests: () => [],
+    consumeCapturedDecisionRequests: () => [],
     commitAgentStep: async () => false,
     takeSteers: () => [],
     getChatModelData: () => undefined,
@@ -218,7 +218,7 @@ function toolCallSSE(calls: {id: string, name: string, args: unknown}[]): string
 
 async function commitFiles(
     impl: any, files: Record<string, string>, parents: string[] = []): Promise<string> {
-  return await impl.gitStore.writeFilesAsCommit(new Map(Object.entries(files)), {
+  return await impl.gitCache.writeFilesAsCommit(new Map(Object.entries(files)), {
     parents,
     author: { name: "Alice", email: "alice@example.com" },
     message: "test commit",

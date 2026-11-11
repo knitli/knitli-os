@@ -1132,7 +1132,7 @@ ids are facet-local, not Activity ids.
   Rejecting one works: see "Rejecting an action on a removed connection".
 - **Restricted data pins its connection (knitli/knitli-site#987).** `removeConnection()` refuses a
   connection that requires an account (a vendor, or a legacy record with no creation spec, as
-  `#accountRequiringUseScope` counts them) once one of its observation records has
+  `#inScopeGatekeepers` counts them) once one of its observation records has
   `containsRestrictedData`. Admission checks only current connections, so after a removal nobody
   admitted would be checked against that account while the data it supplied may remain. The
   workspace flag is checked first, so the action-log scan runs only in a workspace that holds

@@ -4401,8 +4401,8 @@ export interface Overseer extends RpcTarget {
 
   /**
    * Set the chat's system prompt for upcoming turns: a deployment preset, a workspace
-   * gadget's prompt file, or a prompt-marked blueprint -- or null for the built-in `gadget
-   * builder` default. Gadget and blueprint selections pin their current content (commit /
+   * gadget's prompt file, or a prompt-marked blueprint -- or null for the default `gadget
+   * builder` prompt. Gadget and blueprint selections pin their current content (commit /
    * version) at set time. Rejects unknown ids and sources with no prompt to select. Takes
    * effect at the next turn start; swapping prompts changes the static prompt slot and busts
    * the Anthropic prefix cache, so the UI confirms the switch mid-chat. Returns the stamped

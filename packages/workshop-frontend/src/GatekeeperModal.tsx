@@ -11,7 +11,7 @@ import {
   Sparkle,
   X,
 } from '@phosphor-icons/react'
-import { RpcStub } from 'capnweb'
+import { RpcPromise, RpcStub } from 'capnweb'
 import {
   AGENT_SPAWNER_CONNECTION_ID,
   AgentSpawnerConfig,
@@ -19,6 +19,7 @@ import {
   AmbientVendorStatus,
   GatekeeperClient,
   Overseer,
+  WorkpieceId,
 } from '@gadgets/workshop-shared/api'
 import { SupportedResource, VendorDescription, matchesResourceUrlPattern } from '@gadgets/workshop-shared/gatekeeper'
 import { ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
@@ -50,16 +51,16 @@ export interface GatekeeperModalProps {
    * Returns an overseer stub. Called only when actually creating a gatekeeper. This allows
    * the Home page to lazily provision a gadget on first use.
    *
-   * Fork: also called on open when `initialVendorId` is set, to ask the owner's always-on
+   * Fork: also called on open when `initialVendorId` is set and the viewer might have the vendor always on (no account of it, or a singleton one), to ask the owner's always-on
    * availability, so a caller passing `initialVendorId` must supply one that doesn't provision.
    */
   getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>
   /**
-   * Called after the gatekeeper is successfully created. The caller decides what to do with
-   * the stub (e.g. assign a binding name, or insert a capsule). The modal awaits this callback
-   * and shows a loading state while it runs.
+   * Called after the gatekeeper is successfully created, with its id. The caller decides what to
+   * do with the stub (e.g. assign a binding name, or insert a capsule). The modal awaits this
+   * callback and shows a loading state while it runs.
    */
-  onCreated: (gk: RpcStub<GatekeeperClient<any>>) => Promise<void>
+  onCreated: (gk: RpcStub<GatekeeperClient<any>>, id: WorkpieceId) => Promise<void>
   /**
    * Workpieces offered as env entries when creating an agent spawner (see AgentSpawnerConfig.env),
    * normally the gadget the spawner is being created for plus that gadget's own bindings. All are
@@ -114,7 +115,7 @@ type ConnectionType = {
   // token like `text-kumo-strong` (near-white in dark mode) would vanish on it.
   // Pin the glyph to a dark color that reads on the light tile in both themes.
   iconColor?: string
-  // The card's own type; the configurator starts for it.
+  // The card's preferred type; an account may offer only another member of the group.
   resourceUrlPattern?: string
   // The resource types the card's configurator may return (see SupportedResource.groupedWith), in
   // the order the vendor declared them.
@@ -170,6 +171,7 @@ function platformConnectionTypes(siteName: string): ConnectionType[] {
 function connectionsForVendor(vendor: VendorOption): ConnectionType[] {
   const groups = new Map<string, SupportedResource[]>()
   for (const resource of vendor.supportedResources) {
+    if (resource.connectable === false) continue
     const key = resource.groupedWith ?? resource.urlPattern
     const group = groups.get(key)
     if (group) group.push(resource)
@@ -204,10 +206,16 @@ function connectionForResources(
 
 // The grantable resource `urlPattern`s a connection requires before its configurator can load: one
 // for each type the configurator may return.
-function requiredResourceUrlPatterns(connection: ConnectionType): string[] {
-  return (connection.resources ?? [])
+function requiredResourceUrlPatterns(connection: ConnectionType, account?: AccountOption): string[] {
+  return resourcesForAccount(connection, account)
     .filter(resource => resource.grantable)
     .map(resource => resource.urlPattern)
+}
+
+function resourcesForAccount(connection: ConnectionType, account?: AccountOption): SupportedResource[] {
+  return (connection.resources ?? []).filter(resource => !account ||
+    account.supportedResources.some(candidate =>
+      candidate.urlPattern === resource.urlPattern && candidate.connectable !== false))
 }
 
 // A URL's own type on the connection, if it names one: the first match in the vendor's declared
@@ -220,9 +228,7 @@ function resourceForUrl(connection: ConnectionType, url: string): SupportedResou
 
 function accountSupportsConnection(account: AccountOption, connection: ConnectionType): boolean {
   return account.vendorId === connection.vendorId &&
-    (!connection.resourceUrlPattern ||
-      connection.resourceUrlPattern === 'https://*' ||
-      account.supportedResources.some(resource => resource.urlPattern === connection.resourceUrlPattern))
+    resourcesForAccount(connection, account).length > 0
 }
 
 // A connection whose vendor's account provides an agent singleton (AccountDescription.singleton):
@@ -340,11 +346,17 @@ export default function GatekeeperModal({
   const viewerVendorAccounts = accounts.filter(account => account.vendorId === initialVendorId)
   const requestedVendorAccounts = viewerVendorAccounts
     .map(account => `${account.id}:${account.credentialsValid}`).join(',')
+  // Only a vendor that may be ambient waits: a viewer's non-singleton account of it means it can't be.
+  const mayBeAmbient = viewerVendorAccounts.length === 0 ||
+    viewerVendorAccounts.some(account => account.description.singleton)
+  // The query waits for the account list: a viewer with only ordinary accounts of the vendor can
+  // never have it ambient, and then the modal asks for the workspace only when adding.
+  const [accountsReady, setAccountsReady] = useState(false)
   const getOverseerRef = useRef(getOverseer)
   getOverseerRef.current = getOverseer
   useEffect(() => setOwnerAmbient(null), [open, initialVendorId])
   useEffect(() => {
-    if (!open || !initialVendorId) return
+    if (!open || !initialVendorId || !accountsReady || !mayBeAmbient) return
     let cancelled = false
     const settle = (status: AmbientVendorStatus | 'unknown') => {
       if (!cancelled) setOwnerAmbient({ accountsKey: requestedVendorAccounts, status })
@@ -359,16 +371,13 @@ export default function GatekeeperModal({
       cancelled = true
       clearTimeout(timeout)
     }
-  }, [open, initialVendorId, requestedVendorAccounts])
+  }, [open, initialVendorId, requestedVendorAccounts, accountsReady, mayBeAmbient])
   const requestedVendorSelected = initialVendorId !== undefined && selectedConnection?.vendorId === initialVendorId
   const viewerAlwaysOn = selectedConnection !== null && isAlwaysOn(selectedConnection, alwaysOnVendorIds)
   // An answer from before the viewer's accounts changed still stands unless the viewer now has the
   // singleton themselves, which is when the owner's answer is what the modal must show.
   const ownerStatus = ownerAmbient === null ||
     (ownerAmbient.accountsKey !== requestedVendorAccounts && viewerAlwaysOn) ? null : ownerAmbient.status
-  // Only a vendor that may be ambient waits: a viewer's non-singleton account of it means it can't be.
-  const mayBeAmbient = viewerVendorAccounts.length === 0 ||
-    viewerVendorAccounts.some(account => account.description.singleton)
   const checkingOwnerAmbient = requestedVendorSelected && ownerStatus === null && mayBeAmbient
   // A failed query falls back to the viewer's own accounts; handleAddAmbientToChat is authoritative.
   const addsAmbientToChat = requestedVendorSelected &&
@@ -536,6 +545,7 @@ export default function GatekeeperModal({
     if (!open) return
     let cancelled = false
     const accountMap = new Map<number, AccountOption>()
+    setAccountsReady(false)
 
     const subscriber = new AccountsSubscriberAdapter({
       add({ id, description, vendor, supportedResources, credentialsValid, vendorId }) {
@@ -553,12 +563,14 @@ export default function GatekeeperModal({
       ready() {
         if (cancelled) return
         setAccounts(Array.from(accountMap.values()))
+        setAccountsReady(true)
       },
     })
     const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
     subscription.catch(error => {
       if (cancelled) return
       logRpcFailure('Failed to subscribe to connected accounts:', error)
+      setAccountsReady(true)
     })
 
     return () => {
@@ -630,6 +642,14 @@ export default function GatekeeperModal({
     account => account.id === selectedAccountId && account.credentialsValid,
   ) ?? null
   const needsAccount = Boolean(selectedConnection?.vendorId)
+  const accountResources = selectedConnection
+    ? resourcesForAccount(selectedConnection, selectedAccount ?? undefined)
+    : []
+  // Each grouped member serves the shared configurator. Keep the card's lead when supported,
+  // otherwise start one the account actually offers.
+  const configuratorResourceUrlPattern = accountResources.find(resource =>
+    resource.urlPattern === selectedConnection?.resourceUrlPattern)?.urlPattern
+    ?? accountResources[0]?.urlPattern
 
   // When the agent's request supplied a concrete resource URL of one of the selected card's types,
   // pass it to the configurator so its form opens pre-filled (and editable). This is general across
@@ -637,12 +657,14 @@ export default function GatekeeperModal({
   // initialValuesFromResourceUrl hook, or a URLPattern-group fallback). Excludes the whole-instance
   // catch-all, which has no per-resource inputs.
   // An authoritative initialResourceUrlPattern picks the type itself, whatever the URL matches.
-  const prefilledResource = selectedConnection && initialResourceUrl
+  const requestedResource = selectedConnection && initialResourceUrl
     ? (initialResourceUrlPattern !== undefined
       ? selectedConnection.resources?.find(({ urlPattern }) =>
         urlPattern === initialResourceUrlPattern && urlPattern !== 'https://*')
       : resourceForUrl(selectedConnection, initialResourceUrl))
     : undefined
+  const prefilledResource = accountResources.find(resource =>
+    resource.urlPattern === requestedResource?.urlPattern)
 
   const configuratorSeedKey = prefilledResource === undefined
     ? 'no-prefill'
@@ -652,12 +674,13 @@ export default function GatekeeperModal({
   // other type, and opens once there is one to offer; the account's Grant access button asks for the
   // rest. (An undefined granted set means a legacy account predating grant tracking; treat it as
   // fully granted.)
-  const requiredGrants = selectedConnection ? requiredResourceUrlPatterns(selectedConnection) : []
+  const requiredGrants = accountResources.filter(resource => resource.grantable)
+    .map(resource => resource.urlPattern)
   const grantedPatterns = selectedAccount?.description.grantedResourceUrlPatterns
   const missingGrants = grantedPatterns === undefined
     ? []
     : requiredGrants.filter(pattern => !grantedPatterns.includes(pattern))
-  const acceptedResourceUrlPatterns = (selectedConnection?.resources ?? [])
+  const acceptedResourceUrlPatterns = accountResources
     .map(resource => resource.urlPattern)
     .filter(pattern => !missingGrants.includes(pattern))
   const awaitingGrant = missingGrants.length > 0 && acceptedResourceUrlPatterns.length === 0
@@ -683,7 +706,7 @@ export default function GatekeeperModal({
   }, [selectedConnection, matchingAccounts, selectedAccountId, initialVendorId])
 
   useEffect(() => {
-    const resourceUrlPattern = selectedConnection?.resourceUrlPattern ?? null
+    const resourceUrlPattern = configuratorResourceUrlPattern
     if (!open || !resourceUrlPattern || !selectedAccount || awaitingGrant || selectedAlwaysOn) {
       updateConfiguratorFrameState(null)
       setConfiguratorError(null)
@@ -727,7 +750,7 @@ export default function GatekeeperModal({
     return () => {
       cancelled = true
     }
-  }, [open, authenticatedApi, selectedConnection?.id, selectedConnection?.resourceUrlPattern, selectedAccount?.id, awaitingGrant, acceptedKey, selectedAlwaysOn])
+  }, [open, authenticatedApi, selectedConnection?.id, configuratorResourceUrlPattern, selectedAccount?.id, awaitingGrant, acceptedKey, selectedAlwaysOn])
 
   const handleSelectAccount = (accountId: number) => {
     pendingInitialAccountIdRef.current = null
@@ -771,9 +794,9 @@ export default function GatekeeperModal({
   }
 
   const handleGrantResourceAccess = async (accountId: number) => {
-    const required = selectedConnection ? requiredResourceUrlPatterns(selectedConnection) : []
-    if (!required.length) return
     const account = matchingAccounts.find(a => a.id === accountId)
+    const required = selectedConnection && account ? requiredResourceUrlPatterns(selectedConnection, account) : []
+    if (!required.length) return
     const granted = account?.description.grantedResourceUrlPatterns
     const missing = granted === undefined ? [] : required.filter(p => !granted.includes(p))
     if (missing.length === 0) return
@@ -811,29 +834,33 @@ export default function GatekeeperModal({
     }
   }
 
+  // The id is pipelined onto the creation and pulled with it: creating a vendor connection
+  // restarts the workspace about 100 ms after it commits whenever a "build" collaborator is live,
+  // and a separate getId() round trip from a distant client arrives after that.
+  const handOff = async (created: RpcPromise<GatekeeperClient<any>>) => {
+    const [gatekeeper, id] = await Promise.all([created, created.getId()])
+    try {
+      await onCreated(gatekeeper, id)
+    } catch (err) {
+      gatekeeper[Symbol.dispose]()
+      throw err
+    }
+    onClose()
+  }
+
   const handleCreateAiModel = async () => {
     if (!selectedModelId) {
       toasts.add({ title: 'Please select an AI model', variant: 'warning' })
       return
     }
     setCreating(true)
-    let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
-    let transferred = false
     try {
       const overseer = await getOverseer()
-      gatekeeper = await overseer.newAiModelGatekeeper(selectedModelId)
-      if (gatekeeper) {
-        await onCreated(gatekeeper)
-        transferred = true
-        onClose()
-      } else {
-        toasts.add({ title: 'Failed to create AI model connection', variant: 'error' })
-      }
+      await handOff(overseer.newAiModelGatekeeper(selectedModelId))
     } catch (err) {
       console.error('Failed to create AI model gatekeeper:', err)
       toasts.add({ title: 'Failed to create AI model connection', variant: 'error' })
     } finally {
-      if (gatekeeper && !transferred) gatekeeper[Symbol.dispose]()
       setCreating(false)
     }
   }
@@ -854,23 +881,13 @@ export default function GatekeeperModal({
     }
 
     setCreating(true)
-    let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
-    let transferred = false
     try {
       const overseer = await getOverseer()
-      gatekeeper = await overseer.newAgentSpawnerGatekeeper(config)
-      if (gatekeeper) {
-        await onCreated(gatekeeper)
-        transferred = true
-        onClose()
-      } else {
-        toasts.add({ title: 'Failed to create agent spawner connection', variant: 'error' })
-      }
+      await handOff(overseer.newAgentSpawnerGatekeeper(config))
     } catch (err) {
       console.error('Failed to create agent spawner gatekeeper:', err)
       toasts.add({ title: 'Failed to create agent spawner connection', variant: 'error' })
     } finally {
-      if (gatekeeper && !transferred) gatekeeper[Symbol.dispose]()
       setCreating(false)
     }
   }
@@ -878,13 +895,12 @@ export default function GatekeeperModal({
   const handleCreateResourceConnection = async () => {
     if (creating) return
     if (!selectedConnection || selectedAccountId === null || selectedAlwaysOn) return
-    const resourceUrlPattern = selectedConnection.resourceUrlPattern
+    const resourceUrlPattern = configuratorResourceUrlPattern
     if (!resourceUrlPattern) return
 
     setCreating(true)
-    let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
-    let transferred = false
-    let stage: 'collect-resource-url' | 'get-overseer' | 'new-gatekeeper' | 'attach-gatekeeper' = 'collect-resource-url'
+    // handOff() covers both the creation and the caller's follow-up, so they share one stage.
+    let stage: 'collect-resource-url' | 'get-overseer' | 'new-gatekeeper' = 'collect-resource-url'
     try {
       if (!configuratorFrameState?.frame || configuratorFrameState.accountId !== selectedAccountId || configuratorFrameState.resourceUrlPattern !== resourceUrlPattern) {
         throw new Error('Configurator is not ready.')
@@ -894,21 +910,17 @@ export default function GatekeeperModal({
       // A URL no narrower type names binds the card's whole-instance catch-all, if it has one.
       const resource = resourceForUrl(selectedConnection, resourceUrl) ??
         selectedConnection.resources?.find(({ urlPattern }) => urlPattern === 'https://*')
+      if (resource && !accountResources.some(candidate => candidate.urlPattern === resource.urlPattern)) {
+        throw new Error(`This account does not support connecting ${resource.title}.`)
+      }
       if (resource && !acceptedResourceUrlPatterns.includes(resource.urlPattern)) {
         throw new Error(`Grant access to ${resource.title} to connect it.`)
       }
       stage = 'get-overseer'
       const overseer = await getOverseer()
       stage = 'new-gatekeeper'
-      gatekeeper = await overseer.newGatekeeper(selectedAccountId, resourceUrl)
-      if (gatekeeper) {
-        stage = 'attach-gatekeeper'
-        await onCreated(gatekeeper)
-        transferred = true
-        onClose()
-      } else {
-        toasts.add({ title: 'Failed to create connection', variant: 'error' })
-      }
+      // Typed nullable, but never null: the overseer throws instead.
+      await handOff(overseer.newGatekeeper(selectedAccountId, resourceUrl) as RpcPromise<GatekeeperClient<any>>)
     } catch (err) {
       console.error('Failed to create resource gatekeeper:', {
         stage,
@@ -917,7 +929,6 @@ export default function GatekeeperModal({
       })
       toasts.add({ title: err instanceof Error && err.message ? err.message : 'Failed to create connection', variant: 'error' })
     } finally {
-      if (gatekeeper && !transferred) gatekeeper[Symbol.dispose]()
       setCreating(false)
     }
   }
@@ -931,7 +942,7 @@ export default function GatekeeperModal({
       const overseer = await getOverseer()
       gatekeeper = await overseer.getAmbientGatekeeper(selectedConnection.vendorId)
       if (gatekeeper) {
-        await onCreated(gatekeeper)
+        await onCreated(gatekeeper, await gatekeeper.getId())
         transferred = true
         onClose()
       } else {
@@ -960,7 +971,7 @@ export default function GatekeeperModal({
     // while a frame is up, and Add must be off from that render on, not only after the Effect runs.
     if (selectedAlwaysOn) return addsAmbientToChat
     if (selectedConnection.resourceUrlPattern) {
-      const resourceUrlPattern = selectedConnection.resourceUrlPattern
+      const resourceUrlPattern = configuratorResourceUrlPattern
       return Boolean(
         selectedAccountId !== null &&
         resourceUrlPattern &&
@@ -1056,7 +1067,7 @@ export default function GatekeeperModal({
                     resourceTitle={selectedConnection.resourceUrlPattern ? selectedConnection.title : undefined}
                     connecting={connectingVendor === selectedConnection.vendorId}
                     reconnectingAccountId={reconnectingAccountId}
-                    requiredResourceUrlPatterns={requiredResourceUrlPatterns(selectedConnection)}
+                    requiredResourceUrlPatterns={account => requiredResourceUrlPatterns(selectedConnection, account)}
                     grantingAccountId={grantingAccountId}
                     allowAdditionalAccount={!(selectedConnection.autoProvisionsAccount && matchingAccounts.length > 0)}
                     onSelect={handleSelectAccount}

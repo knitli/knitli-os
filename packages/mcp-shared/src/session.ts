@@ -70,6 +70,14 @@ export interface McpSessionHost {
   readonly endpoint: string;
   /** How much of the endpoint this binding may call. Only used to word the "no such tool" error. */
   readonly scope: ToolScope;
+  /**
+   * What every observation through this binding reports as `ObservationDescription.subresources`,
+   * for the Workshop to check collaborators against through the facet's `verifyObserverAccess()`;
+   * `undefined` reports none, leaving every read to the facet's own `addObserver()`, as before
+   * subresources existed. Required rather than defaulted, so each connector states which protocol
+   * its reads use instead of a read path choosing one by omission.
+   */
+  readonly observationSubresources: readonly string[] | undefined;
 
   /** Returns the bounded described catalog. */
   tools(): Promise<ClassifiedTool[]>;
@@ -115,6 +123,15 @@ export class McpSessionBase extends RpcTarget {
     this.#queue = queue;
   }
 
+  // Every observation this session makes goes through here, so each one reports the binding's
+  // subresources when its connector has any, and no read path can leave them out or supply others.
+  #authorizeObservation(description: Omit<ObservationDescription, "subresources">): Promise<void> {
+    const subresources = this.#host.observationSubresources;
+    return this.#queue.authorizeObservation(subresources === undefined
+      ? description
+      : { ...description, subresources: [...subresources] });
+  }
+
   [Symbol.dispose](): void {
     (this.#queue as RpcStub<ApprovalQueue> & { [Symbol.dispose](): void })[Symbol.dispose]();
   }
@@ -124,7 +141,7 @@ export class McpSessionBase extends RpcTarget {
   ): Promise<McpToolInfo[] | McpToolSummary[]> {
     if (options === undefined) {
       const tools = await this.#host.tools();
-      await this.#queue.authorizeObservation({
+      await this.#authorizeObservation({
         title: `${this.#host.serverName}: list tools`,
         description:
           `Read the tool catalog of the MCP server **${this.#host.serverName}** ` +
@@ -143,7 +160,7 @@ export class McpSessionBase extends RpcTarget {
     if (hasName) {
       requireToolName("listTools", options.name);
       const tool = await this.#host.findTool(options.name);
-      await this.#queue.authorizeObservation({
+      await this.#authorizeObservation({
         title: `${this.#host.serverName}: find tool`,
         description:
           `Looked for ${codeSpan(options.name, MAX_TOOL_NAME_CHARS)} on the MCP server ` +
@@ -162,7 +179,7 @@ export class McpSessionBase extends RpcTarget {
       throw new Error("listTools({ search }) requires one or more search terms.");
     }
     const tools = await this.#host.searchTools(trimmed);
-    await this.#queue.authorizeObservation({
+    await this.#authorizeObservation({
       title: `${this.#host.serverName}: search tools`,
       description:
         `Searched the tool catalog of the MCP server **${this.#host.serverName}** ` +
@@ -202,7 +219,7 @@ export class McpSessionBase extends RpcTarget {
    */
   protected describeRead(
     entry: ClassifiedTool, args: Record<string, unknown>,
-  ): ObservationDescription {
+  ): Omit<ObservationDescription, "subresources"> {
     const { title, description, fields } = describeCall({
       serverName: this.#host.serverName,
       endpoint: this.#host.endpoint,
@@ -230,7 +247,7 @@ export class McpSessionBase extends RpcTarget {
       // had already been fetched: the record says the read did not happen and the endpoint saw that
       // it did. A read that fails after this point leaves an authorized observation behind, which is
       // the right way round -- the alternative hands the agent data nobody permitted.
-      await this.#queue.authorizeObservation(this.describeRead(entry, toolArgs));
+      await this.#authorizeObservation(this.describeRead(entry, toolArgs));
       const result = await host.call(client => client.callTool(name, toolArgs));
       return toCallResult(result);
     }
@@ -309,7 +326,7 @@ export class McpSessionBase extends RpcTarget {
           ?? { status: "ok" as const, content: [], text: "", isError: false };
         // The result was produced while the Gadget was not looking, so it becomes an observation at
         // the moment it is handed over rather than when the call was applied.
-        await this.#queue.authorizeObservation({
+        await this.#authorizeObservation({
           title: `${host.serverName}: result of ${stored.toolName}`,
           description:
             `Read the response from the approved call to \`${stored.toolName}\` on ` +

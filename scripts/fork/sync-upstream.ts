@@ -581,7 +581,7 @@ export function printSurvivorReport(
     return;
   }
   console.log(`Upstream-removed names your files still use (${survivors.length}):`);
-  for (const { token, files } of survivors.slice(0, 25)) {
+  for (const { token, files } of survivors.slice(0, 200)) {
     const left = counts.get(token) ?? 0;
     console.log(`  ${token} (${left === 0 ? "gone upstream" : `${left} left upstream`})`);
     for (const commit of attributeRemoval(token, base, tip).slice(0, 2)) {
@@ -589,7 +589,7 @@ export function printSurvivorReport(
     }
     for (const file of files) console.log(`    yours: ${file}`);
   }
-  if (survivors.length > 25) console.log(`  ...and ${survivors.length - 25} more tokens.`);
+  if (survivors.length > 200) console.log(`  ...and ${survivors.length - 200} more tokens.`);
 }
 
 /** A survivor split by the reviewedSurvivors allowlist: still failing, acked, and stale acks. */

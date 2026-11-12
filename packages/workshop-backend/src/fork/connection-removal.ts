@@ -17,7 +17,7 @@ export interface ConnectionRemovalHost {
 /**
  * Refuses an ambient connection (ensureAmbientCapsules() would re-add it under a new id, so removal
  * would only look like it worked). Refuses a connection that requires an account (one with a vendor,
- * or a legacy one with no creationSpec, as #accountRequiringUseScope counts them) and has supplied
+ * or a legacy one with no creationSpec, as #inScopeGatekeepers counts them) and has supplied
  * restricted data (knitli/knitli-site#987): admission checks only current connections, so after
  * the removal nobody admitted would be checked against that account while its data may remain.
  * Owner-only data needs no such rule (its sticky latch blocks sharing). Otherwise removes the

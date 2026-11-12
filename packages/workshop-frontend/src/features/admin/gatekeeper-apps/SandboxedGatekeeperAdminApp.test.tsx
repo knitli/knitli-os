@@ -36,7 +36,8 @@ function settings(enabled: boolean | undefined): AdminSettingsView {
     // Keep the fixed vendor present when the exact pattern is absent, so a vendor-only check fails.
     resources: enabled === undefined ? [] : [{ urlPattern: PATTERN, title: 'Fixture', description: 'Fixture resource', enabled }],
   }]
-  return { signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [], promptPresets: [], restrictedWebFetchHosts: [], voice: DEFAULT_VOICE_CONFIG }
+  return { signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [], promptPresets: [], restrictedWebFetchHosts: [], restrictedWebFetchApprovals: false,
+  adminAuditRetentionDays: { effective: 90, chosen: 90, min: 90 }, voice: DEFAULT_VOICE_CONFIG }
 }
 
 function fakeAdmin(options: {

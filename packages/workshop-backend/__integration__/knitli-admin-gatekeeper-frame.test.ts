@@ -75,7 +75,13 @@ describe('admin gatekeeper frames', () => {
   });
 
   it('B-HOST-011 enforces bounded resource persistence and preserves recovery paths', async () => {
-    const settings = exports.AdminSettings.getByName(`resource-policy-${crypto.randomUUID()}`);
+    const rawSettings = exports.AdminSettings.getByName(`resource-policy-${crypto.randomUUID()}`);
+    // Every admin-config mutation names its actor for the audit log (upstream #1025).
+    const actor = { admin: 'admin', sessionId: 'knitli-admin-gatekeeper-frame', via: 'api', method: 'setResourceEnabled' };
+    const settings = new Proxy(rawSettings, {
+      get: (target, prop) => prop === 'setResourceEnabled' || prop === 'updateAdminConfig'
+        ? (...args: unknown[]) => (target as any)[prop](...args, actor) : (target as any)[prop],
+    }) as typeof rawSettings;
     const priorKv = await env.BLUEPRINTS.get(ADMIN_CONFIG_KEY);
     const snapshot = async () => ({ config: await settings.getAdminConfig(), kv: await env.BLUEPRINTS.get(ADMIN_CONFIG_KEY) });
     const unchangedAfterReject = async (before: Awaited<ReturnType<typeof snapshot>>, call: () => Promise<void>, message: string) => {

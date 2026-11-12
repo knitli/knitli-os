@@ -81,6 +81,8 @@ not connected. A completed connect or `revoke()` deletes it. When it fires the h
 | `gatekeeper-github` `GitHubHookDriver` (`github-hooks.ts`) | `#reschedule` to the earliest webhook check or queued delivery retry | a failing check or delivery re-arms for its next retry | kill switch (`github.hooks`) | SAFE — the kill switch stops the work; retries remain bounded by the queue's own backoff. |
 | `gatekeeper-microsoft` `OutlookHookDriver` (`outlook-hooks.ts`) | `#reschedule` to the earliest queue retry, subscription renewal or sync | a sync or delivery step that fails re-arms for its next time | `guardedAlarmFor` key `microsoft.outlook-hooks` | GUARDED |
 | `gatekeeper-x` `UserAccount` (`x.ts`) | one alarm at the connect timeout from `setCallback()` | none; deletes the account if the flow never completed | kill switch (`x.account-timeout`) | SAFE |
+| `gatekeeper-pagerduty` `UserAccount` (`pagerduty.ts`) | one alarm at the connect timeout from `setCallback()` | none; deletes the account if the flow never completed | kill switch (`pagerduty.connect-timeout`) | SAFE |
+| `gatekeeper-pagerduty` `PagerDutyHookDriver` (`pagerduty-hooks.ts`) | `#reschedule` to the earliest queued delivery retry; `ingest()` arms it at `now` | a failing delivery re-arms for its next retry | `guardedAlarmFor` key `pagerduty.hooks` | GUARDED |
 
 ## Flood threshold
 

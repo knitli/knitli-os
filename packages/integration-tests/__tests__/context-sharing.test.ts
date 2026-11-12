@@ -69,7 +69,7 @@ async function privateWorkspace(owner: ContextUser) {
   const workspace = stack.use(await owner.api.newWorkspace());
   const { id: workspaceId } = await workspace.getMetadata();
   const requirement = await waitFor("the workspace's ambient Context binding", async () =>
-    (await workspace.listObserverRequirements("build"))
+    (await workspace.listObserverRequirements("workspace"))
       .find(entry => entry.vendorId === VENDOR_ID) ?? null);
   const binding = stack.use(await workspace.getGatekeeperById(requirement.gatekeeperId));
   const session = stack.use(await binding.openSession() as RpcStub<ContextLibrary>);
@@ -92,12 +92,11 @@ it.concurrent("top-level private collection metadata prevents a collaborator ope
     description: collection.description, documentCount: 1,
   }] });
 
-  await workspace.addCollaborator(observer.username, "build");
+  await workspace.addCollaborator(observer.username, "workspace");
   const recorder = new ObserverConfigRecorder()
     .alwaysChoose(observer.account.id, MAX_OBSERVER_PROMPTS);
   using callback = stubFor(recorder);
-  await expect(observer.api.openWorkspace(workspaceId, undefined, callback))
-    .rejects.toThrow(/could not confirm that you are permitted/);
+  await expect(observer.api.openWorkspace(workspaceId, undefined, callback)).rejects.toThrow(DENIED);
 });
 
 it.concurrent.each(["list", "read"] as const)(
@@ -119,7 +118,7 @@ it.concurrent.each(["list", "read"] as const)(
       expect(await session.read(docId)).toMatchObject({ docId, content: DOCUMENT.body });
     }
 
-    await workspace.addCollaborator(observer.username, "build");
+    await workspace.addCollaborator(observer.username, "workspace");
     const recorder = new ObserverConfigRecorder()
       .alwaysChoose(observer.account.id, MAX_OBSERVER_PROMPTS);
     using callback = stubFor(recorder);

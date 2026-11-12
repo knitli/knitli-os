@@ -42,9 +42,9 @@ async function request(input: { resourceUrl?: string }) {
   const metadata = await workspace.getMetadata();
   const stub = exports.OverseerDurableObject.get(exports.OverseerDurableObject.idFromString(metadata.id));
   return runInDurableObject(stub, async instance => {
-    const impl = (instance as unknown as { impl: { requestConnection(chatId: number, value: object): Promise<unknown>; consumeCapturedConnectionRequests(chatId: number): unknown[] } }).impl;
+    const impl = (instance as unknown as { impl: { requestConnection(chatId: number, value: object): Promise<unknown>; consumeCapturedDecisionRequests(chatId: number): unknown[] } }).impl;
     const result = await impl.requestConnection(1, { vendorId: "refining", reason: "fixture", bindingName: "mail", ...input });
-    return { result, cards: impl.consumeCapturedConnectionRequests(1) };
+    return { result, cards: impl.consumeCapturedDecisionRequests(1) };
   });
 }
 
@@ -164,13 +164,13 @@ describe("connection request resource resolution", () => {
     const metadata = await workspace.getMetadata();
     const stub = exports.OverseerDurableObject.get(exports.OverseerDurableObject.idFromString(metadata.id));
     await runInDurableObject(stub, async instance => {
-      const impl = (instance as unknown as { impl: { listConnectableResources(id: string): Promise<string>; requestConnection(chatId: number, value: object): Promise<{ requested: boolean }>; consumeCapturedConnectionRequests(chatId: number): unknown[] } }).impl;
+      const impl = (instance as unknown as { impl: { listConnectableResources(id: string): Promise<string>; requestConnection(chatId: number, value: object): Promise<{ requested: boolean }>; consumeCapturedDecisionRequests(chatId: number): unknown[] } }).impl;
       await impl.listConnectableResources("refining");
       await control.setRefiningResolverAdvertised(true);
       const describeBeforeRequest = (await control.getCalls()).filter(call => call.method === "describe").length;
       const result = await impl.requestConnection(1, { vendorId: "refining", resourceUrl: "https://outside.invalid/#segment=mail", reason: "fixture", bindingName: "mail" });
       expect(result.requested).toBe(false);
-      expect(impl.consumeCapturedConnectionRequests(1)).toEqual([]);
+      expect(impl.consumeCapturedDecisionRequests(1)).toEqual([]);
       expect((await control.getCalls()).filter(call => call.method === "describe").length).toBe(describeBeforeRequest + 1);
     });
     const calls = await control.getCalls();

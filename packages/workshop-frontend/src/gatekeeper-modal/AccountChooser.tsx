@@ -53,7 +53,7 @@ export function AccountChooser({
   resourceTitle?: string
   connecting: boolean
   reconnectingAccountId: number | null
-  requiredResourceUrlPatterns?: string[]
+  requiredResourceUrlPatterns?: string[] | ((account: AccountOption) => string[])
   grantingAccountId?: number | null
   /** Whether an account can be added when this vendor already has one. */
   allowAdditionalAccount?: boolean
@@ -81,9 +81,11 @@ export function AccountChooser({
           const expired = !account.credentialsValid
           const reconnecting = reconnectingAccountId === account.id
           const granted = account.description.grantedResourceUrlPatterns
+          const required = typeof requiredResourceUrlPatterns === 'function'
+            ? requiredResourceUrlPatterns(account) : requiredResourceUrlPatterns
           const accountMissing =
-            requiredResourceUrlPatterns && granted !== undefined
-              ? requiredResourceUrlPatterns.filter(p => !granted.includes(p))
+            required && granted !== undefined
+              ? required.filter(p => !granted.includes(p))
               : []
           const needsAccess = !expired && accountMissing.length > 0
           const granting = grantingAccountId === account.id

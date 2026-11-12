@@ -86,9 +86,11 @@ export const useComposerAttachments = ({
     name: string | undefined,
   ) => {
     try {
-      const content = new Uint8Array(await blob.arrayBuffer());
-      if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) return;
       const overseer = await getOverseerRef.current();
+      if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) return;
+      // Fork: staged uploads take the bytes (see below), so the whole file is read here; upstream
+      // streams a plain blob instead.
+      const content = new Uint8Array(await blob.arrayBuffer());
       if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) return;
       // Every upload is staged under its own ID, so removing or abandoning it before a send
       // reclaims the server copy; a send commits it (spreadsheets as a parsed workbook, other

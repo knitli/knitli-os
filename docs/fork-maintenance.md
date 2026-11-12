@@ -230,6 +230,62 @@ wrong).
 
 Intentional, reviewed differences from upstream. Keep this current.
 
+### 2026-11-11 stage-2 sync: upstream's observer model, and what it retired in the fork
+
+Upstream `b0ef1d1..foundation/main` (see Open questions for the decision and the staging). The
+fork adopts upstream's session-holder, per-gadget access and subresource observer model wholesale;
+the seams below were re-applied or retired on top of it.
+
+- **Re-applied on the new model:**
+  - *Audience attestation* (`fork/workspace-audience.ts`): reads `getEffectiveAccess().role` and
+    `listObserverRequirements("workspace")`. A workspace-grant admission claims `admittedAs: "build"`
+    (`beginAdmission` at the top of `ensureObserver`); a gadget ("use") admission claims nothing and
+    never writes the marker. `recordAccountlessAdmission()` persists the record upstream no longer
+    writes when no account-requiring connection is in scope, so a Messaging-only workspace still
+    attests its build collaborators. Pinned by `knitli-workspace-audience.test.ts`.
+  - *Revocation gate*: unchanged in shape, and `runRevocationCleanup()` now also passes the unawaited
+    cleanup to `ctx.waitUntil()` (`keepAlive`), as upstream's paths do, so upstream's
+    `observer-scope-restart` ordering test passes unmodified. `removeCollaborator`/`revokeShareLink` still run
+    `runRevocationCleanup` with the gate, now passing upstream's restart reasons and the new
+    `gadgetId` argument; the `ownerInvitesOnly` latch reuses the already-started listing refresh.
+  - *Loop-limit restart*: `restartIfLoopLimited` moved into `deliverUserUpdates()`'s catch and the
+    Outputs-refresh loop, where upstream now does the user-object calls (journaled, alarm-delivered).
+- **Retired for upstream's version:** `SessionKind`/`joinSession(kind)` (the unread `owner` count
+  went with it; `SessionHolder` instead), `KeyedAsyncSequencer` and per-profile admission
+  serialization (upstream #1001 shares one observer id across concurrent admissions, and its
+  `observer-verification-failure` test replaces ours), the gated workspace-deletion path
+  (`deleteSelf` is upstream's tombstone plus journaled user updates; `scheduleRevocationRestart(false)`
+  has no caller now), `#useScopeGatekeeperIds`, and the fork's "role above your own" share check
+  (`#requireCanShare`). The window the deletion path leaves, between the tombstone and the restart,
+  is fenced by two fork lines instead of the gate: `isRevocationPaused()` is also true while
+  `storage.deleting` is set (observations, action and hook readiness, sharing expansion and open
+  handoffs already check it), and `applyPendingAction()` calls `assertNoRevocationPending()` first,
+  so approval, manual or automatic, cannot reach the world from a retained capability. Pinned by
+  `knitli-deletion-fence.test.ts`.
+- **Readiness gate no longer refuses legacy connections:** `assertGatekeeperObserverReadiness()` ended
+  with `observerVendorId(record)`, which throws for a connection with no `creationSpec`; upstream's new
+  property test (`durable-decision-resume`) stages writes through such a record in an owner-only
+  workspace. The throw is gone from the gate; admission still refuses a legacy connection for
+  collaborators (`#inScopeGatekeepers`).
+- **Kept as a divergence:** DO migration tag. Upstream's `v4` is `AdminAuditDurableObject`, which
+  collides with our applied `v4` `VoiceSession`; it is appended as `v4-upstream-admin-audit` in
+  `workshop-backend/cloudflare.config.ts` (and the golden manifest). Never renumber an applied tag.
+- **Dropped, deferred (see `plans/fork-ports.md`):** the fork's ~890-line hardening of the
+  workspace-docs blueprint's `htmlToMarkdown` (hidden content, `display:none`, implicit closure,
+  textarea): upstream #884 replaced `markdown.ts` and has no equivalent; the git read path's
+  over-budget-blob refusal (upstream streams large files now); the fork's connection re-bind in
+  `Connections.tsx` (`bindCreatedConnection`), superseded by upstream #1018, so the entry
+  "A new connection survives the restart its creation triggers" now covers the composer only and
+  `Connections.fork.test.tsx` / `GatekeeperModal.fork.test.tsx` carry the retired expectations.
+- **Bounded agent grep:** upstream's `matchBlob()` (#817) keeps every matching line of a streamed
+  file until the output budget applies. `scanWorkpieceForGrep()` takes an optional `maxMatches`
+  (default unbounded, so `Worktree.grep()` and `structuredGrep()` are as upstream), the matchers
+  take an optional `limit`, `GrepScan.truncated` marks the cut and `formatGrep()` says `N+ more`.
+  Only the agent's `grepWorkpiece()` passes a cap (`MAX_TOOL_RESULT_CHARS`, since every shown match
+  takes a character). Drop it if upstream bounds the scan itself.
+- **Not adopted (kept):** chat attachments still upload whole (`uploadChatAttachment`), not through
+  upstream's streamed `uploadBlob`.
+
 ### Web Push channel
 
 - **Where:** `packages/workshop-backend/src/fork/web-push.ts` (Tier 1) and its regression test
@@ -816,7 +872,7 @@ setup and their fixtures were removed once knitli-site's native OpenAPI connecto
 `scripts/fork/openapi-host-retired.test.ts` fails if any of it comes back. DO storage rows those
 features wrote are left in place; typed-storage ignores undeclared collections.
 
-### Connect links are bound to the initiating Access identity in four of twelve hand-rolled gatekeepers
+### Connect links are bound to the initiating Access identity in seven of sixteen hand-rolled gatekeepers
 
 - **Where:** `packages/observability/src/fork/connect-initiator.ts` (fork-owned), called from the
   `fetch` handlers and `UserAccount` classes of `packages/gatekeeper-{github,linear,email,cloudflare}`,
@@ -830,16 +886,18 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 - **Why:** the connect URL's nonce was the whole authorization. Anyone who obtained the link —
   a forwarded message, a shared screen, a shoulder — could complete the connection into the
   initiating user's account. #25 closed it for the MCP family and the OpenAPI connector; this
-  closes it for four of the gatekeepers that hand-roll their own account Durable Object.
-- **Scope, and the eight that are deliberately not fixed:** twelve gatekeepers hand-roll that
-  account shape. Four are fixed — `gatekeeper-{github,linear,cloudflare,email}`, the ones this
-  installation uses. The other eight — `gatekeeper-{google,confluence,notion,slack,supabase,spotify,
-  zoominfo,homeassistant}` — are left exactly as upstream wrote them, by the repository owner's
+  closes it for seven of the gatekeepers that hand-roll their own account Durable Object.
+- **Scope, and the nine that are deliberately not fixed:** sixteen gatekeepers hand-roll that
+  account shape. Seven are fixed — `gatekeeper-{github,linear,cloudflare,email,microsoft,x,pagerduty}`,
+  the ones this installation uses (pagerduty from the 2026-11-11 sync, upstream #1050, with the kit
+  `putInitiation` pattern: `initiator` rides the nonce record, `initiatorMatches()`, and
+  `refuseForeignBrowser()` above the authorize redirect and the callback). The other nine —
+  `gatekeeper-{google,confluence,gitlab,notion,slack,supabase,spotify,zoominfo,homeassistant}` — are left exactly as upstream wrote them, by the repository owner's
   explicit decision on 2026-09-12, because this installation does not use them; their connect links
   are still good for whoever holds the nonce. That decision is recorded as `OUT_OF_SCOPE` in
   `scripts/fork/connect-initiator-enforced.test.ts`, which discovers the hand-rolled set from source
-  rather than trusting a hardcoded list: a thirteenth that appears in neither list fails the suite,
-  so adopting one of the eight forces the fix rather than inheriting the gap silently.
+  rather than trusting a hardcoded list: a seventeenth that appears in neither list fails the suite,
+  so adopting one of the nine forces the fix rather than inheriting the gap silently.
 - **Scope expansion too, not only connect:** `GatekeeperUserImpl.ensureResources` mints a reconnect
   link when a connected Cloudflare account is missing an observability scope, and it was the one
   link-minting route left unbound among the four fixed vendors. `GatekeeperUser.ensureResources`,
@@ -955,6 +1013,12 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   fork test files passed `tsc` and became silent `undefined`s at runtime (the bundler does no
   link-check). After any upstream move, grep the fork's test files for imports from the old
   module — a green typecheck does not cover them.
+- **Upstream integration tests edited for it (2026-11-11 sync):** `github-observers.test.ts` (new
+  upstream) gets the one-line `enableBoundGatekeeperResources(harness)` call every sibling suite
+  carries. `workshop-admin-audit.test.ts` pins the audit excerpt of a value past the cap through
+  `enabledResources`: no single pattern passes the cap (2 KiB each), so it enables five near-limit
+  patterns and asserts the fifth's before/after excerpts (offset 100 before the lists' first
+  difference), then disables them; upstream's version disables one 12,000-character pattern.
 
 ### Ambient-provisioned accounts bypass resource policy at minting
 
@@ -1132,7 +1196,7 @@ ids are facet-local, not Activity ids.
   Rejecting one works: see "Rejecting an action on a removed connection".
 - **Restricted data pins its connection (knitli/knitli-site#987).** `removeConnection()` refuses a
   connection that requires an account (a vendor, or a legacy record with no creation spec, as
-  `#accountRequiringUseScope` counts them) once one of its observation records has
+  `#inScopeGatekeepers` counts them) once one of its observation records has
   `containsRestrictedData`. Admission checks only current connections, so after a removal nobody
   admitted would be checked against that account while the data it supplied may remain. The
   workspace flag is checked first, so the action-log scan runs only in a workspace that holds
@@ -1184,12 +1248,19 @@ ids are facet-local, not Activity ids.
 ### A new connection survives the restart its creation triggers
 
 - **Where:** fork-owned `packages/workshop-frontend/src/connectionRestartRecovery.ts`, called from
-  three upstream files: `Connections.tsx` (the Add connection `onCreated`, plus a latest-render
-  ref and an unmount guard), `features/chat/composer/useComposerResources.ts` (`createCapsule`
+  two upstream files now: `features/chat/composer/useComposerResources.ts` (`createCapsule`
   and `attachCreated` go through `consumeCreatedConnection`; a new optional `getOverseer`
   option, whose absence keeps upstream's behaviour) and `features/chat/composer/ChatComposer.tsx`
   (passes `getOverseer` through).
 - **Introduced:** knitli/knitli-site#640
+- **2026-11-11 sync:** the Connections panel's half is retired. Upstream #1018 ("Bind a new
+  connection after the restart its creation causes", 62d5bd2e) now keeps the pending bind in
+  `Connections.tsx` and runs it once the session is replaced (pinned by upstream's
+  `Connections.test.tsx`), so the fork's `Connections.tsx` call, latest-render ref and unmount guard
+  are gone, and the two `Connections.fork.test.tsx` cases for them were deleted. The composer path
+  and the helper stay; the modal's `onCreated` is upstream's `(gatekeeper, id)` and the modal now
+  pipelines `getId()` onto the creation, which the re-bind case in `GatekeeperModal.fork.test.tsx`
+  mimics. The panel's old note about connections lost to the restart applies to the composer only.
 - **What:** adding a connection while a "build" collaborator is connected restarts the workspace.
   The record is saved first, then the picker's follow-up (Connections' `bindWithSuggestedName`,
   the composer's `describe`/`getCreationSpec`) is refused or severed. On a restart-class failure
@@ -1213,9 +1284,9 @@ ids are facet-local, not Activity ids.
   own timeout, so a reconnect that never resolves stalls the retry as it stalls everything else.
 - **Test:** `packages/workshop-backend/__tests__/knitli-connection-restart-bind.test.ts` pins the
   host contract (refused before the reset, bound after it); `connectionRestartRecovery.test.ts`,
-  `Connections.fork.test.tsx`, `features/chat/composer/useComposerResources.fork.test.tsx` and
-  the re-bind case in `GatekeeperModal.fork.test.tsx` pin the client.
-- **At sync:** Tier 2 for the three upstream call sites. If upstream starts retrying the
+  `features/chat/composer/useComposerResources.fork.test.tsx` and the re-bind case in
+  `GatekeeperModal.fork.test.tsx` pin the client.
+- **At sync:** Tier 2 for the two upstream call sites. If upstream starts retrying the
   follow-up itself, or stops refusing the bind, drop the fork module and its call sites; if it
   reshapes `onCreated`, `createCapsule` or `attachCreated`, reapply the single call each.
 

@@ -10,16 +10,24 @@
  * rejecting a revocation that in fact succeeded. Both operations are best-effort by construction
  * (see `tearDownLostObservers()`), and the abort discards whatever has not finished regardless, so
  * there is nothing here worth waiting for. Rejections are swallowed for the same reason.
+ *
+ * `keepAlive` hands the cleanup to `ctx.waitUntil()` as upstream's revocation paths do, so a cleanup
+ * the abort has not yet cut off still counts as background work. It gets the unsettled promise;
+ * the caller decides how a rejection is logged.
  */
 export function runRevocationCleanup({
   tearDownObservers,
   refreshListings,
   scheduleRestart,
+  keepAlive,
 }: {
   tearDownObservers: () => Promise<void>;
   refreshListings: () => Promise<void>;
   scheduleRestart: () => void;
+  keepAlive?: (work: Promise<unknown>) => void;
 }): void {
-  void Promise.all([tearDownObservers(), refreshListings()]).catch(() => undefined);
+  const work = Promise.all([tearDownObservers(), refreshListings()]);
+  void work.catch(() => undefined);
+  keepAlive?.(work);
   scheduleRestart();
 }

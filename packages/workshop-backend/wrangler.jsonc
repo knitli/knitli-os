@@ -98,6 +98,12 @@
       "new_sqlite_classes": [
         "VoiceSession"
       ]
+    },
+    {
+      "tag": "v4-upstream-admin-audit",
+      "new_sqlite_classes": [
+        "AdminAuditDurableObject"
+      ]
     }
   ]
 }

@@ -96,7 +96,7 @@ function addChat(impl: any, id: number): void {
 
 async function commitFiles(
     impl: any, files: Record<string, string>, parents: string[] = []): Promise<string> {
-  return await impl.gitStore.writeFilesAsCommit(new Map(Object.entries(files)), {
+  return await impl.gitCache.writeFilesAsCommit(new Map(Object.entries(files)), {
     parents,
     author: { name: "Alice", email: "alice@example.com" },
     message: "test commit",
@@ -238,20 +238,25 @@ describe("createWorktree", () => {
     addChat(impl, 2);
     const hidden = await commitFiles(impl, { "private.txt": "other chat contents" });
     await impl.createWorktree("Other chat", 2, hidden);
-    const read = vi.spyOn(impl.gitCache, "readLocalObject");
+    // Any of the store's read doors: upstream's chunked store no longer funnels them all through
+    // readLocalObject(). (resolveCommitId()/fetchCommit() are where a prefix is refused, so they
+    // are not reads of the hidden commit.)
+    const reads = ["readLocalObject", "localObjectType", "hasLocalObject", "openLocalBlob"].map(
+        method => vi.spyOn(impl.gitCache, method as "readLocalObject"));
+    const readCount = () => reads.reduce((total, spy) => total + spy.mock.calls.length, 0);
     try {
       for (const length of [4, 12, 39]) {
         const prefix = hidden.slice(0, length);
         await expect(impl.createWorktree("Restricted chat", 1, prefix)).rejects.toThrow(new Error(
           `${JSON.stringify(prefix)} is not a full git commit id: expected 40 lowercase hex digits.`));
       }
-      expect(read).not.toHaveBeenCalled();
+      expect(readCount()).toBe(0);
       // Deliberately supplying the full bearer capability still grants access.
       const created = await impl.createWorktree("Shared capability", 1, hidden);
       expect(created.baseCommit).toBe(hidden);
-      expect(read).toHaveBeenCalled();
+      expect(readCount()).toBeGreaterThan(0);
     } finally {
-      read.mockRestore();
+      for (const spy of reads) spy.mockRestore();
     }
   }));
 
@@ -881,11 +886,11 @@ describe("worktree commit head advancements", () => {
 
     // Two explicit commits within one step (as two commit() calls in one executeCode would
     // buffer them): the barrier validates the previousHead chain and applies both in order.
-    let c2 = await impl.gitStore.writeChangedFilesAsCommit(
+    let c2 = await impl.gitCache.writeChangedFilesAsCommit(
         new Map([["a.txt", "two\n"]]),
         { treeBase: c1, parents: [c1], author: { name: "A", email: "a@x" },
           message: "first", timestamp: new Date(1700000000_000) });
-    let c3 = await impl.gitStore.writeChangedFilesAsCommit(
+    let c3 = await impl.gitCache.writeChangedFilesAsCommit(
         new Map([["a.txt", "three\n"]]),
         { treeBase: c1, parents: [c2], author: { name: "A", email: "a@x" },
           message: "second", timestamp: new Date(1700000001_000) });
@@ -1014,7 +1019,7 @@ describe("epoch reset advances the accepted commit", () => {
     expect(await impl.readFileAtCommit(record.pinBase, "a.txt")).toBe("one!\n");
     expect(await impl.readFileAtCommit(record.pinBase, "new.txt")).toBe("fresh\n");
     expect(await impl.readFileAtCommit(record.pinBase, "src/b.txt")).toBeUndefined();
-    let [autoCommit] = await impl.gitStore.readCommitLog(record.pinBase, { depth: 1 });
+    let [autoCommit] = impl.gitCache.readCommitLog(record.pinBase, { depth: 1 });
     expect(autoCommit.parents).toEqual([c1]);
     expect(autoCommit.author.name).toBe(USER.name);
 
@@ -1088,7 +1093,7 @@ describe("epoch reset advances the accepted commit", () => {
     // commit() would): the accept's flatten equals the head's tree, so the accepted commit
     // becomes the head instead of a new auto-commit.
     await barrier(impl, 1, { changes: [{ change: editChange(id, "a.txt", "one\n", "one!\n") }]});
-    let c2 = await impl.gitStore.writeChangedFilesAsCommit(
+    let c2 = await impl.gitCache.writeChangedFilesAsCommit(
         new Map([["a.txt", "one!\n"]]),
         { treeBase: c1, parents: [c1], author: { name: "A", email: "a@x" },
           message: "explicit", timestamp: new Date(1700000002_000) });
@@ -1116,11 +1121,11 @@ describe("epoch reset advances the accepted commit", () => {
 
     // An explicit commit built the way commit() builds one -- tree from pinBase + (empty)
     // overlay, parent on the last explicit head -- skips both auto-commits in its ancestry.
-    let explicit = await impl.gitStore.writeChangedFilesAsCommit(
+    let explicit = await impl.gitCache.writeChangedFilesAsCommit(
         new Map(), { treeBase: record.pinBase, parents: [record.headCommit],
                      author: { name: "A", email: "a@x" }, message: "explicit",
                      timestamp: new Date(1700000003_000) });
-    let [info] = await impl.gitStore.readCommitLog(explicit, { depth: 1 });
+    let [info] = impl.gitCache.readCommitLog(explicit, { depth: 1 });
     expect(info.parents).toEqual([c1]);
     expect(await impl.readFileAtCommit(explicit, "a.txt")).toBe("three\n");
   }));

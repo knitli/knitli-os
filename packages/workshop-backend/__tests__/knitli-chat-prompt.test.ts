@@ -10,6 +10,7 @@ import {
 } from "../src/admin-config.js";
 import { DEFAULT_ADMIN_CONFIG } from "../src/storage-schema/admin-settings-storage.js";
 import type { AdminSettings } from "../src/admin-settings.js";
+import type { AdminSettingActor } from "../src/admin-access.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import {
   runAgent, COMMUNICATION_GUIDANCE, SYSTEM_PROMPT, type AgentHooks,
@@ -67,6 +68,10 @@ describe("prompt preset parsing", () => {
   });
 });
 
+// Who makes every change here, as the audit log records it.
+const ACTOR: AdminSettingActor =
+    { admin: "admin", sessionId: "knitli-chat-prompt", via: "api", method: "createPromptPreset" };
+
 describe("admin preset CRUD", () => {
   it("round-trips create/update/delete and mirrors to KV", async () => {
     let stub = env.TEST_ADMIN_SETTINGS.getByName(`prompt-crud-${crypto.randomUUID()}`);
@@ -82,7 +87,7 @@ describe("admin preset CRUD", () => {
 
       expect(await instance.getAdminConfig().promptPresets).toEqual([]);
 
-      let created = await instance.createPromptPreset("  Reviewer  ", "  Review.  ");
+      let created = await instance.createPromptPreset("  Reviewer  ", "  Review.  ", ACTOR);
       expect(created.id).toBeTruthy();
       // Stored trimmed.
       expect(created).toEqual({id: created.id, name: "Reviewer", text: "Review."});
@@ -90,20 +95,20 @@ describe("admin preset CRUD", () => {
       // The KV mirror carries the new list.
       expect(parseAdminConfig(mirrored[ADMIN_CONFIG_KEY]).promptPresets).toEqual([created]);
 
-      await instance.updatePromptPreset(created.id, {name: "Senior reviewer"});
+      await instance.updatePromptPreset(created.id, {name: "Senior reviewer"}, ACTOR);
       let updated = await instance.getAdminConfig().promptPresets;
       expect(updated).toEqual([{id: created.id, name: "Senior reviewer", text: "Review."}]);
 
       // Blank patch values are ignored, not stored.
-      await instance.updatePromptPreset(created.id, {name: "   ", text: ""});
+      await instance.updatePromptPreset(created.id, {name: "   ", text: ""}, ACTOR);
       expect(await instance.getAdminConfig().promptPresets).toEqual(updated);
 
-      await expect(instance.updatePromptPreset("missing", {name: "x"}))
+      await expect(instance.updatePromptPreset("missing", {name: "x"}, ACTOR))
           .rejects.toThrow("No such prompt preset.");
-      await expect(instance.createPromptPreset("  ", "x")).rejects.toThrow("must not be blank");
-      await expect(instance.createPromptPreset("x", "  ")).rejects.toThrow("must not be blank");
+      await expect(instance.createPromptPreset("  ", "x", ACTOR)).rejects.toThrow("must not be blank");
+      await expect(instance.createPromptPreset("x", "  ", ACTOR)).rejects.toThrow("must not be blank");
 
-      await instance.deletePromptPreset(created.id);
+      await instance.deletePromptPreset(created.id, ACTOR);
       expect(await instance.getAdminConfig().promptPresets).toEqual([]);
     });
   }, 30000);
@@ -249,7 +254,7 @@ function fakeHooks(overrides: {
     describeStandardFormats: async () => "",
     listConnectableVendors: async () => [],
     consumeCapturedActions: () => undefined,
-    consumeCapturedConnectionRequests: () => [],
+    consumeCapturedDecisionRequests: () => [],
     commitAgentStep: async () => false,
     takeSteers: () => [],
     getChatModelData: () => undefined,

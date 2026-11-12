@@ -76,7 +76,7 @@ function baseHooks(overrides: Record<string, any> = {}): AgentHooks {
     describeStandardFormats: async () => "",
     listConnectableVendors: async () => [],
     consumeCapturedActions: () => undefined,
-    consumeCapturedConnectionRequests: () => [],
+    consumeCapturedDecisionRequests: () => [],
     commitAgentStep: async () => false,
     takeSteers: () => [],
     getChatModelData: () => undefined,
@@ -218,7 +218,7 @@ function toolCallSSE(calls: {id: string, name: string, args: unknown}[]): string
 
 async function commitFiles(
     impl: any, files: Record<string, string>, parents: string[] = []): Promise<string> {
-  return await impl.gitStore.writeFilesAsCommit(new Map(Object.entries(files)), {
+  return await impl.gitCache.writeFilesAsCommit(new Map(Object.entries(files)), {
     parents,
     author: { name: "Alice", email: "alice@example.com" },
     message: "test commit",
@@ -479,6 +479,16 @@ describe("worktree-binding blindfold", () => {
       readTextBlob: async (oid: string) => {
         let sep = oid.indexOf(":");
         return textByOid(oid.slice(0, sep), oid.slice(sep + 1));
+      },
+      // Upstream's grep reads blobs through a BlobReader; text this small is read whole.
+      openBlob: async (oid: string) => {
+        let sep = oid.indexOf(":");
+        let bytes = new TextEncoder().encode(textByOid(oid.slice(0, sep), oid.slice(sep + 1)));
+        return {
+          size: bytes.length,
+          read: (offset: number, length: number) => bytes.subarray(offset, offset + length),
+          pieces: function* () { yield bytes; },
+        };
       },
       hasLocalObject: () => true,
       ensureGitObjects: async () => {},

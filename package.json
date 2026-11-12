@@ -27,14 +27,17 @@
     "types:generate": "node scripts/generate-worker-configs.ts && node scripts/generate-worker-types.ts",
     "types:generated": "node scripts/generate-worker-types.ts --check --package gatekeeper-ai-executor",
     "fork:audit": "node scripts/fork/upstream-merge-audit.ts",
-    "fork:sync": "node scripts/fork/sync-upstream.ts"
+    "fork:sync": "node scripts/fork/sync-upstream.ts",
+    "api-schema:generate": "node packages/api-schema/scripts/generate.ts"
   },
   "devDependencies": {
+    "@gadgets/api-cli": "workspace:*",
     "@gadgets/scripts": "workspace:*",
     "@types/node": "26.1.0",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:",
+    "vitest": "catalog:",
     "wrangler": "catalog:"
   }
 }

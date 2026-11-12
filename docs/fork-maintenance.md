@@ -793,6 +793,14 @@ authorizes a read after fetching it.
   sessions on revocation via `RpcStub.revocable()`"), which needs a patched workerd. If that lands on
   `foundation/main`, the gate, `runRevocationCleanup()` and this whole divergence entry should be
   able to go.
+- **Seams added by the 2026-11-12 sync (foundation `34412000`).**
+  - `overseer.ts` `#resumeAgent`: upstream #1092 moved the resume-budget clear out of the resume path
+    and into `commitAgentStep` (a persisted step is progress). The fork's approval-continuation
+    recovery (`recoverApprovalTurn`, the approved-waiters fall-through and the summary message) still
+    sits before `#runAgentTurn`, but no longer clears `resumeAttempts` itself: neither the summary
+    message nor a suspend counts as progress, and a suspend deletes the execution row anyway.
+  - Upstream #1086 dropped `authorizeWebFetch`'s `mayRequestApproval` argument; the fork had no
+    caller or test of it, so nothing re-applied.
 - **Seams added by the 2026-10-30 update (foundation `0483e888`).**
   - `fork/reasoning-levels.ts`: `APP_PROVIDER_PI_SHAPE` is keyed by every `AiModelConfig["provider"]`, so
     upstream #935's `cloudflare-auto-router` needed an entry (the typecheck catches a new provider).

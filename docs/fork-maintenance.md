@@ -830,6 +830,12 @@ authorizes a read after fetching it.
     `openGatekeeperSession` refuses a missing connection, so the test seeds `{id: 7}`. The fork's
     `knitli-workspace-audience` fake gains upstream's `sessionWatchers`, and two fork tests'
     `capnweb-validate` mocks gain `skipRpcValidation` (now used by `worktree-session.ts`).
+  - Upstream #1081's native Git test bundles `agent.ts` with plain esbuild, which cannot load a
+    binding `.txt` import. `agent.ts`'s fork import of `fork/workbook-agent.ts` reached
+    `workbook-upload.ts`'s `workbook-binding.txt`; `fenceUntrustedFileName` moved beside
+    `UNTRUSTED_SPREADSHEET_NOTICE` in `chat-attachment-workbook.ts`, so `workbook-agent.ts` no
+    longer imports `workbook-upload.ts`. Keep fork modules that upstream files import free of
+    `.txt` imports.
   - `reviewedSurvivors`: all 31 acks no longer matched and were dropped; one added for
     `pendingFingerprint` (a field upstream's own copy keeps).
 - **Seams added by the 2026-11-12 sync (foundation `34412000`).**

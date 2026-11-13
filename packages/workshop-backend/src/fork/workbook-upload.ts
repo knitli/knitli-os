@@ -11,7 +11,7 @@ import type { ChatAttachmentHandle, ChatAttachmentRef, ChatAttachmentUpload }
     from "@gadgets/workshop-shared/api";
 import type { GatekeeperCaller, OverseerStorage } from "../storage-schema/overseer-storage";
 import { LINE_TERMINATORS } from "./workbook-grid";
-import { UNTRUSTED_SPREADSHEET_NOTICE, formatCount, MAX_WORKBOOK_PROMPT_BYTES } from "./chat-attachment-workbook";
+import { UNTRUSTED_SPREADSHEET_NOTICE, fenceUntrustedFileName, formatCount, MAX_WORKBOOK_PROMPT_BYTES } from "./chat-attachment-workbook";
 import type { WorkbookMeta } from "./chat-attachment-workbook";
 import { parseWorkbookIsolated } from "./workbook-parser-isolate";
 import { readSheetRange, WorkbookSessionImpl } from "./workbook-session";
@@ -19,8 +19,8 @@ import { chatWorkbookRowKey } from "./workbook-storage";
 import { SPREADSHEET_MIME_TYPES, XLS_MIME_TYPE } from "./workbook-names";
 import WORKBOOK_BINDING_TYPES from "./workbook-binding.txt";
 
-// Defined beside the session, which needs it too; re-exported for the callers of this module.
-export { UNTRUSTED_SPREADSHEET_NOTICE };
+// Defined beside the session, which needs them too; re-exported for the callers of this module.
+export { UNTRUSTED_SPREADSHEET_NOTICE, fenceUntrustedFileName };
 
 /** Raw size ceiling for a spreadsheet upload. Only its summary and row pages are stored. */
 export const MAX_WORKBOOK_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MiB
@@ -183,17 +183,6 @@ export function readWorkbookChunk(
     storage: Pick<OverseerStorage, "chatWorkbookRows">,
     fileId: string, sheetIndex: number, chunkIndex: number): Uint8Array | undefined {
   return storage.chatWorkbookRows.get(chatWorkbookRowKey(fileId, sheetIndex, chunkIndex))?.rows;
-}
-
-// Render a filename chosen outside this workspace as a Markdown code span, so it renders verbatim
-// and cannot forge the sentence around it. The delimiter is a backtick run longer than any run in
-// the name; a name that starts or ends with a backtick is padded.
-/** A name chosen outside this workspace as a code span; see the comment above. */
-export function fenceUntrustedFileName(name: string): string {
-  let fence = "`";
-  while (name.includes(fence)) fence += "`";
-  let pad = name.startsWith("`") || name.endsWith("`") ? " " : "";
-  return `${fence}${pad}${name}${pad}${fence}`;
 }
 
 // The agent-facing section of the binding's type declarations: everything below the marker.

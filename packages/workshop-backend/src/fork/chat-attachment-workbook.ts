@@ -106,6 +106,17 @@ export const MAX_INLINE_SHEET_BYTES = 32 * 1024;
 /** Ceiling on the outline of one sheet too large to show whole. */
 export const MAX_SHEET_OUTLINE_BYTES = 6 * 1024;
 
+// Render a filename chosen outside this workspace as a Markdown code span, so it renders verbatim
+// and cannot forge the sentence around it. The delimiter is a backtick run longer than any run in
+// the name; a name that starts or ends with a backtick is padded.
+/** A name chosen outside this workspace as a code span; see the comment above. */
+export function fenceUntrustedFileName(name: string): string {
+  let fence = "`";
+  while (name.includes(fence)) fence += "`";
+  let pad = name.startsWith("`") || name.endsWith("`") ? " " : "";
+  return `${fence}${pad}${name}${pad}${fence}`;
+}
+
 /**
  * Heads every spreadsheet text the model reads, in the attachment summary and in readSheet results.
  * A workbook may come from an outside sender, so its cells are data to report on, never

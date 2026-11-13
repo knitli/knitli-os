@@ -1,6 +1,8 @@
 // The agent-facing text of spreadsheet attachments, ported from twinprime19/cloudflare-os. agent.ts
 // holds only the seam calls; the wording lives here.
-import { UNTRUSTED_SPREADSHEET_NOTICE, fenceUntrustedFileName } from "./workbook-upload";
+// Not workbook-upload: agent.ts imports this module, and that one imports a binding .txt that
+// only wrangler-style bundlers can load (upstream's native Git test bundles agent.ts with esbuild).
+import { UNTRUSTED_SPREADSHEET_NOTICE, fenceUntrustedFileName } from "./chat-attachment-workbook";
 
 /** The readSheet tool's description. */
 export const READ_SHEET_TOOL_DESCRIPTION = `

@@ -44,3 +44,25 @@ export function hasRootPromptFile(paths: Iterable<string>): boolean {
   }
   return false;
 }
+
+/** The refusal a worktree replica gets, the same an unreplicable worktree gets upstream. */
+export const REPLICA_REFUSAL = "This worktree can't be replicated.";
+
+/**
+ * Refuses a worktree replica's pull while any of `commits` holds a prompt file at any depth.
+ * A replica (upstream's `worktree-replica.ts`) is served the worktree's trees and history
+ * unfiltered, and agent code can reach one through its worktree binding's `getReplicator()`, so
+ * the blindfold cannot hide a prompt file from it. The refusal matches upstream's for a worktree
+ * that cannot be replicated at all, so it does not confirm that a prompt file exists.
+ * Known gap: a prompt removed from every checked commit but still in older history.
+ */
+export async function assertReplicaHidesNoPrompt(
+    git: { listCommitTreePaths(commit: string, path?: string, options?: { recursive?: boolean })
+        : Promise<{ path: string }[]> },
+    commits: Iterable<string | undefined>): Promise<void> {
+  for (let commit of new Set(commits)) {
+    if (commit === undefined) continue;
+    let paths = await git.listCommitTreePaths(commit, undefined, { recursive: true });
+    if (paths.some(entry => isPromptFileAnywhere(entry.path))) throw new Error(REPLICA_REFUSAL);
+  }
+}

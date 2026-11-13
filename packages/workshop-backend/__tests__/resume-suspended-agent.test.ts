@@ -10,7 +10,7 @@ import type {
 import { FIXTURE_EPOCH, openFakeOverseer } from "./fixtures.js";
 import { currentApprovalWaiters } from "../src/fork/approval-continuation.js";
 
-vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined }));
+vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined, skipRpcValidation: () => () => undefined }));
 
 const CHAT_ID = 1;
 const ACTION_ID = 41;

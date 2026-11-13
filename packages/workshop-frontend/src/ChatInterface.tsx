@@ -65,8 +65,11 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import styles from "./ChatInterface.module.css";
 import {
+  cacheModels,
+  getCachedModels,
   getStoredSelectedModel,
   persistSelectedModel,
+  syncSelectedModel,
 } from "./modelSelection";
 import {
   Overseer,
@@ -2574,6 +2577,7 @@ function inferChatAgentFromMessages(messages: AiChatMessage[]): AiChatAuthorInfo
 }
 
 function fallbackToStoredModelSelection(
+  userId: string | undefined,
   modelId: string | null,
   availableModels: AiChatAuthorInfo[],
 ): string | null {
@@ -2581,7 +2585,7 @@ function fallbackToStoredModelSelection(
     return modelId;
   }
 
-  return getStoredSelectedModel(availableModels);
+  return getStoredSelectedModel(userId, availableModels);
 }
 
 interface ChatInterfaceProps {
@@ -2616,7 +2620,8 @@ interface ChatInterfaceProps {
   onConsumeConsoleLogs: () => string;
   onDiscardConsoleLogs: () => void;
   onChatCountChange?: (count: number, hasChatZero: boolean) => void;
-  onAgentActiveChange?: (chatId: number, isActive: boolean) => void;
+  // With no selected chat, report whether any chat in the workspace is running.
+  onAgentActiveChange?: (chatId: number | null, isActive: boolean) => void;
   // Called after an auto-approval rule is enabled from the chat thread, so the Activity pane's
   // Auto-approval list reflects it without a reload.
   onAutoApproveChange?: () => void;
@@ -2842,7 +2847,12 @@ function ChatInterface({
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
-  const { currentUser, authenticatedApi } = useAuthenticatedApi();
+  const { authenticatedApi, currentUser, isCurrentUserConfirmed } = useAuthenticatedApi();
+  // Whose remembered models to show: nobody's until the server has confirmed who is signed in.
+  const userId = isCurrentUserConfirmed ? currentUser?.id : undefined;
+  // Read through a ref so that the chat subscription is not restarted when only this changes.
+  const authenticatedApiRef = useRef(authenticatedApi);
+  authenticatedApiRef.current = authenticatedApi;
   const initialVoiceModelRef = useRef(initialVoice);
   if (initialVoiceModelRef.current?.chatId !== selectedChatId) initialVoiceModelRef.current = undefined;
   const unread = useUnreadState();
@@ -2953,9 +2963,8 @@ function ChatInterface({
   const [processingConnections, setProcessingConnections] = useState<Set<string>>(
     new Set(),
   );
-  const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>(
-    [],
-  );
+  // Starts on what this browser last saw, so a new chat's selector doesn't wait on the server.
+  const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>(() => getCachedModels(userId));
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   // Pending effort for the not-yet-created chat (new-chat composer). In-chat composers read
   // the value from the chat's cached metadata instead; see handleEffortChange.
@@ -2993,6 +3002,7 @@ function ChatInterface({
   const [promptOptions, setPromptOptions] =
     useState<PromptPresetOption[] | null>(null);
   const promptWriteRef = useRef<Promise<void> | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(true);
   const [sidebarActiveTab, setSidebarActiveTab] = useState<
     "chat" | "connections"
   >("chat");
@@ -3531,18 +3541,18 @@ function ChatInterface({
   // Names the chat's own model in the composer even when the picker no longer offers it.
   const chatAgent = activeAgent ?? inferChatAgentFromMessages(currentMessages);
 
-  // Notify parent when agent active state changes
+  const isViewActive = selectedChatId === null
+    ? chatList.some(chat => !!chat.activeAgent) : isAgentActive;
   const onAgentActiveChangeRef = useRef(onAgentActiveChange);
   onAgentActiveChangeRef.current = onAgentActiveChange;
-  const previousAgentStateRef = useRef({chatId: selectedChatId, active: isAgentActive});
+  const previousAgentStateRef = useRef<{chatId: number | null; active: boolean} | null>(null);
   useEffect(() => {
-    let previous = previousAgentStateRef.current;
-    if (selectedChatId !== null &&
-        (selectedChatId !== previous.chatId || isAgentActive !== previous.active)) {
-      onAgentActiveChangeRef.current?.(selectedChatId, isAgentActive);
+    const previous = previousAgentStateRef.current;
+    if (!previous || selectedChatId !== previous.chatId || isViewActive !== previous.active) {
+      onAgentActiveChangeRef.current?.(selectedChatId, isViewActive);
     }
-    previousAgentStateRef.current = {chatId: selectedChatId, active: isAgentActive};
-  }, [isAgentActive, selectedChatId]);
+    previousAgentStateRef.current = {chatId: selectedChatId, active: isViewActive};
+  }, [isViewActive, selectedChatId]);
 
   // Loads the page before the oldest message on screen. Held in a ref because the scroll handler is
   // built once, while the loader closes over state that changes each render.
@@ -3616,7 +3626,7 @@ function ChatInterface({
   // Update selected model when switching chats
   useEffect(() => {
     if (selectedChatId === null) {
-      setSelectedModel(getStoredSelectedModel(availableModels));
+      setSelectedModel(getStoredSelectedModel(userId, availableModels));
     } else {
       // For existing threads:
       // 1. If an AI agent is currently active, use that agent's model
@@ -3629,10 +3639,11 @@ function ChatInterface({
         setSelectedModel(initialVoiceModelRef.current.modelId);
       } else {
         // 2. Otherwise, the one that last spoke.
-        setSelectedModel(fallbackToStoredModelSelection(chatAgent?.id ?? null, availableModels));
+        setSelectedModel(
+          fallbackToStoredModelSelection(userId, chatAgent?.id ?? null, availableModels));
       }
     }
-  }, [selectedChatId, availableModels, chatAgent?.id]);
+  }, [selectedChatId, availableModels, chatAgent?.id, userId]);
 
   // Keep the ref in sync with selectedChatId state
   useEffect(() => {
@@ -4097,9 +4108,10 @@ function ChatInterface({
 
           // After subscribing, load the list of chats and models
           // This is safe because subscription will catch any new activity
-          const [chats, models] = await Promise.all([
+          const [chats, models, syncedUserId] = await Promise.all([
             overseer.listChats(),
             overseer.listModels(),
+            syncSelectedModel(authenticatedApiRef.current),
           ]);
 
           chats.forEach((chat) => {
@@ -4108,11 +4120,13 @@ function ChatInterface({
           bumpChatListVersion();
           setChatListReady(true);
 
+          // The effect that follows the selected chat picks the model from these.
+          cacheModels(syncedUserId, models);
           setAvailableModels(models);
           // Fork: the prompt selector merges deployment presets with the user's prompt-marked
           // library blueprints (filtered on the existing library, no new library system). Loaded
           // beside the chat list, so a failure here never keeps conversations from loading.
-          void Promise.all([overseer.listPromptPresets(), authenticatedApi.listLibraryBlueprints()])
+          void Promise.all([overseer.listPromptPresets(), authenticatedApiRef.current.listLibraryBlueprints()])
             .then(([presets, library]) => {
               if (!isMounted) return;
               setPromptOptions([
@@ -4126,12 +4140,12 @@ function ChatInterface({
               ]);
             })
             .catch((err) => { logRpcFailure("Failed to load prompt options:", err); });
-
-          setSelectedModel(getStoredSelectedModel(models));
+          setModelsLoading(false);
 
           forceUpdate();
         }
       } catch (err) {
+        if (isMounted) setModelsLoading(false);
         if (!logRpcFailure("Failed to subscribe to chats:", err)) {
           reportIssue('chat.subscription-load', err)
           toasts.add({ title: "Unable to load conversations", variant: "error" });
@@ -4436,7 +4450,7 @@ function ChatInterface({
     initialVoiceModelRef.current = undefined;
     initialVoice?.onConsumed();
     setSelectedModel(modelId);
-    persistSelectedModel(modelId);
+    persistSelectedModel(authenticatedApi, userId, modelId);
   };
 
   // Handle reasoning-effort change: staged for the new-chat composer, written immediately
@@ -5944,6 +5958,7 @@ function ChatInterface({
             isAgentActive={false}
             models={availableModels}
             selectedModel={selectedModel === null ? null : { id: selectedModel }}
+            modelsLoading={modelsLoading}
             onModelChange={handleModelChange}
             effortControl={effortLevels === null ? undefined : {
               levels: effortLevels.levels,
@@ -7034,6 +7049,7 @@ function ChatInterface({
                       id: selectedModel,
                       name: chatAgent?.id === selectedModel ? chatAgent.name : undefined,
                     }}
+                    modelsLoading={modelsLoading}
                     onModelChange={handleModelChange}
                     effortControl={effortLevels === null ? undefined : {
                       levels: effortLevels.levels,

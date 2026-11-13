@@ -50,6 +50,21 @@ test("comments do not count as semantic change", () => {
   );
 });
 
+test("comment markers inside strings do not hide the code between them", () => {
+  const glob = `const a = "https://github.com/*/*";\n`;
+  const before = `${glob}let x = 1;\n${glob}`;
+  const after = `${glob}let x = 1;\nput({id: 7});\n${glob}`;
+  assert.notEqual(normalizeForFormatComparison(before), normalizeForFormatComparison(after));
+  assert.notEqual(
+    normalizeForFormatComparison(`let u = "https://a"; f(1);`),
+    normalizeForFormatComparison(`let u = "https://a"; f(2);`),
+  );
+  assert.equal(
+    normalizeForFormatComparison(`let u = "a"; // it's 'quoted'\nf(1);`),
+    normalizeForFormatComparison(`let u = "a";\nf(1);`),
+  );
+});
+
 test("fork-owned trees are exempt, upstream-owned files are not", () => {
   assert.equal(isForkOwned("packages/gatekeeper-ai-executor/src/index.ts"), true);
   assert.equal(isForkOwned("scripts/fork/upstream-merge-audit.ts"), true);

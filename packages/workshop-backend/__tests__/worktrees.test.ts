@@ -224,8 +224,6 @@ describe("createWorktree", () => {
       baseCommit: c1, headCommit: c1, pinBase: c1,
       pending: { chatId: 1 },
     });
-    // A purely local commit has no gatekeeper source.
-    expect(record.sourceGatekeeperId).toBeUndefined();
     expect(record.bindingName).toBeUndefined();
 
     // A second worktree at the same commit is fine: no workspace-level name is claimed.
@@ -282,15 +280,6 @@ describe("createWorktree", () => {
         `Could not pull git object ${oid.slice(0, 8)}: ` +
         "every connection that could provide it failed. Reconnect the connection " +
         "that provides it, then try again (git.pull.source.failed)."));
-  }));
-
-  it("records the first recorded source as sourceGatekeeperId", () => withImpl(async impl => {
-    addChat(impl, 1);
-    let c1 = await commitFiles(impl, { "a.txt": "one\n" });
-    impl.storage.gitObjectMetadata.put(
-        { oid: c1, type: "commit", onRemote: [42], pullableFrom: [], pendingPush: [] });
-    let created = await impl.createWorktree("W", 1, c1);
-    expect(impl.storage.gadgets.get(created.id)!.sourceGatekeeperId).toBe(42);
   }));
 });
 

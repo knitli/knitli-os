@@ -793,6 +793,56 @@ authorizes a read after fetching it.
   sessions on revocation via `RpcStub.revocable()`"), which needs a patched workerd. If that lands on
   `foundation/main`, the gate, `runRevocationCleanup()` and this whole divergence entry should be
   able to go.
+- **Worktree replicas and the prompt-file blindfold (guarded 2026-11-13; policy still open).**
+  Upstream #1081 gives a worktree a `WorktreeReplicator` (`worktree-replica.ts`, via the binding's
+  `getReplicator()`): a full Git replica for a container to run commands in. Its `gitPull()` serves
+  the worktree's trees and history unfiltered and needs no approval queue, and agent code in
+  `executeCode` can call `getReplicator()` on its own worktree binding, so a `PROMPT.md` hidden by
+  the blindfold (`fork/prompt-files.ts`) was readable that way (found by the PR #92 review).
+  - **Guard:** `OverseerImpl.worktreeGitPull()`, the one path every replica byte leaves through
+    (snapshots are served by ID through it too), calls `assertReplicaHidesNoPrompt()` on the
+    worktree's head and the running execution's pin base, and refuses with upstream's own
+    "can't be replicated" message, so the refusal does not confirm a prompt file exists. Test:
+    `__tests__/knitli-replica-blindfold.test.ts`.
+  - **Known gaps:** a prompt present only in older history (removed from both checked commits)
+    is not caught; `submit()` can still change prompt files, though only after a pull, which the
+    guard refuses. Each pull lists the checked trees recursively.
+  - **Still to decide** before a container gatekeeper ships: keep refusing such worktrees, or
+    strip prompt files from snapshots and refuse submissions that touch them.
+- **Seams added by the 2026-11-13 sync (foundation `769474eb`).**
+  - `worktree-session.ts` `writeBytes`: upstream #1081 rechecks writability after a re-root, around
+    the fork's blindfold refusal and pre-write schema validation; upstream's post-write
+    `validateCodeChangeSchema` stays dropped (the fork validates before the blob is stored).
+  - `user.ts` `createResourceGatekeeper`: upstream #1106 validates a suggested `configuration`
+    first; the fork's ambient-vendor `#assertResourceEnabled(..., ambient)` follows.
+  - `ChatInterface.tsx`: upstream #1119/#1124 made the remembered model per-user and server-synced
+    (`getStoredSelectedModel(userId, ...)`, `modelsLoading`); the fork's initial-voice model choice
+    passes `userId` through, and the prompt-option load sits beside upstream's model load (reading
+    `authenticatedApiRef`, as upstream's does).
+  - `GadgetEditor.tsx`: upstream #1121's `isAgentActive` already requires a selected chat, so
+    `useWorkspaceIdle(isAgentActive)` dropped the fork's own guard.
+  - `GadgetUI.tsx`, `useWorkspaceOpen.ts`: upstream #1116's `await gadget` and reopen backoff sit
+    beside the fork's pause waits, do-reset reopen and heartbeat; the fork's deferred `giveUp` timer
+    sets upstream's `{ message }` error shape. The fork's do-reset tests still live in upstream's
+    `useWorkspaceOpen.test.tsx` and conflicted again; moving them to a fork-owned file is the next
+    cheap win.
+  - Upstream test fakes extended additively, as the other `ChatInterface.*.test.tsx` fakes are:
+    `ChatInterface.activity.test.tsx` (new upstream, #1121) gets a stable `authenticatedApi` with
+    `getModelReasoning`/`listLibraryBlueprints` and `listPromptPresets` on its overseer;
+    `useWorkspaceOpen.test.tsx`'s `openOverseer` gets `getMetadata` for the fork's heartbeat.
+  - `worktree-replica.test.ts` (new upstream, #1081) opens gatekeeper sessions on connection 7
+    without a record; the fork's `assertGatekeeperObserverReadiness()` gate in
+    `openGatekeeperSession` refuses a missing connection, so the test seeds `{id: 7}`. The fork's
+    `knitli-workspace-audience` fake gains upstream's `sessionWatchers`, and two fork tests'
+    `capnweb-validate` mocks gain `skipRpcValidation` (now used by `worktree-session.ts`).
+  - Upstream #1081's native Git test bundles `agent.ts` with plain esbuild, which cannot load a
+    binding `.txt` import. `agent.ts`'s fork import of `fork/workbook-agent.ts` reached
+    `workbook-upload.ts`'s `workbook-binding.txt`; `fenceUntrustedFileName` moved beside
+    `UNTRUSTED_SPREADSHEET_NOTICE` in `chat-attachment-workbook.ts`, so `workbook-agent.ts` no
+    longer imports `workbook-upload.ts`. Keep fork modules that upstream files import free of
+    `.txt` imports.
+  - `reviewedSurvivors`: all 31 acks no longer matched and were dropped; one added for
+    the Google gatekeeper's simulation-cache fingerprint field (upstream's own copy keeps it).
 - **Seams added by the 2026-11-12 sync (foundation `34412000`).**
   - `overseer.ts` `#resumeAgent`: upstream #1092 moved the resume-budget clear out of the resume path
     and into `commitAgentStep` (a persisted step is progress). The fork's approval-continuation
@@ -1027,6 +1077,9 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   `enabledResources`: no single pattern passes the cap (2 KiB each), so it enables five near-limit
   patterns and asserts the fifth's before/after excerpts (offset 100 before the lists' first
   difference), then disables them; upstream's version disables one 12,000-character pattern.
+- **Upstream integration tests edited for it (2026-11-13 sync):** `google-drive-comments.test.ts`
+  and `google-drive-sharing.test.ts` (new upstream, #1065/#1068) get the same one-line
+  `enableBoundGatekeeperResources(harness)` call.
 
 ### Ambient-provisioned accounts bypass resource policy at minting
 
@@ -1081,6 +1134,11 @@ happens before any object read.
 - **Test:** `thin-pack gatekeeper isolation` in `packages/workshop-backend/__tests__/git-cache.test.ts`.
 - **At sync:** Tier 2. If upstream reshapes the pack decode, keep `resolveBase` behind the same
   visibility check as the scoped read view.
+- **2026-11-13 sync:** upstream #1081 added `selfContained` packs (bases must come from the pack
+  itself) and a null `gatekeeperId` for a worktree replica's submission. Both checks now apply:
+  upstream's `usable()` and the fork's `possessed()`. A null gatekeeper has no scoped view, so it
+  borrows a stored base only when the pack is `selfContained` (the one caller,
+  `worktree-replica.ts`, always is); otherwise it fails closed.
 
 ### Git pull failures are reported categorically
 

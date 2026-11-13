@@ -3004,9 +3004,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /**
    * Mint a gatekeeper class simulating a new resource of a creatable type (see
    * GatekeeperVendor.createResource()). It belongs to no account; the returned `action` is the
-   * creation to queue.
+   * creation to queue. A suggested `configuration` must be a URL, for a type that describes one
+   * (see SupportedResource.creationConfigurationDescription).
    */
-  async createResourceGatekeeper(vendorId: string, resourceUrlPattern: string, title: string)
+  async createResourceGatekeeper(vendorId: string, resourceUrlPattern: string, title: string,
+                                 configuration?: string)
       : Promise<{class: DurableObjectClass<Gatekeeper<any>>, typeUrlPattern: string,
                   action: ActionDescription}> {
     let vendor = this.vendors.get(vendorId);
@@ -3016,6 +3018,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!advertised) {
       throw new Error(`This vendor does not advertise creation of "${resourceUrlPattern}". ` +
           "Call listConnectableResources to see the available creations.");
+    }
+    let takes = advertised.creationConfigurator && advertised.creationConfigurationDescription;
+    if (configuration !== undefined && !takes) {
+      throw new Error(`A new ${advertised.title} takes no configuration. Leave configuration out.`);
+    }
+    if (configuration !== undefined && !URL.canParse(configuration)) {
+      throw new Error(`configuration must be ${takes}.`);
     }
     // Fork: a creation names no account, so derive ambience from the vendor, as
     // listGatekeeperVendors does. Ambient vendors have no resource toggles; without this the

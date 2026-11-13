@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import { makeActionStorage, openFakeOverseer } from "./fixtures.js";
 
-vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined }));
+vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined, skipRpcValidation: () => () => undefined }));
 
 const ISSUE: ActionKind = { tag: "issue.create", label: "Create issues" };
 const WRITE: ActionKind = { tag: "memory.write", label: "Write to my working memory" };

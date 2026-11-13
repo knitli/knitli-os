@@ -92,6 +92,7 @@ export const ChatComposer = ({
   isAgentActive,
   models,
   selectedModel,
+  modelsLoading,
   onModelChange,
   pendingConsoleLogCount = 0,
   consoleLogPreview = "",
@@ -140,6 +141,8 @@ export const ChatComposer = ({
   isAgentActive: boolean;
   models: AiChatAuthorInfo[];
   selectedModel: SelectedModel;
+  /** True until `models` and the model a new chat starts on have loaded. */
+  modelsLoading?: boolean;
   onModelChange: (modelId: string | null) => void;
   /**
    * Per-turn reasoning-effort control, rendered beside the model selector. Absent while the
@@ -1169,6 +1172,7 @@ export const ChatComposer = ({
               <ComposerModelSelector
                 models={models}
                 selectedModel={selectedModel}
+                loading={modelsLoading}
                 onModelChange={onModelChange}
               />
               {effortControl !== undefined && (

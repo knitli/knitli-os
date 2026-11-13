@@ -793,6 +793,36 @@ authorizes a read after fetching it.
   sessions on revocation via `RpcStub.revocable()`"), which needs a patched workerd. If that lands on
   `foundation/main`, the gate, `runRevocationCleanup()` and this whole divergence entry should be
   able to go.
+- **Worktree replicas bypass the prompt-file blindfold (open, 2026-11-13).** Upstream #1081 gives
+  a gatekeeper a `WorktreeReplicator` (`worktree-replica.ts`, via `Worktree.getReplicator()`): a
+  full Git replica of the worktree for a container to run commands in, and a `submit()` that
+  installs the container's resulting tree. Neither path knows the fork's `PROMPT.md` blindfold
+  (`fork/prompt-files.ts`): `snapshot()`/`gitPull()` serve prompt files to the replica, so an agent
+  running `cat PROMPT.md` in a container would read them, and `submit()` can change or delete them.
+  No gatekeeper in this repo calls `getReplicator()` yet (only the integration test fixture), so
+  nothing is exposed today. Before a container gatekeeper ships, decide: refuse replication of a
+  worktree that holds a prompt file, strip prompt files from snapshots and refuse submissions that
+  touch them, or accept that container access reveals prompts. This is a product decision, so the
+  sync did not pick one.
+- **Seams added by the 2026-11-13 sync (foundation `769474eb`).**
+  - `worktree-session.ts` `writeBytes`: upstream #1081 rechecks writability after a re-root, around
+    the fork's blindfold refusal and pre-write schema validation; upstream's post-write
+    `validateCodeChangeSchema` stays dropped (the fork validates before the blob is stored).
+  - `user.ts` `createResourceGatekeeper`: upstream #1106 validates a suggested `configuration`
+    first; the fork's ambient-vendor `#assertResourceEnabled(..., ambient)` follows.
+  - `ChatInterface.tsx`: upstream #1119/#1124 made the remembered model per-user and server-synced
+    (`getStoredSelectedModel(userId, ...)`, `modelsLoading`); the fork's initial-voice model choice
+    passes `userId` through, and the prompt-option load sits beside upstream's model load (reading
+    `authenticatedApiRef`, as upstream's does).
+  - `GadgetEditor.tsx`: upstream #1121's `isAgentActive` already requires a selected chat, so
+    `useWorkspaceIdle(isAgentActive)` dropped the fork's own guard.
+  - `GadgetUI.tsx`, `useWorkspaceOpen.ts`: upstream #1116's `await gadget` and reopen backoff sit
+    beside the fork's pause waits, do-reset reopen and heartbeat; the fork's deferred `giveUp` timer
+    sets upstream's `{ message }` error shape. The fork's do-reset tests still live in upstream's
+    `useWorkspaceOpen.test.tsx` and conflicted again; moving them to a fork-owned file is the next
+    cheap win.
+  - `reviewedSurvivors`: all 31 acks no longer matched and were dropped; one added for
+    `pendingFingerprint` (a field upstream's own copy keeps).
 - **Seams added by the 2026-11-12 sync (foundation `34412000`).**
   - `overseer.ts` `#resumeAgent`: upstream #1092 moved the resume-budget clear out of the resume path
     and into `commitAgentStep` (a persisted step is progress). The fork's approval-continuation
@@ -1081,6 +1111,11 @@ happens before any object read.
 - **Test:** `thin-pack gatekeeper isolation` in `packages/workshop-backend/__tests__/git-cache.test.ts`.
 - **At sync:** Tier 2. If upstream reshapes the pack decode, keep `resolveBase` behind the same
   visibility check as the scoped read view.
+- **2026-11-13 sync:** upstream #1081 added `selfContained` packs (bases must come from the pack
+  itself) and a null `gatekeeperId` for a worktree replica's submission. Both checks now apply:
+  upstream's `usable()` and the fork's `possessed()`. A null gatekeeper has no scoped view, so it
+  borrows a stored base only when the pack is `selfContained` (the one caller,
+  `worktree-replica.ts`, always is); otherwise it fails closed.
 
 ### Git pull failures are reported categorically
 

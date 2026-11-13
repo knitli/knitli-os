@@ -481,7 +481,7 @@ export default function GadgetEditor() {
   const params = useParams({ strict: false }) as { id?: string }
   const id = params.id
   const navigate = useNavigate()
-  const { authenticatedApi } = useAuthenticatedApi()
+  const { authenticatedApi, currentUser, isCurrentUserConfirmed } = useAuthenticatedApi()
   const publicApi = useRpcStub()
 
   const { chat: chatParam, w: workpieceParam, showChat: showChatParam } =
@@ -695,7 +695,9 @@ export default function GadgetEditor() {
   const [chatCount, setChatCount] = useState<number | null>(null)
   const [hasChatZero, setHasChatZero] = useState(false)
   const [_hasBindings, setHasBindings] = useState(false)
-  const [isAgentActive, setIsAgentActive] = useState(false)
+  const [agentActivity, setAgentActivity] = useState<{chatId: number | null; active: boolean}>({
+    chatId: null, active: false,
+  })
   // The workpieces any chat proposes changes to (see AiChatMetadata.proposedChangeWorkpieces).
   const [anyChatProposedWorkpieces, setAnyChatProposedWorkpieces] =
     useState<readonly WorkpieceId[]>([])
@@ -737,10 +739,11 @@ export default function GadgetEditor() {
   const pinInitialChatSelection =
     singleInitialChat && !hasCommittedCode && !userNavigatedToList
   const effectiveSelectedChatId = selectedChatId ?? (pinInitialChatSelection ? 0 : null)
+  const isViewActive = agentActivity.chatId === effectiveSelectedChatId && agentActivity.active
+  const isAgentActive = effectiveSelectedChatId !== null && isViewActive
   // Idle tabs drop their socket so the workspace's Durable Objects can go idle, never mid-stream.
-  // Nothing resumes by itself: sending, deciding an action, or the Paused chip does. isAgentActive goes stale when the chat list replaces the chat (no chat reports in), so it only
-  // counts while a chat is selected.
-  useWorkspaceIdle(isAgentActive && effectiveSelectedChatId !== null)
+  // Nothing resumes by itself: sending, deciding an action, or the Paused chip does.
+  useWorkspaceIdle(isAgentActive)
   const { request: voiceStartRequest, consume: consumeVoiceStart } = useInitialVoiceChat(id, effectiveSelectedChatId)
 
   // ── workpiece selection ──────────────────────────────────────────────────────
@@ -1130,9 +1133,13 @@ export default function GadgetEditor() {
     if (showsNoUi) showCodeIfNoUi()
   }, [showCodeIfNoUi])
 
-  const handleAgentActiveChange = useCallback((chatId: number, isActive: boolean) => {
+  const handleAgentActiveChange = useCallback((chatId: number | null, isActive: boolean) => {
     if (chatId !== selectedChatIdRef.current) return
-    setIsAgentActive(isActive)
+    setAgentActivity({chatId, active: isActive})
+    if (chatId === null) {
+      turnOutputRef.current = null
+      return
+    }
     if (isActive) {
       turnOutputRef.current = {
         chatId,
@@ -2009,8 +2016,10 @@ export default function GadgetEditor() {
       {/* ═══ BODY ═════════════════════════════════════════════════════════════ */}
       <div className="flex flex-1 min-h-0 relative overflow-hidden">
 
-        {isAgentActive && (
+        {isViewActive && (
           <div
+            role="progressbar"
+            aria-label="Agent working"
             className="absolute left-0 z-10 h-0 max-md:!right-0 max-md:!top-0"
             style={{ top: simpleMode ? 0 : TABBAR_H, right: outputRailWidth }}
           >
@@ -2400,6 +2409,8 @@ export default function GadgetEditor() {
               }}
               overseer={overseer.stub}
               publicApi={publicApi}
+              authenticatedApi={authenticatedApi}
+              userId={isCurrentUserConfirmed ? currentUser?.id : undefined}
               onClose={() => setBlueprintUpdateDialogOpen(false)}
               onProposed={chatId => {
                 setBlueprintUpdateDialogOpen(false)

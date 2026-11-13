@@ -125,14 +125,22 @@ function changedFiles(from: string, to: string): Set<string> {
 }
 
 /**
+ * A comment, or a string literal to step over so that comment markers inside it stay put: a
+ * glob such as `"https://github.com/*\/*"` must not open a block comment that swallows every line
+ * up to the next string holding a `*\/` (which once hid a seam line from this audit). Quote and
+ * double-quote strings end at the line; a stray quote therefore protects at most its own line.
+ */
+const COMMENT_OR_STRING =
+    /"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\[\s\S])*`|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g;
+
+/**
  * Normalises away everything a reformat can change but a compiler cannot see: comments, all
  * whitespace, parentheses around a lone arrow parameter, and trailing commas before a closer.
  * Deliberately crude -- it only has to be good enough to separate "reflowed" from "rewritten", and
  * reading a reflow as semantic is the safe direction to err in.
  */
 export function normalizeForFormatComparison(source: string): string {
-  let text = source.replaceAll(/\/\*[\s\S]*?\*\//g, "");
-  text = text.replaceAll(/\/\/[^\n]*/g, "");
+  let text = source.replaceAll(COMMENT_OR_STRING, match => match.startsWith("/") ? "" : match);
   text = text.replaceAll(/\s+/g, " ");
   text = text.replaceAll(/\(\s*([A-Za-z_$][\w$]*)\s*\)\s*=>/g, "$1 =>");
   text = text.replaceAll(/,\s*([)\]}])/g, "$1");

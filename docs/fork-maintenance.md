@@ -837,7 +837,7 @@ authorizes a read after fetching it.
     longer imports `workbook-upload.ts`. Keep fork modules that upstream files import free of
     `.txt` imports.
   - `reviewedSurvivors`: all 31 acks no longer matched and were dropped; one added for
-    `pendingFingerprint` (a field upstream's own copy keeps).
+    the Google gatekeeper's simulation-cache fingerprint field (upstream's own copy keeps it).
 - **Seams added by the 2026-11-12 sync (foundation `34412000`).**
   - `overseer.ts` `#resumeAgent`: upstream #1092 moved the resume-budget clear out of the resume path
     and into `commitAgentStep` (a persisted step is progress). The fork's approval-continuation

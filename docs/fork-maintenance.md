@@ -821,6 +821,10 @@ authorizes a read after fetching it.
     sets upstream's `{ message }` error shape. The fork's do-reset tests still live in upstream's
     `useWorkspaceOpen.test.tsx` and conflicted again; moving them to a fork-owned file is the next
     cheap win.
+  - Upstream test fakes extended additively, as the other `ChatInterface.*.test.tsx` fakes are:
+    `ChatInterface.activity.test.tsx` (new upstream, #1121) gets a stable `authenticatedApi` with
+    `getModelReasoning`/`listLibraryBlueprints` and `listPromptPresets` on its overseer;
+    `useWorkspaceOpen.test.tsx`'s `openOverseer` gets `getMetadata` for the fork's heartbeat.
   - `reviewedSurvivors`: all 31 acks no longer matched and were dropped; one added for
     `pendingFingerprint` (a field upstream's own copy keeps).
 - **Seams added by the 2026-11-12 sync (foundation `34412000`).**
@@ -1057,6 +1061,9 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   `enabledResources`: no single pattern passes the cap (2 KiB each), so it enables five near-limit
   patterns and asserts the fifth's before/after excerpts (offset 100 before the lists' first
   difference), then disables them; upstream's version disables one 12,000-character pattern.
+- **Upstream integration tests edited for it (2026-11-13 sync):** `google-drive-comments.test.ts`
+  and `google-drive-sharing.test.ts` (new upstream, #1065/#1068) get the same one-line
+  `enableBoundGatekeeperResources(harness)` call.
 
 ### Ambient-provisioned accounts bypass resource policy at minting
 

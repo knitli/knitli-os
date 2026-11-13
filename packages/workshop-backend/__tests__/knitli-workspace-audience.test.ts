@@ -11,6 +11,7 @@ import type { WorkspaceAudience } from "@gadgets/workshop-shared/gatekeeper";
 import { serializeAdminConfig } from "../src/admin-config.js";
 import { DEFAULT_ADMIN_CONFIG } from "../src/storage-schema/admin-settings-storage.js";
 import { OverseerDurableObject } from "../src/overseer.js";
+import { SessionWatchers } from "../src/session-watchers.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -453,6 +454,7 @@ describe("a hook firing's queue", () => {
       env: { BLUEPRINTS: { get: async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG) } },
       impl: {
         assertGatekeeperUsable: () => {},
+        sessionWatchers: new SessionWatchers(),
         storage: {
           boundHooks: { get: () => ({ ...hook, gatekeeperId: 1 }) },
           gatekeepers: { get: () => undefined },

@@ -302,6 +302,7 @@ async function withCommands(test: (impl: Impl, id: number, base: string) => Prom
   await runInDurableObject(testEnv.TEST_OVERSEER.getByName(name ?? crypto.randomUUID()), async instance => {
     const impl = instance.impl;
     impl.storage.chatMeta.put({id: 1, title: "Chat", started: new Date(0), lastActive: new Date(0)});
+    impl.storage.gatekeepers.put({id: 7, class: {} as never}); // fork: queueFor's connection must exist
     const base = await impl.gitCache.writeFilesAsCommit(new Map(Object.entries(BASE)),
       {parents: [], author: {name: "Test", email: "test@example.com"}, message: "Base", timestamp: new Date(0)});
     const {id} = await impl.createWorktree("Repo", 1, base);

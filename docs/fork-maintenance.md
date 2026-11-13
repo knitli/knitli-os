@@ -825,6 +825,11 @@ authorizes a read after fetching it.
     `ChatInterface.activity.test.tsx` (new upstream, #1121) gets a stable `authenticatedApi` with
     `getModelReasoning`/`listLibraryBlueprints` and `listPromptPresets` on its overseer;
     `useWorkspaceOpen.test.tsx`'s `openOverseer` gets `getMetadata` for the fork's heartbeat.
+  - `worktree-replica.test.ts` (new upstream, #1081) opens gatekeeper sessions on connection 7
+    without a record; the fork's `assertGatekeeperObserverReadiness()` gate in
+    `openGatekeeperSession` refuses a missing connection, so the test seeds `{id: 7}`. The fork's
+    `knitli-workspace-audience` fake gains upstream's `sessionWatchers`, and two fork tests'
+    `capnweb-validate` mocks gain `skipRpcValidation` (now used by `worktree-session.ts`).
   - `reviewedSurvivors`: all 31 acks no longer matched and were dropped; one added for
     `pendingFingerprint` (a field upstream's own copy keeps).
 - **Seams added by the 2026-11-12 sync (foundation `34412000`).**

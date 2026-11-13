@@ -6,8 +6,9 @@ import type { AiChatMetadata, AiChatSubscriber } from "@gadgets/workshop-shared/
 import { makeOverseer, makeTestRoot } from "./action-test-harness";
 import ChatInterface from "./ChatInterface";
 
+const auth = vi.hoisted(() => ({currentUser: null, authenticatedApi: {getModelReasoning: async () => null, listLibraryBlueprints: async () => []}}));
 vi.mock("./AuthContext", () => ({
-  useAuthenticatedApi: () => ({currentUser: null}),
+  useAuthenticatedApi: () => auth,
   useOptionalAuthenticatedApi: () => null,
 }));
 vi.mock("./features/notifications/UnreadStateBridge", () => ({useUnreadState: () => null}));
@@ -32,6 +33,7 @@ const setup = () => {
   Object.assign(server.overseer, {
     listChats: async () => [chat(1), chat(2)],
     listModels: async () => [],
+    listPromptPresets: async () => [],
     getChatHistory: async () => ({messages: []}),
     onRpcBroken: () => {},
     viewChat: () => ({[Symbol.dispose]: () => {}}),

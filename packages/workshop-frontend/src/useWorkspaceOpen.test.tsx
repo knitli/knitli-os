@@ -68,6 +68,7 @@ const advance = async (ms: number) => {
 }
 
 const openOverseer = () => disposableStub({
+  getMetadata: async () => METADATA,
   subscribeToMetadata: vi.fn<
     (callback: (metadata: WorkspaceMetadata) => void) => Promise<RpcStub<{}>>
   >(async callback => {

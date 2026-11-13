@@ -13,7 +13,7 @@ import { ActionApplyContextImpl, attestWorkspaceAudience, beginAdmission, forget
   forgetContractedAdmissions, recordAccountlessAdmission } from "./fork/workspace-audience";
 import type { WorkspaceAudience } from "@gadgets/workshop-shared/gatekeeper";
 import {
-  PROMPT_FILENAME, hasRootPromptFile, isPromptFileAnywhere,
+  PROMPT_FILENAME, assertReplicaHidesNoPrompt, hasRootPromptFile, isPromptFileAnywhere,
 } from "./fork/prompt-files";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import type { ChatTimelineHead } from "@gadgets/workshop-shared/api";
@@ -7252,6 +7252,9 @@ class OverseerImpl implements AgentHooks {
       hints: WorktreeGitPullHints): Promise<GitPullTransfer> {
     const head = this.worktreeGitHead(worktreeId);
     const execution = this.#activeExecutions.get(this.getWorktreeRecord(worktreeId).chatId);
+    // Fork: the prompt-file blindfold cannot filter a replica (see fork/prompt-files.ts).
+    await assertReplicaHidesNoPrompt(
+        this.gitCache, [head, execution?.worktree?.getBaseCommit(worktreeId)]);
     // Pull from a connection. Access is checked when a pull starts, not while its pack streams.
     const pullFrom = async (source: WorkpieceId, pulled: string[], pullHints: GitPullHints) => {
       this.assertGatekeeperUsable(source);

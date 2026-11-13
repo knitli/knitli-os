@@ -793,17 +793,22 @@ authorizes a read after fetching it.
   sessions on revocation via `RpcStub.revocable()`"), which needs a patched workerd. If that lands on
   `foundation/main`, the gate, `runRevocationCleanup()` and this whole divergence entry should be
   able to go.
-- **Worktree replicas bypass the prompt-file blindfold (open, 2026-11-13).** Upstream #1081 gives
-  a gatekeeper a `WorktreeReplicator` (`worktree-replica.ts`, via `Worktree.getReplicator()`): a
-  full Git replica of the worktree for a container to run commands in, and a `submit()` that
-  installs the container's resulting tree. Neither path knows the fork's `PROMPT.md` blindfold
-  (`fork/prompt-files.ts`): `snapshot()`/`gitPull()` serve prompt files to the replica, so an agent
-  running `cat PROMPT.md` in a container would read them, and `submit()` can change or delete them.
-  No gatekeeper in this repo calls `getReplicator()` yet (only the integration test fixture), so
-  nothing is exposed today. Before a container gatekeeper ships, decide: refuse replication of a
-  worktree that holds a prompt file, strip prompt files from snapshots and refuse submissions that
-  touch them, or accept that container access reveals prompts. This is a product decision, so the
-  sync did not pick one.
+- **Worktree replicas and the prompt-file blindfold (guarded 2026-11-13; policy still open).**
+  Upstream #1081 gives a worktree a `WorktreeReplicator` (`worktree-replica.ts`, via the binding's
+  `getReplicator()`): a full Git replica for a container to run commands in. Its `gitPull()` serves
+  the worktree's trees and history unfiltered and needs no approval queue, and agent code in
+  `executeCode` can call `getReplicator()` on its own worktree binding, so a `PROMPT.md` hidden by
+  the blindfold (`fork/prompt-files.ts`) was readable that way (found by the PR #92 review).
+  - **Guard:** `OverseerImpl.worktreeGitPull()`, the one path every replica byte leaves through
+    (snapshots are served by ID through it too), calls `assertReplicaHidesNoPrompt()` on the
+    worktree's head and the running execution's pin base, and refuses with upstream's own
+    "can't be replicated" message, so the refusal does not confirm a prompt file exists. Test:
+    `__tests__/knitli-replica-blindfold.test.ts`.
+  - **Known gaps:** a prompt present only in older history (removed from both checked commits)
+    is not caught; `submit()` can still change prompt files, though only after a pull, which the
+    guard refuses. Each pull lists the checked trees recursively.
+  - **Still to decide** before a container gatekeeper ships: keep refusing such worktrees, or
+    strip prompt files from snapshots and refuse submissions that touch them.
 - **Seams added by the 2026-11-13 sync (foundation `769474eb`).**
   - `worktree-session.ts` `writeBytes`: upstream #1081 rechecks writability after a re-root, around
     the fork's blindfold refusal and pre-write schema validation; upstream's post-write

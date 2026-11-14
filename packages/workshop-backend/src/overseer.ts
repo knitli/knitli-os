@@ -5595,11 +5595,11 @@ class OverseerImpl implements AgentHooks {
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean,
                            creation?: {creator: Fetcher<GatekeeperUserVerifier>,
                                        configuration: string | null}): Promise<void> {
-    using _decision = this.claimDecision(record.id);
-    let id = record.gatekeeperId;
     // Fork: approval (manual or automatic) applies a change in the world, so it is fenced while a
     // revocation or deletion is in flight, as submitting and binding are.
     this.assertNoRevocationPending();
+    using _decision = this.claimDecision(record.id);
+    let id = record.gatekeeperId;
     // A created resource exists only once its creation applies, and that stays pending until then.
     if (record.action !== "create" && this.creationPending(id)) {
       throw new Error("This resource doesn't exist yet. Approve its creation first.");

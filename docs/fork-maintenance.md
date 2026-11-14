@@ -833,6 +833,10 @@ authorizes a read after fetching it.
     explanatory line under the list are re-applied there; the fork's test in
     `ShareModal.test.tsx` opens the panel first. Moving it to a fork-owned test file would stop it
     conflicting with upstream's share-modal tests.
+  - `overseer.ts` `applyPendingAction`: upstream #1118 opens with `using _decision =
+    claimDecision(record.id)`; the fork's `assertNoRevocationPending()` fence moved above it, so a
+    revocation or deletion in flight is refused before any decision is claimed (and
+    `knitli-deletion-fence.test.ts` exercises the fence, not the claim).
   - `integration-tests/__tests__/workshop-lifecycle.test.ts`: the fork's `assertDeletionRestart()`
     (it observes the deleter's session being severed, since the fork's revocation restart holds the
     input gate) still accepted the old "removed collaborator" reason; upstream's `deleteSelf` has

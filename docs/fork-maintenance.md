@@ -833,6 +833,12 @@ authorizes a read after fetching it.
     explanatory line under the list are re-applied there; the fork's test in
     `ShareModal.test.tsx` opens the panel first. Moving it to a fork-owned test file would stop it
     conflicting with upstream's share-modal tests.
+  - `integration-tests/__tests__/workshop-lifecycle.test.ts`: the fork's `assertDeletionRestart()`
+    (it observes the deleter's session being severed, since the fork's revocation restart holds the
+    input gate) still accepted the old "removed collaborator" reason; upstream's `deleteSelf` has
+    restarted with "…because the workspace was deleted." since `e39537b4`. Only a race exposes the
+    reason text, so this failed intermittently (first seen on PR #93's CI). The list now accepts the
+    deletion reason and rejects the collaborator one.
   - `reviewedSurvivors`: the Google fingerprint ack no longer matched and was dropped; four acks
     added for false positives (see the file).
 - **Seams added by the 2026-11-13 sync (foundation `769474eb`).**

@@ -809,6 +809,32 @@ authorizes a read after fetching it.
     guard refuses. Each pull lists the checked trees recursively.
   - **Still to decide** before a container gatekeeper ships: keep refusing such worktrees, or
     strip prompt files from snapshots and refuse submissions that touch them.
+- **Seams added by the 2026-11-14 sync (foundation `9e8acadb`).**
+  - `overseer.ts` `#resumeAgent`: upstream #1128 split the `wait.pending || isPreparingChatMessage`
+    return in two (the second now calls `staysStopped()`); the fork's approved-action summary
+    follows both, unchanged.
+  - `overseer.ts` `createShareLink` and `sharing.ts` `createShareLink`: upstream #1126 added
+    `default` links, where a repeat request stores the new key as an alias of the caller's existing
+    default link. The fork's sharing-prohibited refusal stays first in the Overseer, and
+    `beforeAuthorityExpansion()` runs before both writes (the alias is a new bearer key too).
+  - `api.ts` / the denying Overseer: upstream's `readBlob` (#863) and the `ChatMetadata`
+    `spawnerId`/`awaitingDecision` fields (#1128) sit beside the fork's
+    `uploadChatAttachment`/`deleteChatAttachment` and `reasoningEffort`/`promptRef`.
+  - Spreadsheet download name: upstream #1133 moved chat-attachment downloads out of
+    `ChatInterface.tsx` into `features/chat/attachments/AttachmentViewer.tsx`. The fork's
+    `attachmentDownloadName()` (in `attachmentFormatting.ts`; saves a converted spreadsheet as
+    `<name>.summary.md`, since its stored bytes are the summary, not the workbook) is now one call
+    there, and `attachmentFile.ts`'s `AttachmentFile` gains an optional `convertedFrom`.
+    `ChatInterface.tsx` no longer carries any of it. Retire when upstream converts attachments
+    itself or stops storing a summary under the original name.
+  - Always-on recipient requirements: upstream #1126 moved the share dialog's
+    "Recipients must prove…" list into a Protected-resources panel (`ProtectedResourceList` in
+    `ShareModal.tsx`). The fork's ` (always on)` suffix for ambient requirements and the
+    explanatory line under the list are re-applied there; the fork's test in
+    `ShareModal.test.tsx` opens the panel first. Moving it to a fork-owned test file would stop it
+    conflicting with upstream's share-modal tests.
+  - `reviewedSurvivors`: the Google fingerprint ack no longer matched and was dropped; four acks
+    added for false positives (see the file).
 - **Seams added by the 2026-11-13 sync (foundation `769474eb`).**
   - `worktree-session.ts` `writeBytes`: upstream #1081 rechecks writability after a re-root, around
     the fork's blindfold refusal and pre-write schema validation; upstream's post-write

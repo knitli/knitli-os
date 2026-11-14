@@ -44,7 +44,7 @@ import {
 import type { UserAiModelRecord, WorkspaceOutputEntry } from "./storage-schema/user-storage";
 import { filesEqual, threeWayMerge, type MergeResult } from "./three-way-merge";
 import { GitCacheImpl, WorkspaceGitCache, assertNoNul, commitIdentityForAuthor } from "./git-cache";
-import type { BlobReader } from "./git-chunked-blob";
+import { blobByteStream, type BlobReader } from "./git-chunked-blob";
 import {
   OVERSEER_STORAGE_VERSION, migrateToActionIndexes, migrateToBlueprintUpstreams,
   migrateToFrozenGadgetGrants, migrateToGitStorage, migrateToMultiGadget, migrateToSpawnerBindings,
@@ -86,7 +86,7 @@ import {
   buildReleasePack, buildSnapshotRelease, encodeReleaseCommit, releaseMergeHeader,
   releasesMergedBy, type Release,
 } from "./blueprint-release";
-import { EMPTY_TREE_OID, gitObjectOid, parseGitCommitRefs } from "./git-codec";
+import { EMPTY_TREE_OID, gitObjectOid, parseGitCommitRefs, validateGitOid } from "./git-codec";
 import {
   listFeaturedBlueprintsFromKv, readBlueprintKvRecord, type BlueprintKvRecord,
 } from "./storage-schema/blueprints-kv";
@@ -613,6 +613,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
   // ActionLogEntry omits the gatekeeperId for records that didn't come from a real gatekeeper
   // (built-in agent tools use the BUILTIN_TOOL_GATEKEEPER_ID sentinel).
   let gatekeeperId = record.gatekeeperId >= 0 ? record.gatekeeperId : undefined;
+  let chatId = record.caller.from === "hook" ? undefined : record.caller.chatId;
 
   switch (record.type) {
     case "observation": {
@@ -622,6 +623,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
       return {
         id: record.id,
         gatekeeperId,
+        chatId,
         resourceTitle: record.resourceTitle || "(title unavailable)",
         resourceUrl: record.resourceUrl,
         createdAt: record.createdAt,
@@ -634,6 +636,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
       return {
         id: record.id,
         gatekeeperId,
+        chatId,
         resourceTitle: record.resourceTitle || "(title unavailable)",
         resourceUrl: record.resourceUrl,
         createdAt: record.createdAt,
@@ -651,6 +654,7 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
       return {
         id: record.id,
         gatekeeperId,
+        chatId,
         resourceTitle: record.resourceTitle || "(title unavailable)",
         resourceUrl: record.resourceUrl,
         createdAt: record.createdAt,
@@ -822,6 +826,9 @@ class OverseerImpl implements AgentHooks {
   readonly cacheWarmer: ChatCacheWarmer;
 
   #autoApprovalDrainer: AutoApprovalDrainer;
+
+  // Actions with a decision in flight (see claimDecision).
+  #deciding = new Set<number>();
 
   #preparingChatMessages = new Map<number, Promise<void>>();
 
@@ -1751,7 +1758,8 @@ class OverseerImpl implements AgentHooks {
     this.#autoApprovalDrainer = new AutoApprovalDrainer(
         this.storage,
         (record, resolvedBy, autoApproved) =>
-            this.applyPendingAction(record, resolvedBy, autoApproved));
+            this.applyPendingAction(record, resolvedBy, autoApproved),
+        id => this.#deciding.has(id));
     this.cacheWarmer = new ChatCacheWarmer(ctx.id.toString(), (chatId, resent) =>
         this.#addRequestCost(
             chatId, resent.usage, resent.aiGatewayLogId, resent.aiGatewayLogRoute, false));
@@ -2218,8 +2226,10 @@ class OverseerImpl implements AgentHooks {
         .map(meta => meta.id));
   }
 
-  // Re-puts the chats' metadata, re-broadcasting what they propose: removing a workpiece or an
-  // edge changes that with no chatMeta write of the chat's own (as reconcilePendingGadgets).
+  // Re-puts the chats' metadata, re-broadcasting the fields derived from other state (see
+  // chatMetaForClient) when that state changes with no chatMeta write of the chat's own: removing
+  // a workpiece or an edge changes what a chat proposes (as reconcilePendingGadgets), and a
+  // decision whether it is waiting on one.
   #rebroadcastChatMeta(chatIds: Iterable<number>): void {
     for (let chatId of chatIds) {
       let meta = this.storage.chatMeta.get(chatId);
@@ -2966,14 +2976,19 @@ class OverseerImpl implements AgentHooks {
   }
 
   // A chat metadata record as delivered to clients: the stored row with the derived
-  // `proposedChangeWorkpieces` list attached (see proposedChangeWorkpieceIds) and the retired
-  // `hasProposedChanges` flag dropped (see StoredChatMetadata). Never mutates the input.
+  // `proposedChangeWorkpieces` list and `awaitingDecision` flag attached (see
+  // proposedChangeWorkpieceIds and #decisionWait) and the retired `hasProposedChanges` flag
+  // dropped (see StoredChatMetadata). Never mutates the input.
   chatMetaForClient(stored: StoredChatMetadata): AiChatMetadata {
     let meta: StoredChatMetadata = {...stored};
     delete meta.hasProposedChanges;
     let proposed = this.proposedChangeWorkpieceIds(stored.id, stored);
     if (proposed.length > 0) {
       meta.proposedChangeWorkpieces = proposed;
+    }
+    // A responding agent is not stopped on anything, so its chat skips the log scan.
+    if (!stored.activeAgent && this.#decisionWait(stored.id)?.pending) {
+      meta.awaitingDecision = true;
     }
     return meta;
   }
@@ -5542,10 +5557,33 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  // Marks a pending action as "being decided", so that only one approval or rejection of it can be
+  // in progress at a time. Throws "Action is not pending" if the action was already approved or
+  // rejected, or if another approval or rejection of it is still in progress. The mark is removed
+  // when the returned handle is disposed, so callers hold it with `using`.
+  //
+  // Why this is needed: approving or rejecting an action first calls its gatekeeper, and only
+  // records the action as approved or rejected after that call returns. While the call is being
+  // awaited, this Durable Object keeps handling other incoming requests, and to them the action
+  // still looks pending. Without this mark, a second decision arriving in that window -- from
+  // another tab, a retry after a dropped connection, or the auto-approval drain -- would also pass
+  // the "is it pending?" check and reach the gatekeeper a second time.
+  //
+  // This method is synchronous, so no other request can run between the check and setting the
+  // mark. Callers must call it before they contact the gatekeeper. Since it checks the action's
+  // state itself, it can come earlier than that, as in applyPendingAction.
+  claimDecision(id: number): Disposable {
+    if (this.storage.actions.get(id)?.state !== "pending" || this.#deciding.has(id)) {
+      throw new Error(`Action is not pending: ${id}`);
+    }
+    this.#deciding.add(id);
+    return {[Symbol.dispose]: () => { this.#deciding.delete(id); }};
+  }
+
   // Apply a single pending action: invoke the gatekeeper, mark it approved, and persist (the put
   // auto-notifies subscribeToActions). Shared by manual approval (`approveAction`) and the
-  // auto-approval drain (`drainAutoApprovals`). The caller is responsible for validating that the
-  // record is still pending before calling.
+  // auto-approval drain (`drainAutoApprovals`). Refuses, as not pending, an action decided since
+  // the caller read it or whose decision is still in flight (see claimDecision).
   //
   // `resolvedBy`/`autoApproved` are required (not defaulted) so that no apply path can omit how the
   // gate was cleared: this is the single chokepoint where an action transitions to "approved", so
@@ -5557,6 +5595,7 @@ class OverseerImpl implements AgentHooks {
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean,
                            creation?: {creator: Fetcher<GatekeeperUserVerifier>,
                                        configuration: string | null}): Promise<void> {
+    using _decision = this.claimDecision(record.id);
     let id = record.gatekeeperId;
     // Fork: approval (manual or automatic) applies a change in the world, so it is fenced while a
     // revocation or deletion is in flight, as submitting and binding are.
@@ -10441,19 +10480,34 @@ class OverseerImpl implements AgentHooks {
 
   // No await: the decision, its model-visible note, busy state, execution row and alarm all
   // precede model lookup. Live resumption and restart recovery then use the same #resumeAgent.
+  // Every decision a turn waits on comes through here with its id, and that keeps
+  // `awaitingDecision` current: it is derived as metadata is sent, so when such a decision leaves
+  // the agent stopped, this re-sends the metadata (a resume writes it anyway). The callers that
+  // pass no decision are only checking whether a turn can go on, which changes no metadata.
   resumeAgentAfterDecision(chatId: number, decisionId?: number | string): void {
     let meta = this.storage.chatMeta.get(chatId);
     if (meta?.activeAgent) return; // Teardown rechecks after releasing this execution.
+    let staysStopped = () => {
+      if (decisionId !== undefined) this.#rebroadcastChatMeta([chatId]);
+    };
     let record = this.storage.activeAgents.get(chatId);
-    if (!record) return;
+    if (!record) {
+      staysStopped();
+      return;
+    }
     let wait = this.#decisionWait(chatId);
     if (wait && decisionId !== undefined && !(typeof decisionId === "number"
         ? wait.actionIds.includes(decisionId) : wait.requestIds.includes(decisionId))) return;
     if (!meta || !wait || wait.denied) {
       this.storage.activeAgents.delete(chatId);
+      staysStopped();
       return;
     }
-    if (wait.pending || this.isPreparingChatMessage(chatId)) return;
+    if (wait.pending) return; // Still waiting, as the metadata already says.
+    if (this.isPreparingChatMessage(chatId)) {
+      staysStopped();
+      return;
+    }
     // Fork: once every awaited action is approved, the approval summary is the model's record
     // that they ran (raw action cards are not surfaced to it; see #53). It is recorded here,
     // after the wait above was derived from the untouched history and before the agent starts,
@@ -13543,6 +13597,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       // apply now. Their gatekeeper-side state goes with the facet's storage, so no rejectAction()
       // is called.
       let profile = await this.#getClientProfile();
+      using _decision = this.impl.claimDecision(id);
       let queued = Array.from(
           this.impl.storage.actions.pendingByGatekeeper.get(action.gatekeeperId));
       this.impl.removeGatekeeper(action.gatekeeperId);
@@ -13567,6 +13622,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // can't leave the action rejected with the gatekeeper but still "pending" in storage.
     let profile = await this.#getClientProfile();
 
+    using _decision = this.impl.claimDecision(id);
     await gatekeeper.rejectAction(action.action);
 
     action.state = "rejected";
@@ -13954,6 +14010,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       : await this.impl.gitCache.writeBlobStream(content.stream, content.byteLength);
     await this.impl.ctx.storage.sync();
     return oid;
+  }
+
+  async readBlob(oid: string): Promise<ReadableStream<Uint8Array>> {
+    return blobByteStream(await this.impl.gitCache.openBlob(validateGitOid(oid)));
   }
 
   // Fetch the bytes of a committed chat attachment over the authenticated RPC connection. The
@@ -14614,7 +14674,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   // --- Share link management ---
 
-  async createShareLink(grant: CollaboratorGrant, note?: string)
+  async createShareLink(grant: CollaboratorGrant, note?: string, options?: {default?: boolean})
       : Promise<{ key: string; linkId: string }> {
     if (this.impl.isWorkspaceSharingProhibited()) {
       throw new Error(
@@ -14622,8 +14682,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           "shared.");
     }
 
-    return (await this.impl.getSharingManager())
-        .createShareLink({ caller: this.#sharingCaller(), grant, note });
+    return (await this.impl.getSharingManager()).createShareLink(
+        { caller: this.#sharingCaller(), grant, note, default: options?.default });
   }
 
   async newShareLinkKey(linkId: string): Promise<{ key: string }> {
@@ -14677,6 +14737,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         ...(record.gadgetIds !== undefined ? {gadgets: record.gadgetIds
           .filter(id => this.impl.isShareableGadget(id))
           .map(id => ({id, title: this.impl.getGadgetRecord(id).title}))} : {}),
+        ...(record.default ? {default: true} : {}),
       });
     }
     return result;
@@ -14962,6 +15023,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async uploadChatAttachment(_attachment: ChatAttachmentUpload, _modelId: string | null)
       : Promise<ChatAttachmentHandle> { this.#deny(); }
   async deleteChatAttachment(_id: string): Promise<void> { this.#deny(); }
+  async readBlob(_oid: string): Promise<ReadableStream<Uint8Array>> { this.#deny(); }
   async getChatAttachmentContent(_chatId: number, _id: string): Promise<Uint8Array> { this.#deny(); }
   async setChatTitle(_chatId: number, _title: string): Promise<void> { this.#deny(); }
   async setChatEffort(_chatId: number, _effort: string | null): Promise<void> { this.#deny(); }
@@ -15798,6 +15860,7 @@ class AgentSpawnerQueueImpl extends ApprovalQueueImpl implements AgentSpawnerQue
       started: timestamp,
       lastActive: timestamp,
       spawnerName: config.displayName,
+      spawnerId: this.gatekeeperId,
     };
     this.impl.storage.chatMeta.put(meta);
 

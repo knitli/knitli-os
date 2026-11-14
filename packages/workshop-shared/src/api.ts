@@ -25,7 +25,7 @@
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AgentCatalog, AvatarImage, GatekeeperUiFrame, GatekeeperUserSelection, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
-import type { CodeChange } from "./code-change.js";
+import type { BytesRef, CodeChange } from "./code-change.js";
 import type { GitOid } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 
@@ -3645,18 +3645,18 @@ export type TreeNode =
 /**
  * One file's content at a commit, as returned by Overseer.readFilesAtCommit(). `text` carries
  * the file's UTF-8 content; `absent` means the path names no entry at that commit (or names a
- * directory); `unreadable` means the entry exists but cannot be presented as text -- a symlink,
- * a submodule, or binary content (never a matter of size) -- and carries a descriptive,
- * path-flavored message suitable for display in place of the file.
+ * directory); `unreadable` means the entry exists but is not a regular file -- a symlink or a
+ * submodule -- and carries a descriptive, path-flavored message suitable for display in place
+ * of the file.
  *
- * `stream` is how a regular file over MAX_BUFFERED_BLOB_SIZE arrives instead of `text`: its raw
- * bytes, `byteLength` of them, as a stream. The server has not checked that they are text, so
- * the caller applies the same rules it would have (no NUL byte, valid UTF-8). The caller must
- * consume or cancel every stream it receives.
+ * `blob` names a regular file by its git blob instead of carrying its content: the caller reads
+ * the bytes with Overseer.readBlob(). It is how content that is not text arrives (a NUL byte, or
+ * invalid UTF-8), and how every file over MAX_BUFFERED_BLOB_SIZE arrives. The server has not
+ * checked that a file over that size is text, so the caller applies the same rules to its bytes.
  */
 export type FileAtCommit =
   | { kind: "text"; text: string }
-  | { kind: "stream"; byteLength: number; content: ReadableStream<Uint8Array> }
+  | { kind: "blob"; blob: BytesRef }
   | { kind: "absent" }
   | { kind: "unreadable"; message: string };
 
@@ -3670,8 +3670,8 @@ export const MAX_READ_FILES_PER_CALL = 64;
  * Text bytes after which Overseer.readFilesAtCommit() stops decoding and omits the remaining
  * requested paths from its response (the client re-requests them). Keeps one response well
  * under the RPC message ceiling even with the UTF-16 inflation of serialized text. The first
- * file is always returned whole, however large, so every call makes progress. A `stream` entry's
- * bytes travel outside the response message, so they do not count toward this budget.
+ * file is always returned whole, however large, so every call makes progress. A `blob` entry
+ * carries no content, so it does not count toward this budget.
  */
 export const READ_FILES_RESPONSE_BUDGET = 8 * 1024 * 1024;
 
@@ -3696,6 +3696,12 @@ export type ActionLogEntry = {
    * source (e.g. webFetch tool).
    */
   gatekeeperId?: WorkpieceId;
+
+  /**
+   * The chat this entry was made from: the chat whose agent made it, or whose slash command or
+   * gadget code did. Absent for a hook firing and for gadget code running outside any chat.
+   */
+  chatId?: number;
 
   resourceTitle: string;
   resourceUrl?: string;
@@ -3937,8 +3943,9 @@ export interface Overseer extends RpcTarget {
    * the workspace's git store are pulled in one batch through the gatekeeper that provided the
    * commit; a pull failure fails the whole call, since it is transient or actionable rather than
    * a fact about any one file, whereas per-file conditions -- absent path, symlink, submodule,
-   * binary content -- are reported per entry (see FileAtCommit). A file of any size is read: one
-   * over MAX_BUFFERED_BLOB_SIZE (see `@gadgets/workshop-shared/gatekeeper`) as a `stream` entry.
+   * binary content -- are reported per entry (see FileAtCommit). No file is refused for its size:
+   * one over MAX_BUFFERED_BLOB_SIZE (see `@gadgets/workshop-shared/gatekeeper`) comes back as a
+   * `blob` entry, to read with readBlob().
    *
    * At most MAX_READ_FILES_PER_CALL paths per call. The server stops decoding once the
    * accumulated text exceeds READ_FILES_RESPONSE_BUDGET and omits the remaining paths from the
@@ -4378,6 +4385,13 @@ export interface Overseer extends RpcTarget {
   deleteChatAttachment(id: string): Promise<void>;
 
   /**
+   * Read a blob in this workspace's Git store, such as one a `blob` FileAtCommit or a chat's
+   * `setBytes` change names: the counterpart of uploadBlob(). Like readFilesAtCommit(), the read
+   * pulls a blob missing from the store through the gatekeeper that provided it.
+   */
+  readBlob(oid: GitOid): Promise<ReadableStream<Uint8Array>>;
+
+  /**
    * Fetch the bytes of a committed chat attachment over RPC. The canonical metadata is already
    * present in the message's ChatAttachmentRef. Images are inlined there, so this is normally used
    * only to download non-image attachments on demand.
@@ -4688,10 +4702,16 @@ export interface Overseer extends RpcTarget {
    * Anyone who redeems the link receives `grant`. The caller must be the owner or a "build"
    * collaborator.
    *
+   * With `default`, the link is the caller's *default* link for `grant`: each sharer has at
+   * most one live default link per grant, which the share dialog presents apart from the named
+   * links. If the caller already has one, this mints another key for it (as `newShareLinkKey`
+   * does) instead of creating a second, and returns that link's id. Otherwise it behaves as any
+   * other link, and revoking it leaves the caller with none until they create another.
+   *
    * A signed-in user redeems the key by passing it as `shareKey` to
    * AuthenticatedApi.openWorkspace(), which adds them as a collaborator and opens the workspace.
    */
-  createShareLink(grant: CollaboratorGrant, note?: string)
+  createShareLink(grant: CollaboratorGrant, note?: string, options?: {default?: boolean})
       : Promise<{ key: string; linkId: string }>;
 
   /**
@@ -4778,6 +4798,21 @@ export type AiChatMetadata = {
    * at turn start.
    */
   promptRef?: PromptRef;
+
+  /**
+   * If this was started from an agent spawner, the spawner's id. `spawnerName` is the spawner's
+   * name when the chat started, so one spawner's runs can carry different names and two
+   * spawners' runs the same one; this tells them apart. Absent on chats spawned before it was
+   * recorded.
+   */
+  spawnerId?: WorkpieceId;
+
+  /**
+   * Present while the agent's turn is stopped on a decision only a user can make: an action it
+   * asked to wait for, a connection request, or a restricted web fetch, still pending. Derived
+   * server-side from the chat's log and delivered on metadata updates; never submitted by clients.
+   */
+  awaitingDecision?: true;
 
   /**
    * Tokens the model reported for this conversation's last step, if known. Cleared when compaction
@@ -7348,6 +7383,9 @@ export type ShareLinkInfo = {
    * be created, but it can still be copied and redeemed.
    */
   gadgets?: {id: WorkpieceId; title: string}[];
+
+  /** Whether this is its creator's default link for what it grants (see `createShareLink`). */
+  default?: true;
 };
 
 /**

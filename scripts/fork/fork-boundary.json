@@ -559,9 +559,24 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "pendingFingerprint",
-      "path": "packages/gatekeeper-google/src/google.ts",
-      "reason": "Still present in upstream's own copy of this file (a GoogleDocSimulatedContentCache field); upstream's #1123 only removed a same-named local variable."
+      "token": "onPreview",
+      "path": "packages/workshop-frontend/src/features/admin/voice/AdminVoicePanel.tsx",
+      "reason": "The fork's voice-list row prop (play a voice sample); unrelated to the chat-attachment card prop upstream's #1133 removed."
+    },
+    {
+      "token": "NAME_LIST",
+      "path": "packages/workshop-frontend/src/ShareModal.tsx",
+      "reason": "Still present in upstream's own copy of this file (the collaborator-added toast); upstream's #1126 only dropped other uses."
+    },
+    {
+      "token": "TEXT_DECODER_STRICT",
+      "path": "packages/workshop-backend/src/git-cache.ts",
+      "reason": "Still present in upstream's own copy of this file; upstream's #863 only dropped one use."
+    },
+    {
+      "token": "titleIcon",
+      "path": "packages/workshop-frontend/src/ChatInterface.tsx",
+      "reason": "Still present in upstream's own copy of this file (a local in the action-card renderer); upstream's #1118 only dropped other uses."
     }
   ]
 }

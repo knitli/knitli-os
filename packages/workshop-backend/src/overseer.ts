@@ -1,7 +1,7 @@
 import {
   clearAlarmGuard, guardedAlarmFor, MAX_ALARM_CONSECUTIVE_FAILURES, readAlarmGuardRecord,
 } from "@gadgets/observability/fork/alarm-guard";
-import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn } from "./fork/approval-continuation";
+import { currentApprovalWaiters, approvedActionSummary, approvedCapturedActionSummary, approvalSummaryAuthor, recoverApprovalTurn, isApprovalSummaryMessage, isUserChatParticipation } from "./fork/approval-continuation";
 import { capExecuteCodeOutput } from "./fork/turn-guards";
 import { rejectIfConnectionRemoved, removeConnection } from "./fork/connection-removal";
 import { chatWorkbook, describeWorkbookBinding, dropWorkbook, isChatWorkbook, isSpreadsheetUpload, isWorkbookAttachment, openWorkbookSession, readWorkbookRange, stageWorkbookUpload, workbookRefFields } from "./fork/workbook-upload";
@@ -38,7 +38,7 @@ import {
   type ChatChangeBoundaryRecord, type ChatChangeRecord, type ChatFanoutStart, type CompactionCheckpoint,
   type ExternalChatRecord, type ExternalMessageRecord, type GadgetRecord, type GatekeeperCaller,
   type GatekeeperClass, type GatekeeperRecord, type ObserverRecord, type OverseerStorage,
-  isChatParticipation, type StoredAssistantMessage, type StoredChatMessage, type StoredChatMetadata,
+  type StoredAssistantMessage, type StoredChatMessage, type StoredChatMetadata,
   type WorkpieceRecord, type WorktreeRecord,
 } from "./storage-schema/overseer-storage";
 import type { UserAiModelRecord, WorkspaceOutputEntry } from "./storage-schema/user-storage";
@@ -138,7 +138,7 @@ import {
 const logger = createWorkshopLogger("workshop.overseer");
 
 function isCountableChatMessage(message: StoredChatMessage): boolean {
-  return message.type === "message" && message.generatedBySlashCommandSequence === undefined &&
+  return message.type === "message" && message.generatedBySlashCommandSequence === undefined && !isApprovalSummaryMessage(message) &&
     (!!message.message.trim() || !!message.attachments?.length);
 }
 
@@ -1569,7 +1569,7 @@ class OverseerImpl implements AgentHooks {
     const stamp = (message: StoredChatMessage, old?: StoredChatMessage) => {
       if (old) { message.visibleThroughSequence = old.visibleThroughSequence; return; }
       if (!this.ownerId) return;
-      if (isChatParticipation(message)) this.enrollChatParticipant(message.chatId, message.author.id);
+      if (isUserChatParticipation(message)) this.enrollChatParticipant(message.chatId, message.author.id);
       let counter = this.storage.nextChatSequences.get(message.chatId) ?? {chatId: message.chatId, nextSequence: 0};
       let visible = counter.visibleThroughSequence ?? 0;
       if (isCountableChatMessage(message)) visible++;
@@ -1583,10 +1583,10 @@ class OverseerImpl implements AgentHooks {
     this.storage.chats.subscribe({
       add: message => {
         stamp(message);
-        if (isCountableChatMessage(message) || isChatParticipation(message)) {
+        if (isCountableChatMessage(message) || isUserChatParticipation(message)) {
           this.markChatDirty(message.chatId, message.sequence,
             isCountableChatMessage(message) ? message.visibleThroughSequence : undefined,
-            isChatParticipation(message) ? this.users.idFromName(message.author.id).toString() : undefined);
+            isUserChatParticipation(message) ? this.users.idFromName(message.author.id).toString() : undefined);
         }
       },
       update: (old, message) => {

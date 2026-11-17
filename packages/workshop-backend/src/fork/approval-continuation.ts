@@ -1,5 +1,5 @@
 import type { AiChatMessage, AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
-import type { ActionRecord } from "../storage-schema/overseer-storage.js";
+import { isChatParticipation, type ActionRecord, type StoredChatMessage } from "../storage-schema/overseer-storage.js";
 
 type AwaitedAction = Extract<ActionRecord, { type: "action" }>;
 /** Existing chat boundary and referenced action records for one current turn. */
@@ -28,10 +28,12 @@ export function currentApprovalWaiters(
   return undefined;
 }
 
+const APPROVAL_SUMMARY_PREFIX = "The user approved your action(s): ";
+
 /** Approval summaries delimit the resumed turn, so the same references cannot resume twice. */
 export function approvedActionSummary(actions: readonly AwaitedAction[] | undefined): string | undefined {
   if (!actions?.length || actions.some(action => action.state !== "approved")) return undefined;
-  return `The user approved your action(s): ${actions.map(action => `"${action.description.title}"`).join(", ")}. They have now run. You don't need to resubmit them; continue from where you left off. Later reads will show the result.`;
+  return `${APPROVAL_SUMMARY_PREFIX}${actions.map(action => `"${action.description.title}"`).join(", ")}. They have now run. You don't need to resubmit them; continue from where you left off. Later reads will show the result.`;
 }
 
 /** Close approval-before-persistence without crossing into a subsequent user turn. */
@@ -67,4 +69,18 @@ export function recoverApprovalTurn(
   const summary = approvedActionSummary(current?.actions);
   const author = approvalSummaryAuthor(current?.actions);
   return summary && author ? { suspend: false, summary, author } : { suspend: true };
+}
+
+/**
+ * Whether a stored message is an approval summary: a note for the model, attributed to the
+ * approving user, that is neither their participation nor anyone's unread message. Upstream #1112
+ * keeps an approval from enrolling anyone in a chat's notifications; the summary must not undo it.
+ */
+export function isApprovalSummaryMessage(message: StoredChatMessage): boolean {
+  return message.type === "message" && message.message.startsWith(APPROVAL_SUMMARY_PREFIX);
+}
+
+/** Upstream's `isChatParticipation`, minus approval summaries. */
+export function isUserChatParticipation(message: StoredChatMessage): boolean {
+  return isChatParticipation(message) && !isApprovalSummaryMessage(message);
 }

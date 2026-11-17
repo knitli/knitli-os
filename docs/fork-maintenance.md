@@ -849,6 +849,12 @@ authorizes a read after fetching it.
     (B-PARENT-004/005). Resolved to that single refresh, with upstream's toast when the write had
     succeeded. Upstream's `AdminPage.test.tsx` "refresh fails" case now fails both attempts, since
     the fork's `reloadResources()` retries once.
+  - `admin-settings.ts` `isCatalogConflict` (fork AI executor): upstream #1152's workerd
+    1.20261113 delivers a remote error over Workers RPC as a plain `Error` whose message starts
+    with the original name, so the name/stack test no longer matched and a profile revision
+    conflict surfaced as "service unavailable". It now also checks the message prefix
+    (`ai-executor-admin-rpc` integration test). Fork test fakes of the Overseer's `users`
+    namespace also gained `idFromName`, which #1112 calls when a message is stored.
   - `ChatInterface.tsx` effort selector: its mount-time `getModelReasoning` read returns early with
     no `authenticatedApi`, as upstream's new `ChatInterface.codeChat.test.tsx` renders without one.
 - **Seams added by the 2026-11-14 sync (foundation `9e8acadb`).**

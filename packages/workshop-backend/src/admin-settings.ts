@@ -54,9 +54,12 @@ export interface InferenceAdmin extends WorkerEntrypoint {
   disableProfile(id: string, revision: number): Promise<AiExecutorProfile>;
 }
 
+// Workers RPC may deliver a remote error as a plain `Error` whose message (and stack) carries the
+// original name as a prefix, as workerd 1.20261113 does.
 function isCatalogConflict(error: unknown): boolean {
   return error instanceof Error && (
     error.name === "CatalogConflictError" ||
+    error.message.startsWith("CatalogConflictError:") ||
     error.stack?.startsWith("CatalogConflictError:") === true
   );
 }

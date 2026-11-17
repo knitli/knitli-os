@@ -2794,7 +2794,8 @@ function ChatInterface({
   const [effortLevels, setEffortLevels] =
     useState<{ levels: string[]; default: string } | null>(null);
   useEffect(() => {
-    if (selectedModel === null) {
+    // No API in harnesses that render without a session: no levels to offer.
+    if (selectedModel === null || !authenticatedApi) {
       setEffortLevels(null);
       return;
     }

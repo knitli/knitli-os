@@ -330,20 +330,23 @@ export default function AdminPage() {
           : { ...v, resources: v.resources.map((r) => ((r.resourceTypeId ?? r.urlPattern) === urlPattern ? { ...r, enabled } : r)) }
       )
     )
+    let saved = false
     try {
       await admin.api.setResourceEnabled(vendorId, urlPattern, enabled)
+      saved = true
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Update failed'
+      toasts.add({ title: message, variant: 'error' })
+    } finally {
+      // Fork: one refresh, once the row is no longer busy, so a failed write rolls back.
+      setResourceOperationBusy(key, false)
       await reloadResources().catch(() => {
+        if (!saved) return
         toasts.add({
           title: 'Change saved, but resource settings could not be refreshed. Reload this page.',
           variant: 'error',
         })
       })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Update failed'
-      toasts.add({ title: message, variant: 'error' })
-    } finally {
-      setResourceOperationBusy(key, false)
-      await reloadResources().catch(() => {})
     }
   }
 

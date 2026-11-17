@@ -181,16 +181,16 @@ it("records every setting change, before it takes effect", async () => {
   last = await newSetting(last);
 
   // Resource restrictions use the advertised stable ID and are audited as that identity.
-  // Fork: resources are opt-in (the harness enables "thing"), so the setting is `enabledResourceTypeIds`.
+  // Fork: resources are opt-in, so the recorded change enables the type in `enabledResourceTypeIds`.
   try {
-    await admin.setResourceEnabled(TEST_VENDOR_ID, "thing", false);
-    last = await expectRecord(last, "setResourceEnabled",
-        [{ setting: "enabledResourceTypeIds", key: TEST_VENDOR_ID, before: '["thing"]' }]);
-  } finally {
     await admin.setResourceEnabled(TEST_VENDOR_ID, "thing", true);
+    last = await expectRecord(last, "setResourceEnabled",
+        [{ setting: "enabledResourceTypeIds", key: TEST_VENDOR_ID, after: '["thing"]' }]);
+  } finally {
+    await admin.setResourceEnabled(TEST_VENDOR_ID, "thing", false);
   }
   last = await expectRecord(last, "setResourceEnabled",
-      [{ setting: "enabledResourceTypeIds", key: TEST_VENDOR_ID, after: '["thing"]' }]);
+      [{ setting: "enabledResourceTypeIds", key: TEST_VENDOR_ID, before: '["thing"]' }]);
 
   // Past the audit value limit, the values are excerpts. Use a real setting that accepts a long
   // list, rather than inventing an unadvertised resource type that the setter must refuse.

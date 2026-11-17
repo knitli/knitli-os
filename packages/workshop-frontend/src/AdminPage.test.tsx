@@ -54,7 +54,9 @@ it.each([
   const getSettings = vi.fn<AdminApi['getSettings']>().mockResolvedValueOnce(settings).mockResolvedValue({ ...settings,
     resourceVendors: [{ ...vendor, resources: current.map(r => ({ ...r, enabled: true })) }],
   })
+  // Fork: reloadResources() retries a failed refresh once, so the refresh fails only on both.
   if (refreshFails) getSettings.mockRejectedValueOnce(new Error('Settings unavailable'))
+    .mockRejectedValueOnce(new Error('Settings unavailable'))
   const setResourceEnabled = vi.fn<AdminApi['setResourceEnabled']>(async () => {})
   getAdminApi.mockResolvedValue({ getSettings, setResourceEnabled, getUpdateStatus: async () => null })
   const container = document.createElement('div')
@@ -75,7 +77,7 @@ it.each([
         title: 'Change saved, but resource settings could not be refreshed. Reload this page.',
         variant: 'error',
     }]] : [])
-    expect(getSettings).toHaveBeenCalledTimes(2)
+    expect(getSettings).toHaveBeenCalledTimes(refreshFails ? 3 : 2)
   } finally {
     await act(async () => { root.unmount() })
     container.remove()

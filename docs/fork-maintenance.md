@@ -835,6 +835,22 @@ authorizes a read after fetching it.
     `initialVoice` beside upstream's `codeChatId`/`returnChatId`.
   - `reviewedSurvivors`: the four 2026-11-14 acks no longer matched and were dropped; six acks
     added for false positives (see the file).
+  - Approval summaries vs upstream #1112 (chat notifications on first participation): the fork's
+    approval-continuation summary is stored as a `message` authored by the approver, so upstream's
+    `isChatParticipation` read it as that user's first participation (enabling notifications on
+    approval, which #1112 deliberately avoids) and counted it as their unread message.
+    `src/fork/approval-continuation.ts` now exports `isApprovalSummaryMessage`/
+    `isUserChatParticipation`; `overseer.ts` uses the latter at its three participation checks and
+    excludes summaries in its local `isCountableChatMessage` (one clause). Upstream's
+    `workshop-chat-notifications.test.ts` approval case pins it unchanged.
+  - `AdminPage.tsx` `handleResourceToggle`: upstream #1031 added a refresh after a successful save
+    (with a "saved, but could not refresh" toast) beside its error-path refresh; the fork already
+    refreshes once in `finally`, after the row stops being busy, so a failed write rolls back
+    (B-PARENT-004/005). Resolved to that single refresh, with upstream's toast when the write had
+    succeeded. Upstream's `AdminPage.test.tsx` "refresh fails" case now fails both attempts, since
+    the fork's `reloadResources()` retries once.
+  - `ChatInterface.tsx` effort selector: its mount-time `getModelReasoning` read returns early with
+    no `authenticatedApi`, as upstream's new `ChatInterface.codeChat.test.tsx` renders without one.
 - **Seams added by the 2026-11-14 sync (foundation `9e8acadb`).**
   - `overseer.ts` `#resumeAgent`: upstream #1128 split the `wait.pending || isPreparingChatMessage`
     return in two (the second now calls `staysStopped()`); the fork's approved-action summary

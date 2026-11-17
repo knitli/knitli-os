@@ -52,11 +52,13 @@ export type AdminConfig = {
   /** Accent (brand) color hex, or "" for the default theme. */
   accentColor: string;
   /**
-   * Enabled gatekeeper resources: vendorId -> enabled resource urlPatterns. Anything unlisted
-   * is off. (Fork #24: upstream's opt-out `disabledResources` is opt-in here; enforcement reads
-   * this via #enforceGatekeeperResourcePolicy in user.ts.)
+   * Legacy enabled gatekeeper resources: vendorId -> enabled resource URL patterns. Anything
+   * unlisted in either allow-list is off. (Fork #24: upstream's opt-out `disabledResources` is
+   * opt-in here; enforcement reads this via #enforceGatekeeperResourcePolicy in user.ts.)
    */
   enabledResources: Record<string, string[]>;
+  /** Enabled stable resource type IDs, keyed by vendor (fork opt-in twin of `disabledResourceTypeIds`). */
+  enabledResourceTypeIds?: Record<string, string[]>;
   /** Fully-disabled gatekeeper vendor ids. */
   disabledGatekeepers: string[];
   /**
@@ -201,6 +203,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   banner: { text: "", color: DEFAULT_BANNER_COLOR },
   accentColor: "",
   enabledResources: {},
+  enabledResourceTypeIds: {},
   disabledGatekeepers: [],
   ambientGatekeeperModes: {},
   restrictedWebFetchHosts: [],

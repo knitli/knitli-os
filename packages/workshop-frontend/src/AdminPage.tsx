@@ -283,7 +283,7 @@ export default function AdminPage() {
     return () => { applyAccentColor(savedAccent) }
   }, [accentDraft, savedAccent])
 
-  // Re-fetch just the gatekeeper/resource state (used to revert an optimistic toggle on error).
+  // Re-fetch policy: one toggle can affect other resource rows or remove a legacy restriction.
   // Leaves the General-tab drafts untouched.
   const reloadResources = useCallback(async () => {
     const api = currentAdminApi.current
@@ -327,11 +327,17 @@ export default function AdminPage() {
       prev.map((v) =>
         v.vendorId !== vendorId || v.autoProvisions
           ? v
-          : { ...v, resources: v.resources.map((r) => (r.urlPattern === urlPattern ? { ...r, enabled } : r)) }
+          : { ...v, resources: v.resources.map((r) => ((r.resourceTypeId ?? r.urlPattern) === urlPattern ? { ...r, enabled } : r)) }
       )
     )
     try {
       await admin.api.setResourceEnabled(vendorId, urlPattern, enabled)
+      await reloadResources().catch(() => {
+        toasts.add({
+          title: 'Change saved, but resource settings could not be refreshed. Reload this page.',
+          variant: 'error',
+        })
+      })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Update failed'
       toasts.add({ title: message, variant: 'error' })
@@ -1368,18 +1374,18 @@ export default function AdminPage() {
                 {vendor.enabled ? (
                   <div className="space-y-1">
                     {vendor.resources.map((resource) => {
-                      const key = resourceKey(vendor.vendorId, resource.urlPattern)
+                      const key = resourceKey(vendor.vendorId, (resource.resourceTypeId ?? resource.urlPattern))
                       return (
                         <div
-                          key={resource.urlPattern}
+                          key={(resource.resourceTypeId ?? resource.urlPattern)}
                           role="button"
                           tabIndex={0}
-                          onClick={() => !resourceBusy.has(key) && handleResourceToggle(vendor.vendorId, resource.urlPattern, !resource.enabled)}
+                          onClick={() => !resourceBusy.has(key) && handleResourceToggle(vendor.vendorId, (resource.resourceTypeId ?? resource.urlPattern), !resource.enabled)}
                           onKeyDown={(e) => {
                             if (e.currentTarget !== e.target) return
                             if (e.key === 'Enter' || e.key === ' ') {
                               e.preventDefault()
-                              if (!resourceBusy.has(key)) handleResourceToggle(vendor.vendorId, resource.urlPattern, !resource.enabled)
+                              if (!resourceBusy.has(key)) handleResourceToggle(vendor.vendorId, (resource.resourceTypeId ?? resource.urlPattern), !resource.enabled)
                             }
                           }}
                           className="flex cursor-pointer items-center gap-4 px-3 py-2.5 rounded-lg hover:bg-kumo-tint transition-colors"
@@ -1395,7 +1401,7 @@ export default function AdminPage() {
                               checked={resource.enabled}
                               disabled={resourceBusy.has(key)}
                               onCheckedChange={(enabled) =>
-                                handleResourceToggle(vendor.vendorId, resource.urlPattern, enabled)
+                                handleResourceToggle(vendor.vendorId, (resource.resourceTypeId ?? resource.urlPattern), enabled)
                               }
                             />
                           </span>

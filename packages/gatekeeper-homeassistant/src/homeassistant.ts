@@ -18,6 +18,7 @@ import {
   type ResourceDescription,
   type SupportedResource,
   type VendorDescription,
+  resourceTypeUrlPattern,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
@@ -154,6 +155,7 @@ const HOMEASSISTANT_ICON: AvatarImage = { url: HOMEASSISTANT_LOGO_URL };
 // pattern so any HA URL the user pastes will match. The Workshop's resource picker recognizes
 // `https://*` as a special "any URL" pattern.
 const INSTANCE_RESOURCE: SupportedResource = {
+  id: "instance",
   urlPattern: "https://*",
   title: "Home Assistant",
   description: "Access to a Home Assistant instance: every area, device, entity, and dashboard.",
@@ -164,6 +166,7 @@ const INSTANCE_RESOURCE: SupportedResource = {
 // a unique scheme/host marker so the resource picker doesn't confuse them with the catch-all
 // `https://*` whole-instance resource, and so URLPattern.test() routes correctly.
 const AREA_RESOURCE: SupportedResource = {
+  id: "area",
   urlPattern: "https://homeassistant.local/_resource/area/:areaId",
   title: "Home Assistant Area",
   description: "Access to a single Home Assistant area (room): its devices and entities only.",
@@ -171,6 +174,7 @@ const AREA_RESOURCE: SupportedResource = {
 };
 
 const LABEL_RESOURCE: SupportedResource = {
+  id: "label",
   urlPattern: "https://homeassistant.local/_resource/label/:labelId",
   title: "Home Assistant Label",
   description: "Access to all Home Assistant entities carrying a particular label.",
@@ -178,6 +182,7 @@ const LABEL_RESOURCE: SupportedResource = {
 };
 
 const DEVICE_RESOURCE: SupportedResource = {
+  id: "device",
   urlPattern: "https://homeassistant.local/_resource/device/:deviceId",
   title: "Home Assistant Device",
   description: "Access to a single physical device and the entities it provides.",
@@ -185,6 +190,7 @@ const DEVICE_RESOURCE: SupportedResource = {
 };
 
 const ENTITY_RESOURCE: SupportedResource = {
+  id: "entity",
   urlPattern: "https://homeassistant.local/_resource/entity/:entityId",
   title: "Home Assistant Entity",
   description: "Access to a single Home Assistant entity (light, sensor, switch, etc).",
@@ -617,6 +623,7 @@ export class HomeAssistantUserImpl
   }
 
   async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    resourceUrlPattern = resourceTypeUrlPattern(await this.getSupportedResources(), resourceUrlPattern);
     const userAccount = this.#userAccount();
     const credsGetter = async () => await userAccount.getCredentials();
 

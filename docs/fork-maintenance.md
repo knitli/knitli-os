@@ -809,6 +809,32 @@ authorizes a read after fetching it.
     guard refuses. Each pull lists the checked trees recursively.
   - **Still to decide** before a container gatekeeper ships: keep refusing such worktrees, or
     strip prompt files from snapshots and refuse submissions that touch them.
+- **Seams added by the 2026-11-17 sync (foundation `30df0fb5`).**
+  - Resource policy by stable type ID (upstream #1031): see "Gatekeeper resources are opt-in"
+    below. Kernel lines: `admin-config.ts` (`enabledResourceTypeIds` parse/lowercase/reader,
+    the opt-in `isResourceDisabled`/`filterEnabledResources` with a trailing `ambient`),
+    `admin-settings.ts` `setResourceEnabled` (upstream's catalog lookup, then the inverted
+    allow-list edit), and `user.ts` callers threading `ambient` after upstream's new
+    `advertisedResources` argument.
+  - `overseer.ts` `requestConnection`: the fork's connector-side `resolveGatekeeperResource()`
+    now runs beside upstream #1031's explicit `resourceTypeId`. A connector reading is adopted
+    only when no type was named, when it refuses the URL, or when it agrees with the named type;
+    a connector-resolved URL then skips upstream's pattern-mismatch check (the connector exists
+    for URLs the pattern grammar cannot read). Without this the connector could have overridden
+    an explicit type and bypassed upstream's mismatch refusal.
+  - `ConnectInitiator` threading (see "Connect links are bound…"): upstream #1031 renamed
+    `connectAccount`/`ensureAccountResources`/`ensureResources` arguments to `resourceTypeIds`;
+    the fork's trailing `initiator` is re-applied on each, and in the Cloudflare, Microsoft and X
+    gatekeepers' `ensureResources`/`setCallback`.
+  - `GadgetUI.tsx`: upstream #1143 moved the frame's console and Escape reports from
+    `postMessage` to RPC on `GadgetFrameRoot`; the fork's idle-lease `activity` signal stays a
+    `postMessage` (the one remaining branch of `handleMessage`).
+  - `GadgetEditor.tsx`: upstream #1148 split the selected chat into `workingChatId`/`shownChatId`
+    and moved `isAgentActive` onto `paneChatId`; `useWorkspaceIdle(isAgentActive)` and
+    `useInitialVoiceChat(id, workingChatId)` now follow that definition, and `ChatInterface` gets
+    `initialVoice` beside upstream's `codeChatId`/`returnChatId`.
+  - `reviewedSurvivors`: the four 2026-11-14 acks no longer matched and were dropped; six acks
+    added for false positives (see the file).
 - **Seams added by the 2026-11-14 sync (foundation `9e8acadb`).**
   - `overseer.ts` `#resumeAgent`: upstream #1128 split the `wait.pending || isPreparingChatMessage`
     return in two (the second now calls `staysStopped()`); the fork's approved-action summary
@@ -1082,7 +1108,7 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   management is disjoint (chat LLMs vs speech models), and `getModelReasoning` was ported
   onto the new `#resolveModel` helper.
 
-### Gatekeeper resources are opt-in (`enabledResources`)
+### Gatekeeper resources are opt-in (`enabledResources`, `enabledResourceTypeIds`)
 
 - **Where:** `AdminConfig` in `packages/workshop-backend/src/storage-schema/admin-settings-storage.ts`,
   `normalizeAdminConfig`/`parseAdminConfig`, the `AdminSettings` resource toggles, and the
@@ -1116,6 +1142,29 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 - **Upstream integration tests edited for it (2026-11-13 sync):** `google-drive-comments.test.ts`
   and `google-drive-sharing.test.ts` (new upstream, #1065/#1068) get the same one-line
   `enableBoundGatekeeperResources(harness)` call.
+- **2026-11-17 sync (upstream #1031, stable resource type IDs):** upstream keyed admin policy
+  by vendor-scoped type ID (`disabledResourceTypeIds`), kept `disabledResources` as legacy
+  patterns, and made `setResourceEnabled(vendorId, resourceTypeId, …)` accept only an advertised
+  type (or clear an existing legacy entry). The fork mirrors that shape, inverted:
+  `enabledResourceTypeIds` beside the legacy `enabledResources`; a resource is on when its ID
+  (`getResourceTypeId`) or its exact current pattern is listed; editing a vendor upgrades exact
+  legacy matches to IDs. Deliberate differences from upstream: an unmatched legacy entry fails
+  closed by enabling nothing, so the fork has no `unresolvedResourceRestrictions` and no
+  "Unavailable resource type" rows (upstream needs both because an unmatched opt-out restriction
+  must keep the vendor blocked); an unbound vendor's stale entries can still be removed; the
+  per-vendor cap and config-size cap still apply when enabling. The fork's 2 KiB pattern cap and
+  `URLPattern` validation were retired: the setter no longer stores admin-supplied patterns.
+  Rollback note (upstream `docs/gatekeeper-resource-types.md`): a Workshop that reads only
+  `enabledResources` would turn ID-enabled types *off* — fail-closed, unlike upstream's case.
+  The fork's allow-list unit tests moved out of upstream's `admin-config.test.ts` into fork-owned
+  `__tests__/knitli-resource-allow-list.test.ts`. Upstream tests edited for it:
+  `resource-type-identity.test.ts` (two migration cases restated as allow-lists, and the
+  "blocks the vendor" expectation inverted), `resource-creation.test.ts` (the two stable-ID admin
+  cases restated for opt-in; the discovery fake user gains a null `resolveGatekeeperResource`),
+  `admin-settings-audit.test.ts` (records enabling, not disabling), `AdminPage.test.tsx` (the
+  fork's `promptPresets`/`voice` view fields), and integration `workshop-admin-audit.test.ts`
+  (audits `enabledResourceTypeIds`; upstream moved the long-value excerpt case to
+  `restrictedWebFetchHosts`, so the fork's five-pattern variant is gone).
 
 ### Ambient-provisioned accounts bypass resource policy at minting
 

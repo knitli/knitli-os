@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { vi } from 'vitest';
 import { AdminGatekeeperApps } from '../src/fork/admin-gatekeeper-apps.js';
 import { ADMIN_CONFIG_KEY } from '../src/storage-schema/blueprints-kv.js';
-import { MAX_ADMIN_CONFIG_BYTES, MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES, MAX_ENABLED_RESOURCES_PER_VENDOR } from '../src/admin-settings.js';
+import { MAX_ADMIN_CONFIG_BYTES, MAX_ENABLED_RESOURCES_PER_VENDOR } from '../src/admin-settings.js';
 
 type Call = { vendorId: string; method: string; args: unknown[] };
 interface Control { reset(): Promise<void>; getCalls(): Promise<Call[]> }
@@ -94,76 +94,76 @@ describe('admin gatekeeper frames', () => {
       Array.from({ length: count }, (_, i) => `${prefix}${i}`);
     const oversizedPatterns = (vendor: string) =>
       patterns(MAX_ENABLED_RESOURCES_PER_VENDOR, `https://fixture.invalid/${vendor}/${'x'.repeat(1000)}-`);
+    // The resource toggle takes an advertised type (upstream #1031), so bad patterns are refused as
+    // unknown types; only an existing grant, or an unbound vendor's stale one, can be removed.
+    const MAIL = 'https://graph.microsoft.com/#segment=mail';
+    const CALENDAR = 'https://graph.microsoft.com/#segment=calendar';
+    const longPattern = 'too-large-' + 'x'.repeat(2048);
     try {
-      await settings.updateAdminConfig({ enabledResources: {} });
-      let multibyte = `https://fixture.invalid/${'é'.repeat(1100)}`;
-      expect(multibyte.length).toBeLessThan(MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES);
-      expect(new TextEncoder().encode(multibyte).byteLength).toBeGreaterThan(MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES);
-      expect(() => new URLPattern(multibyte)).not.toThrow();
+      await settings.updateAdminConfig({ enabledResources: {}, enabledResourceTypeIds: {} });
       let before = await snapshot();
-      await unchangedAfterReject(before, () => settings.setResourceEnabled('adminframe', multibyte, true), 'too long');
-      before = await snapshot();
-      await unchangedAfterReject(before, () => settings.setResourceEnabled('adminframe', 'not a URL pattern [', true), 'invalid');
-      await settings.setResourceEnabled('adminframe', 'custom://fixture/allowed', true);
-      await settings.setResourceEnabled('adminframe', 'https://fixture.invalid/allowed', true);
+      await unchangedAfterReject(before, () => settings.setResourceEnabled('refining', `https://fixture.invalid/${'é'.repeat(1100)}`, true), 'Unknown resource type');
+      await unchangedAfterReject(before, () => settings.setResourceEnabled('refining', 'not a URL pattern [', true), 'Unknown resource type');
+      await unchangedAfterReject(before, () => settings.setResourceEnabled('refining', 'not a URL pattern [', false), 'Unknown resource type');
+      await settings.setResourceEnabled('refining', MAIL, true);
+      await settings.setResourceEnabled('refining', CALENDAR, true);
       let usable = await snapshot();
-      expect(usable.config.enabledResources.adminframe).toEqual([
-        'custom://fixture/allowed', 'https://fixture.invalid/allowed',
-      ]);
+      expect(usable.config.enabledResources.refining).toEqual([MAIL, CALENDAR]);
       expect(usable.kv).toBe(JSON.stringify(usable.config));
 
-      await settings.updateAdminConfig({ enabledResources: { adminframe: patterns(MAX_ENABLED_RESOURCES_PER_VENDOR) } });
+      await settings.updateAdminConfig({ enabledResources: { refining: patterns(MAX_ENABLED_RESOURCES_PER_VENDOR) } });
       before = await snapshot();
-      await unchangedAfterReject(before, () => settings.setResourceEnabled('adminframe', 'https://fixture.invalid/129', true), 'Too many');
-      await settings.setResourceEnabled('adminframe', patterns(MAX_ENABLED_RESOURCES_PER_VENDOR)[0]!, true);
-      expect(await snapshot()).toEqual(before);
+      await unchangedAfterReject(before, () => settings.setResourceEnabled('refining', MAIL, true), 'Too many');
+      await settings.setResourceEnabled('refining', patterns(1)[0]!, false);
+      expect((await snapshot()).config.enabledResources.refining).toHaveLength(MAX_ENABLED_RESOURCES_PER_VENDOR - 1);
 
-      await settings.updateAdminConfig({ enabledResources: { adminframe: ['https://fixture.invalid/idempotent'] } });
-      await settings.setResourceEnabled('adminframe', 'https://fixture.invalid/idempotent', true);
+      await settings.updateAdminConfig({ enabledResources: { refining: [MAIL] } });
       before = await snapshot();
-      await unchangedAfterReject(before, () => settings.setResourceEnabled('missing-vendor', 'https://fixture.invalid/new', true), 'Unknown');
+      await settings.setResourceEnabled('refining', MAIL, true);
+      expect(await snapshot()).toEqual(before);
+      await unchangedAfterReject(before, () => settings.setResourceEnabled('missing-vendor', MAIL, true), 'Unknown');
 
       await settings.updateAdminConfig({
         enabledResources: {
-          adminframe: ['https://fixture.invalid/legacy'],
+          refining: [MAIL],
           legacyOne: oversizedPatterns('one'), legacyTwo: oversizedPatterns('two'),
           stale: ['https://fixture.invalid/stale'],
         },
       });
       before = await snapshot();
       expect(new TextEncoder().encode(JSON.stringify(before.config)).byteLength).toBeGreaterThan(MAX_ADMIN_CONFIG_BYTES);
-      await settings.setResourceEnabled('adminframe', 'https://fixture.invalid/legacy', true);
+      await settings.setResourceEnabled('refining', MAIL, true);
       expect(await snapshot()).toEqual(before);
-      await unchangedAfterReject(before, () => settings.setResourceEnabled('adminframe', 'https://fixture.invalid/new', true), 'too large');
+      await unchangedAfterReject(before, () => settings.setResourceEnabled('refining', CALENDAR, true), 'too large');
       await settings.setResourceEnabled('stale', 'https://fixture.invalid/stale', false);
       let afterStale = await snapshot();
       expect(afterStale.config.enabledResources.stale).toBeUndefined();
-      expect(afterStale.config.enabledResources.adminframe).toEqual(['https://fixture.invalid/legacy']);
+      expect(afterStale.config.enabledResources.refining).toEqual([MAIL]);
       expect(afterStale.kv).toBe(JSON.stringify(afterStale.config));
-      await settings.setResourceEnabled('adminframe', 'https://fixture.invalid/legacy', false);
+      await settings.setResourceEnabled('refining', MAIL, false);
       let afterRecovery = await snapshot();
-      expect(afterRecovery.config.enabledResources.adminframe).toBeUndefined();
+      expect(afterRecovery.config.enabledResources.refining).toBeUndefined();
       expect(afterRecovery.config.enabledResources.legacyOne).toEqual(oversizedPatterns('one'));
       expect(afterRecovery.kv).toBe(JSON.stringify(afterRecovery.config));
 
       await settings.updateAdminConfig({ enabledResources: Object.fromEntries([
-        ['__proto__', ['__proto__', 'https://fixture.invalid/proto', 'too-large-' + 'x'.repeat(MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES)]],
-        ['adminframe', ['https://fixture.invalid/keep']],
+        ['__proto__', ['__proto__', 'https://fixture.invalid/proto', longPattern]],
+        ['refining', [MAIL]],
       ]) });
       await settings.setResourceEnabled('__proto__', 'https://fixture.invalid/proto', false);
       let afterProto = await snapshot();
-      expect(afterProto.config.enabledResources.__proto__).toEqual(['__proto__', 'too-large-' + 'x'.repeat(MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES)]);
-      expect(afterProto.config.enabledResources.adminframe).toEqual(['https://fixture.invalid/keep']);
+      expect(afterProto.config.enabledResources.__proto__).toEqual(['__proto__', longPattern]);
+      expect(afterProto.config.enabledResources.refining).toEqual([MAIL]);
       expect(afterProto.kv).toBe(JSON.stringify(afterProto.config));
-      await settings.setResourceEnabled('__proto__', 'too-large-' + 'x'.repeat(MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES), false);
+      await settings.setResourceEnabled('__proto__', longPattern, false);
       afterProto = await snapshot();
       expect(afterProto.config.enabledResources.__proto__).toEqual(['__proto__']);
-      expect(afterProto.config.enabledResources.adminframe).toEqual(['https://fixture.invalid/keep']);
+      expect(afterProto.config.enabledResources.refining).toEqual([MAIL]);
       expect(afterProto.kv).toBe(JSON.stringify(afterProto.config));
       await settings.setResourceEnabled('__proto__', '__proto__', false);
       let final = await settings.getAdminConfig();
       expect(Object.hasOwn(final.enabledResources, '__proto__')).toBe(false);
-      expect(final.enabledResources.adminframe).toEqual(['https://fixture.invalid/keep']);
+      expect(final.enabledResources.refining).toEqual([MAIL]);
       expect(await env.BLUEPRINTS.get(ADMIN_CONFIG_KEY)).toBe(JSON.stringify(final));
     } finally {
       if (priorKv === null) await env.BLUEPRINTS.delete(ADMIN_CONFIG_KEY);

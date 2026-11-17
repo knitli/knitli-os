@@ -10,7 +10,7 @@
 // here is enabled by default; the admin UI opts things *out*.
 
 import { AdminSettingChange, AiModelProvider, AmbientGatekeeperMode, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, GatewayModel, GatewayModelCapabilities, GatewayModelMode, GatewayModelSettings, MAX_ADMIN_AUDIT_RETENTION_DAYS, MAX_UPDATE_CHECK_INTERVAL_MINUTES, MAX_UPDATE_HOURS, OutputFormatOffer, PromptPreset, REASONING_LEVELS, SUGGESTED_MODELS, isAmbientGatekeeperMode, isBannerColor, isGatewayModelMode, isOutputIcon, isReasoningLevel } from "@gadgets/workshop-shared/api";
-import { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
+import { SupportedResource, getResourceTypeId } from "@gadgets/workshop-shared/gatekeeper";
 import { adminSettingChange } from "./admin-access.js";
 import { sanitizeBlueprintOutput } from "./blueprint-archive.js";
 import { DEFAULT_ADMIN_CONFIG, type AdminConfig, type FormatCuration } from "./storage-schema/admin-settings-storage.js";
@@ -386,19 +386,16 @@ export function parseRestrictedWebFetchHosts(hosts: string[]): string[] {
  * storage or its KV mirror.
  */
 export function normalizeAdminConfig(p: Partial<AdminConfig>): AdminConfig {
-  // Fork: resources are opt-in (enabledResources; unlisted is off), not upstream's opt-out
-  // disabledResources (see #24). Built via fromEntries so special keys (__proto__) stay
-  // ordinary own entries rather than tripping Object.prototype setters. Case is preserved
-  // here: the AdminSettings read path round-trips bulk-written ids verbatim (B-HOST-011), and
-  // only the KV-mirror parse below lowercases (MsGraph handling, kept from #24).
-  let enabledResourceEntries: Array<[string, string[]]> = [];
-  if (p.enabledResources && typeof p.enabledResources === "object") {
-    for (let [vendorId, patterns] of Object.entries(p.enabledResources)) {
-      let list = strings(patterns);
-      if (list.length > 0) enabledResourceEntries.push([vendorId, list]);
-    }
-  }
-  let enabledResources = Object.fromEntries(enabledResourceEntries);
+  // Fork: resources are opt-in (enabledResources/enabledResourceTypeIds; unlisted is off), not
+  // upstream's opt-out disabledResources/disabledResourceTypeIds (see #24). Built via fromEntries
+  // so special keys (__proto__) stay ordinary own entries rather than tripping Object.prototype
+  // setters. Case is preserved here: the AdminSettings read path round-trips bulk-written ids
+  // verbatim (B-HOST-011), and only the KV-mirror parse below lowercases (MsGraph handling, kept from #24).
+  const allowList = (raw: Record<string, string[]> | undefined) => Object.fromEntries(
+    Object.entries(raw && typeof raw === "object" ? raw : {}).flatMap(([vendorId, values]) => {
+      const list = strings(values);
+      return list.length ? [[vendorId, list]] : [];
+    }));
   let ambientGatekeeperModes: Record<string, AmbientGatekeeperMode> = {};
   if (p.ambientGatekeeperModes && typeof p.ambientGatekeeperModes === "object") {
     for (let [vendorId, mode] of Object.entries(p.ambientGatekeeperModes)) {
@@ -441,7 +438,8 @@ export function normalizeAdminConfig(p: Partial<AdminConfig>): AdminConfig {
       color: isBannerColor(p.banner?.color) ? p.banner!.color : DEFAULT_BANNER_COLOR,
     },
     accentColor: typeof p.accentColor === "string" ? p.accentColor : "",
-    enabledResources,
+    enabledResources: allowList(p.enabledResources),
+    enabledResourceTypeIds: allowList(p.enabledResourceTypeIds),
     disabledGatekeepers: strings(p.disabledGatekeepers).map(v => v.toLowerCase()),
     ambientGatekeeperModes,
     restrictedWebFetchHosts: strings(p.restrictedWebFetchHosts),
@@ -684,14 +682,23 @@ export function parseAdminConfig(raw: string | null, seed: AdminConfigSeed = {})
   let config = effectiveAdminConfig(stored, seed);
   // Fork: the KV-mirror read lowercases vendor ids (see #24); the AdminSettings read path
   // preserves them (B-HOST-011), so this lives here rather than in the shared normalize.
-  config.enabledResources = Object.fromEntries(
-      Object.entries(config.enabledResources).map(([id, patterns]) => [id.toLowerCase(), patterns]));
+  const lowercased = (map: Record<string, string[]>) => Object.fromEntries(
+      Object.entries(map).map(([id, values]) => [id.toLowerCase(), values]));
+  config.enabledResources = lowercased(config.enabledResources);
+  config.enabledResourceTypeIds = lowercased(config.enabledResourceTypeIds ?? {});
   return config;
 }
 
+/** Legacy enabled resources: exact URL patterns, stored before resource types had stable IDs. */
 export function enabledResourcePatterns(config: AdminConfig, vendorId: string): string[] {
   let id = vendorId.toLowerCase();
   return Object.hasOwn(config.enabledResources, id) ? config.enabledResources[id]! : [];
+}
+
+/** Enabled stable resource type IDs (`getResourceTypeId`) for one vendor. */
+export function enabledResourceTypeIds(config: AdminConfig, vendorId: string): string[] {
+  let id = vendorId.toLowerCase(), map = config.enabledResourceTypeIds ?? {};
+  return Object.hasOwn(map, id) ? map[id]! : [];
 }
 
 export function serializeAdminConfig(config: AdminConfig): string {
@@ -710,18 +717,19 @@ export async function readAdminConfig(env: Cloudflare.Env): Promise<AdminConfig>
 // vendor, which has no resource toggles and is governed by `ambientGatekeeperMode` instead.
 
 export function isResourceDisabled(
-    config: AdminConfig, vendorId: string, urlPattern: string, ambient = false): boolean {
+    config: AdminConfig, vendorId: string, resource: SupportedResource,
+    _advertisedResources: readonly SupportedResource[], ambient = false): boolean {
+  // Fork: opt-in, so a legacy pattern that no longer matches enables nothing and needs no
+  // blocking (upstream's unresolved opt-out restrictions block the vendor instead).
   if (ambient) return false;
-  return !enabledResourcePatterns(config, vendorId).includes(urlPattern);
+  return !enabledResourceTypeIds(config, vendorId).includes(getResourceTypeId(resource)) &&
+    !enabledResourcePatterns(config, vendorId).includes(resource.urlPattern);
 }
 
 export function filterEnabledResources(
     config: AdminConfig, vendorId: string, resources: SupportedResource[],
-    ambient = false): SupportedResource[] {
-  if (ambient) return resources;
-  let enabled = enabledResourcePatterns(config, vendorId);
-  if (!enabled || enabled.length === 0) return [];
-  return resources.filter(r => enabled.includes(r.urlPattern));
+    advertisedResources: readonly SupportedResource[] = resources, ambient = false): SupportedResource[] {
+  return resources.filter(resource => !isResourceDisabled(config, vendorId, resource, advertisedResources, ambient));
 }
 
 // --- Agent system-prompt instructions ---

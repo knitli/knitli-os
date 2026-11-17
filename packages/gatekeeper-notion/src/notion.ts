@@ -34,6 +34,7 @@ import {
   type ResourceDescription,
   type SupportedResource,
   type VendorDescription,
+  resourceTypeUrlPattern,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { KvTtlCache } from "@gadgets/gatekeeper-kit/cache";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
@@ -178,12 +179,14 @@ function constantTimeEqual(a: string, b: string): boolean {
 const NOTION_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(NOTION_LOGO_SVG)}`;
 
 const WORKSPACE_RESOURCE: SupportedResource = {
+  id: "workspace",
   urlPattern: "https://*",
   title: "Notion Workspace",
   description: "Search, read, and edit any page or database shared with this connection.",
 };
 
 const ITEM_RESOURCE: SupportedResource = {
+  id: "page",
   urlPattern: "https://www.notion.so/:path+",
   title: "Notion Page or Database",
   description: "Read and edit a specific Notion page or database (and its rows).",
@@ -655,6 +658,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 
   async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    resourceUrlPattern = resourceTypeUrlPattern(await this.getSupportedResources(), resourceUrlPattern);
     if (resourceUrlPattern === ITEM_RESOURCE.urlPattern) {
       return {
         iframeHtml: NOTION_ITEM_CONFIGURATOR_HTML,

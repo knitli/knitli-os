@@ -180,45 +180,43 @@ it("records every setting change, before it takes effect", async () => {
   }
   last = await newSetting(last);
 
-  // Past it, the values are excerpts from a little before their first difference.
-  // Fork: resources are opt-in, so the audited setting is `enabledResources`, and a pattern is at
-  // most 2 KiB. Enable several until the vendor's list passes the cap: the fifth does.
-  const vendor = settings.resourceVendors.find(candidate => candidate.vendorId === TEST_VENDOR_ID);
-  const existing = !vendor || vendor.autoProvisions ? [] :
-      vendor.resources.filter(resource => resource.enabled).map(resource => resource.urlPattern);
-  const patterns = Array.from({ length: 5 }, (_, index) =>
-      `https://gadgets-test.example/${String(index).repeat(2_000 - 29)}`);
-  const shorter = JSON.stringify([...existing, ...patterns.slice(0, 4)]);
-  const longer = JSON.stringify([...existing, ...patterns]);
-  expect(shorter.length).toBeLessThanOrEqual(MAX_ADMIN_AUDIT_VALUE_LENGTH);
-  expect(longer.length).toBeGreaterThan(MAX_ADMIN_AUDIT_VALUE_LENGTH);
-  // The lists agree up to the closing bracket, and the excerpt starts 100 characters before it.
-  const offset = shorter.length - 1 - 100;
+  // Resource restrictions use the advertised stable ID and are audited as that identity.
+  // Fork: resources are opt-in (the harness enables "thing"), so the setting is `enabledResourceTypeIds`.
   try {
-    for (const pattern of patterns) await admin.setResourceEnabled(TEST_VENDOR_ID, pattern, true);
+    await admin.setResourceEnabled(TEST_VENDOR_ID, "thing", false);
+    last = await expectRecord(last, "setResourceEnabled",
+        [{ setting: "enabledResourceTypeIds", key: TEST_VENDOR_ID, before: '["thing"]' }]);
+  } finally {
+    await admin.setResourceEnabled(TEST_VENDOR_ID, "thing", true);
+  }
+  last = await expectRecord(last, "setResourceEnabled",
+      [{ setting: "enabledResourceTypeIds", key: TEST_VENDOR_ID, after: '["thing"]' }]);
+
+  // Past the audit value limit, the values are excerpts. Use a real setting that accepts a long
+  // list, rather than inventing an unadvertised resource type that the setter must refuse.
+  const hosts = Array.from({ length: 200 }, (_, i) => `${"h".repeat(50)}-${i}.example.test`);
+  const serialized = JSON.stringify(hosts);
+  expect(serialized.length).toBeGreaterThan(MAX_ADMIN_AUDIT_VALUE_LENGTH);
+  try {
+    await admin.setRestrictedWebFetchHosts(hosts);
     last = await newSetting(last);
-    expect(last.method).toBe("setResourceEnabled");
+    expect(last.method).toBe("setRestrictedWebFetchHosts");
     expect(last.changes).toHaveLength(1);
     const [change] = last.changes;
     expect(change).toMatchObject({
-      setting: "enabledResources", key: TEST_VENDOR_ID,
-      excerpt: { offset, beforeLength: shorter.length, afterLength: longer.length },
+      setting: "restrictedWebFetchHosts", excerpt: { offset: 0, afterLength: serialized.length },
     });
-    expect(change!.before!.length).toBeLessThanOrEqual(MAX_ADMIN_AUDIT_VALUE_LENGTH);
     expect(change!.after!.length).toBeLessThanOrEqual(MAX_ADMIN_AUDIT_VALUE_LENGTH);
-    expect(shorter.slice(offset).startsWith(change!.before!)).toBe(true);
-    expect(longer.slice(offset).startsWith(change!.after!)).toBe(true);
-
-    await admin.setResourceEnabled(TEST_VENDOR_ID, patterns[4]!, false);
-    last = await newSetting(last);
-    expect(last.changes).toEqual([expect.objectContaining({
-      setting: "enabledResources", key: TEST_VENDOR_ID,
-      excerpt: { offset, beforeLength: longer.length, afterLength: shorter.length },
-    })]);
+    expect(serialized.startsWith(change!.after!)).toBe(true);
   } finally {
-    for (const pattern of patterns) await admin.setResourceEnabled(TEST_VENDOR_ID, pattern, false);
+    await admin.setRestrictedWebFetchHosts(settings.restrictedWebFetchHosts);
   }
-  last = await newestSetting();
+  last = await newSetting(last);
+  expect(last.method).toBe("setRestrictedWebFetchHosts");
+  expect(last.changes).toEqual([expect.objectContaining({
+    setting: "restrictedWebFetchHosts", excerpt: { offset: 0, beforeLength: serialized.length,
+      afterLength: JSON.stringify(settings.restrictedWebFetchHosts).length },
+  })]);
 
   try {
     await admin.setUpdateCheckIntervalMinutes(120);

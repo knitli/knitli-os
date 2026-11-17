@@ -1,12 +1,12 @@
 import { AI_EXECUTOR_ADMIN_ERROR_CODES, AdminApi, AdminAuditPage, AdminAuditQuery, AdminAuditStats, AdminAuditStatsQuery, AdminFormat, AdminFormatPatch, AdminModel, AdminResourceVendor, AdminSettingChange, AdminSettingMethod, AdminSettingsView, AdminVia, AiExecutorProfile, AiExecutorProfileInput, AiModelConfig, AiModelProvider, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, DeploymentUpdateStatus, GatewayModel, GatewayModelLevelTest, GatewayModelMode, GatewayModelSettings, GatewayModelTest, MAX_ADMIN_AUDIT_RETENTION_DAYS, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, MAX_UPDATE_CHECK_INTERVAL_MINUTES, MAX_UPDATE_HOURS, PromptPreset, PromptPresetPatch, ReasoningLevel, SUGGESTED_MODELS, VoiceAdminConfig, createAiExecutorAdminError, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
-import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
+import { GatekeeperVendor, getResourceTypeId, findResourceType } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject, type WorkerEntrypoint } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
 import { validateRpc } from 'capnweb-validate';
 import { createWorkshopLogger } from "./observability";
 import { sanitizeBlueprintOutput } from './blueprint-archive.js';
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, readBlueprintKvRecord, serializeFeaturedBlueprints } from './storage-schema/blueprints-kv.js';
-import { MAX_AGENT_HINT, MAX_ALLOWED_MODELS, adminConfigSeed, assertPermutation, changesModelSettings, defaultOutputFormatId, diffAdminConfig, effectiveAdminConfig, enabledResourcePatterns, isAllowedModelName, isUpdateCheckInterval, isUpdateHours, listPromotedFormats, parseRestrictedWebFetchHosts, reorderFormats, sanitizeAddedModel, sanitizeModelSettings, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
+import { MAX_AGENT_HINT, MAX_ALLOWED_MODELS, adminConfigSeed, assertPermutation, changesModelSettings, defaultOutputFormatId, diffAdminConfig, effectiveAdminConfig, enabledResourcePatterns, enabledResourceTypeIds, isAllowedModelName, isUpdateCheckInterval, isUpdateHours, listPromotedFormats, parseRestrictedWebFetchHosts, reorderFormats, sanitizeAddedModel, sanitizeModelSettings, sanitizeOutputOverrides, serializeAdminConfig, isResourceDisabled } from './admin-config.js';
 import { makeAdminSettingsStorage, type AdminConfig, type AdminSettingsStorage, type FormatCuration } from './storage-schema/admin-settings-storage.js';
 import { getModelTokenLimits } from './agent-compaction.js';
 import { AUTO_ROUTER_PROVIDER_NAMES, AiGatewayConfig, GatewayModels, assertGatewayProvider, gatewayModelConfig, gatewayRunConfig, getAiGatewayConfig, isCatalogModel } from './ai-gateway.js';
@@ -34,8 +34,6 @@ const VERSION_TAGS_TTL_MS = 60_000;
 const AI_EXECUTOR_PROTOCOL_VERSION = 1 as const;
 const adminSettingsEncoder = new TextEncoder();
 
-/** Maximum UTF-8 bytes accepted for one resource URLPattern. */
-export const MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES = 2 * 1024;
 /** Maximum enabled resources for one currently bound vendor. */
 export const MAX_ENABLED_RESOURCES_PER_VENDOR = 128;
 /** Maximum UTF-8 bytes for the serialized deployment admin config. */
@@ -1178,35 +1176,53 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   }
 
   /** Enable/disable a single gatekeeper resource type atomically (read-modify-write within the DO). */
-  async setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean,
-                           actor: AdminSettingActor): Promise<void> {
+  async setResourceEnabled(
+      vendorId: string, resourceTypeId: string, enabled: boolean, actor: AdminSettingActor): Promise<void> {
     vendorId = vendorId.toLowerCase();
+    const vendor = this.vendors.get(vendorId);
+    // Fork: an unbound vendor's stale grants can still be removed.
+    if (!vendor && enabled) throw new Error("Unknown gatekeeper vendor.");
+    const resources = vendor ? await vendor.getSupportedResources({ userId: actor.admin }) : [];
+    const resource = findResourceType(resources, resourceTypeId)
+      ?? findResourceType(resources, undefined, resourceTypeId);
     await this.#mutateAdminConfig(actor, config => {
-      let on = new Set(enabledResourcePatterns(config, vendorId));
-      if (!enabled) {
-        on.delete(urlPattern);
-        return this.#withEnabledResources(config, vendorId, on);
+      // Fork: opt-in, so the allow-lists are inverted relative to upstream's restrictions.
+      const legacy = new Set(enabledResourcePatterns(config, vendorId));
+      const ids = new Set(enabledResourceTypeIds(config, vendorId));
+      if (!resource && (enabled || (!legacy.has(resourceTypeId) && !ids.has(resourceTypeId)))) {
+        throw new Error("Unknown resource type; only an existing grant can be removed.");
       }
-      if (on.has(urlPattern)) return config;
-      if (!urlPattern || adminSettingsEncoder.encode(urlPattern).byteLength > MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES) {
-        throw new Error('Resource URL pattern is too long.');
+      // Upgrade only exact matches; an unmatched legacy pattern enables nothing.
+      for (const type of resources) {
+        if (type.id !== undefined && legacy.delete(type.urlPattern)) ids.add(type.id);
       }
-      try { void new URLPattern(urlPattern); } catch { throw new Error('Resource URL pattern is invalid.'); }
-      if (!this.vendors.has(vendorId)) throw new Error('Unknown gatekeeper vendor.');
-      if (on.size >= MAX_ENABLED_RESOURCES_PER_VENDOR) throw new Error('Too many enabled resources for gatekeeper vendor.');
-      on.add(urlPattern);
-      let next = this.#withEnabledResources(config, vendorId, on);
-      if (adminSettingsEncoder.encode(serializeAdminConfig(next)).byteLength > MAX_ADMIN_CONFIG_BYTES) {
+      if (resource) {
+        const [list, key] = resource.id !== undefined ? [ids, resource.id] : [legacy, resource.urlPattern];
+        if (enabled) list.add(key); else list.delete(key);
+      } else { legacy.delete(resourceTypeId); ids.delete(resourceTypeId); }
+      const same = (stored: string[], next: Set<string>) => stored.length === next.size && stored.every(v => next.has(v));
+      if (same(enabledResourcePatterns(config, vendorId), legacy) && same(enabledResourceTypeIds(config, vendorId), ids)) {
+        return config;
+      }
+      if (enabled && legacy.size + ids.size > MAX_ENABLED_RESOURCES_PER_VENDOR) {
+        throw new Error('Too many enabled resources for gatekeeper vendor.');
+      }
+      let next = this.#withEnabledResources(config, vendorId, legacy, ids);
+      if (enabled && adminSettingsEncoder.encode(serializeAdminConfig(next)).byteLength > MAX_ADMIN_CONFIG_BYTES) {
         throw new Error('Admin config is too large.');
       }
       return next;
     });
   }
 
-  #withEnabledResources(config: AdminConfig, vendorId: string, patterns: Set<string>): AdminConfig {
-    let entries = Object.entries(config.enabledResources).filter(([id]) => id !== vendorId);
-    if (patterns.size > 0) entries.push([vendorId, [...patterns]]);
-    return { ...config, enabledResources: Object.fromEntries(entries) };
+  #withEnabledResources(config: AdminConfig, vendorId: string, patterns: Set<string>, ids: Set<string>): AdminConfig {
+    const replace = (map: Record<string, string[]>, values: Set<string>) => {
+      let entries = Object.entries(map).filter(([id]) => id !== vendorId);
+      if (values.size > 0) entries.push([vendorId, [...values]]);
+      return Object.fromEntries(entries);
+    };
+    return { ...config, enabledResources: replace(config.enabledResources, patterns),
+      enabledResourceTypeIds: replace(config.enabledResourceTypeIds ?? {}, ids) };
   }
 
   async setSiteLogo(data: Uint8Array | null, actor: AdminSettingActor): Promise<boolean> {
@@ -1331,7 +1347,6 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
             // Nothing to toggle for this gatekeeper.
             return null;
           }
-          let enabled = new Set(enabledResourcePatterns(config, id));
           return {
             vendorId: id,
             displayName: description.displayName,
@@ -1339,11 +1354,12 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
             autoProvisions: false,
             enabled: !disabledGatekeeperSet.has(id),
             resources: supportedResources.map(r => ({
+              resourceTypeId: getResourceTypeId(r),
               urlPattern: r.urlPattern,
               title: r.title,
               description: r.description,
               icon: r.icon,
-              enabled: enabled.has(r.urlPattern),
+              enabled: !isResourceDisabled(config, id, r, supportedResources),
             })),
           };
         } catch (err) {

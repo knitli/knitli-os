@@ -85,6 +85,10 @@
       "reason": "Unit test for the fork-owned client-activity lease (src/fork/idle-lease.ts); exact path because this package's vitest include is non-recursive."
     },
     {
+      "path": "packages/workshop-backend/__tests__/knitli-resource-allow-list.test.ts",
+      "reason": "Unit tests for the fork's opt-in resource allow-list (enabledResources / enabledResourceTypeIds), moved out of upstream's admin-config.test.ts; exact path because this package's vitest include is non-recursive."
+    },
+    {
       "path": "packages/workshop-backend/__integration__/knitli-session-lease.test.ts",
       "reason": "End-to-end test for the fork-owned client-activity lease: real /api socket, workspace and alarm."
     },
@@ -559,24 +563,34 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "onPreview",
-      "path": "packages/workshop-frontend/src/features/admin/voice/AdminVoicePanel.tsx",
-      "reason": "The fork's voice-list row prop (play a voice sample); unrelated to the chat-attachment card prop upstream's #1133 removed."
+      "token": "consoleLogCount",
+      "path": "packages/workshop-frontend/src/GadgetEditor.tsx",
+      "reason": "Still present in upstream's own copy of this file; upstream's #1148 only dropped one use (the code tab now reads shownConsoleLogCount)."
     },
     {
-      "token": "NAME_LIST",
-      "path": "packages/workshop-frontend/src/ShareModal.tsx",
-      "reason": "Still present in upstream's own copy of this file (the collaborator-added toast); upstream's #1126 only dropped other uses."
+      "token": "isViewActive",
+      "path": "packages/workshop-frontend/src/GadgetEditor.tsx",
+      "reason": "Still present in upstream's own copy of this file; upstream's #1148 moved it onto paneChatId, and the fork's idle lease reads isAgentActive beside it."
     },
     {
-      "token": "TEXT_DECODER_STRICT",
-      "path": "packages/workshop-backend/src/git-cache.ts",
-      "reason": "Still present in upstream's own copy of this file; upstream's #863 only dropped one use."
+      "token": "metadataLoaded",
+      "path": "packages/workshop-frontend/src/GadgetEditor.tsx",
+      "reason": "Still present in upstream's own copy of this file; upstream's #1148 only dropped one use."
     },
     {
-      "token": "titleIcon",
-      "path": "packages/workshop-frontend/src/ChatInterface.tsx",
-      "reason": "Still present in upstream's own copy of this file (a local in the action-card renderer); upstream's #1118 only dropped other uses."
+      "token": "grantedPatterns",
+      "path": "packages/gatekeeper-cloudflare/src/cloudflare.ts",
+      "reason": "Still present in upstream's own ensureResources(); upstream's #1031 only renamed the account-description use."
+    },
+    {
+      "token": "ieee754",
+      "path": "pnpm-lock.yaml",
+      "reason": "Transitive (buffer@5.7.1 via unbzip2-stream), still in upstream's own lockfile; upstream's #1155 bump only dropped another path to it."
+    },
+    {
+      "token": "urlPatterns",
+      "path": "packages/workshop-shared/src/gatekeeper.ts",
+      "reason": "Upstream's own doc comment on the configurator's resource types, unchanged in upstream's copy; #1031 only dropped other uses."
     }
   ]
 }

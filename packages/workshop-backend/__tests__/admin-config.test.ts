@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_UPDATE_CHECK_INTERVAL_MINUTES, DEFAULT_UPDATE_MINIMUM_AGE_HOURS, DEFAULT_UPDATE_NOTICE_SNOOZE_HOURS, MAX_UPDATE_CHECK_INTERVAL_MINUTES, MAX_UPDATE_HOURS, type GatewayModel, DEFAULT_ADMIN_AUDIT_RETENTION_DAYS, MAX_ADMIN_AUDIT_ARG_LENGTH, MAX_ADMIN_AUDIT_RETENTION_DAYS } from "@gadgets/workshop-shared/api";
-import { adminConfigSeed, changesModelSettings, defaultOutputFormatId, effectiveAdminConfig, enabledResourcePatterns, filterEnabledResources, isResourceDisabled, isUpdateCheckInterval, isUpdateHours, normalizeAdminConfig, parseAdminConfig, parseAdminConfigSeed, readAdminConfig, parseRestrictedWebFetchHosts, reorderFormats, resolveFormatOutput, sanitizeAddedModel, sanitizeModelSettings, sanitizeOutputOverrides, serializeAdminConfig, diffAdminConfig } from "../src/admin-config.js";
+import { adminConfigSeed, changesModelSettings, defaultOutputFormatId, effectiveAdminConfig, isUpdateCheckInterval, isUpdateHours, normalizeAdminConfig, parseAdminConfig, parseAdminConfigSeed, readAdminConfig, parseRestrictedWebFetchHosts, reorderFormats, resolveFormatOutput, sanitizeAddedModel, sanitizeModelSettings, sanitizeOutputOverrides, serializeAdminConfig, diffAdminConfig } from "../src/admin-config.js";
 import { DEFAULT_ADMIN_CONFIG, type AdminConfig, type FormatCuration } from "../src/storage-schema/admin-settings-storage.js";
 
 describe("parseAdminConfig", () => {
@@ -151,67 +151,6 @@ describe("admin config site logo", () => {
   });
 });
 
-const MAIL = { urlPattern: "https://graph.microsoft.com/#segment=mail", title: "Mail", description: "" };
-const CALENDAR = { urlPattern: "https://graph.microsoft.com/#segment=calendar", title: "Calendar", description: "" };
-const CUSTOM = { urlPattern: "https://graph.microsoft.com/#tool=*", title: "Custom selection", description: "" };
-
-describe("resource allow-list", () => {
-  it("treats every resource as off until an admin turns it on", () => {
-    let config = parseAdminConfig(null);
-    expect(config.enabledResources).toEqual({});
-    expect(filterEnabledResources(config, "msgraph", [MAIL, CALENDAR])).toEqual([]);
-    expect(isResourceDisabled(config, "msgraph", MAIL.urlPattern)).toBe(true);
-  });
-
-  it("keeps only the resources the admin enabled, per vendor", () => {
-    let config = parseAdminConfig(JSON.stringify({ enabledResources: { msgraph: [MAIL.urlPattern] } }));
-    expect(filterEnabledResources(config, "msgraph", [MAIL, CALENDAR])).toEqual([MAIL]);
-    expect(filterEnabledResources(config, "linear", [MAIL])).toEqual([]);
-    expect(isResourceDisabled(config, "msgraph", MAIL.urlPattern)).toBe(false);
-    expect(isResourceDisabled(config, "msgraph", CALENDAR.urlPattern)).toBe(true);
-    expect(isResourceDisabled(config, "MsGraph", CUSTOM.urlPattern)).toBe(true);
-  });
-
-  it("matches the vendor id case-insensitively, the way setResourceEnabled stores it", () => {
-    let config = parseAdminConfig(JSON.stringify({ enabledResources: { msgraph: [MAIL.urlPattern] } }));
-    expect(filterEnabledResources(config, "MsGraph", [MAIL, CALENDAR])).toEqual([MAIL]);
-    expect(isResourceDisabled(config, "MSGRAPH", MAIL.urlPattern)).toBe(false);
-  });
-
-  it("lowercases a stored key at parse time, so a hand-edited mixed-case key still matches", () => {
-    let config = parseAdminConfig(JSON.stringify({ enabledResources: { MsGraph: [MAIL.urlPattern] } }));
-    expect(config.enabledResources).toEqual({ msgraph: [MAIL.urlPattern] });
-    expect(filterEnabledResources(config, "msgraph", [MAIL, CALENDAR])).toEqual([MAIL]);
-  });
-
-  it("lets an ambient (auto-provisioning) vendor through untouched, since it has no toggles", () => {
-    let config = parseAdminConfig(null);
-    expect(filterEnabledResources(config, "context", [MAIL, CALENDAR], true)).toEqual([MAIL, CALENDAR]);
-    expect(isResourceDisabled(config, "context", MAIL.urlPattern, true)).toBe(false);
-  });
-
-  it("ignores the retired deny-list rather than turning anything on", () => {
-    let config = parseAdminConfig(JSON.stringify({ disabledResources: { msgraph: [CALENDAR.urlPattern] } }));
-    expect(filterEnabledResources(config, "msgraph", [MAIL, CALENDAR])).toEqual([]);
-    expect("disabledResources" in config).toBe(false);
-  });
-
-  it("round-trips the allow-list through serialize/parse", () => {
-    let config = { ...DEFAULT_ADMIN_CONFIG, enabledResources: { msgraph: [MAIL.urlPattern] } };
-    expect(parseAdminConfig(serializeAdminConfig(config)).enabledResources).toEqual({ msgraph: [MAIL.urlPattern] });
-  });
-
-  it("keeps special vendor keys as ordinary own entries", () => {
-    let config = parseAdminConfig('{"enabledResources":{"__proto__":["https://graph.microsoft.com/#segment=mail"],"constructor":["constructor"],"toString":["toString"]}}');
-    expect(Object.hasOwn(config.enabledResources, "__proto__")).toBe(true);
-    expect(enabledResourcePatterns(config, "__proto__")).toEqual([MAIL.urlPattern]);
-    expect(isResourceDisabled(config, "__proto__", MAIL.urlPattern)).toBe(false);
-    expect(enabledResourcePatterns(config, "constructor")).toEqual(["constructor"]);
-    expect(enabledResourcePatterns(config, "toString")).toEqual(["toString"]);
-    expect(enabledResourcePatterns(parseAdminConfig(null), "constructor")).toEqual([]);
-    expect(enabledResourcePatterns(parseAdminConfig(null), "toString")).toEqual([]);
-  });
-});
 describe("admin config gateway models", () => {
   let added: GatewayModel =
       { provider: "anthropic", id: "claude-test", name: "Claude Test", contextWindow: 500000 };
@@ -570,7 +509,7 @@ describe("admin config update notice", () => {
 
 describe("ADMIN_CONFIG_SEED", () => {
   const SEED = {
-    modelModes: { "claude-fable-5-1": "hidden" },
+    modelModes: { "claude-fable-5-2": "hidden" },
     modelSettings: { "@cf/zai-org/glm-5.2": { reasoning: "high", compactionInputBudget: 200000 } },
     addedModels: [
       { provider: "cloudflare", id: "@cf/test/added", name: "Added", contextWindow: 131072 },

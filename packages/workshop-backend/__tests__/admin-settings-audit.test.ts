@@ -201,9 +201,29 @@ describe("AdminSettings records each admin's change before making it", () => {
       { setting: "banner", key: "text", before: "", after: "Down at noon" },
     ]);
 
-    await inDo(admin => admin.setGatewayModelMode("claude-fable-5-1", "disabled", ACTOR));
+    await inDo(admin => admin.setGatewayModelMode("claude-fable-5-2", "disabled", ACTOR));
     expect(records()[1]!.changes).toStrictEqual(
-        [{ setting: "modelModes", key: "claude-fable-5-1", after: "disabled" }]);
+        [{ setting: "modelModes", key: "claude-fable-5-2", after: "disabled" }]);
+  });
+
+  it("records stable resource restrictions before changing policy", async () => {
+    const { inDo, records, events, config, audit } = adminSettings();
+    const setEnabled = (enabled: boolean) => inDo(admin => {
+      Object.assign(admin, { vendors: new Map([["vendor", {
+        getSupportedResources: async () => [{ id: "repository", urlPattern: "https://example.test/:repo",
+          title: "Repository", description: "Read code" }],
+      }]]) });
+      return admin.setResourceEnabled("vendor", "repository", enabled, ACTOR);
+    });
+    // Fork: resources are opt-in, so enabling is the recorded change.
+    await setEnabled(true);
+    expect(records()[0]!.changes).toEqual([
+      { setting: "enabledResourceTypeIds", key: "vendor", after: '["repository"]' },
+    ]);
+    expect(events.slice(-2)).toEqual(["audit", "kv:.adminConfig"]);
+    audit.fail = true;
+    await expect(setEnabled(false)).rejects.toThrow("audit log unavailable");
+    expect((await config()).enabledResourceTypeIds).toEqual({ vendor: ["repository"] });
   });
 
   it("keeps an excerpt of an over-long value, and cuts an over-long key", async () => {

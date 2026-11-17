@@ -32,7 +32,7 @@ describe("rejecting an action on a removed connection", () => {
       impl.ownerId = USER.id;
       impl.storage.ownerId.put(USER.id);
       impl.users = {
-        idFromString: (id: string) => id,
+        idFromString: (id: string) => id, idFromName: (name: string) => name,
         get: () => ({ id: { toString: () => USER.id }, whoami: async () => USER }),
       };
       impl.ensureAmbientCapsules = async () => {};

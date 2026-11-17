@@ -262,7 +262,7 @@ async function withBlindfoldTurn(
       setWorkspaceLastActive: async () => {},
       publishNotification: async () => {},
     };
-    impl.users = { idFromString: (id: string) => id, get: () => userStub };
+    impl.users = { idFromString: (id: string) => id, idFromName: (name: string) => name, get: () => userStub };
     impl.ensureAmbientCapsules = async () => {};
     impl.syncOutputsTo = async () => true;
     impl.listConnectableVendors = async () => [];

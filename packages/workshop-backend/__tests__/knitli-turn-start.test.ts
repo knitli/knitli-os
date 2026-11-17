@@ -65,7 +65,7 @@ async function withTurn(
       setWorkspaceLastActive: async () => {},
       publishNotification: async () => {},
     };
-    impl.users = { idFromString: (id: string) => id, get: () => userStub };
+    impl.users = { idFromString: (id: string) => id, idFromName: (name: string) => name, get: () => userStub };
     impl.ensureAmbientCapsules = async () => {};
     impl.syncOutputsTo = async () => true;
     // No gatekeeper bindings in the test worker; the real method would log a warning and

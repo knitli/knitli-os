@@ -39,7 +39,7 @@ describe("drain resume for non-agent waiters", () => {
       impl.ownerId = USER.id;
       impl.storage.ownerId.put(USER.id);
       impl.users = {
-        idFromString: (id: string) => id,
+        idFromString: (id: string) => id, idFromName: (name: string) => name,
         get: () => ({
           id: { toString: () => USER.id },
           whoami: async () => USER,

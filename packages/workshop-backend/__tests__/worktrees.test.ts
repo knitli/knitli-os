@@ -585,7 +585,7 @@ describe("the reader a fold takes for worktree edit bases", () => {
       // The failed fold cached nothing: the default one reads the base itself, through the
       // connection while the blob is missing and from the store once it is back.
       await expect(impl.getCurrentChatContent(1, metaOf(impl)))
-          .rejects.toThrow("the fold reached a connection");
+          .rejects.toThrow("every connection that could provide it failed");
       expect(reached).toBe(1);
       reached = 0;
       impl.storage.gitObjects.put(stored);

@@ -102,6 +102,13 @@ async function withClient(
     impl.markOutputsDirty = () => {};
     impl.syncOutputsTo = async () => {};
     impl.authorizeCollaborator = async () => ({ role: "build" });
+    // Fork: open() re-checks the caller's effective access in the sharing table after its last
+    // handoff guard, so a collaborator needs a real grant beside the stubbed authorization.
+    if (userId !== OWNER_USER_ID) {
+      (await impl.getSharingManager()).addCollaborator({
+        caller: { profileId: OWNER.id, isOwner: true }, profile: PROFILES[userId], grant: "workspace",
+      });
+    }
     // The pool binds no model gatekeeper class, so its ctx.exports has none to mint a model
     // connection from. The facets are fakes, so the class is stored and never instantiated.
     Object.defineProperty(impl.ctx, "exports", { value: Object.create(impl.ctx.exports, {

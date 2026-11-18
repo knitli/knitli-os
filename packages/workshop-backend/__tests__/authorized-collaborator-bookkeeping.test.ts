@@ -50,6 +50,8 @@ describe("authorized collaborator bookkeeping", () => {
         get: (id: string) => id === ownerUserId ? owner : collaborator,
       };
       impl.ensureAmbientCapsules = async () => {};
+      // The deployment directory's backfill reads the owner's profile too (upstream #1026).
+      impl.syncDirectory = () => {};
       impl.getSharingManager = async () => sharing;
       impl.ensureObserver = async () => {};
       impl.assertNoRevocationPending = () => {};

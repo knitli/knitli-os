@@ -563,34 +563,14 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "consoleLogCount",
+      "token": "handleClientConsoleLog",
       "path": "packages/workshop-frontend/src/GadgetEditor.tsx",
-      "reason": "Still present in upstream's own copy of this file; upstream's #1148 only dropped one use (the code tab now reads shownConsoleLogCount)."
+      "reason": "Still present in upstream's own copy of this file (the code tab's GadgetUI uses it); upstream's #1187 only dropped the dead preview-mode overlay's use."
     },
     {
-      "token": "isViewActive",
+      "token": "uiReloadTrigger",
       "path": "packages/workshop-frontend/src/GadgetEditor.tsx",
-      "reason": "Still present in upstream's own copy of this file; upstream's #1148 moved it onto paneChatId, and the fork's idle lease reads isAgentActive beside it."
-    },
-    {
-      "token": "metadataLoaded",
-      "path": "packages/workshop-frontend/src/GadgetEditor.tsx",
-      "reason": "Still present in upstream's own copy of this file; upstream's #1148 only dropped one use."
-    },
-    {
-      "token": "grantedPatterns",
-      "path": "packages/gatekeeper-cloudflare/src/cloudflare.ts",
-      "reason": "Still present in upstream's own ensureResources(); upstream's #1031 only renamed the account-description use."
-    },
-    {
-      "token": "ieee754",
-      "path": "pnpm-lock.yaml",
-      "reason": "Transitive (buffer@5.7.1 via unbzip2-stream), still in upstream's own lockfile; upstream's #1155 bump only dropped another path to it."
-    },
-    {
-      "token": "urlPatterns",
-      "path": "packages/workshop-shared/src/gatekeeper.ts",
-      "reason": "Upstream's own doc comment on the configurator's resource types, unchanged in upstream's copy; #1031 only dropped other uses."
+      "reason": "Still present in upstream's own copy of this file (the code tab's GadgetUI uses it); upstream's #1187 only dropped the dead preview-mode overlay's use."
     }
   ]
 }

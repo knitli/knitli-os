@@ -809,6 +809,42 @@ authorizes a read after fetching it.
     guard refuses. Each pull lists the checked trees recursively.
   - **Still to decide** before a container gatekeeper ships: keep refusing such worktrees, or
     strip prompt files from snapshots and refuse submissions that touch them.
+- **Admin inspection of owner-only workspaces (open since 2026-11-18).** Upstream #1026/#1066 let
+  a deployment admin open any workspace (and any user's account) read-only: metadata only, every
+  call audited, refused while the admin-set `adminWorkspaceAccess` is `off` (default
+  `metadata`, i.e. on). Nothing in it reads through a connection, and it ignores the fork's
+  owner-only tier (`prohibitWorkspaceSharing`, restricted ambient reads), which was designed
+  against collaborators and share links, not admins. Adopted unchanged; whether an owner-only
+  workspace should also be withheld from admin inspection (or only its titles and file names) is a
+  product decision for the maintainer.
+- **Seams added by the 2026-11-18 sync (foundation `941b36e9`).**
+  - `overseer.ts` `runAlarmTasks`: upstream #1184 made the alarm's work one run that may span
+    invocations (each held open for at most `ALARM_HANDLER_BUDGET_MS`, then re-armed at once), and
+    moved the after-the-last-retry wake-up from `#runAlarmTasksOnce`'s `finally` into
+    `runAlarmTasks`'s `catch`. The fork's `guardWillGiveUp` condition (see "Alarm guards") moved
+    with it, unchanged. A handed-off invocation returns normally, so the guard counts it as a
+    success and its flood detector sees one run per budget.
+  - `user.ts` `saveFile` (upstream #1178, save a gadget's export to a connected account): it calls
+    `#assertResourceEnabled` like the two mints; the fork passes the account's
+    `autoProvisioned` flag as `getGatekeeperClassFor()` does, or the opt-in check would refuse
+    every save through an ambient account (see "Gatekeeper resources are opt-in").
+  - Admin workspace and user inspection (upstream #1026, #1066): adopted as is. The view is
+    metadata-only, audited, and gated by the admin-set `adminWorkspaceAccess`; it does not consult
+    the fork's owner-only tier (`prohibitWorkspaceSharing`), which governs sharing with
+    collaborators, not deployment admins. See Open questions.
+  - Imports, storage-schema fields (`createdAt`/`titleRev`/`directoryRev` beside
+    `prohibitWorkspaceSharing`), `ADMIN_SETTING_METHODS` (`setAdminWorkspaceAccess` beside the
+    fork's voice/preset setters) and the `AdminApi` doc comments keep both sides. Fork
+    `AdminSettingsView` fixtures gained `adminWorkspaceAccess`.
+  - `reviewedSurvivors`: the six 2026-11-17 acks no longer matched and were dropped; two acks
+    added for #1187 false positives (see the file).
+  - Upstream tests edited for fork divergences: `admin-workspace-view.test.ts` (its
+    `ObserverBindingNeed` constants carry the fork's `ambient` field), `connection-creator.test.ts`
+    (a collaborator's `withClient` open adds a real `workspace` grant, since the fork's `open()`
+    re-checks `getEffectiveAccess` after its last handoff guard), and `worktrees.test.ts` (the
+    fold's failed pull reports the fork's categorical message, not the remote's; see "Git pull
+    failures are reported categorically"). The fork's `authorized-collaborator-bookkeeping.test.ts`
+    stubs `syncDirectory`, which now reads the owner's profile on open, as upstream's tests do.
 - **Seams added by the 2026-11-17 sync (foundation `30df0fb5`).**
   - Resource policy by stable type ID (upstream #1031): see "Gatekeeper resources are opt-in"
     below. Kernel lines: `admin-config.ts` (`enabledResourceTypeIds` parse/lowercase/reader,
@@ -1187,6 +1223,9 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   fork's `promptPresets`/`voice` view fields), and integration `workshop-admin-audit.test.ts`
   (audits `enabledResourceTypeIds`; upstream moved the long-value excerpt case to
   `restrictedWebFetchHosts`, so the fork's five-pattern variant is gone).
+- **2026-11-18 sync (upstream #1178, `saveFile`):** the third `#assertResourceEnabled` caller
+  threads `autoProvisioned` as the mint does; a save to a type the admin has not enabled is
+  refused before the file is read.
 
 ### Ambient-provisioned accounts bypass resource policy at minting
 
@@ -1570,7 +1609,9 @@ ids are facet-local, not Activity ids.
 - **At sync:** Tier 2 for each seam. A new upstream `alarm()` fails the coverage test until it gets
   the one-line check and a row in `docs/alarm-audit.md`. If upstream adds its own alarm guard, drop
   ours. The overseer breaker only bounds an undeliverable external-response loop (see the audit);
-  it does not delete the record.
+  it does not delete the record. Since upstream #1184 (2026-11-18 sync) the Overseer's alarm work
+  can span invocations; the guard wraps each invocation, and the fork's give-up wake-up lives in
+  `runAlarmTasks`'s `catch`.
 
 ### Email send action (ported from michielappelman/cloudflare-os)
 

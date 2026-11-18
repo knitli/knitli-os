@@ -1,7 +1,8 @@
 import { haltIfAlarmsDisabled } from "@gadgets/observability/fork/alarm-guard";
 import { RpcStub } from "capnweb";
 import type { ChatReadState, ChatTimelineHead, UnreadStateScope, UnreadStateSubscriber, UserUnreadState, UnreadThread, UserUnreadSummary, WorkspaceUnreadSummary } from "@gadgets/workshop-shared/api";
-import { WorkspaceMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelKind, modelKind, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, WorkspaceMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, NotificationMute, UserNotification, type DeviceSessionHandoffStart, type WebPushSubscription, ModelReasoningInfo, WebPushSubscriptionInfo, VoiceOptions, VoicePreferences } from '@gadgets/workshop-shared/api';
+import { ADMIN_ACCESS_ERROR_CODES, createAdminAccessError, type AdminUserView } from "@gadgets/workshop-shared/api";
+import { WorkspaceMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelKind, modelKind, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, NotificationMute, UserNotification, type DeviceSessionHandoffStart, type WebPushSubscription, ModelReasoningInfo, WebPushSubscriptionInfo, VoiceOptions, VoicePreferences } from '@gadgets/workshop-shared/api';
 import { ActionDescription, Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, GatekeeperUserSelection, GatekeeperUserSelectionExchange, RedeemedGatekeeperUserSelection, getResourceTypeId, findResourceType, type ConnectInitiator, type ResolveRequestedResourceResult } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -36,6 +37,9 @@ import {
   type DeviceSessionCredential, type DeviceSessionHandoff,
 } from "./auth/device-session-handoff.js";
 import { addWebPushSubscription, deliverWebPush, webPushPublicKey } from "./fork/web-push.js";
+import { DIRECTORY_ACTIVITY_INTERVAL_MS, type UserDirectoryActivity } from "./user-directory.js";
+import type { AdminViewTerms } from "./admin-access.js";
+import { openAdminUserView } from "./admin-user-view.js";
 
 const logger = createWorkshopLogger("workshop.user");
 
@@ -192,6 +196,7 @@ type ResourceResolverStub = Required<Pick<GatekeeperVendor, "resolveResourceUrl"
 type ResourceCreatorStub = Required<Pick<GatekeeperVendor, "createResource">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
 type CreationConfiguratorStub = Required<Pick<GatekeeperUser, "startCreationConfigurator">>;
+type FileSaverStub = Required<Pick<GatekeeperUser, "saveFile">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
@@ -393,21 +398,35 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  // Mirrors the profile into the deployment-wide user directory. Best-effort
-  // and does not block the caller. The `syncUser` call opens this DO's input
-  // gate, so a rename can start a second sync while one is in flight, and the
-  // two can reach the directory in either order. Each sync carries its
-  // `profileRev` and the directory keeps the highest, so no ordering is needed
-  // here. The revision counter only increases, and a failed sync leaves it
-  // behind so the next authentication retries.
-  #syncDirectory(): void {
+  // Mirrors the profile into the deployment-wide user directory, with when the
+  // account was created and, when `session` says a session is starting, its
+  // start, at most once per DIRECTORY_ACTIVITY_INTERVAL_MS. Best-effort and
+  // does not block the caller. The `syncUser` call opens this DO's input gate,
+  // so a rename can start a second sync while one is in flight, and the two can
+  // reach the directory in either order. Each sync carries its `profileRev` and
+  // the directory keeps the highest, and it keeps the latest login time it is
+  // sent: the profile converges by revision and the login time by maximum, so
+  // neither needs ordering here. `directoryRev` and `directoryLoginAt` only
+  // advance, and a failed sync leaves both behind so the next session retries.
+  #syncDirectory(session: boolean): void {
     const rev = this.storage.profileRev.get();
-    if (rev === this.storage.directoryRev.get()) return;
+    const now = Date.now();
+    const reportLogin =
+        session && now - this.storage.directoryLoginAt.get() >= DIRECTORY_ACTIVITY_INTERVAL_MS;
+    if (rev === this.storage.directoryRev.get() && !reportLogin) return;
     const profile = this.storage.profile.get();
+    const createdAt = this.storage.createdAt.get();
+    const activity: UserDirectoryActivity = {
+      ...createdAt && { created: createdAt },
+      ...reportLogin && { lastLogin: new Date(now) },
+    };
     this.ctx.exports.UserDirectoryDurableObject.getByName("")
-        .syncUser({ id: profile.id, name: profile.name }, rev)
+        .syncUser({ id: profile.id, name: profile.name }, rev, activity)
         .then(() => {
           if (rev > this.storage.directoryRev.get()) this.storage.directoryRev.put(rev);
+          if (reportLogin && now > this.storage.directoryLoginAt.get()) {
+            this.storage.directoryLoginAt.put(now);
+          }
         }, (error: unknown) => {
           logger.warn("failed to sync user directory record", {
             event: "user.directory.sync.failed",
@@ -440,7 +459,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (session.pendingUntil) {
       throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
     }
-    this.#syncDirectory();
+    this.#syncDirectory(true);
   }
 
   /**
@@ -456,13 +475,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
       // Create on first use.
       this.storage.created.put(true);
+      this.storage.createdAt.put(new Date());
       this.storage.profile.put({
         type: "user",
         name: email.split("@")[0],
         id: email,
       });
     }
-    this.#syncDirectory();
+    this.#syncDirectory(true);
     return isNew;
   }
 
@@ -595,6 +615,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     this.storage.created.put(true);
+    this.storage.createdAt.put(new Date());
     this.storage.profile.put({
       type: "user",
       name: displayName,
@@ -625,6 +646,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!this.storage.created.get()) {
       if (!allowCreate) return null;
       this.storage.created.put(true);
+      this.storage.createdAt.put(new Date());
       this.storage.profile.put({
         type: "user",
         name: email.split("@")[0],
@@ -1334,6 +1356,46 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
+   * Mint a deployment admin's read-only view of this account (AdminUserView), for
+   * AdminApiImpl.inspectUser(): reachable only over the Workshop's Durable Object binding, never
+   * through a capability a user holds.
+   *
+   * Refuses (`userNotFound`) an account never created, before anything else and writing nothing:
+   * reaching this object by a name no one signed up with creates no account. `reason` and `terms`
+   * arrive validated (see AdminApiImpl.inspectUser()).
+   *
+   * The open is the view's first call ("inspectUser"): it passes the view's checks (a caller no
+   * longer an admin is refused unrecorded), is recorded as refused and throws `accessOff` while
+   * the deployment's level is "off", and is otherwise recorded in the deployment-wide log before
+   * the view is returned; a record that cannot be written refuses the open.
+   *
+   * Nothing is written to this object, no session starts, the directory is not synced, no alarm
+   * is set and no gatekeeper is called: the view is handed this object's store to read, and each
+   * connected account without its gatekeeper stub. Waking the object still runs what its
+   * constructor runs for any wake, which delivers notifications already queued and re-arms a
+   * missing alarm.
+   */
+  async openForAdmin(adminId: string, reason: string, sessionId: string, terms: AdminViewTerms)
+      : Promise<AdminUserView> {
+    if (!this.storage.created.get()) {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.userNotFound);
+    }
+
+    let view = await openAdminUserView({
+      // A function, so that the view reads this object's environment at each use.
+      env: () => this.env,
+      storage: this.storage,
+      audits: this.ctx.exports.AdminAuditDurableObject,
+      // The stub is dropped here, so the view never holds one.
+      connectedAccounts: () => Array.from(
+          this.#connectedAccountRecords(), ({ account: _account, ...record }) => record),
+      nextAlarm: () => this.ctx.storage.getAlarm(),
+    }, adminId, reason, sessionId, terms);
+    logger.info("admin user view opened", { event: "admin.user.view.opened" });
+    return view;
+  }
+
+  /**
    * Called by the overseer every time a collaborator opens a shared workspace.
    * Creates the record on first open; updates lastActive on subsequent opens.
    *
@@ -1429,7 +1491,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     profile.name = name;
     this.storage.profile.put(profile);
     this.storage.profileRev.put(this.storage.profileRev.get() + 1);
-    this.#syncDirectory();
+    this.#syncDirectory(false);
   }
 
   async setOwnCommitEmail(email: string | null): Promise<void> {
@@ -1777,7 +1839,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.gadgets.put(record);
   }
 
-  async getWorkspace(id: string): Promise<WorkspaceMetadata | null> {
+  /** The stored record of one of the user's workspaces, whose `created` the Overseer reads once to
+   * date a workspace older than the directory. */
+  async getWorkspace(id: string): Promise<GadgetRecord | null> {
     return this.storage.gadgets.get(id) || null;
   }
 
@@ -2714,12 +2778,32 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return record.account.startResourceConfigurator(resourceTypeId);
   }
 
-  async startCreationConfigurator(accountId: number, resourceTypeId: string)
+  async startCreationConfigurator(
+      accountId: number, resourceTypeId: string, purpose?: "create" | "save")
       : Promise<GatekeeperUiFrame> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
     return (record.account as unknown as CreationConfiguratorStub)
-        .startCreationConfigurator(resourceTypeId);
+        .startCreationConfigurator(resourceTypeId, purpose);
+  }
+
+  async saveFile(accountId: number, resourceTypeId: string, destination: string, name: string,
+      contentType: string, file: ReadableStream<Uint8Array>): Promise<{url: string}> {
+    try {
+      let record = this.storage.connectedAccounts.get(accountId);
+      if (!record) throw new Error("No such account.");
+      let resource = findResourceType(await record.account.getSupportedResources(), resourceTypeId);
+      if (!resource?.savableFrom?.includes(contentType)) {
+        throw new Error("This account cannot save that kind of file as that resource type.");
+      }
+      await this.#assertResourceEnabled(record.vendorId, resource);
+      return await (record.account as unknown as FileSaverStub)
+          .saveFile(resourceTypeId, destination, name, contentType, file);
+    } catch (err) {
+      // A refusal leaves the file unread: tell its producer now, not at its own deadline.
+      void file.cancel(err).catch(() => {});
+      throw err;
+    }
   }
 
   /**

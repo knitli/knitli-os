@@ -578,7 +578,6 @@ export default function GadgetEditor() {
   }
   const [blueprintModalOpen, setBlueprintModalOpen] = useState(false)
   const [blueprintUpdateDialogOpen, setBlueprintUpdateDialogOpen] = useState(false)
-  const [previewMode, _setPreviewMode] = useState(false)
   const [workpieceRailExpanded, setWorkpieceRailExpanded] = useState(getInitialAppRailExpanded)
   const workpieceRailWidth = workpieceRailExpanded
     ? WORKPIECE_RAIL_EXPANDED_WIDTH
@@ -829,6 +828,8 @@ export default function GadgetEditor() {
   useWorkspaceIdle(isAgentActive)
   const { request: voiceStartRequest, consume: consumeVoiceStart } = useInitialVoiceChat(id, workingChatId)
   const selectedGadgetId = selectedGadgetSummary?.id ?? null
+  const gadgetSaveScope = id !== undefined && selectedGadgetId !== null
+    ? { workspaceId: id, workpieceId: selectedGadgetId } : undefined
   // A gadget still pending in a chat has no committed code for an update to be merged into.
   const canUpdateFromBlueprint = selectedGadgetSummary?.commitId !== undefined
   // An upstream that names no blueprint records that the gadget was built from scratch, so there
@@ -1352,7 +1353,7 @@ export default function GadgetEditor() {
   const shownGadget = {
     workspaceId: id,
     gadgetId: selectedGadgetId,
-    onScreen: activeTab === 'app' && !previewMode &&
+    onScreen: activeTab === 'app' &&
       (isGadgetFullscreen || (showFullEditor && !paneShowsActivity)),
   }
   const shownGadgetRef = useRef(shownGadget)
@@ -1812,10 +1813,9 @@ export default function GadgetEditor() {
   const mobilePrimaryActive = showFullEditor && !paneShowsActivity && activeTab === mobilePrimaryTab
   const mobileMoreActive = showFullEditor && !paneShowsActivity && activeTab !== mobilePrimaryTab
 
-  // ── always render the full two-pane edit layout; preview overlays on top ──────
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-kumo-base">
-      {/* ═══ SHARED TOP BAR (visible in both modes) ════════════════════════════ */}
+      {/* ═══ TOP BAR ════════════════════════════════════════════════════════════ */}
       <div
         className="relative flex items-center justify-between px-4 sm:px-6 backdrop-blur-md border-b border-kumo-line flex-shrink-0 gap-3"
         style={{ height: TOPBAR_H, backgroundColor: 'color-mix(in srgb, var(--color-kumo-base) 80%, transparent)' }}
@@ -1975,6 +1975,7 @@ export default function GadgetEditor() {
               gadget={selectedGadgetStub}
               gadgetTitle={selectedGadgetSummary?.title ?? 'Gadget'}
               chatId={previewChatId}
+              saveScope={gadgetSaveScope}
             />
           </span>
           <UserMenu />
@@ -2304,6 +2305,7 @@ export default function GadgetEditor() {
                   gadget={selectedGadgetStub}
                   gadgetTitle={selectedGadgetSummary?.title ?? 'Gadget'}
                   chatId={previewChatId}
+                  saveScope={gadgetSaveScope}
                 />
               )}
 
@@ -2322,11 +2324,11 @@ export default function GadgetEditor() {
               {!paneShowsActivity && selectedWorkpieceSummary?.type !== 'worktree' && (
                 <WorkshopIconButton
                   aria-label="Enter full screen"
-                  title={activeTab === 'app' && !previewMode
+                  title={activeTab === 'app'
                     ? 'Full screen'
                     : `Full screen is available in ${formatOf(selectedGadgetSummary?.output).noun} view`}
                   onClick={enterGadgetFullscreen}
-                  disabled={activeTab !== 'app' || previewMode}
+                  disabled={activeTab !== 'app'}
                 >
                   <ArrowsOutSimple size={17} />
                 </WorkshopIconButton>
@@ -2377,27 +2379,27 @@ export default function GadgetEditor() {
               aria-modal={isGadgetFullscreen ? true : undefined}
               aria-label={isGadgetFullscreen ? 'Gadget full screen' : undefined}
               className={
-                activeTab !== 'app' || previewMode
+                activeTab !== 'app'
                   ? 'hidden'
                   : isGadgetFullscreen
                     ? 'visual-viewport-fixed z-20 bg-kumo-base outline-none'
                     : 'h-full'
               }
             >
-              {selectedGadgetStub && !previewMode ? (
+              {selectedGadgetStub ? (
                 <GadgetUI
                   key={selectedGadgetId}
                   gadget={selectedGadgetStub}
                   height="100%"
                   reloadTrigger={uiReloadTrigger}
-                  isVisible={activeTab === 'app' && !previewMode}
+                  isVisible={activeTab === 'app'}
                   chatId={previewChatId}
                   onConsoleLog={handleClientConsoleLog}
                   onIframeEscape={isGadgetFullscreen ? exitGadgetFullscreen : undefined}
                   onNoUiChange={handleNoUiChange}
                   onOpenAgentChat={handleOpenAgentChat}
                 />
-              ) : !previewMode && (
+              ) : (
                 <NoGadgetPlaceholder height="100%" />
               )}
               {isGadgetFullscreen && showFullscreenHint && (
@@ -2483,23 +2485,6 @@ export default function GadgetEditor() {
           </div>
         )}
       </div>
-
-      {/* ═══ PREVIEW OVERLAY ══════════════════════════════════════════════════ */}
-      {previewMode && (
-        <div className="absolute inset-x-0 bottom-0 bg-kumo-base z-10" style={{ top: TOPBAR_H }}>
-          {selectedGadgetStub && (
-            <GadgetUI
-              key={selectedGadgetId}
-              gadget={selectedGadgetStub}
-              height="100%"
-              reloadTrigger={uiReloadTrigger}
-              isVisible={true}
-              chatId={previewChatId}
-              onConsoleLog={handleClientConsoleLog}
-            />
-          )}
-        </div>
-      )}
 
       {/* Share modal. Kept mounted while closed, so an invite still in flight reports back when
           it is reopened; keyed by what it shares, so nothing carries over between targets. */}

@@ -19,6 +19,13 @@ import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import type { ChatTimelineHead } from "@gadgets/workshop-shared/api";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { Overseer, WorkspaceMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPinRecord, MainlineMergeGadget, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AGENT_SPAWNER_CONNECTION_ID, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, CollaboratorAccess, CollaboratorGrant, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, BlueprintMerge, ApplyBlueprintResult, GadgetUpstream, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenWorkspaceError, OPEN_WORKSPACE_ERROR_CODES, createGatekeeperError, GATEKEEPER_ERROR_CODES, resolveSiteName, modelKind, PromptPresetSummary, PromptSelection, PromptRef, ChatAttachmentUpload } from '@gadgets/workshop-shared/api'
+import {
+  ADMIN_ACCESS_ERROR_CODES, MAX_ADMIN_AUDIT_ARG_LENGTH, createAdminAccessError,
+  type AdminAccessRecord, type AdminAutoApproval, type AdminChatAttachment, type AdminChatState,
+  type AdminGatekeeperInfo, type AdminObserver, type AdminPendingChange,
+  type AdminWorkspaceDescription, type AdminWorkspaceDiagnostics, type AdminWorkspaceMethod,
+  type AdminWorkspaceView,
+} from "@gadgets/workshop-shared/api";
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange,
   MAX_CODE_CHANGE_SIZE, transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   requireTextFiles, type FileContent, type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -75,6 +82,15 @@ import { scanWorkpieceForGrep, type GrepScan } from "./grep";
 import WORKTREE_BINDING_TYPES from "./worktree-binding.txt";
 import EXPORTS_BINDING_TYPES from "./exports-binding.txt";
 import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminConfig } from "./admin-config";
+import {
+  adminCommitLogDepth, assertAdminViewLive, cutAdminAuditText, redactAdminAuditArgs,
+  withholdActionContent, withholdBlueprintContent, withholdChatContent, withholdCommitContent,
+  withholdCreationContent, withholdHookContent,
+  type AdminViewTerms,
+} from "./admin-access";
+import { adminViewCall } from "./admin-view";
+import type { AdminAuditDurableObject } from "./admin-audit";
+import { DIRECTORY_ACTIVITY_INTERVAL_MS, type UserDirectoryDurableObject } from "./user-directory";
 import { chatChangeStatuses, foldCompactedCode, isTurnPrompt } from "./agent-compaction";
 import type { CachedRequest } from "./ai-models";
 import { ChatCacheWarmer } from "./chat-cache-warming";
@@ -86,7 +102,7 @@ import {
   buildReleasePack, buildSnapshotRelease, encodeReleaseCommit, releaseMergeHeader,
   releasesMergedBy, type Release,
 } from "./blueprint-release";
-import { EMPTY_TREE_OID, gitObjectOid, parseGitCommitRefs, validateGitOid } from "./git-codec";
+import { EMPTY_TREE_OID, blobOid, gitObjectOid, parseGitCommitRefs, validateGitOid } from "./git-codec";
 import {
   listFeaturedBlueprintsFromKv, readBlueprintKvRecord, type BlueprintKvRecord,
 } from "./storage-schema/blueprints-kv";
@@ -578,6 +594,11 @@ const AGENT_RESPONSE_DELIVERED_RETENTION_MS = 24 * 60 * 60 * 1000;
 // recorded) the keep-alive alarm fires. See #agentKeepAliveTime.
 const AGENT_KEEPALIVE_ALARM_MS = 60_000;
 
+// The longest one alarm invocation holds the DO open before handing off to the next. Works around
+// a Workers Runtime bug that aborts a Durable Object whose alarm handler runs for more than 15
+// minutes; remove once that is fixed. See runAlarmTasks.
+const ALARM_HANDLER_BUDGET_MS = 10 * 60_000;
+
 // The platform retries a failed alarm six times. Other durable work must remain scheduled after
 // that budget is exhausted; agent resumes have their own per-execution budget below.
 const ALARM_MAX_RETRIES = 6;
@@ -619,6 +640,41 @@ async function computeSessionAffinity(gadgetId: string, chatId: number): Promise
   let input = new TextEncoder().encode(`e26339049e055b01:${gadgetId}:${chatId}`);
   let hash = await crypto.subtle.digest("SHA-256", input);
   return new Uint8Array(hash).toHex();
+}
+
+// A workpiece as clients see it (see subscribeToWorkpieces()). `includeUpstream` says whether to
+// name the blueprint a gadget follows: its id is a share link to code the reader may have no other
+// way to read.
+function workpieceSummary(record: WorkpieceRecord, includeUpstream: boolean): WorkpieceSummary {
+  if (record.type === "worktree") {
+    return {
+      id: record.id,
+      type: "worktree",
+      title: record.title,
+      chatId: record.chatId,
+      pinBase: record.pinBase,
+      headCommit: record.headCommit,
+      baseCommit: record.baseCommit,
+    };
+  }
+  let summary: WorkpieceSummary = {
+    id: record.id,
+    type: "gadget",
+    title: record.title,
+  };
+  if (record.commitId !== undefined) {
+    summary.commitId = record.commitId;
+  }
+  if (record.output) {
+    summary.output = record.output;
+  }
+  if (record.upstream && includeUpstream) {
+    summary.upstream = record.upstream;
+  }
+  if (record.pending) {
+    summary.chatId = record.pending.chatId;
+  }
+  return summary;
 }
 
 function actionRecordToLog(record: ActionRecord): ActionLogEntry {
@@ -749,6 +805,34 @@ export const ACTION_REPLAY_PAGE_SIZE = 256;
 /** listActions() entries returned per page. Exported for tests. */
 export const ACTION_HISTORY_PAGE_DEFAULT_LIMIT = 50;
 
+// Throws for a listActions() `beforeId` that cannot name an action.
+function validateBeforeId(beforeId: number | undefined): void {
+  if (beforeId !== undefined && (!Number.isSafeInteger(beforeId) || beforeId < 0)) {
+    throw new TypeError(`Invalid beforeId: ${beforeId}`);
+  }
+}
+
+// One page of the action log, newest first (see Overseer.listActions()).
+function actionHistoryPage(storage: OverseerStorage,
+    options?: {beforeId?: number, filter?: ActionHistoryFilter}): ActionHistoryPage {
+  let {beforeId, filter = "all"} = options ?? {};
+  validateBeforeId(beforeId);
+
+  // One ranged read -- off the collection itself for "all" (already id-ordered), off
+  // byHistoryFilter otherwise -- so the work is O(page) however sparse the matches. Pages are
+  // full until the last; the +1 record probes whether an older page exists.
+  let actions = storage.actions;
+  let range = {end: beforeId, reverse: true, limit: ACTION_HISTORY_PAGE_DEFAULT_LIMIT + 1};
+  let page = [...(filter === "all"
+      ? actions.list(range) : actions.byHistoryFilter.get(filter, range))];
+  let more = page.length > ACTION_HISTORY_PAGE_DEFAULT_LIMIT;
+  if (more) page.pop();
+  return {
+    entries: page.map(actionRecordToLog),
+    nextBeforeId: more ? page.at(-1)!.id : undefined,
+  };
+}
+
 /**
  * Keeps `commandPosition` only if it's a real index into `args`. Anything else becomes undefined,
  * and the command renders at the front. Display-only, so a bad value isn't worth an error.
@@ -802,6 +886,12 @@ export function sanitizeMessageFormatRefs(
 // owner's sessions are never counted, since the owner is never an observer.
 type SessionHolder = {kind: CollaboratorRole, profileId: string};
 
+// How folding a chat's content reads the base text of a worktree edit (see
+// OverseerImpl.seedWorktreeEditBases): one file of a commit as text, undefined when the commit has
+// no file there.
+type BaseTextReader =
+    (commit: string, path: string) => string | undefined | Promise<string | undefined>;
+
 class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
   readonly logger: ReturnType<typeof createWorkshopLogger>;
@@ -824,6 +914,17 @@ class OverseerImpl implements AgentHooks {
   ownerProfileId?: string;
 
   users: DurableObjectNamespace<UserDurableObject>;
+
+  /** The deployment-wide admin audit log; a field, like `users`, so tests can replace it. */
+  adminAudits: DurableObjectNamespace<AdminAuditDurableObject>;
+
+  /** The deployment directory this workspace mirrors itself into; a field, like `users`, so tests
+   * can replace it. */
+  directories: DurableObjectNamespace<UserDirectoryDurableObject>;
+
+  /** Set by removeFromDirectory() so that this instance syncs nothing more; cleared when the
+   * workspace is initialised. */
+  directoryRemoved = false;
 
   // The workspace's git store (see git-cache.ts): all gadgets' committed code and every other
   // history the workspace holds, with the gatekeeper-facing provenance metadata, the pull driver,
@@ -1002,6 +1103,13 @@ class OverseerImpl implements AgentHooks {
     return [...new Set(Array.from(this.#liveSessions, session => session.holder.profileId))];
   }
 
+  /** How many holds collaborators have on the workspace (see joinSession), by role. */
+  liveSessionCounts(): Record<CollaboratorRole, number> {
+    let counts = {build: 0, use: 0};
+    for (let {holder} of this.#liveSessions) counts[holder.kind]++;
+    return counts;
+  }
+
   // Whether some collaborator session is live right now that holds "build", or one of
   // `affected`'s gadgets, or anything at all when `affected` is omitted.
   #hasCollaboratorSession(affected?: "build" | ReadonlySet<WorkpieceId>): boolean {
@@ -1015,12 +1123,17 @@ class OverseerImpl implements AgentHooks {
     return false;
   }
 
+  // Who has the workspace open now: the roster a presence subscriber is sent first.
+  presenceSnapshot(): PresenceParticipant[] {
+    return [...this.#presence.keys()].map(id => this.#toParticipant(id));
+  }
+
   // Subscribe to roster changes. The current roster is delivered immediately via init().
   addPresenceSubscriber(subscriber: RpcStub<PresenceSubscriber>): RpcStub<{}> {
     subscriber = subscriber.dup();
     let token = {};
     this.#presenceSubscribers.set(token, subscriber);
-    let snapshot = [...this.#presence.keys()].map(id => this.#toParticipant(id));
+    let snapshot = this.presenceSnapshot();
     subscriber.init(snapshot).catch(() => this.#removePresenceSubscriber(token));
     subscriber.onRpcBroken(() => this.#removePresenceSubscriber(token));
     // @ts-expect-error Bugs in native RPC types make this not work currently.
@@ -1202,9 +1315,48 @@ class OverseerImpl implements AgentHooks {
   // rethrown once everything else has settled. After the last retry — the platform's, or the
   // alarm guard's where the guard is what retries — schedule a fresh wake-up: a long
   // response-target outage must not strand durable work.
+  //
+  // That work is one run, which may outlast an invocation: each holds the DO open for at most
+  // ALARM_HANDLER_BUDGET_MS. When that runs out first, the invocation returns successfully and
+  // re-arms the alarm to fire at once, and the next invocation joins the same run rather than
+  // starting the concerns again, so none ever overlaps itself. If the DO dies meanwhile, the run
+  // dies with it, and the re-armed alarm starts a fresh one on wake.
   async runAlarmTasks(retryCount = 0): Promise<void> {
+    this.#scheduledAlarm = undefined; // This alarm has fired; the run recomputes the next.
+    let run = this.#alarmRun;
+    if (!run) {
+      run = this.#alarmRun = this.#runAlarmTasksOnce().finally(() => { this.#alarmRun = undefined; });
+      run.catch(() => {}); // One that fails between invocations is retried by the re-armed alarm.
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      let finished = await Promise.race([
+        run.then(() => true),
+        new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), ALARM_HANDLER_BUDGET_MS); }),
+      ]);
+      if (!finished) this.#setAlarm(Date.now());
+    } catch (error) {
+      // The fresh wake-up after the last retry cannot key off the platform's retryCount alone:
+      // the alarm guard catches the rethrow, so the platform never retries and its count never
+      // advances. The guard's own lifecycle is the one that runs — when this failure is the one
+      // that reaches its consecutive-failure limit, it will stop re-arming, so arm the wake-up
+      // here (the guard then holds it to its longest backoff rather than dropping the work).
+      const guardWillGiveUp = (readAlarmGuardRecord(this.ctx, "overseer")?.failures ?? 0) + 1 >=
+          MAX_ALARM_CONSECUTIVE_FAILURES;
+      if (retryCount >= ALARM_MAX_RETRIES || guardWillGiveUp) {
+        this.#updateAlarm(Date.now() + AGENT_KEEPALIVE_ALARM_MS);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // The current run of the alarm's work (see runAlarmTasks), cleared as it settles.
+  #alarmRun?: Promise<void>;
+
+  async #runAlarmTasksOnce(): Promise<void> {
     this.#inAlarmHandler = true;
-    this.#scheduledAlarm = undefined; // A success recomputes the next alarm from settled state.
     let failed = false;
     try {
       if (this.storage.deleting.get()) {
@@ -1231,16 +1383,7 @@ class OverseerImpl implements AgentHooks {
     } finally {
       this.#inAlarmHandler = false;
       this.#agentKeepAliveTime = undefined;
-      // The fresh wake-up after the last retry cannot key off the platform's retryCount alone:
-      // the alarm guard catches the rethrow, so the platform never retries and its count never
-      // advances. The guard's own lifecycle is the one that runs — when this failure is the one
-      // that reaches its consecutive-failure limit, it will stop re-arming, so arm the wake-up
-      // here (the guard then holds it to its longest backoff rather than dropping the work).
-      const guardWillGiveUp = (readAlarmGuardRecord(this.ctx, "overseer")?.failures ?? 0) + 1 >=
-          MAX_ALARM_CONSECUTIVE_FAILURES;
-      if (!failed || retryCount >= ALARM_MAX_RETRIES || guardWillGiveUp) {
-        this.#updateAlarm(failed ? Date.now() + AGENT_KEEPALIVE_ALARM_MS : 0);
-      }
+      if (!failed) this.#updateAlarm();
     }
   }
 
@@ -1827,6 +1970,8 @@ class OverseerImpl implements AgentHooks {
       pull: (gatekeeperId, oids, hints) => this.#pullGitObjects(gatekeeperId, oids, hints),
     });
     this.users = this.ctx.exports.UserDurableObject;
+    this.adminAudits = this.ctx.exports.AdminAuditDurableObject;
+    this.directories = this.ctx.exports.UserDirectoryDurableObject;
     this.ownerId = this.storage.deleting.get() ? undefined : this.storage.ownerId.get();
     this.observerLedger = new ObserverLedger(this);
 
@@ -1865,6 +2010,19 @@ class OverseerImpl implements AgentHooks {
       add: () => this.markOutputsDirty(),
       update: () => this.markOutputsDirty(),
       remove: () => this.markOutputsDirty(),
+    });
+
+    // Mirror the title into the deployment directory. The title singleton is the one chokepoint
+    // every writer passes (renames, agent-chosen titles, blueprint and external-message
+    // initialisation). typed-storage runs this inside the write's transaction, before the value
+    // lands, so the revision bump is atomic with the write and the sync itself is deferred. The
+    // revision is time-based so that a workspace reinitialised under the same id (an external
+    // message names its workspace by key) outranks whatever its earlier life reported.
+    this.storage.title.subscribe({
+      update: () => {
+        this.storage.titleRev.put(Math.max(this.storage.titleRev.get() + 1, Date.now()));
+        this.markDirectoryDirty();
+      },
     });
 
     this.ctx.blockConcurrencyWhile(async () => {
@@ -2537,37 +2695,7 @@ class OverseerImpl implements AgentHooks {
     let gadgets = this.storage.gadgets;
     subscriber = subscriber.dup();  // keep stub after return
 
-    let toSummary = (record: WorkpieceRecord): WorkpieceSummary => {
-      if (record.type === "worktree") {
-        return {
-          id: record.id,
-          type: "worktree",
-          title: record.title,
-          chatId: record.chatId,
-          pinBase: record.pinBase,
-          headCommit: record.headCommit,
-          baseCommit: record.baseCommit,
-        };
-      }
-      let summary: WorkpieceSummary = {
-        id: record.id,
-        type: "gadget",
-        title: record.title,
-      };
-      if (record.commitId !== undefined) {
-        summary.commitId = record.commitId;
-      }
-      if (record.output) {
-        summary.output = record.output;
-      }
-      if (record.upstream && includePending) {
-        summary.upstream = record.upstream;
-      }
-      if (record.pending) {
-        summary.chatId = record.pending.chatId;
-      }
-      return summary;
-    };
+    let toSummary = (record: WorkpieceRecord) => workpieceSummary(record, includePending);
 
     let disposed = false;
     let unsubscribe = () => {
@@ -2731,7 +2859,10 @@ class OverseerImpl implements AgentHooks {
   // Live (unmaterialized) change rows are deliberately NOT included: callers that need them either
   // materialize first (accept, update-from-mainline, UI bundle loads) or apply them on top
   // themselves (getCurrentChatContent).
-  async buildChatContent(chatId: number, through?: number): Promise<CodeContent> {
+  //
+  // `readBase` is the reader seedWorktreeEditBases takes for the base texts of worktree edits.
+  async buildChatContent(chatId: number, through?: number, readBase?: BaseTextReader)
+      : Promise<CodeContent> {
     let messages = [...this.storage.chats.list({prefix: chatKeyPrefix(chatId)})];
     if (through !== undefined) {
       messages = messages.filter(msg => msg.sequence <= through);
@@ -2773,7 +2904,7 @@ class OverseerImpl implements AgentHooks {
         }
       }
       if (msg.change !== undefined) {
-        content = await this.seedWorktreeEditBases(content, msg.change, worktreeBases);
+        content = await this.seedWorktreeEditBases(content, msg.change, worktreeBases, readBase);
         content = applyCodeChange(content, msg.change);
       }
     }
@@ -2791,8 +2922,14 @@ class OverseerImpl implements AgentHooks {
   // out for hand-rolled clients only: a row that edits a path an earlier row removed re-seeds
   // the base text rather than failing -- every fold applies the same rule in the same order, so
   // all replicas agree; the shipped producers never emit that sequence.)
-  async seedWorktreeEditBases(content: CodeContent, change: CodeChange,
-                              worktreeBases: Map<WorkpieceId, string>): Promise<CodeContent> {
+  //
+  // `readBase` does the read. The default, readFileAtCommit(), pulls what the store lacks; a
+  // caller that must not reach a connection gives a reader of stored objects alone. A reader's
+  // `undefined` is final: no other reader is asked.
+  async seedWorktreeEditBases(
+      content: CodeContent, change: CodeChange, worktreeBases: Map<WorkpieceId, string>,
+      readBase: BaseTextReader = (commit, path) => this.readFileAtCommit(commit, path))
+      : Promise<CodeContent> {
     let result = content;
     for (let [key, entries] of Object.entries(change)) {
       let worktreeId = Number(key);
@@ -2800,7 +2937,7 @@ class OverseerImpl implements AgentHooks {
       if (base === undefined) continue;
       for (let [path, fileChange] of entries) {
         if (!("edit" in fileChange) || result.get(worktreeId)?.has(path)) continue;
-        let text = await this.gitCache.readFileAtCommitIfExists(base, path);
+        let text = await readBase(base, path);
         if (text === undefined) continue;
         if (result === content) result = new Map(content);
         let files = new Map(result.get(worktreeId));
@@ -2885,7 +3022,12 @@ class OverseerImpl implements AgentHooks {
 
   // The chat's current content: what the next change row will apply to. Cached; treat the result as
   // immutable (it is shared with the cache and with code-change's structure sharing).
-  async getCurrentChatContent(chatId: number, meta: AiChatMetadata): Promise<CodeContent> {
+  //
+  // `readBase` reads the base texts of worktree edits (see seedWorktreeEditBases). The cache holds
+  // the same content whichever reader filled it: a commit is immutable, so every reader that
+  // reads a base returns the same text, and one that cannot throws before anything is cached.
+  async getCurrentChatContent(chatId: number, meta: AiChatMetadata, readBase?: BaseTextReader)
+      : Promise<CodeContent> {
     for (let attempt = 0; ; attempt++) {
       let codeBase = this.chatCodeBase(meta);
       let cached = this.#chatContentCache.get(chatId);
@@ -2898,7 +3040,7 @@ class OverseerImpl implements AgentHooks {
       // materialization retiring rows out from under the row scan), and the re-reads pick up
       // rows appended meanwhile.
       let token = this.nextChatSequencePeek(chatId);
-      let content = await this.buildChatContent(chatId);
+      let content = await this.buildChatContent(chatId, undefined, readBase);
       // Pins established by live rows are not yet declared in any message; their bases enter
       // the content before the rows apply. (Rows before the establishing row never touch the
       // gadget, so establishing all of them up front is equivalent to establishing in order.)
@@ -2919,7 +3061,8 @@ class OverseerImpl implements AgentHooks {
       if (worktreeBases.size > 0) {
         let probe = content;
         for (let row of this.listLiveChatChanges(chatId, codeBase.generation)) {
-          probe = await this.#prefetchWorktreeSeeds(probe, row.change, worktreeBases, seeds);
+          probe = await this.#prefetchWorktreeSeeds(
+              probe, row.change, worktreeBases, seeds, readBase);
           probe = applyCodeChange(probe, row.change);
         }
       }
@@ -2962,9 +3105,11 @@ class OverseerImpl implements AgentHooks {
   // seedWorktreeEditBases, but additionally records every looked-up base into `seeds`
   // (`${worktreeId}:${path}` -> text, or null for a path absent from the base), so the
   // synchronous tail can re-seed without awaiting.
-  async #prefetchWorktreeSeeds(content: CodeContent, change: CodeChange,
-                               worktreeBases: Map<WorkpieceId, string>,
-                               seeds: Map<string, FileContent | null>): Promise<CodeContent> {
+  async #prefetchWorktreeSeeds(
+      content: CodeContent, change: CodeChange, worktreeBases: Map<WorkpieceId, string>,
+      seeds: Map<string, FileContent | null>,
+      readBase: BaseTextReader = (commit, path) => this.readFileAtCommit(commit, path))
+      : Promise<CodeContent> {
     let result = content;
     for (let [key, entries] of Object.entries(change)) {
       let worktreeId = Number(key);
@@ -2975,7 +3120,7 @@ class OverseerImpl implements AgentHooks {
         let key = `${worktreeId}:${path}`;
         let text = seeds.get(key);
         if (text === undefined) {
-          text = await this.gitCache.readFileAtCommitIfExists(base, path) ?? null;
+          text = await readBase(base, path) ?? null;
           seeds.set(key, text);
         }
         if (text === null) continue;
@@ -4740,7 +4885,7 @@ class OverseerImpl implements AgentHooks {
     // out stale below.
     let worktreeAccepts = new Map<WorkpieceId, string>();
     if (entryCodeBase.pins.some(pin => this.isWorktree(pin.gadgetId))) {
-      let touchedByWorktree = this.#worktreeTouchedPaths(messages, statuses);
+      let touchedByWorktree = this.worktreeTouchedPaths(messages, statuses);
       for (let pin of entryCodeBase.pins) {
         let record = this.storage.gadgets.get(pin.gadgetId);
         if (record?.type !== "worktree") continue;
@@ -4984,10 +5129,21 @@ class OverseerImpl implements AgentHooks {
   // each declaration, which re-roots it; reverted messages excluded). The accept's re-pin plan
   // needs this alongside the flattened content: content answers what a path holds now, but only
   // the change stream knows which paths were touched at all -- a removed path is simply absent
-  // from content, and must enter the auto-commit's change map as a deletion.
-  #worktreeTouchedPaths(messages: AiChatMessage[], statuses: Map<number, "merged" | "reverted">)
+  // from content, and must enter the auto-commit's change map as a deletion. `liveRows` are the
+  // rows not yet materialized into a message, whose paths are touched too.
+  worktreeTouchedPaths(messages: AiChatMessage[], statuses: Map<number, "merged" | "reverted">,
+                       liveRows: readonly ChatChangeRecord[] = [])
       : Map<WorkpieceId, Set<string>> {
     let touched = new Map<WorkpieceId, Set<string>>();
+    let touch = (change: CodeChange) => {
+      for (let [key, entries] of Object.entries(change)) {
+        let id = Number(key);
+        if (!this.isWorktree(id)) continue;
+        let paths = touched.get(id);
+        if (paths === undefined) touched.set(id, paths = new Set());
+        for (let [path] of entries) paths.add(path);
+      }
+    };
     for (let msg of messages) {
       if (msg.type === "merge" && msg.epochBoundary) {
         touched.clear();
@@ -4997,15 +5153,9 @@ class OverseerImpl implements AgentHooks {
       if (statuses.get(msg.sequence) === "reverted") continue;
       if (msg.conversionBoundary) touched.clear();
       for (let pin of msg.pins ?? []) touched.delete(pin.gadgetId);
-      if (msg.change === undefined) continue;
-      for (let [key, entries] of Object.entries(msg.change)) {
-        let id = Number(key);
-        if (!this.isWorktree(id)) continue;
-        let paths = touched.get(id);
-        if (paths === undefined) touched.set(id, paths = new Set());
-        for (let [path] of entries) paths.add(path);
-      }
+      if (msg.change !== undefined) touch(msg.change);
     }
+    for (let row of liveRows) touch(row.change);
     return touched;
   }
 
@@ -5868,11 +6018,13 @@ class OverseerImpl implements AgentHooks {
   // `joinAs` counts the returned client toward #hasCollaboratorSession for its lifetime; passed by
   // the collaborator-facing mints, omitted for the owner's and for internal callers (see
   // GadgetClientImpl). `actorUserId` is who the returned client acts for, for analytics only.
-  // `bindings` are an agent spawner's (see GatekeeperRecord.bindings).
+  // `bindings` are an agent spawner's (see GatekeeperRecord.bindings). `createdBy` is the person
+  // creating the connection, recorded on it (GatekeeperRecord.createdBy); an ambient capsule has
+  // none.
   async addGatekeeper(
       cls: GatekeeperClass, creationSpec: GatekeeperCreationSpec, actorUserId: string,
-      joinAs?: SessionHolder, bindings?: Record<string, BindingRecord>)
-      : Promise<GatekeeperClient<any>> {
+      joinAs?: SessionHolder, bindings?: Record<string, BindingRecord>,
+      createdBy?: AiChatAuthorInfo): Promise<GatekeeperClient<any>> {
     let id = this.allocateWorkpieceId();
     let gatekeeperRecord: GatekeeperRecord = {
       id,
@@ -5880,6 +6032,7 @@ class OverseerImpl implements AgentHooks {
       creationSpec,
     };
     if (bindings) gatekeeperRecord.bindings = bindings;
+    if (createdBy) gatekeeperRecord.createdBy = createdBy;
 
     // The record is published only once, below, after describe() resolves -- the facet takes the
     // class directly so it needs no record to exist yet. Publishing it before the await instead
@@ -7002,9 +7155,17 @@ class OverseerImpl implements AgentHooks {
 
       let owner = this.users.get(this.users.idFromString(this.ownerId));
 
-      this.#lastActiveTimeKnownToUserDo = this.#lastActiveTimeKnownToUs!;
-      await owner.setWorkspaceLastActive(this.ctx.id.toString(), this.#lastActiveTimeKnownToUs!,
+      let lastActive = this.#lastActiveTimeKnownToUs!;
+      this.#lastActiveTimeKnownToUserDo = lastActive;
+      await owner.setWorkspaceLastActive(this.ctx.id.toString(), lastActive,
                                       this.storage.totalCost.get());
+
+      // The directory's activity is precise only to DIRECTORY_ACTIVITY_INTERVAL_MS, so it hears
+      // of activity far less often than the owner does.
+      if (Date.now() - this.#directoryActivityAt >= DIRECTORY_ACTIVITY_INTERVAL_MS) {
+        this.#directoryActivityAt = Date.now();
+        this.syncDirectory(lastActive);
+      }
     } catch (err) {
       this.logger.warn("failed to bump gadget last-active on user DO", {
         event: "gadget.last.active.bump.failed",
@@ -7155,6 +7316,103 @@ class OverseerImpl implements AgentHooks {
 
   // The snapshot every watcher last acknowledged, to suppress pushes that would change nothing.
   #lastOutputsPushed?: string;
+
+  // --- Deployment directory ----------------------------------------------------------
+  //
+  // The workspace mirrors its title, owner and activity into the deployment directory (see
+  // UserDirectoryDurableObject), which AdminApi.listWorkspaces() reads. Durable Objects cannot be
+  // enumerated, so a workspace older than the directory is listed once it is next opened: open()
+  // syncs on every open, a no-op once the directory has acknowledged the title's revision.
+
+  // The last sync in flight or queued. Syncs chain onto it so they run one at a time, and awaiting
+  // it awaits every one. Never rejects.
+  #directorySync: Promise<void> = Promise.resolve();
+  #directorySyncScheduled = false;
+
+  // When this instance last reported activity to the directory (epoch ms), so that it reports at
+  // most once per DIRECTORY_ACTIVITY_INTERVAL_MS.
+  #directoryActivityAt = 0;
+
+  /** syncDirectory() after the current turn, coalesced: the title subscriber runs before the new
+   * title is stored. */
+  markDirectoryDirty(): void {
+    if (this.#directorySyncScheduled || !this.ownerId) return;
+    this.#directorySyncScheduled = true;
+    scheduler.wait(0).then(() => {
+      this.#directorySyncScheduled = false;
+      this.syncDirectory();
+    });
+  }
+
+  #directorySyncNeeded(lastActive: Date | undefined): boolean {
+    return this.ownerId !== undefined && !this.directoryRemoved &&
+        (lastActive !== undefined ||
+            this.storage.titleRev.get() !== this.storage.directoryRev.get());
+  }
+
+  /** Mirror this workspace into the deployment directory (WorkspaceDirectoryEntry, the title
+   * whole: the directory clamps it): best-effort, never awaited by its callers, never restarting
+   * the workspace. Syncs run one at a time; a no-op without an owner, while directoryRemoved is
+   * set, and once the directory has acknowledged the title's revision when no `lastActive` is
+   * given. */
+  syncDirectory(lastActive?: Date): void {
+    if (!this.#directorySyncNeeded(lastActive)) return;
+    this.#directorySync = this.#directorySync.then(() => this.#syncDirectoryStep(lastActive));
+  }
+
+  async #syncDirectoryStep(lastActive: Date | undefined): Promise<void> {
+    try {
+      // Checked again now that its turn has come: a step queued behind removeFromDirectory()
+      // sends nothing.
+      if (!this.#directorySyncNeeded(lastActive)) return;
+      let ownerId = this.ownerId!;
+      let id = this.ctx.id.toString();
+      let title = this.storage.title.get();
+      let created = this.storage.createdAt.get();
+      let rev = this.storage.titleRev.get();
+      let ownerProfileId = await this.getOwnerProfileId();
+      // A deletion that began meanwhile waits for this step before it deletes storage, so a write
+      // is safe while the owner is unchanged and the workspace has not left the directory.
+      let current = () => this.ownerId === ownerId && !this.directoryRemoved;
+
+      if (created === undefined) {
+        // A workspace initialised before it recorded this: its owner's record says, once. A raw
+        // stub rather than wrapUserDo(), since the directory feed must never restart the
+        // workspace.
+        let record = await this.users.get(this.users.idFromString(ownerId)).getWorkspace(id);
+        if (record && !record.owner) {
+          created = record.created;
+          if (current()) this.storage.createdAt.put(created);
+        }
+      }
+
+      await this.directories.getByName("").syncWorkspace(
+          { id, title, ownerId: ownerProfileId, created, lastActive }, rev);
+      if (current() && this.storage.directoryRev.get() < rev) this.storage.directoryRev.put(rev);
+    } catch (err) {
+      this.logger.warn("failed to sync workspace to the deployment directory", {
+        event: "workspace.directory.sync.failed", error: err,
+      });
+    }
+  }
+
+  /**
+   * Take this workspace out of the directory, for deleteSelf() once beginDeletion() has committed.
+   * Sets directoryRemoved and resets directoryRev, waits for every sync in flight or queued (none
+   * of which then sends or acknowledges), and removes the entry. Logs a failure and never throws.
+   */
+  async removeFromDirectory(): Promise<void> {
+    this.directoryRemoved = true;
+    this.storage.directoryRev.put(-1);
+    await this.#directorySync;
+    try {
+      await this.directories.getByName("").removeWorkspace(this.ctx.id.toString());
+    } catch (err) {
+      this.logger.warn("failed to remove workspace from the deployment directory", {
+        event: "workspace.directory.remove.failed", error: err,
+      });
+    }
+  }
 
   // Increment the code version and restart the affected gadgets so they reload. If
   // `affectedGadgetIds` is omitted, conservatively restarts every gadget (e.g. for code commits,
@@ -10030,6 +10288,56 @@ class OverseerImpl implements AgentHooks {
     this.storage.blueprints.delete(record.id);
   }
 
+  // Every blueprint published from the workspace (see Overseer.listBlueprints()).
+  blueprintSummaries(): BlueprintGadgetSummary[] {
+    let result: BlueprintGadgetSummary[] = [];
+    for (let record of Array.from(this.storage.blueprints.list())) {
+      result.push({
+        id: record.id,
+        title: record.metadata.title,
+        description: record.metadata.description,
+        version: record.metadata.version,
+        codeVersionDate: this.#blueprintCodeDate(record),
+        screenshotUrl: blueprintScreenshotUrl(record.id, record.metadata),
+        dirty: record.dirty,
+        ...(this.#hasUnpublishedChanges(record) ? {unpublishedChanges: true} : {}),
+      });
+    }
+    return result;
+  }
+
+  // Whether the gadget a blueprint exports has committed files other than the ones the
+  // blueprint last published, which are those of the record's `commitId`. A gadget that has
+  // since been removed has nothing left to publish, and a record from before git-backed code
+  // storage has no commit to compare with until it is migrated.
+  //
+  // The trees are what is compared, not the commits: publishing an unchanged tree mints nothing
+  // and leaves `commitId` where it was (see mintBlueprintRelease), so a head that has moved on
+  // to the same files would otherwise count as a change that no publish could clear.
+  #hasUnpublishedChanges(record: BlueprintGadgetRecord): boolean {
+    let gadgetId = record.gadgetId ?? this.defaultGadgetId;
+    let gadget = gadgetId === undefined ? undefined : this.storage.gadgets.get(gadgetId);
+    let head = gadget?.type === "gadget" ? gadget.commitId : undefined;
+    let published = record.commitId;
+    if (head === undefined || published === undefined || head === published) return false;
+    let store = this.gitCache;
+    return store.commitTree(head) !== store.commitTree(published);
+  }
+
+  // The timestamp of the code exported into a blueprint: the exported commit's author date, or
+  // for legacy (pre-git-storage) records the legacy log entry's, falling back to the metadata's
+  // own last-updated time.
+  #blueprintCodeDate(record: BlueprintGadgetRecord): Date {
+    if (record.commitId !== undefined) {
+      return this.gitCache.readCommitLog(record.commitId, {depth: 1})[0].timestamp;
+    }
+    if (record.codeVersion !== undefined) {
+      let codeUpdate = this.storage.code.get(record.codeVersion);
+      if (codeUpdate) return codeUpdate.timestamp;
+    }
+    return record.metadata.lastUpdated;
+  }
+
   postAgentChatMessage(chatId: number, author: AiChatAuthorInfo, message: string) {
     let meta = this.storage.chatMeta.get(chatId);
     if (!meta) {
@@ -10941,6 +11249,9 @@ class OverseerImpl implements AgentHooks {
   async createExternalResource(
       chatId: number, input: Extract<AiToolCall, {toolName: "createExternalResource"}>["input"])
       : Promise<{gatekeeperId: WorkpieceId}> {
+    // The resource is created by whoever started the turn this tool call belongs to. Read before
+    // the first await: cancelling the turn deletes its record.
+    let createdBy = this.storage.activeAgents.get(chatId)?.initiator;
     let minted = await this.#ownerUserStub().createResourceGatekeeper(
         input.vendorId, input.resourceTypeId, input.title, input.resourceUrlPattern, input.configuration);
     let id = this.allocateWorkpieceId();
@@ -10952,6 +11263,7 @@ class OverseerImpl implements AgentHooks {
                      typeUrlPattern: minted.typeUrlPattern, resourceTypeId: minted.resourceTypeId,
                      ...(input.configuration !== undefined
                          ? {configuration: input.configuration} : {})},
+      ...(createdBy !== undefined ? {createdBy} : {}),
     });
     await this.submitAction(id, "create", minted.action, {from: "agent", chatId})
         .catch(error => { this.removeGatekeeper(id); throw error; });
@@ -11896,6 +12208,54 @@ class OverseerImpl implements AgentHooks {
     return this.#sharingManager;
   }
 
+  // The workspace's active share links (see Overseer.listShareLinks()). `ownerProfile` reads the
+  // owner's profile from their account, and is called only when the owner created a link.
+  async shareLinkInfos(ownerProfile: () => Promise<AiChatAuthorInfo>): Promise<ShareLinkInfo[]> {
+    let sharing = await this.getSharingManager();
+
+    // Collect all records synchronously to release the kv.list() iterator before any await
+    // points below. Only one kv.list() iterator can be active at a time, and concurrent RPC
+    // calls (e.g. listCollaborators) may start their own.
+    let records = sharing.listShareLinkRecords();
+
+    let result: ShareLinkInfo[] = [];
+    // Cache profile lookups.
+    let profileCache = new Map<string, AiChatAuthorInfo>();
+
+    for (let record of records) {
+      let createdBy = profileCache.get(record.createdBy);
+      if (!createdBy) {
+        // Check if the creator is the owner (requires an RPC to the owner's DO).
+        let ownerProfileId = await this.getOwnerProfileId();
+        if (ownerProfileId === record.createdBy) {
+          createdBy = await ownerProfile();
+        }
+        // Check if the creator is a collaborator (resolved locally).
+        if (!createdBy) {
+          createdBy = sharing.getCreatorProfile(record.createdBy);
+        }
+        // Fallback.
+        if (!createdBy) {
+          createdBy = { type: "user", id: record.createdBy, name: record.createdBy };
+        }
+        profileCache.set(record.createdBy, createdBy);
+      }
+      result.push({
+        linkId: record.id,
+        note: record.note,
+        created: record.created,
+        createdBy,
+        role: record.role ?? "build",
+        ...(record.gadgetId !== undefined ? {gadgetId: record.gadgetId} : {}),
+        ...(record.gadgetIds !== undefined ? {gadgets: record.gadgetIds
+          .filter(id => this.isShareableGadget(id))
+          .map(id => ({id, title: this.getGadgetRecord(id).title}))} : {}),
+        ...(record.default ? {default: true} : {}),
+      });
+    }
+    return result;
+  }
+
   #codeIdMap = new Map<string, WorkerLoaderWorkerCode>;
 
   // Gadgets that had persistent restore stubs forged during each chat's currently-running
@@ -12066,7 +12426,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    *   handler takes over and holds the DO open until the work is done. If the DO died meanwhile,
    *   the alarm wakes it (and the constructor resumes the turns and drains the calls before
    *   alarm() itself runs). If the DO dies *while* the alarm is running, the system retries the
-   *   alarm, picking the work up yet again.
+   *   alarm, picking the work up yet again. Work that outlasts ALARM_HANDLER_BUDGET_MS is held
+   *   open by a chain of invocations, each handing off to the next, since the runtime aborts a DO
+   *   whose alarm handler runs past 15 minutes.
    * - External-message responses ready to deliver, and delivered records due to be swept.
    *
    * See OverseerImpl.runAlarmTasks for how the concerns are run together.
@@ -12100,6 +12462,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // A workspace initialized by this version of the code is born at the current schema version;
     // there is nothing to migrate.
     this.impl.storage.version.put(OVERSEER_STORAGE_VERSION);
+
+    this.impl.storage.createdAt.put(new Date());
+    // Outranks whatever the directory still lists under this id (from an earlier life whose
+    // removal from the directory failed), as the title's time-based revision does.
+    this.impl.storage.titleRev.put(Math.max(this.impl.storage.titleRev.get() + 1, Date.now()));
+    this.impl.directoryRemoved = false;
   }
 
   /**
@@ -12168,6 +12536,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       this.impl.ownerProfileId = profileId;
       this.impl.clientActivity();  // Fork: arm/renew the client-activity lease
     }
+
+    // The directory's lazy backfill: a workspace older than the directory is listed once it is
+    // next opened. A no-op once the directory has acknowledged the title's revision.
+    this.impl.syncDirectory();
 
     // Make singleton gatekeepers (e.g. the Context Library) available to the agent as unnamed
     // capsules. Idempotent and best-effort, so a library hiccup never blocks opening the gadget.
@@ -12315,6 +12687,44 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return ownedByClient(new OverseerClientInterface(
         this.impl, profileId, userId, isOwner, notifyClosed.dup(),
         ensureCapsules), this.impl.clientActivity);
+  }
+
+  /**
+   * Mint a deployment admin's read-only view of this workspace (AdminWorkspaceView), for
+   * AdminApiImpl.inspectWorkspace(): reachable only over the Workshop's Durable Object binding,
+   * never through a capability a user holds. Every environment read on this path goes through the
+   * OverseerImpl (`this.impl.env`), never this object's own `env`.
+   *
+   * Refuses (`workspaceNotFound`) a workspace never initialised or since deleted, before anything
+   * else and writing nothing: unlike open()'s first-open path it never asks a user DO whether the
+   * workspace is theirs and never claims ownership. `reason` and `terms` arrive validated (see
+   * AdminApiImpl.inspectWorkspace()). An `expiresAt` already past refuses the open `viewExpired`,
+   * unrecorded, as any call on an expired view is.
+   *
+   * By explicit policy it skips authorizeCollaborator() and observer verification (see
+   * docs/observers.md): the admin is not a collaborator, is never registered with the workspace's
+   * gatekeepers, and the audit log stands in for that check. It joins no presence, session count
+   * or outputs fan-out, and starts no agent, ambient capsule or gatekeeper facet; waking the
+   * Durable Object still resumes turns a previous instance left running, as any wake does.
+   *
+   * The open is the view's first call ("inspectWorkspace"): it passes the view's checks (a caller
+   * no longer an admin is refused unrecorded), is recorded as refused and throws `accessOff` while
+   * the deployment's level is "off", and is otherwise recorded in the deployment-wide log before
+   * the view is returned; a record that cannot be written refuses the open.
+   */
+  async openForAdmin(adminId: string, reason: string, sessionId: string, terms: AdminViewTerms)
+      : Promise<AdminWorkspaceView> {
+    if (!this.impl.ownerId) {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.workspaceNotFound);
+    }
+
+    // The owner is resolved now, since a call's record is built before its first await (see
+    // AdminWorkspaceViewImpl), and never changes.
+    let ownerId = await this.impl.getOwnerProfileId();
+    let view = await AdminWorkspaceViewImpl.open(
+        this.impl, adminId, reason, sessionId, terms, ownerId);
+    this.impl.logger.info("admin workspace view opened", {event: "admin.view.opened"});
+    return view;
   }
 
   #getExternalChat(externalChatKey: string): ExternalChatRecord | undefined {
@@ -12967,6 +13377,27 @@ function joinSessionPresence(
   };
 }
 
+// Every hook the workspace's connections deliver (see Overseer.listHooks()).
+function boundHookInfos(impl: OverseerImpl): BoundHookInfo[] {
+  let defaultGadgetId = impl.defaultGadgetId;
+  let result: BoundHookInfo[] = [];
+  for (let record of impl.storage.boundHooks.list()) {
+    let gatekeeper = impl.storage.gatekeepers.get(record.gatekeeperId);
+    result.push({
+      id: record.id,
+      gatekeeperId: record.gatekeeperId,
+      // Hooks recorded before multi-gadget support carry no gadgetId; they belong to the
+      // default gadget, which necessarily exists in any workspace old enough to have them.
+      gadgetId: (record.gadgetId ?? defaultGadgetId)!,
+      resourceTitle: gatekeeper?.resourceTitle,
+      resourceUrl: gatekeeper?.resourceUrl,
+      description: record.description,
+      enabled: record.enabled,
+    });
+  }
+  return result;
+}
+
 @validateRpc()
 class OverseerClientInterface extends RpcTarget implements Overseer {
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
@@ -13317,6 +13748,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let readers = new Set([this.impl.ownerId, ...sharing.listCollaborators()
       .map(reader => this.impl.users.idFromName(reader.profile.id).toString())]);
     this.impl.beginDeletion(readers);
+    await this.impl.removeFromDirectory();
     this.impl.recordGadgetAnalytics({
       event_name: "gadget_deleted",
       user_id: this.#clientUser.id.toString(),
@@ -13423,7 +13855,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       resourceTypeId,
     };
     let result = await this.impl.addGatekeeper(
-        cls, creationSpec, this.clientUserId, this.#mintedCapabilityHolder());
+        cls, creationSpec, this.clientUserId, this.#mintedCapabilityHolder(), undefined,
+        await this.#getClientProfile());
     await this.recordConnectionCreated(result, "gatekeeper", vendorId);
     return ownedByClient(result, this.impl.clientActivity);
   }
@@ -13449,7 +13882,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         modelKind(props.config.provider, props.config.model) === "decision"
             ? this.impl.ctx.exports.DecisionModelGatekeeper({props})
             : this.impl.ctx.exports.LanguageModelGatekeeper({props}),
-        creationSpec, this.clientUserId, this.#mintedCapabilityHolder());
+        creationSpec, this.clientUserId, this.#mintedCapabilityHolder(), undefined,
+        await this.#getClientProfile());
     await this.recordConnectionCreated(result, "ai_model");
     return ownedByClient(result, this.impl.clientActivity);
   }
@@ -13483,31 +13917,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let result = await this.impl.addGatekeeper(
         this.impl.ctx.exports.AgentSpawnerGatekeeper({props}), creationSpec,
-        this.clientUserId, this.#mintedCapabilityHolder(), bindings);
+        this.clientUserId, this.#mintedCapabilityHolder(), bindings,
+        await this.#getClientProfile());
     await this.recordConnectionCreated(result, "agent_spawner");
     return ownedByClient(result, this.impl.clientActivity);
   }
 
   async listActions(options?: {beforeId?: number, filter?: ActionHistoryFilter})
       : Promise<ActionHistoryPage> {
-    let {beforeId, filter = "all"} = options ?? {};
-    if (beforeId !== undefined && (!Number.isSafeInteger(beforeId) || beforeId < 0)) {
-      throw new TypeError(`Invalid beforeId: ${beforeId}`);
-    }
-
-    // One ranged read -- off the collection itself for "all" (already id-ordered), off
-    // byHistoryFilter otherwise -- so the work is O(page) however sparse the matches. Pages are
-    // full until the last; the +1 record probes whether an older page exists.
-    let actions = this.impl.storage.actions;
-    let range = {end: beforeId, reverse: true, limit: ACTION_HISTORY_PAGE_DEFAULT_LIMIT + 1};
-    let page = [...(filter === "all"
-        ? actions.list(range) : actions.byHistoryFilter.get(filter, range))];
-    let more = page.length > ACTION_HISTORY_PAGE_DEFAULT_LIMIT;
-    if (more) page.pop();
-    return {
-      entries: page.map(actionRecordToLog),
-      nextBeforeId: more ? page.at(-1)!.id : undefined,
-    };
+    return actionHistoryPage(this.impl.storage, options);
   }
 
   async approveAction(id: number, creation?: CreationApproval): Promise<void> {
@@ -13610,24 +14028,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listHooks(): Promise<BoundHookInfo[]> {
-    let defaultGadgetId = this.impl.defaultGadgetId;
-    let result: BoundHookInfo[] = [];
-    for (let record of this.impl.storage.boundHooks.list()) {
-      let gatekeeper = this.impl.storage.gatekeepers.get(record.gatekeeperId);
-      result.push({
-        id: record.id,
-        gatekeeperId: record.gatekeeperId,
-        // Hooks recorded before multi-gadget support carry no gadgetId; they belong to the
-        // default gadget, which necessarily exists in any workspace old enough to have them.
-        gadgetId: (record.gadgetId ?? defaultGadgetId)!,
-        resourceTitle: gatekeeper?.resourceTitle,
-        resourceUrl: gatekeeper?.resourceUrl,
-        description: record.description,
-        enabled: record.enabled,
-      });
-    }
-
-    return result;
+    return boundHookInfos(this.impl);
   }
 
   async enableHook(id: number): Promise<void> {
@@ -14586,52 +14987,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // --- Blueprint management ---
 
   async listBlueprints(): Promise<BlueprintGadgetSummary[]> {
-    let result: BlueprintGadgetSummary[] = [];
-    for (let record of Array.from(this.impl.storage.blueprints.list())) {
-      result.push({
-        id: record.id,
-        title: record.metadata.title,
-        description: record.metadata.description,
-        version: record.metadata.version,
-        codeVersionDate: this.#blueprintCodeDate(record),
-        screenshotUrl: blueprintScreenshotUrl(record.id, record.metadata),
-        dirty: record.dirty,
-        ...(this.#hasUnpublishedChanges(record) ? {unpublishedChanges: true} : {}),
-      });
-    }
-    return result;
-  }
-
-  // Whether the gadget a blueprint exports has committed files other than the ones the
-  // blueprint last published, which are those of the record's `commitId`. A gadget that has
-  // since been removed has nothing left to publish, and a record from before git-backed code
-  // storage has no commit to compare with until it is migrated.
-  //
-  // The trees are what is compared, not the commits: publishing an unchanged tree mints nothing
-  // and leaves `commitId` where it was (see mintBlueprintRelease), so a head that has moved on
-  // to the same files would otherwise count as a change that no publish could clear.
-  #hasUnpublishedChanges(record: BlueprintGadgetRecord): boolean {
-    let gadgetId = record.gadgetId ?? this.impl.defaultGadgetId;
-    let gadget = gadgetId === undefined ? undefined : this.impl.storage.gadgets.get(gadgetId);
-    let head = gadget?.type === "gadget" ? gadget.commitId : undefined;
-    let published = record.commitId;
-    if (head === undefined || published === undefined || head === published) return false;
-    let store = this.impl.gitCache;
-    return store.commitTree(head) !== store.commitTree(published);
-  }
-
-  // The timestamp of the code exported into a blueprint: the exported commit's author date, or
-  // for legacy (pre-git-storage) records the legacy log entry's, falling back to the metadata's
-  // own last-updated time.
-  #blueprintCodeDate(record: BlueprintGadgetRecord): Date {
-    if (record.commitId !== undefined) {
-      return this.impl.gitCache.readCommitLog(record.commitId, {depth: 1})[0].timestamp;
-    }
-    if (record.codeVersion !== undefined) {
-      let codeUpdate = this.impl.storage.code.get(record.codeVersion);
-      if (codeUpdate) return codeUpdate.timestamp;
-    }
-    return record.metadata.lastUpdated;
+    return this.impl.blueprintSummaries();
   }
 
   async updateBlueprint(blueprintId: string, options: {
@@ -14858,49 +15214,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listShareLinks(): Promise<ShareLinkInfo[]> {
-    let sharing = await this.impl.getSharingManager();
-
-    // Collect all records synchronously to release the kv.list() iterator before any await
-    // points below. Only one kv.list() iterator can be active at a time, and concurrent RPC
-    // calls (e.g. listCollaborators) may start their own.
-    let records = sharing.listShareLinkRecords();
-
-    let result: ShareLinkInfo[] = [];
-    // Cache profile lookups.
-    let profileCache = new Map<string, AiChatAuthorInfo>();
-
-    for (let record of records) {
-      let createdBy = profileCache.get(record.createdBy);
-      if (!createdBy) {
-        // Check if the creator is the owner (requires an RPC to the owner's DO).
-        let ownerProfileId = await this.impl.getOwnerProfileId();
-        if (ownerProfileId === record.createdBy) {
-          createdBy = await retryOnDoReset(() => this.#owner.whoami(), this.impl.logger);
-        }
-        // Check if the creator is a collaborator (resolved locally).
-        if (!createdBy) {
-          createdBy = sharing.getCreatorProfile(record.createdBy);
-        }
-        // Fallback.
-        if (!createdBy) {
-          createdBy = { type: "user", id: record.createdBy, name: record.createdBy };
-        }
-        profileCache.set(record.createdBy, createdBy);
-      }
-      result.push({
-        linkId: record.id,
-        note: record.note,
-        created: record.created,
-        createdBy,
-        role: record.role ?? "build",
-        ...(record.gadgetId !== undefined ? {gadgetId: record.gadgetId} : {}),
-        ...(record.gadgetIds !== undefined ? {gadgets: record.gadgetIds
-          .filter(id => this.impl.isShareableGadget(id))
-          .map(id => ({id, title: this.impl.getGadgetRecord(id).title}))} : {}),
-        ...(record.default ? {default: true} : {}),
-      });
-    }
-    return result;
+    return this.impl.shareLinkInfos(
+        () => retryOnDoReset(() => this.#owner.whoami(), this.impl.logger));
   }
 
   async updateShareLink(linkId: string, note?: string): Promise<void> {
@@ -15245,6 +15560,412 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
 }
 
 renewOnClientCalls(UseOverseerInterface);
+
+// A deployment admin's read-only view of the workspace (see AdminWorkspaceView in api.ts and
+// OverseerDurableObject.openForAdmin()). Deliberately not an Overseer: it holds no session, joins
+// no presence or fan-out, and never reads through a connection: its reads of trees, history and
+// a chat's pending paths never pull, and what a connection could tell it, it reads from the
+// workspace's own records instead. Beyond the workspace's storage it reads only the owner's
+// profile, from their account (describe() and listShareLinks()). Every method runs through
+// #call, which reads the call's answer and records the call in the deployment-wide log before
+// returning anything.
+@validateRpc()
+class AdminWorkspaceViewImpl extends RpcTarget implements AdminWorkspaceView {
+  #impl: OverseerImpl;
+  #adminId: string;
+  #reason: string;
+  #sessionId: string;
+  #terms: AdminViewTerms;
+  #ownerId: string;
+
+  constructor(impl: OverseerImpl, adminId: string, reason: string, sessionId: string,
+              terms: AdminViewTerms, ownerId: string) {
+    super();
+    this.#impl = impl;
+    this.#adminId = adminId;
+    this.#reason = reason;
+    this.#sessionId = sessionId;
+    this.#terms = terms;
+    this.#ownerId = ownerId;
+  }
+
+  // Mints a view, recording the open as its first call (see openForAdmin()). Static, so that
+  // auditing stays off the view's RPC surface.
+  static async open(impl: OverseerImpl, adminId: string, reason: string, sessionId: string,
+                    terms: AdminViewTerms, ownerId: string): Promise<AdminWorkspaceViewImpl> {
+    let view = new AdminWorkspaceViewImpl(impl, adminId, reason, sessionId, terms, ownerId);
+    await view.#call(
+        "inspectWorkspace", {expiresAt: terms.expiresAt.toISOString()}, () => undefined);
+    return view;
+  }
+
+  // The checks that stop a call unrecorded: the view has not expired, its admin is still one, and
+  // the workspace still exists.
+  #assertLive(): void {
+    assertAdminViewLive(this.#terms, this.#adminId, this.#impl.env);
+    if (!this.#impl.ownerId) {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.workspaceNotFound);
+    }
+  }
+
+  // Runs one call through adminViewCall(): checks the view, reads the deployment's setting and
+  // checks again. While the setting is "off" the call is recorded and refused, having read
+  // nothing. Any other call reads its answer with `read` (never through a connection), is checked
+  // once more, and is recorded. Only then is it answered, so nothing it read leaves the server
+  // unrecorded, and a call whose record cannot be written fails and returns nothing. A read that
+  // fails is recorded as an attempt, and the call fails with the read's error. The host is built
+  // at each call, so its audit log and logger are the Overseer's at that call, and the environment
+  // is read at each use within it.
+  async #call<T>(method: AdminWorkspaceMethod, args: Record<string, string | number | undefined>,
+      read: () => T | Promise<T>): Promise<T> {
+    let impl = this.#impl;
+    return adminViewCall({
+      env: () => impl.env,
+      audits: impl.adminAudits,
+      logger: impl.logger,
+      assertLive: () => this.#assertLive(),
+      recordOf: refused => this.#recordOf(method, args, refused),
+    }, read);
+  }
+
+  // The record of one call, as the deployment-wide log keeps it, as refused when `refused` names
+  // why. Synchronous: adminViewCall() builds and sends a record with nothing awaited since its
+  // last check.
+  #recordOf(method: AdminWorkspaceMethod, args: Record<string, string | number | undefined>,
+      refused?: AdminAccessRecord["refused"]): AdminAccessRecord {
+    let impl = this.#impl;
+    return {
+      kind: "workspace",
+      workspaceId: impl.ctx.id.toString(),
+      workspaceOwner: this.#ownerId,
+      at: new Date(),
+      admin: this.#adminId,
+      sessionId: this.#sessionId,
+      via: this.#terms.via,
+      // A title has no length limit of its own, and an uncut one could overflow the
+      // deployment-wide row and so refuse every investigation of this workspace.
+      workspaceTitle: cutAdminAuditText(impl.storage.title.get(), MAX_ADMIN_AUDIT_ARG_LENGTH),
+      method,
+      args: redactAdminAuditArgs(args),
+      reason: this.#reason,
+      access: refused ? "off" : "metadata",
+      ...(refused ? {refused} : {}),
+    };
+  }
+
+  // The head commit of a permanent gadget, the only workpiece with committed code to read.
+  #committedHead(gadgetId: WorkpieceId): string {
+    let record = this.#impl.storage.gadgets.get(gadgetId);
+    if (record?.type !== "gadget" || record.pending || record.commitId === undefined) {
+      throw new Error(`No gadget with committed code has id ${gadgetId}.`);
+    }
+    return record.commitId;
+  }
+
+  // A commit the workspace stores, by id (a gadget's history, a worktree's commits, a chat pin's
+  // base); throws for a malformed id and for one naming no stored commit.
+  #storedCommit(commitId: string): string {
+    if (this.#impl.gitCache.localObjectType(validateOid(commitId)) !== "commit") {
+      throw new Error(`No commit ${commitId} is stored in this workspace.`);
+    }
+    return commitId;
+  }
+
+  // The chat's current content, its worktree bases read only from stored objects.
+  #pendingContent(chatId: number): Promise<CodeContent> {
+    let impl = this.#impl;
+    return impl.getCurrentChatContent(chatId, impl.getChatMetaOrThrow(chatId),
+        (commit, path) => impl.gitCache.readLocalFileAtCommitIfExists(commit, path));
+  }
+
+  // The owner's profile, from their account: the one thing a view reads beyond the workspace's
+  // storage (describe() and listShareLinks()).
+  #ownerProfile(): Promise<AiChatAuthorInfo> {
+    return retryOnDoReset(() => this.#impl.ownerUserDo().whoami(), this.#impl.logger);
+  }
+
+  async describe(): Promise<AdminWorkspaceDescription> {
+    let impl = this.#impl;
+    return this.#call("describe", {}, async () => {
+      let owner = await this.#ownerProfile();
+      let collaborators = await (await impl.getSharingManager()).listCollaborators();
+      return {
+        id: impl.ctx.id.toString(),
+        // Live data, not a record, so whole.
+        title: impl.storage.title.get(),
+        totalCost: impl.storage.totalCost.get(),
+        containsRestrictedData: impl.storage.containsRestrictedData.get(),
+        ownerInvitesOnly: impl.storage.ownerInvitesOnly.get(),
+        defaultGadgetId: impl.defaultGadgetId,
+        owner,
+        workpieces: [...impl.storage.gadgets.list()]
+            .map(record => workpieceSummary(record, false)),
+        collaborators,
+        expiresAt: this.#terms.expiresAt,
+      };
+    });
+  }
+
+  async listChats(): Promise<AiChatMetadata[]> {
+    return this.#call("listChats", {},
+        () => [...this.#impl.storage.chatMeta.list({reverse: true})]
+            .map(meta => this.#impl.chatMetaForClient(meta))
+            .map(withholdChatContent));
+  }
+
+  // Each part of the answer names the fields its type declares, since the stored records hold
+  // more: a turn's and a queued call's hold their initiator's user id, and a queued call's its
+  // raw arguments. Each storage listing is read to its end before the next starts.
+  async getChatState(chatId: number): Promise<AdminChatState> {
+    return this.#call("getChatState", {chatId}, () => {
+      let storage = this.#impl.storage;
+      let meta = this.#impl.getChatMetaOrThrow(chatId);
+      let turn = storage.activeAgents.get(chatId);
+      let prefix = chatKeyPrefix(chatId);
+      let [newest] = [...storage.chats.list({prefix, reverse: true, limit: 1})];
+      let queuedCalls = [...storage.pendingAgentCalls.list({prefix})].map(call => ({
+        callId: call.callId,
+        methodName: call.methodName,
+        initiatorModelId: call.initiatorModelId,
+      }));
+      let pendingActionIds = [...storage.actions.byHistoryFilter.get("pending")]
+          .filter(({caller}) => "chatId" in caller && caller.chatId === chatId)
+          .map(action => action.id);
+      return {
+        turn: turn && {
+          modelId: turn.modelId,
+          initiator: turn.initiator,
+          callbackInitiated: turn.callbackInitiated,
+          resumeAttempts: turn.resumeAttempts ?? 0,
+          paused: meta.activeAgent === undefined,
+        },
+        lastMessageAt: newest?.timestamp,
+        queuedCalls,
+        pendingActionIds,
+      };
+    });
+  }
+
+  // The scan deleteChat() makes: a message's ChatAttachmentRef is the one record of an
+  // attachment's metadata. Each entry names the fields its type declares, since a stored
+  // reference also holds its path in the chat's scratch worktree, and can hold bytes.
+  async listChatAttachments(chatId: number): Promise<AdminChatAttachment[]> {
+    return this.#call("listChatAttachments", {chatId}, () => {
+      let attachments: AdminChatAttachment[] = [];
+      for (let msg of this.#impl.storage.chats.list({prefix: chatKeyPrefix(chatId)})) {
+        if (msg.type !== "message") continue;
+        for (let {id, oid, mimeType, name, size} of msg.attachments ?? []) {
+          attachments.push({id, oid, mimeType, name, size, sequence: msg.sequence});
+        }
+      }
+      return attachments;
+    });
+  }
+
+  async listActions(options?: {beforeId?: number, filter?: ActionHistoryFilter})
+      : Promise<ActionHistoryPage> {
+    validateBeforeId(options?.beforeId);
+    return this.#call("listActions", {beforeId: options?.beforeId, filter: options?.filter},
+        () => {
+          let page = actionHistoryPage(this.#impl.storage, options);
+          return {...page, entries: page.entries.map(withholdActionContent)};
+        });
+  }
+
+  async listFiles(gadgetId: WorkpieceId): Promise<TreeNode[]> {
+    return this.#call("listFiles", {gadgetId},
+        () => this.#impl.gitCache.readLocalCommitTree(this.#committedHead(gadgetId)));
+  }
+
+  // `limit`, the depth the validator answers with, bounds the walk: readCommitLog() stops only at
+  // a depth it is handed. The record keeps `depth` as the caller gave it.
+  async getCommitLog(fromCommit: string, depth?: number): Promise<CommitInfo[]> {
+    let limit = adminCommitLogDepth(depth);
+    return this.#call("getCommitLog", {fromCommit, depth},
+        () => this.#impl.gitCache
+            .readCommitLog(this.#storedCommit(fromCommit), {depth: limit, stopAtMissing: true})
+            .map(withholdCommitContent));
+  }
+
+  async listFilesAtCommit(commitId: string): Promise<TreeNode[]> {
+    return this.#call("listFilesAtCommit", {commitId},
+        () => this.#impl.gitCache.readLocalCommitTree(this.#storedCommit(commitId)));
+  }
+
+  async listChangedPaths(fromCommit: string, toCommit: string): Promise<string[]> {
+    return this.#call("listChangedPaths", {fromCommit, toCommit},
+        async () => [...await this.#impl.gitCache.changedLocalFilePathsBetween(
+            this.#storedCommit(fromCommit), this.#storedCommit(toCommit))].toSorted());
+  }
+
+  // One entry per workpiece the chat's content holds and the workspace still has: a pin outlives
+  // its workpiece's removal and proposes nothing (see proposedChangeWorkpieceIds()). Each is
+  // compared with its pin's base, read only from stored objects. A gadget's content is its whole
+  // file map. A worktree's holds only the paths the chat touched, a removed one being absent from
+  // it, so the change stream names its paths and the base's tree says what each was.
+  async listPendingChanges(chatId: number): Promise<AdminPendingChange[]> {
+    return this.#call("listPendingChanges", {chatId}, async () => {
+      let impl = this.#impl;
+      // The fold settles one microtask before this goes on, and an accept's synchronous tail can
+      // run in that gap and clear the pins the content was folded from. So the chat's code base
+      // and message sequence are read on both sides of the fold, and a fold they moved under is
+      // taken again.
+      let content: CodeContent;
+      let codeBase: ChatCodeBase;
+      for (let attempt = 0; ; attempt++) {
+        let before = impl.chatCodeBase(impl.getChatMetaOrThrow(chatId));
+        let token = impl.nextChatSequencePeek(chatId);
+        content = await this.#pendingContent(chatId);
+        codeBase = impl.chatCodeBase(impl.getChatMetaOrThrow(chatId));
+        if (codeBase.generation === before.generation && codeBase.revision === before.revision &&
+            impl.nextChatSequencePeek(chatId) === token) {
+          break;
+        }
+        if (attempt >= 4) throw new Error("The chat is changing too quickly; please retry.");
+      }
+      // Nothing is awaited from here on, so the pins and the change stream read below are those
+      // of the code base the content is at. The content may still be a cached fold that lacks
+      // one of those pins: a step that only commits in a worktree pins it without moving the
+      // generation or the revision, which are all the cache is keyed by. A worktree pinned that
+      // way and not edited since is then left out, where a fresh fold lists it with three empty
+      // lists.
+      let pins = new Map(codeBase.pins.map(pin => [pin.gadgetId, pin]));
+      let messages = [...impl.storage.chats.list({prefix: chatKeyPrefix(chatId)})];
+      let touched = impl.worktreeTouchedPaths(messages, chatChangeStatuses(messages),
+          impl.listLiveChatChanges(chatId, codeBase.generation));
+      return [...content]
+          .filter(([gadgetId]) => impl.storage.gadgets.get(gadgetId) !== undefined)
+          .toSorted(([a], [b]) => a - b)
+          .map(([gadgetId, files]) => {
+            let pin = pins.get(gadgetId);
+            let added: string[] = [], modified: string[] = [], removed: string[] = [];
+            if (pin === undefined) {
+              // A gadget the chat created: it has no commit, so every file is added.
+              added = [...files.keys()];
+            } else if (impl.isWorktree(gadgetId)) {
+              for (let path of touched.get(gadgetId) ?? []) {
+                let file = files.get(path);
+                let entry = impl.gitCache.localPathEntryAtCommit(pin.baseCommit, path);
+                let base = entry?.kind === "dir" ? undefined : entry;
+                if (file === undefined) {
+                  if (base !== undefined) removed.push(path);
+                } else if (base === undefined) {
+                  added.push(path);
+                } else if (base.oid !== (typeof file === "string" ? blobOid(file) : file.oid)) {
+                  modified.push(path);
+                }
+              }
+            } else {
+              let base = impl.gitCache.readCommitFiles(pin.baseCommit);
+              for (let [path, file] of files) {
+                if (!base.has(path)) added.push(path);
+                else if (base.get(path) !== file) modified.push(path);
+              }
+              removed = [...base.keys()].filter(path => !files.has(path));
+            }
+            return {
+              gadgetId,
+              ...(pin && {baseCommit: pin.baseCommit, mergedCommit: pin.mergedCommit}),
+              added: added.toSorted(), modified: modified.toSorted(), removed: removed.toSorted(),
+            };
+          });
+    });
+  }
+
+  async listGatekeepers(): Promise<AdminGatekeeperInfo[]> {
+    return this.#call("listGatekeepers", {}, () => {
+      let storage = this.#impl.storage;
+      let gadgets = [...storage.gadgets.list()].filter(record => record.type === "gadget");
+      let hooks = boundHookInfos(this.#impl);
+      return [...storage.gatekeepers.list()].map(record => ({
+        id: record.id,
+        resourceTitle: record.resourceTitle,
+        resourceUrl: record.resourceUrl,
+        vendorId: gatekeeperVendorId(record),
+        creationSpec: record.creationSpec && withholdCreationContent(record.creationSpec),
+        createdBy: record.createdBy,
+        bindings: gadgets.flatMap(gadget => Object.entries(gadget.bindings)
+            .filter(([, edge]) => edge.target === record.id)
+            .map(([name, edge]) => ({
+              gadgetId: gadget.id, name, ...(edge.pending ? {chatId: edge.pending.chatId} : {}),
+            }))),
+        hooks: hooks.filter(hook => hook.gatekeeperId === record.id).map(withholdHookContent),
+      }));
+    });
+  }
+
+  // Each entry names the fields its type declares, since a stored record also holds the observer
+  // id, the handle connections know the collaborator by. A profile the collaborator table lacks
+  // is made of the id alone, as a share link's creator's is. Choices come in connection id
+  // order, as an object lists integer keys, and one outlives its connection, which then gives it
+  // no vendor. The listing is read to its end before the connections are read.
+  async listObservers(): Promise<AdminObserver[]> {
+    return this.#call("listObservers", {}, async () => {
+      let storage = this.#impl.storage;
+      let sharing = await this.#impl.getSharingManager();
+      return [...storage.observers.list()].map((record): AdminObserver => ({
+        profile: sharing.getCreatorProfile(record.profileId) ??
+            {type: "user", id: record.profileId, name: record.profileId},
+        accountChoices: Object.entries(record.accountChoices).map(([id, accountId]) => ({
+          gatekeeperId: Number(id),
+          accountId,
+          vendorId: gatekeeperVendorId(storage.gatekeepers.get(Number(id))),
+        })),
+      }));
+    });
+  }
+
+  // Read from storage alone (see OverseerImpl.listObserverRequirements()). The record keeps the
+  // grant by name: "workspace", or the gadget's id.
+  async listObserverRequirements(grant: CollaboratorGrant): Promise<ObserverBindingNeed[]> {
+    return this.#call("listObserverRequirements",
+        grant === "workspace" ? {grant} : {gadgetId: grant.gadgetId},
+        () => this.#impl.listObserverRequirements(grant));
+  }
+
+  // The owner's account is asked only when the owner created a link, as for a member's session.
+  async listShareLinks(): Promise<ShareLinkInfo[]> {
+    return this.#call("listShareLinks", {},
+        () => this.#impl.shareLinkInfos(() => this.#ownerProfile()));
+  }
+
+  // The stored rules as they are, whether or not any can apply now (see AdminAutoApproval). What
+  // each connection could auto-approve is not read: that would ask every bound connection.
+  async listAutoApprovals(): Promise<AdminAutoApproval[]> {
+    return this.#call("listAutoApprovals", {},
+        () => [...this.#impl.storage.autoApproveTags.list()].map(
+            ({gatekeeperId, actionKind, enabledBy}) => ({gatekeeperId, actionKind, enabledBy})));
+  }
+
+  async listBlueprints(): Promise<BlueprintGadgetSummary[]> {
+    return this.#call("listBlueprints", {},
+        () => this.#impl.blueprintSummaries().map(withholdBlueprintContent));
+  }
+
+  async getDiagnostics(): Promise<AdminWorkspaceDiagnostics> {
+    return this.#call("getDiagnostics", {}, async () => {
+      let impl = this.#impl;
+      let storage = impl.storage;
+      let hooks = [...storage.boundHooks.list()];
+      let nextAlarm = await impl.ctx.storage.getAlarm();
+      return {
+        storageVersion: storage.version.get(),
+        instanceStartedAt: new Date(impl.streamGeneration),
+        sessions: impl.liveSessionCounts(),
+        activeAgentChatIds: [...storage.activeAgents.list()].map(record => record.chatId),
+        pendingAgentCalls: [...storage.pendingAgentCalls.list()].length,
+        pendingActions: [...storage.actions.byHistoryFilter.get("pending")].length,
+        chats: [...storage.chatMeta.list()].length,
+        hooks: {total: hooks.length, enabled: hooks.filter(hook => hook.enabled).length},
+        observers: [...storage.observers.list()].length,
+        storageBytes: impl.ctx.storage.sql.databaseSize,
+        present: impl.presenceSnapshot(),
+        nextAlarm: nextAlarm === null ? undefined : new Date(nextAlarm),
+        ownerRegistrationPending: storage.ownerRegistrationPending.get(),
+      };
+    });
+  }
+}
 
 // Capability representing one gadget workpiece, handed to "build"-role sessions via
 // Overseer.createGadget()/getGadget().

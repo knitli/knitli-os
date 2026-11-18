@@ -2796,7 +2796,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (!resource?.savableFrom?.includes(contentType)) {
         throw new Error("This account cannot save that kind of file as that resource type.");
       }
-      await this.#assertResourceEnabled(record.vendorId, resource);
+      await this.#assertResourceEnabled(record.vendorId, resource, record.autoProvisioned === true);
       return await (record.account as unknown as FileSaverStub)
           .saveFile(resourceTypeId, destination, name, contentType, file);
     } catch (err) {

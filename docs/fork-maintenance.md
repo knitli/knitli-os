@@ -671,7 +671,9 @@ the seams below were re-applied or retired on top of it.
 - **What:** deployment bindings, vars, and limits differ from upstream's: backend assets
   (`ASSETS` binding + `assets` + `assetsDirectory`) with `limits.cpuMs: 300000` and smart
   placement, the backend `v4` `VoiceSession` migration, context's remote `ARTIFACTS` binding,
-  and router smart placement. Each delta carries a `// Fork:` comment in the config.
+  and router smart placement. Each delta carries a `// Fork:` comment in the config. Since the
+  2026-11-19 sync the release manifest carries `limits` (upstream #1079), so customer instances get
+  the backend's `cpu_ms` too; smart placement stays first-party only.
 - **Why:** this deployment binds workers differently than upstream's; the generated files cannot
   be byte-identical.
 - **How it is kept:** Tier 2, resolved by hand at each sync — usually take ours, but an upstream
@@ -817,6 +819,35 @@ authorizes a read after fetching it.
   against collaborators and share links, not admins. Adopted unchanged; whether an owner-only
   workspace should also be withheld from admin inspection (or only its titles and file names) is a
   product decision for the maintainer.
+- **Seams added by the 2026-11-19 sync (foundation `303e0d71`).**
+  - Snapshot sharing (upstream #1173, #1189, #1227): adopted as is, on by default
+    (`snapshotSharingEnabled`). A view grant is a "use" grant whose holder gets a static copy of the
+    gadget (`GadgetSnapshotClientImpl`) and is verified as no observer, which is how the fork's
+    audience attestation already treats a "use" admission (it claims nothing). The owner-only tier
+    is unaffected: `createShareLink`/`newShareLinkKey` still refuse first, view grants pass
+    `beforeAuthorityExpansion` like any other, and an owner-only workspace has no collaborators to
+    keep a view. Snapshots run the same commit modules and UI bundle as the live gadget, so the
+    prompt blindfold needs nothing new.
+  - `overseer.ts`: upstream moved the facet proxy out of `getGadgetFacet` into the module-level
+    `facetRpcStub()`; the fork's lease renewal is its optional fourth argument (see "Workspace
+    client-activity lease", which now covers snapshot clients too). `removeCollaborator` takes
+    upstream's `keepView` inside the fork's revocation gate: `requireSnapshotSharing()` is awaited
+    before `assertCanRemoveCollaborator()`, so everything after it stays synchronous.
+  - `sharing.ts`: upstream renamed `#liveCeiling` to `#existingCeiling` (a ceiling now keeps a view
+    grant's `mode`); the fork's re-resolving redemption and post-mint rechecks call it.
+    `removeCollaborator` keeps `assertCanRemoveCollaborator()` and takes `keepView`.
+  - Release manifest (upstream #1079, the `pdf-renderer` internal worker): `limits` now travel
+    verbatim into the manifest, so the fork's "limits are read and dropped" rule is retired, as its
+    own comment said it would be once the contract had a field. The backend's and AI Executor's
+    `cpu_ms: 300000` therefore reach customer manifests (upstream's `pdf-renderer` ships the same
+    value). `placement` is still dropped. Upstream's "a worker without limits carries none"
+    assertion checks the router, not the backend, which sets `cpu_ms` in the fork.
+  - `scripts/preview/`: upstream's internal-worker tier sits beside the fork's
+    standalone-gatekeeper filter, Access secrets and browser-binding rebuild.
+  - Fork fixtures: `AdminSettingsView` gains `snapshotSharingEnabled`; the fork's
+    `ObserverConfigModal` test (still inside upstream's test file) passes the new `subject`.
+  - `reviewedSurvivors`: the two 2026-11-18 acks no longer matched and were dropped; one added for
+    `getGadgetUiBundle` (upstream #1173 kept the same three uses the fork has).
 - **Seams added by the 2026-11-18 sync (foundation `941b36e9`).**
   - `overseer.ts` `runAlarmTasks`: upstream #1184 made the alarm's work one run that may span
     invocations (each held open for at most `ALARM_HANDLER_BUDGET_MS`, then re-armed at once), and
@@ -1559,8 +1590,10 @@ ids are facet-local, not Activity ids.
   the lease deadline); `noteWorkEnded()` in `#unregisterRunningAgent`; `alarm()` also calls
   `reapIdleSession()`; `open()` takes `notifyClosed(reason?: "idle")`, arms the lease and
   registers a notifier with a `using`; both client interfaces register/release a notifier;
-  browser mints wrap their capability in `ownedByClient(...)`; `getGadgetFacet` takes an optional
-  `activity` callback; five `renewOnClientCalls(Class)` lines. `server.ts`: per-open counting,
+  browser mints wrap their capability in `ownedByClient(...)`; `getGadgetFacet` and
+  `getSnapshotFacet` take an optional `activity` callback, which upstream's module-level
+  `facetRpcStub()` takes as its fourth argument (`onCall`, since the 2026-11-19 sync); six
+  `renewOnClientCalls(Class)` lines (`GadgetSnapshotClientImpl` added for upstream #1173). `server.ts`: per-open counting,
   `IdleSessionError`, and the idle close code in the abort listener. `blueprints-kv.ts`: the
   reserved key. `workshop-shared/src/api.ts`: `SESSION_IDLE_CLOSE_CODE`.
   `vitest.integration.config.ts` and `__tests__/fixtures.ts` gain the expected-abort filter and

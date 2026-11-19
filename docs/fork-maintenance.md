@@ -833,8 +833,8 @@ authorizes a read after fetching it.
     client-activity lease", which now covers snapshot clients too). `removeCollaborator` takes
     upstream's `keepView` inside the fork's revocation gate: `requireSnapshotSharing()` is awaited
     before `assertCanRemoveCollaborator()`, so everything after it stays synchronous.
-  - `sharing.ts`: upstream renamed `#liveCeiling` to `#existingCeiling` (a ceiling now keeps a view
-    grant's `mode`); the fork's re-resolving redemption and post-mint rechecks call it.
+  - `sharing.ts`: upstream renamed the live-ceiling helper to `#existingCeiling` (a ceiling now keeps
+    a view grant's `mode`); the fork's re-resolving redemption and post-mint rechecks call it.
     `removeCollaborator` keeps `assertCanRemoveCollaborator()` and takes `keepView`.
   - Release manifest (upstream #1079, the `pdf-renderer` internal worker): `limits` now travel
     verbatim into the manifest, so the fork's "limits are read and dropped" rule is retired, as its
@@ -849,7 +849,7 @@ authorizes a read after fetching it.
     `__tests__/fixtures.ts`' `openFakeOverseer` returns a real `SharingManager` whole (upstream's
     new `gadget-snapshot` test passes one); only plain-object fakes get the fork's preflight stubs.
   - `reviewedSurvivors`: the two 2026-11-18 acks no longer matched and were dropped; one added for
-    `getGadgetUiBundle` (upstream #1173 kept the same three uses the fork has).
+    the live UI-bundle reader in `overseer.ts` (upstream #1173 kept the same three uses the fork has).
 - **Seams added by the 2026-11-18 sync (foundation `941b36e9`).**
   - `overseer.ts` `runAlarmTasks`: upstream #1184 made the alarm's work one run that may span
     invocations (each held open for at most `ALARM_HANDLER_BUDGET_MS`, then re-armed at once), and

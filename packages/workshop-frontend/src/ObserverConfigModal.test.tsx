@@ -437,7 +437,7 @@ describe('ObserverConfigModal when a service cannot be connected', () => {
     root = createRoot(container)
     await act(async () => {
       root!.render(
-        <ObserverConfigModal needs={needs} authenticatedApi={api} onConfirm={() => {}} onCancel={onCancel} />,
+        <ObserverConfigModal needs={needs} authenticatedApi={api} onConfirm={() => {}} onCancel={onCancel} subject="workspace" />,
       )
       await Promise.resolve()
     })

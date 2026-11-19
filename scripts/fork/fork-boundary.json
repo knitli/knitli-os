@@ -563,14 +563,9 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "handleClientConsoleLog",
-      "path": "packages/workshop-frontend/src/GadgetEditor.tsx",
-      "reason": "Still present in upstream's own copy of this file (the code tab's GadgetUI uses it); upstream's #1187 only dropped the dead preview-mode overlay's use."
-    },
-    {
-      "token": "uiReloadTrigger",
-      "path": "packages/workshop-frontend/src/GadgetEditor.tsx",
-      "reason": "Still present in upstream's own copy of this file (the code tab's GadgetUI uses it); upstream's #1187 only dropped the dead preview-mode overlay's use."
+      "token": "getGadgetUiBundle",
+      "path": "packages/workshop-backend/src/overseer.ts",
+      "reason": "Still in upstream's own copy of this file (the live gadget clients call it); upstream #1173 only replaced its use in export with readGadgetFiles(), and the fork has the same three uses upstream does."
     }
   ]
 }

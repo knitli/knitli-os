@@ -24,7 +24,7 @@ import type {
   EmailAddress, EmailContent, GmailAttachment, GmailAttachmentEntry, GmailAttachmentInfo, GmailAttachmentInput,
   GmailComposeOptions, GmailCustomLabel,
   GmailDraft, GmailDraftAttachment, GmailDraftAttachmentEntry, GmailDraftEntry, GmailDraftInfo, GmailDraftInput, GmailDraftPatch, GmailHeader,
-  GmailLabel, GmailMessage, GmailMessageEntry, GmailMessageInfo, GmailMutableLabel,
+  GmailLabel, GmailMessage, GmailMessageEntry, GmailMessageInfo, GmailMutableLabel, GmailPdfText,
   GmailReplyOptions, GmailScopedSession, GmailSession, GmailSystemLabel, GmailThread, GmailThreadEntry,
   GmailThreadInfo,
 } from "./types";
@@ -66,6 +66,11 @@ import {
   UNDELIVERED_GMAIL_LABELS, type GmailHookDelivery, type GmailHookParams, type GmailMessageHookTarget,
 } from "./gmail-hooks";
 import {gmailHooksConfigured, type PushHooksEnv} from "./pubsub-push";
+import {
+  GMAIL_PDF, pdfConverter, pdfUpload, releasedAtEnd, TranscriptionRefusal, type PdfConverter,
+  type PdfRangeReader, type PdfRead,
+} from "./drive-pdf";
+import {forwardRangeReader, type PdfOpener} from "./pdf-forward-reader";
 import TYPES_CODE from "./types.txt";
 
 type Env = Cloudflare.Env & PushHooksEnv;
@@ -2056,6 +2061,8 @@ type GmailReadContext = {
   labelName?: string;
   restricted: boolean;
   providerLabels(): Promise<GmailLabelRaw[]>;
+  /** Converts a PDF attachment to its text, or `undefined` where the deployment cannot. */
+  convertPdf: PdfConverter | undefined;
 };
 
 /** What every capability of this binding shares, over one approval queue. */
@@ -2754,6 +2761,23 @@ function gmailRestrictedThreadCursor(
   }), ctx.approvalQueue);
 }
 
+/**
+ * What a search- or label-scoped binding answers a whole-mailbox method with: which connection
+ * has the method, and how the user makes one. `instead` names what this binding offers in its
+ * place, when it offers anything.
+ */
+function wholeMailboxOnlyError(method: string, instead = ""): Error {
+  return new Error(
+    `${method}() needs a whole-mailbox Gmail connection, and this one is limited to a search or a ` +
+    `label.${instead} To use ${method}(), connect Gmail again with "All Gmail" as its mailbox ` +
+    "scope (https://mail.google.com/mail/).");
+}
+
+const REPLY_INSTEAD_OF_SEND =
+  " To answer a message this connection can read, use that message's reply() or replyAll().";
+const REPLY_DRAFT_INSTEAD_OF_DRAFT =
+  " To draft an answer to a message this connection can read, use that message's createReplyDraft().";
+
 @validateRpc()
 class GmailSessionImpl extends ApprovalQueueRpcTarget implements GmailSession {
   #ctx: GmailContext;
@@ -2876,8 +2900,7 @@ class GmailSessionImpl extends ApprovalQueueRpcTarget implements GmailSession {
   async send(
       to: string[], subject: string, body: string, options: GmailComposeOptions = {}): Promise<string> {
     if (this.#ctx.restricted) {
-      throw new Error(
-        "send() is unavailable on a search- or label-scoped binding. Use a message capability.");
+      throw wholeMailboxOnlyError("send", REPLY_INSTEAD_OF_SEND);
     }
     const message = this.#ctx.api.buildSendRaw(to, subject, body, options);
     validateOutboundFields(message, message.subject, message.body, message.html);
@@ -2915,7 +2938,7 @@ class GmailSessionImpl extends ApprovalQueueRpcTarget implements GmailSession {
 
   async createDraft(input: GmailDraftInput): Promise<GmailDraft> {
     if (this.#ctx.restricted) {
-      throw new Error("createDraft() is only available on a whole-mailbox Gmail binding.");
+      throw wholeMailboxOnlyError("createDraft", REPLY_DRAFT_INSTEAD_OF_DRAFT);
     }
     const message = this.#ctx.api.buildSendRaw(
       input.to ?? [], input.subject ?? "", input.text ?? "", input);
@@ -2924,7 +2947,7 @@ class GmailSessionImpl extends ApprovalQueueRpcTarget implements GmailSession {
 
   async listLabels(): Promise<GmailLabel[]> {
     if (this.#ctx.restricted) {
-      throw new Error("listLabels() is only available on a whole-mailbox Gmail binding.");
+      throw wholeMailboxOnlyError("listLabels");
     }
     const labels = await currentLabels(this.#ctx);
     await this.#ctx.approvalQueue.authorizeObservation({
@@ -2939,7 +2962,7 @@ class GmailSessionImpl extends ApprovalQueueRpcTarget implements GmailSession {
 
   async createLabel(name: string): Promise<GmailCustomLabel> {
     if (this.#ctx.restricted) {
-      throw new Error("createLabel() is only available on a whole-mailbox Gmail binding.");
+      throw wholeMailboxOnlyError("createLabel");
     }
     validateGmailLabelName(name);
     const existing = (await currentLabels(this.#ctx)).labels.some(
@@ -2957,7 +2980,7 @@ class GmailSessionImpl extends ApprovalQueueRpcTarget implements GmailSession {
 
   async renameLabel(label: GmailCustomLabel, name: string): Promise<GmailCustomLabel> {
     if (this.#ctx.restricted) {
-      throw new Error("renameLabel() is only available on a whole-mailbox Gmail binding.");
+      throw wholeMailboxOnlyError("renameLabel");
     }
     validateGmailLabelName(name);
     let generation: number;
@@ -2982,7 +3005,7 @@ class GmailSessionImpl extends ApprovalQueueRpcTarget implements GmailSession {
 
   async deleteLabel(label: GmailCustomLabel): Promise<void> {
     if (this.#ctx.restricted) {
-      throw new Error("deleteLabel() is only available on a whole-mailbox Gmail binding.");
+      throw wholeMailboxOnlyError("deleteLabel");
     }
     const canonical = await resolveMutableLabel(this.#ctx, label);
     if (canonical.type !== "custom") throw new Error("System Gmail labels cannot be deleted.");
@@ -3030,6 +3053,20 @@ class GmailScopedSessionImpl extends ApprovalQueueRpcTarget implements GmailScop
   subscribeNewMessages(hook: RpcStub<GmailMessageHookTarget>): Promise<void> {
     return this.#mailbox.subscribeNewMessages(hook);
   }
+
+  // The whole-mailbox methods, which GmailScopedSession does not declare. A caller used to a
+  // whole-mailbox binding calls them all the same, and "no such method" tells it nothing, so each
+  // refuses here, whatever it is passed, and says which connection has it. None reaches #mailbox.
+  async send(..._args: unknown[]): Promise<void> {
+    throw wholeMailboxOnlyError("send", REPLY_INSTEAD_OF_SEND);
+  }
+  async createDraft(..._args: unknown[]): Promise<void> {
+    throw wholeMailboxOnlyError("createDraft", REPLY_DRAFT_INSTEAD_OF_DRAFT);
+  }
+  async listLabels(..._args: unknown[]): Promise<void> { throw wholeMailboxOnlyError("listLabels"); }
+  async createLabel(..._args: unknown[]): Promise<void> { throw wholeMailboxOnlyError("createLabel"); }
+  async renameLabel(..._args: unknown[]): Promise<void> { throw wholeMailboxOnlyError("renameLabel"); }
+  async deleteLabel(..._args: unknown[]): Promise<void> { throw wholeMailboxOnlyError("deleteLabel"); }
 
   [Symbol.dispose](): void {
     this.#mailbox[Symbol.dispose]();
@@ -3522,7 +3559,8 @@ class GmailMessageStub extends ApprovalQueueRpcTarget implements GmailMessage {
     return snapshots.map(snapshot => ({
       info: snapshot.info,
       attachment: new GmailAttachmentStub(
-        this.#ctx, snapshot.info, () => this.#ctx.api.getAttachmentContent(snapshot)),
+        this.#ctx, snapshot.info, () => this.#ctx.api.getAttachmentContent(snapshot),
+        () => this.#ctx.api.openAttachmentContent(snapshot)),
     }));
   }
 
@@ -3803,13 +3841,15 @@ class GmailPendingMessageStub extends ApprovalQueueRpcTarget implements GmailMes
       title: `List ${attachments.length} Gmail attachments`,
       description: "Read attachment and inline MIME-part metadata for this message.",
     });
-    return attachments.map(({info, data}) => ({
-      info,
-      attachment: new GmailAttachmentStub(this.#ctx, info, async () => {
+    return attachments.map(({info, data}) => {
+      const read = async () => {
         const bytes = Uint8Array.from(atob(data), char => char.charCodeAt(0));
         return bytes.buffer as ArrayBuffer;
-      }),
-    }));
+      };
+      return {
+        info, attachment: new GmailAttachmentStub(this.#ctx, info, read, storedAttachmentOpener(read, info.size)),
+      };
+    });
   }
 
   async reply(body: string, options?: GmailReplyOptions): Promise<string> {
@@ -3858,20 +3898,67 @@ class GmailPendingMessageStub extends ApprovalQueueRpcTarget implements GmailMes
   }
 }
 
+/** Opens an attachment's bytes from their start, as a stream that is read only as it is read. */
+type AttachmentOpener = () => Promise<ReadableStream<Uint8Array>>;
+
+/** Bytes of a stored attachment that {@link storedAttachmentOpener}'s stream gives at a time. */
+const STORED_ATTACHMENT_STEP_BYTES = 64 * 1024;
+
+/**
+ * How long a read of an attachment's bytes may be outstanding with none arriving while
+ * `readPdf()` converts them, before it gives the attachment up. Nothing else times Gmail's body
+ * then: the open is timed only until the answer begins, and the text's own idle minute starts
+ * once there is a text. It is an object so that a test can shorten it.
+ */
+export const PDF_FIRST_READ = {idleMs: 60_000};
+/** What `readPdf()` fails with when the attachment stopped arriving. */
+const ATTACHMENT_STALLED = "The attachment stopped arriving while it was being read; read it again.";
+
+/**
+ * The opener of an attachment whose bytes this binding stores, which `read` gives whole: a
+ * pending message's part, or a draft's uploaded file, inline part or forward source. Each open
+ * reads them all, one whole copy, and gives them in steps, so it is held to this binding's
+ * upload limit. A forward is limited only as a whole message, and a part it copies from its
+ * source can be larger: one of `size` over the limit is refused before anything of it is read,
+ * as `getContent()` refuses it. An attachment that Gmail stores is opened with
+ * `GmailApi.openAttachmentContent()` instead, which holds nothing of it.
+ */
+function storedAttachmentOpener(read: () => Promise<ArrayBuffer>, size: number): AttachmentOpener {
+  return async () => {
+    if (size > MAX_GMAIL_ATTACHMENT_BYTES) {
+      throw new Error(
+        `This attachment exceeds the ${MAX_GMAIL_ATTACHMENT_BYTES}-byte safe limit for a PDF read ` +
+        "from a pending message or a draft.");
+    }
+    const bytes = new Uint8Array(await read());
+    let offset = 0;
+    return new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset < bytes.byteLength) {
+          controller.enqueue(bytes.subarray(offset, offset += STORED_ATTACHMENT_STEP_BYTES));
+        }
+        if (offset >= bytes.byteLength) controller.close();
+      },
+    }, {highWaterMark: 0});
+  };
+}
+
 @validateRpc()
 class GmailAttachmentStub extends ApprovalQueueRpcTarget implements GmailAttachment {
   #ctx: GmailContext;
   #info: GmailAttachmentInfo;
   #read: () => Promise<ArrayBuffer>;
+  #open: AttachmentOpener;
   #validate?: () => void;
 
   constructor(
       ctx: GmailContext, info: GmailAttachmentInfo, read: () => Promise<ArrayBuffer>,
-      validate?: () => void) {
+      open: AttachmentOpener, validate?: () => void) {
     super(ctx.approvalQueue);
     this.#ctx = ctx;
     this.#info = info;
     this.#read = read;
+    this.#open = open;
     this.#validate = validate;
   }
 
@@ -3903,6 +3990,105 @@ class GmailAttachmentStub extends ApprovalQueueRpcTarget implements GmailAttachm
     this.#validate?.();
     return content;
   }
+
+  async readPdf(): Promise<GmailPdfText> {
+    this.#validate?.();
+    // A text that reads the attachment again has those reads authorized as it is read, which may
+    // be after this capability is disposed, so the text holds the queue, and the pass over the
+    // attachment its page images are read from, until it ends. Any other text needs neither,
+    // and both are let go before it is returned.
+    const releaseQueue = this.#ctx.approvalQueue.retain();
+    const pages = forwardRangeReader(purpose => this.#openPdfAgain(purpose), GMAIL_PDF);
+    const release = () => {
+      pages.release();
+      releaseQueue();
+    };
+    try {
+      const {text, hasText, transcribed, rereads} = await this.#readPdf(pages.readRange);
+      if (rereads) return {text: releasedAtEnd(text, release), hasText, transcribed};
+      release();
+      return {text, hasText, transcribed};
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
+
+  /**
+   * This attachment's text as its conversion gives it, once the read has been reported. Whatever
+   * this throws, it has let go of what it opened: the attachment's bytes and the conversion.
+   */
+  async #readPdf(readRange: PdfRangeReader): Promise<PdfRead> {
+    if (!/^\s*application\/pdf\s*(;|$)/i.test(this.#info.mimeType) &&
+        !/\.pdf$/i.test(this.#info.filename ?? "")) {
+      throw new Error("This attachment is not a PDF.");
+    }
+    const convert = this.#ctx.convertPdf;
+    if (!convert) throw new Error("PDF reading is not available on this deployment.");
+    const download = (await this.#open()).getReader();
+    // The checks after the conversion must cover everything the text is converted from, and
+    // Gmail's bytes are known to be the snapshot's only at their end, so a conversion that
+    // answers before they have ended is refused.
+    const upload = pdfUpload(download, () => {
+      // Only a read that is outstanding is timed: the conversion takes the bytes at the pace of
+      // its own upload.
+      let clock!: ReturnType<typeof setTimeout>;
+      const stalled = new Promise<never>((_, reject) => {
+        clock = setTimeout(() => reject(new Error(ATTACHMENT_STALLED)), PDF_FIRST_READ.idleMs);
+      });
+      return Promise.race([download.read(), stalled]).finally(() => clearTimeout(clock));
+    });
+    let converted: PdfRead | undefined;
+    try {
+      // A refusal to transcribe says what the attachment's content is like, so it discloses
+      // something too and has to be authorized: it rides back as a value, and is thrown only
+      // once the read has been reported.
+      const outcome = await convert(upload.pdf, readRange).catch((error: unknown) => {
+        if (error instanceof TranscriptionRefusal) return {refusal: error};
+        throw error;
+      });
+      if (!("refusal" in outcome)) converted = outcome;
+      if (!upload.whole()) throw new Error(GMAIL_PDF.conversionFailed);
+      this.#validate?.();
+      await this.#ctx.approvalQueue.authorizeObservation({
+        title: "Read Gmail attachment text",
+        description: "Read the text of this PDF attachment.",
+      });
+      this.#validate?.();
+      if ("refusal" in outcome) throw outcome.refusal;
+      return outcome;
+    } catch (error) {
+      // A text refused after its conversion still holds the response open, and an idle timer.
+      await converted?.text.cancel().catch(() => undefined);
+      await download.cancel().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /**
+   * Opens the attachment's bytes for a text that is being read, which may be long after
+   * `readPdf()` returned and this capability was disposed. Each such open is a read of its own:
+   * checked for staleness, opened with nothing of it read, reported, and checked again, and it is
+   * let go when it is refused.
+   */
+  async #openPdfAgain({page, again}: Parameters<PdfOpener>[0]): Promise<ReadableStream<Uint8Array>> {
+    this.#validate?.();
+    const opened = await this.#open();
+    try {
+      await this.#ctx.approvalQueue.authorizeObservation({
+        title: "Read Gmail attachment text",
+        description: page === undefined
+          ? "Read this PDF attachment whole, to render its pages and transcribe them."
+          : `Read this PDF attachment's stored page images${again ? " again" : ""}, from page image ${
+            page} on, to transcribe them.`,
+      });
+      this.#validate?.();
+    } catch (error) {
+      await opened.cancel().catch(() => undefined);
+      throw error;
+    }
+    return opened;
+  }
 }
 
 @validateRpc()
@@ -3911,8 +4097,8 @@ class GmailDraftAttachmentStub extends GmailAttachmentStub implements GmailDraft
 
   constructor(
       ctx: GmailContext, info: GmailAttachmentInfo, read: () => Promise<ArrayBuffer>,
-      validate: () => void, remove: () => Promise<void>) {
-    super(ctx, info, read, validate);
+      open: AttachmentOpener, validate: () => void, remove: () => Promise<void>) {
+    super(ctx, info, read, open, validate);
     this.#remove = remove;
   }
 
@@ -4312,9 +4498,13 @@ class GmailDraftStub extends ApprovalQueueRpcTarget implements GmailDraft {
         ...attachment.info,
         mimeType: snapshot.info.mimeType, size: snapshot.info.size, readable: snapshot.info.readable,
       }} : attachment;
+      // Only a provider snapshot's bytes are Gmail's to stream. They are held to the size this
+      // capability is listed with, as getContent() holds them.
+      const open = snapshot &&
+        (() => this.#ctx.api.openAttachmentContent({...snapshot, info: current.info}));
       return {
         info: current.info,
-        attachment: this.#attachmentCapability(logicalId, current, read),
+        attachment: this.#attachmentCapability(logicalId, current, read, open),
       };
     });
     try {
@@ -4348,12 +4538,14 @@ class GmailDraftStub extends ApprovalQueueRpcTarget implements GmailDraft {
   #attachmentCapability(
       logicalId: string, attachment: GmailDraftAttachmentState,
       readPart: () => Promise<ArrayBuffer> = () =>
-        Promise.reject(new Error("This draft attachment is no longer available."))):
+        Promise.reject(new Error("This draft attachment is no longer available.")),
+      openPart?: AttachmentOpener):
       GmailDraftAttachmentStub {
     const {file} = attachment;
     const read = file
       ? async () => (await this.#ctx.store.readFile(file)).buffer as ArrayBuffer
       : readPart;
+    const open = !file && openPart ? openPart : storedAttachmentOpener(read, attachment.info.size);
     const validate = file ? () => {
       const current = localDraftAttachments(this.#ctx.store, logicalId)
         ?.find(part => part.key === attachment.key);
@@ -4361,7 +4553,7 @@ class GmailDraftStub extends ApprovalQueueRpcTarget implements GmailDraft {
         throw new Error("This draft attachment capability became stale after the attachment changed.");
       }
     } : this.#versionValidator(logicalId);
-    return new GmailDraftAttachmentStub(this.#ctx, attachment.info, read, validate, async () => {
+    return new GmailDraftAttachmentStub(this.#ctx, attachment.info, read, open, validate, async () => {
       validate();
       await this.#update({}, state => {
         const target = state.attachments.find(part => part.key === attachment.key);
@@ -4928,6 +5120,7 @@ export class GmailGatekeeperImpl extends DurableObject<Env, GmailGatekeeperImplP
       labelName: bindingLabel.name,
       restricted: this.ctx.props.searchQuery !== undefined || bindingLabel.id !== undefined,
       providerLabels: () => api.listLabelRecords(),
+      convertPdf: pdfConverter(this.env, GMAIL_PDF),
     };
   }
 

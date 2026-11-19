@@ -599,6 +599,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     return {
       signupsEnabled: config.signupsEnabled,
       userSearchEnabled: config.userSearchEnabled,
+      snapshotSharingEnabled: config.snapshotSharingEnabled,
       siteName: config.siteName,
       siteLogo: siteLogoImage(config.siteLogoConfigured),
       instanceInstructions: config.instanceInstructions,
@@ -1543,6 +1544,11 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
   async setUserSearchEnabled(enabled: boolean): Promise<void> {
     await this.admin.updateAdminConfig(
         { userSearchEnabled: enabled }, this.#actor("setUserSearchEnabled"));
+  }
+
+  async setSnapshotSharingEnabled(enabled: boolean): Promise<void> {
+    await this.admin.updateAdminConfig(
+        { snapshotSharingEnabled: enabled }, this.#actor("setSnapshotSharingEnabled"));
   }
 
   async setSiteName(name: string): Promise<void> {

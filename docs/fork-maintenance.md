@@ -846,6 +846,8 @@ authorizes a read after fetching it.
     standalone-gatekeeper filter, Access secrets and browser-binding rebuild.
   - Fork fixtures: `AdminSettingsView` gains `snapshotSharingEnabled`; the fork's
     `ObserverConfigModal` test (still inside upstream's test file) passes the new `subject`.
+    `__tests__/fixtures.ts`' `openFakeOverseer` returns a real `SharingManager` whole (upstream's
+    new `gadget-snapshot` test passes one); only plain-object fakes get the fork's preflight stubs.
   - `reviewedSurvivors`: the two 2026-11-18 acks no longer matched and were dropped; one added for
     `getGadgetUiBundle` (upstream #1173 kept the same three uses the fork has).
 - **Seams added by the 2026-11-18 sync (foundation `941b36e9`).**

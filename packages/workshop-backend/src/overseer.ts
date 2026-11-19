@@ -5730,8 +5730,9 @@ class OverseerImpl implements AgentHooks {
   }
 
   // A stub to `snapshot`'s facet, which can be returned to the client. The gadget's console
-  // doesn't get its errors: they are a viewer's, not the gadget's.
-  getSnapshotFacet(snapshot: GadgetSnapshot): RpcStub<any> {
+  // doesn't get its errors: they are a viewer's, not the gadget's. Fork: `activity` as
+  // getGadgetFacet's.
+  getSnapshotFacet(snapshot: GadgetSnapshot, activity?: () => void): RpcStub<any> {
     return facetRpcStub(this.ctx.facets.get<DurableObject>(snapshot.facetName, () => {
       // A stub outliving its snapshot must not restart the facet, empty and unrecorded, where
       // nothing would ever delete it.
@@ -5741,7 +5742,7 @@ class OverseerImpl implements AgentHooks {
         // The gadget's own facet ID, so code reading ctx.id sees what it sees in the gadget.
         id: this.gadgetFacetName(snapshot.gadgetId),
       };
-    }));
+    }), undefined, undefined, activity);
   }
 
   // The worker a snapshot runs: its gadget's code at the snapshot's commit, with an empty env,
@@ -13914,8 +13915,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.impl.requireSnapshotSharing();
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
-    return new GadgetSnapshotClientImpl(
-        this.impl, async () => true, this.impl.createGadgetSnapshot(id));
+    return ownedByClient(new GadgetSnapshotClientImpl(
+        this.impl, async () => true, this.impl.createGadgetSnapshot(id)), this.impl.clientActivity);
   }
 
   async deleteSelf(): Promise<void> {
@@ -15614,8 +15615,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     if (!await mayOpen()) throw new Error(`No such gadget: ${id}`);
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
-    return new GadgetSnapshotClientImpl(
-        this.impl, mayOpen, this.impl.createGadgetSnapshot(id));
+    return ownedByClient(new GadgetSnapshotClientImpl(
+        this.impl, mayOpen, this.impl.createGadgetSnapshot(id)), this.impl.clientActivity);
   }
 
   // --- Denied methods (build-only) ---
@@ -16640,7 +16641,7 @@ class GadgetSnapshotClientImpl extends RpcTarget implements GadgetSnapshotClient
 
   async connectToGadget(chatId?: number): Promise<RpcStub<any>> {
     if (chatId !== undefined) this.#deny();
-    return this.impl.getSnapshotFacet(this.#current);
+    return this.impl.getSnapshotFacet(this.#current, clientActivityOf(this));
   }
 
   async getExportFormats(chatId?: number): Promise<GadgetExportFormat[]> {
@@ -16653,6 +16654,8 @@ class GadgetSnapshotClientImpl extends RpcTarget implements GadgetSnapshotClient
     return this.impl.runExport(this.impl.snapshotExportSource(this.#current), id);
   }
 }
+// Fork: browser calls renew the client-activity lease, as GadgetClientImpl's do.
+renewOnClientCalls(GadgetSnapshotClientImpl);
 
 @validateRpc()
 class GatekeeperClientImpl<Session extends RpcCompatible<Session>>

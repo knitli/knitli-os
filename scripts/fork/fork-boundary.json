@@ -563,9 +563,9 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "getGadgetUiBundle",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "Still in upstream's own copy of this file (the live gadget clients call it); upstream #1173 only replaced its use in export with readGadgetFiles(), and the fork has the same three uses upstream does."
+      "token": "variables_troubleshooting",
+      "path": "packages/gatekeeper-gitlab/src/gitlab.ts",
+      "reason": "Part of a GitLab docs URL in a comment that upstream's own copy of this file keeps; upstream #1238 only removed other mentions of the same URL."
     }
   ]
 }

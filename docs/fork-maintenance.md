@@ -819,6 +819,20 @@ authorizes a read after fetching it.
   against collaborators and share links, not admins. Adopted unchanged; whether an owner-only
   workspace should also be withheld from admin inspection (or only its titles and file names) is a
   product decision for the maintainer.
+- **2026-11-20 sync (foundation `7f9f7a8f`): no new seams.** Five gatekeeper commits (#1217, #1232,
+  #1215, #1213, #1238), no conflicts. The five files changed on both sides auto-merged and still
+  carry only their recorded fork lines: the alarm-guard calls in `gatekeeper-gitlab/src/gitlab.ts`,
+  `gatekeeper-google/src/google.ts` and `gmail-hooks.ts`, the idle-alarm test include in Google's
+  `vitest.worker.config.ts` (now beside upstream's `gmail-group.test.ts`), and the fork's entries in
+  the golden manifest.
+  - Upstream #1232 dropped the kit `ObserverTracker`'s `maxObservers` option and its cap of 10
+    collaborators; no fork gatekeeper passed it.
+  - Upstream #1213 adds a Google Group resource type to the Google gatekeeper (Gmail for a group,
+    shared with its members). Under the fork's opt-in `enabledResources` it is off until an admin
+    enables it. It adds no `alarm()` handler, Durable Object class or migration. Google's connect
+    links stay unbound (`OUT_OF_SCOPE` in `connect-initiator-enforced.test.ts`).
+  - `reviewedSurvivors`: the 2026-11-19 ack no longer matched and was dropped; one added for a
+    GitLab docs URL in a comment of upstream's own `gitlab.ts` (#1238 removed its other mentions).
 - **Seams added by the 2026-11-19 sync (foundation `303e0d71`).**
   - Snapshot sharing (upstream #1173, #1189, #1227): adopted as is, on by default
     (`snapshotSharingEnabled`). A view grant is a "use" grant whose holder gets a static copy of the

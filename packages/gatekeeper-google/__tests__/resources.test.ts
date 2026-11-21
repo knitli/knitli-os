@@ -3,13 +3,14 @@ import {
   BIGQUERY_RESOURCE, DRIVE_WRITES_GRANT, GMAIL_RESOURCE, GOOGLE_CALENDAR_RESOURCE,
   GOOGLE_CHAT_RESOURCE, GOOGLE_CHAT_SPACE_RESOURCE, GOOGLE_CHAT_THREAD_RESOURCE,
   GOOGLE_DOC_RESOURCE, GOOGLE_DRIVE_FILE_RESOURCE, GOOGLE_DRIVE_FOLDER_RESOURCE,
-  GOOGLE_DRIVE_RESOURCE, GOOGLE_SHEETS_RESOURCE, GOOGLE_SLIDES_RESOURCE, IDENTITY_SCOPES,
+  GOOGLE_DRIVE_RESOURCE, GOOGLE_GROUP_RESOURCE, GOOGLE_SHEETS_RESOURCE, GOOGLE_SLIDES_RESOURCE,
+  GROUP_MAIL_GRANT, IDENTITY_SCOPES,
   LEGACY_GRANTED_RESOURCE_URL_PATTERNS, OFFICE_IMPORT_GRANT, RESOURCE_BY_KIND, RESOURCE_SCOPES,
   SCOPE_DERIVED_RESOURCE_URL_PATTERNS, SHARED_DRIVES_GRANT, SUPPORTED_RESOURCES, creatableKind,
-  driveResourceUrl, grantedResourceUrlPatterns, hasDriveResourceGrant, isPrivateGrant,
+  driveResourceUrl, grantedResourceUrlPatterns, groupResourceUrl, hasDriveResourceGrant, isPrivateGrant,
   nativeFileUrl, parseResourceUrl,
   recordedResourceUrlPatterns, resourceUrlPatternsToOAuthScopes, resourcesCoveredByScopes,
-  validateResourceUrlPatterns,
+  validateResourceUrlPatterns, withDriveWrites,
 } from "../src/resources";
 import type { DriveResourceTarget } from "../src/resources";
 
@@ -29,6 +30,7 @@ describe("resource declarations", () => {
   it("pins every grantable resource's urlPattern", () => {
     expect(SUPPORTED_RESOURCES.map(r => r.urlPattern)).toEqual([
       "https://mail.google.com/*",
+      "https://groups.google.com/a/:domain/g/:name",
       "https://docs.google.com/document/d/:docId/*",
       "https://docs.google.com/spreadsheets/d/:spreadsheetId/*",
       "https://docs.google.com/presentation/d/:presentationId/*",
@@ -67,26 +69,28 @@ describe("resource declarations", () => {
     expect(GOOGLE_DRIVE_RESOURCE.description).toBe(
       "Find files you can open anywhere in Drive, including shared drives, and read Docs, Sheets, " +
       "Slides, PDFs, other files and comments. Connect all of Drive, or just one shared drive, " +
-      "folder or file, as read only or as read and write, which also lets agents comment on " +
-      "files, change who they are shared with and, in all of Drive or a folder, move them, each " +
-      "with your approval; a Doc, spreadsheet or presentation connected on its own can be " +
-      "edited, and a Doc commented on, with your approval, but none of them moved or shared. A " +
-      "connection request asks for read and write by adding ?access=write to the URL.",
+      "folder or file, as read only or as read and write, which also lets agents edit Docs, " +
+      "spreadsheets and presentations, comment on files, change who they are shared with and, " +
+      "in all of Drive or a folder, move them, each with your approval; a Doc, spreadsheet or " +
+      "presentation connected on its own can be edited, and a Doc commented on, with your " +
+      "approval, but none of them moved or shared. A connection request asks for read and write " +
+      "by adding ?access=write to the URL.",
     );
     expect(GOOGLE_DOC_RESOURCE.description).toBe("Read, edit and comment on documents you choose.");
     expect(GOOGLE_DRIVE_FOLDER_RESOURCE.description).toBe(
       "Browse a selected folder or shared drive, search its direct children, and read native " +
       "Google Docs, Sheets and Slides, PDFs as text, any other file's content as bytes, and " +
-      "comments. A read and write connection also lets agents comment on its files, move them " +
-      "within it and change who they are shared with, each with your approval; a connection " +
-      "request asks for one by adding ?access=write to the URL.",
+      "comments. A read and write connection also lets agents edit its Docs, spreadsheets and " +
+      "presentations, comment on its files, move them within it and change who they are shared " +
+      "with, each with your approval; a connection request asks for one by adding ?access=write " +
+      "to the URL.",
     );
     expect(GOOGLE_DRIVE_FILE_RESOURCE.description).toBe(
       "Read metadata, comments and, for a native Google Doc, Sheet or Slides presentation, " +
       "content from one Drive file, its text when it is a PDF, or otherwise its content as " +
-      "bytes. A read and write connection also lets agents comment on the file and change who " +
-      "it is shared with, each with your " +
-      "approval; a connection request asks for one by adding ?access=write to the URL.",
+      "bytes. A read and write connection also lets agents edit the file when it is a Doc, " +
+      "spreadsheet or presentation, comment on it and change who it is shared with, each with " +
+      "your approval; a connection request asks for one by adding ?access=write to the URL.",
     );
 
     for (let { description } of [
@@ -375,6 +379,12 @@ describe("resourcesCoveredByScopes", () => {
       .toEqual([]);
   });
 
+  it("covers a Google Group with the read-write groups scope", () => {
+    expect(resourcesCoveredByScopes([GOOGLE_GROUP_RESOURCE.urlPattern],
+        ["https://www.googleapis.com/auth/cloud-identity.groups"]))
+      .toEqual([GOOGLE_GROUP_RESOURCE.urlPattern]);
+  });
+
   // The whole point of recording the consented set: a resource the user never chose stays out
   // even when the scopes they did consent to happen to cover it.
   it("reports only the resources that were actually consented to", () => {
@@ -489,6 +499,47 @@ describe("validateResourceUrlPatterns", () => {
 });
 
 describe("parseResourceUrl", () => {
+  describe("Google Groups", () => {
+    it("reads a Workspace group's page as the group's address, lowercase", () => {
+      expect(parseResourceUrl("https://groups.google.com/a/Example.com/g/Team-Launch"))
+        .toEqual({ kind: "group", groupAddress: "team-launch@example.com" });
+      expect(parseResourceUrl("https://groups.google.com/a/example.com/g/o%27brien%2Bteam/"))
+        .toEqual({ kind: "group", groupAddress: "o'brien+team@example.com" });
+    });
+
+    it("refuses a name that isn't one plain address", () => {
+      expect(() => parseResourceUrl("https://groups.google.com/a/example.com/g/a%2Cb"))
+        .toThrow("Expected one lowercase email address.");
+    });
+
+    it("reads ?senders=anyone as a group that takes outside mail, and nothing else in a query", () => {
+      const url = "https://groups.google.com/a/example.com/g/team?senders=anyone";
+      expect(parseResourceUrl(url)).toEqual({ kind: "group", groupAddress: "team@example.com", outsideSenders: true });
+      expect(groupResourceUrl("team@example.com", true)).toBe(url);
+      for (const query of ["?senders=", "?senders=everyone", "?senders=anyone&x=1", "?x=1&senders=anyone", "?Senders=anyone"]) {
+        expect(() => parseResourceUrl(`https://groups.google.com/a/example.com/g/team${query}`), query)
+          .toThrow("takes no query string but ?senders=anyone");
+      }
+    });
+
+    it("refuses a second spelling of the same group", () => {
+      expect(() => parseResourceUrl("https://groups.google.com/a/example.com/g/team?x=1"))
+        .toThrow("takes no query string but ?senders=anyone, and no fragment");
+      expect(() => parseResourceUrl("https://groups.google.com/a/example.com/g/team#members"))
+        .toThrow("takes no query string but ?senders=anyone, and no fragment");
+    });
+
+    it("explains that a consumer group can't be connected", () => {
+      expect(() => parseResourceUrl("https://groups.google.com/g/team"))
+        .toThrow("Only Workspace groups");
+    });
+
+    it("writes the URL it reads", () => {
+      expect(parseResourceUrl(groupResourceUrl("o'brien+team@example.com")))
+        .toEqual({ kind: "group", groupAddress: "o'brien+team@example.com" });
+    });
+  });
+
   describe("unsupported URLs", () => {
     // Regression: Gmail used to be the fallback branch, so any unrecognised Google URL minted a
     // full mailbox binding. The caller derives the resource -- and hence the admin disable check
@@ -496,7 +547,8 @@ describe("parseResourceUrl", () => {
     it.each([
       "https://drive.google.com/drive/folders/",
       "https://drive.google.com/file/d/abc",
-      "https://groups.google.com/g/team",
+      "https://groups.google.com/",
+      "https://groups.google.com/a/example.com/g/team/members",
       "https://mail.google.com.evil.example/",
       "https://example.com/",
     ])("rejects %s instead of falling back to Gmail", url => {
@@ -548,8 +600,8 @@ describe("parseResourceUrl", () => {
       });
 
       it("names only the host for an unsupported one", () => {
-        expect(messageFor("https://groups.google.com/g/team?invite=sekrit"))
-          .toBe("Unsupported Google resource URL host: groups.google.com");
+        expect(messageFor("https://keep.google.com/u/0/?invite=sekrit"))
+          .toBe("Unsupported Google resource URL host: keep.google.com");
       });
 
       it("names only the scheme for a non-https URL", () => {
@@ -961,6 +1013,26 @@ describe("Office import grant", () => {
   });
 });
 
+describe("group mail grant", () => {
+  const GMAIL_READONLY = "https://www.googleapis.com/auth/gmail.readonly";
+
+  it("is a private grant, not a resource anything can list, offer or bind", () => {
+    expect(isPrivateGrant(GROUP_MAIL_GRANT)).toBe(true);
+    expect(SUPPORTED_RESOURCES.map(resource => resource.urlPattern)).not.toContain(GROUP_MAIL_GRANT);
+    expect(messageFor(GROUP_MAIL_GRANT)).toBeTruthy();
+  });
+
+  it("asks for gmail.readonly only, which the Gmail Mailbox scopes also cover", () => {
+    expect(resourceUrlPatternsToOAuthScopes([GROUP_MAIL_GRANT])).toEqual([...IDENTITY_SCOPES, GMAIL_READONLY]);
+    expect(resourcesCoveredByScopes([GROUP_MAIL_GRANT], resourceUrlPatternsToOAuthScopes([GMAIL_RESOURCE.urlPattern])))
+      .toEqual([GROUP_MAIL_GRANT]);
+  });
+
+  it("implies no Gmail Mailbox grant", () => {
+    expect(resourcesCoveredByScopes([GMAIL_RESOURCE.urlPattern], [GMAIL_READONLY])).toEqual([]);
+  });
+});
+
 describe("shared drives grant", () => {
   const DRIVE_READONLY = "https://www.googleapis.com/auth/drive.readonly";
 
@@ -1036,12 +1108,24 @@ describe("Drive writes grant", () => {
       .toEqual([...IDENTITY_SCOPES, DRIVE]);
   });
 
-  // connectAccount requests every supported resource when the caller names none; full drive comes
-  // only from this grant, so a first connection is never asked for it.
-  it("is not part of a first connection's request-everything default", () => {
+  // Full drive belongs to this grant alone: no resource's own scopes ask for it, so declining it on
+  // Google's consent screen leaves every resource granted.
+  it("is in no resource's scopes", () => {
     let everything = resourceUrlPatternsToOAuthScopes(
       SUPPORTED_RESOURCES.map(resource => resource.urlPattern));
     expect(everything).not.toContain(DRIVE);
+  });
+
+  it("is added to a consent's request by any Google Drive resource, once", () => {
+    for (let drive of DRIVE_RESOURCES) {
+      expect(withDriveWrites([GMAIL_RESOURCE.urlPattern, drive]))
+        .toEqual([GMAIL_RESOURCE.urlPattern, drive, DRIVE_WRITES_GRANT]);
+      expect(withDriveWrites([DRIVE_WRITES_GRANT, drive])).toEqual([DRIVE_WRITES_GRANT, drive]);
+    }
+    let others = [[], [GMAIL_RESOURCE.urlPattern], [GOOGLE_DOC_RESOURCE.urlPattern], [OFFICE_IMPORT_GRANT]];
+    for (let other of others) {
+      expect(withDriveWrites(other)).toEqual(other);
+    }
   });
 
   it("is covered only by full drive", () => {
@@ -1188,5 +1272,18 @@ describe("Drive access level", () => {
       .toBe("https://drive.google.com/drive/folders/a%2Fb%20c?access=write");
     expect(driveResourceUrl({ kind: "driveFile", fileId: "a b" }))
       .toBe("https://drive.google.com/file/d/a%20b/view");
+  });
+});
+
+describe("stable resource grant identity", () => {
+  it("uses an ID grant despite an obsolete pattern snapshot and does not fall back from an empty ID list", () => {
+    expect(recordedResourceUrlPatterns({
+      resourceTypeIds: [GOOGLE_SHEETS_RESOURCE.id!],
+      resourceUrlPatterns: ["https://old.example/spreadsheets/*"],
+    })).toEqual([GOOGLE_SHEETS_RESOURCE.urlPattern]);
+    expect(recordedResourceUrlPatterns({
+      resourceTypeIds: [], resourceUrlPatterns: [GOOGLE_SHEETS_RESOURCE.urlPattern],
+    })).toEqual([]);
+    expect(recordedResourceUrlPatterns({ resourceTypeIds: ["removed-type"] })).toEqual([]);
   });
 });

@@ -65,7 +65,7 @@ async function withTurn(
       setWorkspaceLastActive: async () => {},
       publishNotification: async () => {},
     };
-    impl.users = { idFromString: (id: string) => id, get: () => userStub };
+    impl.users = { idFromString: (id: string) => id, idFromName: (name: string) => name, get: () => userStub };
     impl.ensureAmbientCapsules = async () => {};
     impl.syncOutputsTo = async () => true;
     // No gatekeeper bindings in the test worker; the real method would log a warning and
@@ -93,8 +93,7 @@ async function withTurn(
     try {
       let chatId = await impl.newChat(
           userStub, { profile: USER, aiModel: { profile: AGENT, config: CONFIG } },
-          "hi", undefined, undefined, undefined, undefined, undefined,
-          effort, prompt);
+          "hi", undefined, undefined, undefined, effort, prompt);
       // The turn runs detached (startAgent returns void); wait for its teardown.
       let deadline = Date.now() + 20000;
       while (impl.storage.activeAgents.get(chatId) !== undefined) {

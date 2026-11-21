@@ -32,18 +32,11 @@ export type ComposerDocument = {
 export type ComposerDocumentCaretTransition = {
   document: ComposerDocument;
   caret: number;
-  /** The source-text range replaced to produce `document`. */
-  textEdit: ComposerTextEdit;
-};
-
-export type ComposerTextEdit = {
-  start: number;
-  end: number;
 };
 
 export type ComposerTextEditTransition =
   | { document: ComposerDocument; rejected: true; caret: number }
-  | { document: ComposerDocument; rejected?: false; caret?: number; textEdit?: ComposerTextEdit };
+  | { document: ComposerDocument; rejected?: false; caret?: number };
 
 export type ComposerUrlRange = {
   text: string;
@@ -60,7 +53,6 @@ export type ComposerResourceRefinement = {
   document: ComposerDocument;
   activeUrl: ComposerUrlRange;
   selection: ComposerSelection;
-  textEdit: ComposerTextEdit;
 };
 
 const shiftRangeAfter = <T extends ComposerRange>(range: T, position: number, delta: number): T =>
@@ -114,7 +106,6 @@ export const insertComposerCapsule = (
       ],
     },
     caret: splice.caret,
-    textEdit: { start: position, end: position },
   };
 };
 
@@ -140,7 +131,6 @@ export const insertComposerFormat = (
       ],
     },
     caret: splice.caret,
-    textEdit: { start: position, end: position },
   };
 };
 
@@ -167,7 +157,6 @@ export const replaceComposerUrlWithCapsule = (
       ],
     },
     caret: splice.caret,
-    textEdit: { start: url.start, end: url.end },
   };
 };
 
@@ -195,7 +184,6 @@ export const refineComposerResourceUrl = (
       start: url.start + placeholder.start,
       end: url.start + placeholder.end,
     },
-    textEdit: { start: url.start, end: url.end },
   };
 };
 
@@ -219,7 +207,6 @@ export const removeComposerDocumentToken = (
         : shiftRangeAfter(document.command, rangeEnd, removal.delta),
     },
     caret: removal.caret,
-    textEdit: { start: range.start, end: rangeEnd },
   };
 };
 
@@ -245,7 +232,6 @@ export const resolveComposerSlashCommand = (
       },
     },
     caret: splice.caret,
-    textEdit: { start: tokenStart, end: tokenEnd },
   };
 };
 
@@ -339,6 +325,5 @@ export const applyComposerTextEdit = (
     ...(brokenCapsules.length > 0
       ? { caret: brokenCapsules[brokenCapsules.length - 1].start }
       : {}),
-    textEdit: { start: editStart, end: oldEnd },
   };
 };

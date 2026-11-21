@@ -99,6 +99,7 @@ export async function openFakeOverseer(
       ensureAmbientCapsules: async () => {},
       markOutputsDirty: () => {},
       trackUnreadReader: () => {},
+      syncDirectory: () => {},
       joinSession: () => () => {},
       joinPresence: () => () => {},
       joinOutputsFanout: () => () => {},
@@ -151,13 +152,18 @@ export async function openFakeOverseer(
     },
   } satisfies Pick<OverseerDurableObject, "open"> & { impl: object, ctx: object };
   Object.assign(overseer.impl, opts.implOverrides);
-  // Partial sharing fakes still pass through the fork's synchronous permission preflights.
+  // Partial sharing fakes still pass through the fork's synchronous permission preflights. A real
+  // SharingManager (a class instance, whose methods a spread would drop) has them already.
   const getSharingManager = overseer.impl.getSharingManager;
-  overseer.impl.getSharingManager = async () => ({
-    assertCanRemoveCollaborator: () => {},
-    assertCanRevokeShareLink: () => {},
-    getEffectiveAccess: () => access,
-    ...await getSharingManager(),
-  });
+  overseer.impl.getSharingManager = async () => {
+    const manager = await getSharingManager();
+    if (Object.getPrototypeOf(manager) !== Object.prototype) return manager;
+    return {
+      assertCanRemoveCollaborator: () => {},
+      assertCanRevokeShareLink: () => {},
+      getEffectiveAccess: () => access,
+      ...manager,
+    };
+  };
   return overseer.open(userId, `${userId}-profile`, new NativeRpcStub<() => void>(() => {}));
 }

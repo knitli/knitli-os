@@ -11,7 +11,10 @@ vi.mock("./AuthContext", () => ({
   useAuthenticatedApi: () => auth,
   useOptionalAuthenticatedApi: () => null,
 }));
-vi.mock("./features/notifications/UnreadStateBridge", () => ({useUnreadState: () => null}));
+vi.mock("./features/notifications/UnreadStateBridge", async importOriginal => ({
+  ...await importOriginal<typeof import("./features/notifications/UnreadStateBridge")>(),
+  useUnreadState: () => null,
+}));
 vi.mock("@cloudflare/kumo", async importOriginal => ({
   ...await importOriginal<typeof import("@cloudflare/kumo")>(),
   useKumoToastManager: () => ({add: () => {}}),

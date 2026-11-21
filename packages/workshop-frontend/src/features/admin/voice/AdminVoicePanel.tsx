@@ -22,12 +22,6 @@ import { useVoicePreview } from '../../../hooks/useVoicePreview'
 
 const ROLE_SECTIONS: { role: VoiceRole; title: string; blurb: string; kind: VoiceModelKind }[] = [
   {
-    role: 'dictationStt',
-    title: 'Dictation',
-    blurb: 'Transcribes dictated text into the composer.',
-    kind: 'stt',
-  },
-  {
     role: 'conversationStt',
     title: 'Conversation input',
     blurb: 'Hears the user during voice conversations.',
@@ -129,7 +123,7 @@ export const AdminVoicePanel = ({
       <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-6">
         <h2 className="mb-1 text-lg font-semibold text-kumo-strong">Speech models</h2>
         <p className="mb-5 text-sm text-kumo-subtle">
-          The transcription and voice models people can choose for dictation and conversation.
+          The transcription and voice models people can choose for voice conversations.
           Turning a model off hides it from the pickers; calls already running are unaffected.
         </p>
 

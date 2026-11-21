@@ -19,6 +19,7 @@ import {
   type ResourceDescription,
   type SupportedResource,
   type VendorDescription,
+  resourceTypeUrlPattern,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { buildDescription, type RenderedDescription } from "@gadgets/gatekeeper-kit/action-description";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
@@ -147,6 +148,7 @@ const SPOTIFY_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(SPOTIFY_LOGO_S
 
 const ACCOUNT_RESOURCE: SupportedResource = {
   // Whole-instance catch-all (matches any URL), like other single-tenant gatekeepers.
+  id: "account",
   urlPattern: "https://*",
   title: "Spotify Account",
   description:
@@ -155,6 +157,7 @@ const ACCOUNT_RESOURCE: SupportedResource = {
 };
 
 const PLAYLIST_RESOURCE: SupportedResource = {
+  id: "playlist",
   urlPattern: "https://open.spotify.com/playlist/:playlistId",
   title: "Spotify Playlist",
   description: "Read and edit a single Spotify playlist.",
@@ -754,6 +757,7 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
   }
 
   async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    resourceUrlPattern = resourceTypeUrlPattern(await this.getSupportedResources(), resourceUrlPattern);
     const getToken = async () => await this.#userAccount().getAccessToken();
 
     if (resourceUrlPattern === ACCOUNT_RESOURCE.urlPattern) {

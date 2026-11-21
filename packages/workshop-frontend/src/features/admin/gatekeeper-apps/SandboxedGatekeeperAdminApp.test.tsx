@@ -36,7 +36,7 @@ function settings(enabled: boolean | undefined): AdminSettingsView {
     // Keep the fixed vendor present when the exact pattern is absent, so a vendor-only check fails.
     resources: enabled === undefined ? [] : [{ urlPattern: PATTERN, title: 'Fixture', description: 'Fixture resource', enabled }],
   }]
-  return { signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [], promptPresets: [], restrictedWebFetchHosts: [], restrictedWebFetchApprovals: false,
+  return { signupsEnabled: true, userSearchEnabled: false, snapshotSharingEnabled: false, adminWorkspaceAccess: { effective: 'metadata', chosen: 'metadata', max: 'metadata' }, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'info' }, accentColor: '', resourceVendors, formats: [], promptPresets: [], restrictedWebFetchHosts: [], restrictedWebFetchApprovals: false,
   adminAuditRetentionDays: { effective: 90, chosen: 90, min: 90 }, voice: DEFAULT_VOICE_CONFIG }
 }
 
@@ -73,7 +73,7 @@ async function render(control?: AdminResourceControl): Promise<HTMLIFrameElement
   root ??= createRoot(container)
   frame ??= { iframeHtml: '<!doctype html><title>fixture</title>', ui: new RpcStub(new EmptyUi()) }
   await act(async () => {
-    root!.render(<SandboxedGatekeeperApp frame={frame!} gatekeeperVendorId="fixed" title="Fixed administration" adminResourceControl={control} />)
+    root!.render(<SandboxedGatekeeperApp frame={frame!} gatekeeperVendorId="fixed" path="/" title="Fixed administration" adminResourceControl={control} />)
   })
   const iframe = container.querySelector('iframe')
   if (!iframe) throw new Error('Missing iframe.')

@@ -5,7 +5,7 @@
       "reason": "Exact new test path for the credential mutation transaction hook; the source and existing tests stay upstream-audited."
     },
     {
-      "path": "patches/capnweb-validate@0.3.0.patch",
+      "path": "patches/capnweb-validate@0.3.2.patch",
       "reason": "Fork-local pnpm patch so native Workers capabilities keep their runtime identity through validation; pinned by scripts/fork/capnweb-native-validation.test.ts."
     },
     {
@@ -83,6 +83,10 @@
     {
       "path": "packages/workshop-backend/__tests__/knitli-idle-lease.test.ts",
       "reason": "Unit test for the fork-owned client-activity lease (src/fork/idle-lease.ts); exact path because this package's vitest include is non-recursive."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-resource-allow-list.test.ts",
+      "reason": "Unit tests for the fork's opt-in resource allow-list (enabledResources / enabledResourceTypeIds), moved out of upstream's admin-config.test.ts; exact path because this package's vitest include is non-recursive."
     },
     {
       "path": "packages/workshop-backend/__integration__/knitli-session-lease.test.ts",
@@ -237,6 +241,10 @@
       "reason": "The AI Executor gatekeeper, bound by the outer deployment rather than deployed as its own worker; zero conflict surface by construction."
     },
     {
+      "path": "packages/gatekeeper-gitlab/src/fork/",
+      "reason": "Fork-owned GitLab policy: the roles earlier releases recorded for CI data stay required of observers; upstream's files carry one-line seams into it."
+    },
+    {
       "path": "packages/gatekeeper-microsoft/src/fork/",
       "reason": "Stub Durable Object classes of the fork's retired Microsoft Worker, kept exported so its migration history stays valid; upstream has no such directory."
     },
@@ -293,10 +301,6 @@
       "reason": "Regression test for the fork-owned native OpenAPI facade publisher above."
     },
     {
-      "path": "packages/workshop-backend/src/chat-commit-guard.ts",
-      "reason": "Synchronous commit-guard ordering for chat preparation; fork-owned authorization helper."
-    },
-    {
       "path": "packages/workshop-backend/src/collaborator-bookkeeping.ts",
       "reason": "Detached collaborator bookkeeping with per-boundary re-authorization; fork-owned helper."
     },
@@ -323,14 +327,6 @@
     {
       "path": "packages/workshop-backend/__tests__/connect-initiator.test.ts",
       "reason": "Backend regression test for connect-initiator threading; upstream has no initiator binding."
-    },
-    {
-      "path": "packages/workshop-backend/__tests__/external-message-commit-guard.test.ts",
-      "reason": "Regression test for the fork-owned chat commit-guard ordering."
-    },
-    {
-      "path": "packages/workshop-backend/__tests__/external-message-production-commit-guard.test.ts",
-      "reason": "Production-path variant of the fork-owned commit-guard regression above."
     },
     {
       "path": "packages/workshop-backend/__tests__/gatekeeper-initialization-recovery-unit.test.ts",
@@ -403,6 +399,10 @@
     {
       "path": "packages/workshop-frontend/src/Connections.fork.test.tsx",
       "reason": "Regression test for Connections' fork wiring of connectionRestartRecovery.ts and RemoveConnection.tsx, kept out of upstream test files."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/chat/composer/ChatComposer.fork.test.tsx",
+      "reason": "Fork voice-conversation cases for the composer (controls placement, conversation draft), kept out of upstream's ChatComposer.test.tsx so that file stays byte-identical."
     },
     {
       "path": "packages/workshop-frontend/src/features/chat/composer/useComposerResources.fork.test.tsx",
@@ -489,18 +489,6 @@
       "reason": "Fork-owned voice chat UI (controls, settings, protocol, transport); no upstream counterpart."
     },
     {
-      "path": "packages/workshop-frontend/src/features/chat/composer/draft/speechRanges.ts",
-      "reason": "Fork-owned speech-range tracking for dictation; the draft/ dir is otherwise upstream's."
-    },
-    {
-      "path": "packages/workshop-frontend/src/features/chat/composer/useDictationAppendQueue.ts",
-      "reason": "Fork-owned dictation append queue; the composer dir is otherwise upstream's."
-    },
-    {
-      "path": "packages/workshop-frontend/src/homeVoiceFlow.test.tsx",
-      "reason": "Regression test for the fork-owned home voice flow."
-    },
-    {
       "path": "packages/workshop-frontend/src/hooks/useVoicePreview.ts",
       "reason": "Fork-owned voice preview hook; hooks/ is shared with upstream so this stays file-scoped."
     },
@@ -559,9 +547,49 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "pendingFingerprint",
-      "path": "packages/gatekeeper-google/src/google.ts",
-      "reason": "Still present in upstream's own copy of this file (a GoogleDocSimulatedContentCache field); upstream's #1123 only removed a same-named local variable."
+      "token": "ExternalMessageGateway",
+      "path": "docs/superpowers/plans/2026-09-28-cloudflare-agent-voice.md",
+      "reason": "Historical fork design record written before upstream #1188 removed the gateway; upstream left its own plans/*.md mentions in place for the same reason."
+    },
+    {
+      "token": "ExternalMessageGateway",
+      "path": "docs/superpowers/specs/2026-09-28-cloudflare-agent-voice-design.md",
+      "reason": "Historical fork design record written before upstream #1188 removed the gateway; upstream left its own plans/*.md mentions in place for the same reason."
+    },
+    {
+      "token": "freshPublicApi",
+      "path": "packages/integration-tests/__tests__/fork/observer-privacy.test.ts",
+      "reason": "A local variable of the fork's own test cases; upstream #1188 only deleted tests that happened to use the same name."
+    },
+    {
+      "token": "promptSequence",
+      "path": "packages/workshop-backend/src/overseer.ts",
+      "reason": "The fork's chat submission receipt: sendChatMessage() returns the committed prompt's sequence. Upstream #1188 dropped its own use with the external message gateway."
+    },
+    {
+      "token": "promptSequence",
+      "path": "docs/fork-maintenance.md",
+      "reason": "The inventory's record of the chat submission receipt kept in overseer.ts (see the ack above)."
+    },
+    {
+      "token": "UserDO",
+      "path": "packages/workshop-backend/src/overseer.ts",
+      "reason": "In a comment upstream's own copy of this file keeps; upstream #1188 only removed other mentions."
+    },
+    {
+      "token": "clearSkillIndex",
+      "path": "packages/gatekeeper-context/src/context-collection.ts",
+      "reason": "Upstream's own private method, still in its copy of this file; upstream #1243 only removed some call sites."
+    },
+    {
+      "token": "durable_objects",
+      "path": "packages/gatekeeper-context/cloudflare.config.ts",
+      "reason": "In a comment upstream's own copy of this file keeps; upstream #1188 only removed the test fixture's mentions."
+    },
+    {
+      "token": "durable_objects",
+      "path": "packages/workshop-backend/cloudflare.config.ts",
+      "reason": "In a comment upstream's own copy of this file keeps; upstream #1188 only removed the test fixture's mentions."
     }
   ]
 }

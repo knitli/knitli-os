@@ -11,10 +11,11 @@ import {
   type Harness,
 } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
-import { connect, signUp } from "../src/rpc-client.js";
+import { connect, nextUsernames, signUp } from "../src/rpc-client.js";
 
 // A second deployment admin, so that the statistics can be checked across two.
 const AUDITOR_USERNAME = "auditor";
+const REASON = "Audit log check";
 
 // Admin settings and the audit log are deployment-wide, so this file owns its harness and runs
 // serially.
@@ -58,6 +59,9 @@ afterAll(async () => {
 /** The newest setting record of the deployment-wide audit log, if any. */
 async function newestSetting(): Promise<AdminSettingRecord | undefined> {
   const [record] = (await admin.listAdminAudit({ kind: "setting", limit: 1 })).records;
+  if (record !== undefined && record.kind !== "setting") {
+    throw new Error("The kind filter returned an access record");
+  }
   return record;
 }
 
@@ -67,6 +71,17 @@ async function newSetting(previous: AdminSettingRecord | undefined): Promise<Adm
   if (record === undefined) throw new Error("No setting change was recorded");
   expect(record).not.toEqual(previous);
   return record;
+}
+
+/** A fresh owner's workspace, retitled so that its records can be recognised. */
+async function newWorkspace(stack: DisposableStack, prefix: string)
+    : Promise<{ id: string; title: string; ownerName: string }> {
+  const [ownerName] = nextUsernames(prefix);
+  const owner = stack.use(await signUp(stack.use(connect(harness.url)), ownerName!));
+  const ws = stack.use(await owner.newWorkspace());
+  const title = `Workspace of ${ownerName}`;
+  await ws.setTitle(title);
+  return { id: (await ws.getMetadata()).id, title, ownerName: ownerName! };
 }
 
 // The smallest PNG a site logo accepts: the signature and a 1x1 IHDR chunk, 33 bytes.
@@ -180,45 +195,43 @@ it("records every setting change, before it takes effect", async () => {
   }
   last = await newSetting(last);
 
-  // Past it, the values are excerpts from a little before their first difference.
-  // Fork: resources are opt-in, so the audited setting is `enabledResources`, and a pattern is at
-  // most 2 KiB. Enable several until the vendor's list passes the cap: the fifth does.
-  const vendor = settings.resourceVendors.find(candidate => candidate.vendorId === TEST_VENDOR_ID);
-  const existing = !vendor || vendor.autoProvisions ? [] :
-      vendor.resources.filter(resource => resource.enabled).map(resource => resource.urlPattern);
-  const patterns = Array.from({ length: 5 }, (_, index) =>
-      `https://gadgets-test.example/${String(index).repeat(2_000 - 29)}`);
-  const shorter = JSON.stringify([...existing, ...patterns.slice(0, 4)]);
-  const longer = JSON.stringify([...existing, ...patterns]);
-  expect(shorter.length).toBeLessThanOrEqual(MAX_ADMIN_AUDIT_VALUE_LENGTH);
-  expect(longer.length).toBeGreaterThan(MAX_ADMIN_AUDIT_VALUE_LENGTH);
-  // The lists agree up to the closing bracket, and the excerpt starts 100 characters before it.
-  const offset = shorter.length - 1 - 100;
+  // Resource restrictions use the advertised stable ID and are audited as that identity.
+  // Fork: resources are opt-in, so the recorded change enables the type in `enabledResourceTypeIds`.
   try {
-    for (const pattern of patterns) await admin.setResourceEnabled(TEST_VENDOR_ID, pattern, true);
+    await admin.setResourceEnabled(TEST_VENDOR_ID, "thing", true);
+    last = await expectRecord(last, "setResourceEnabled",
+        [{ setting: "enabledResourceTypeIds", key: TEST_VENDOR_ID, after: '["thing"]' }]);
+  } finally {
+    await admin.setResourceEnabled(TEST_VENDOR_ID, "thing", false);
+  }
+  last = await expectRecord(last, "setResourceEnabled",
+      [{ setting: "enabledResourceTypeIds", key: TEST_VENDOR_ID, before: '["thing"]' }]);
+
+  // Past the audit value limit, the values are excerpts. Use a real setting that accepts a long
+  // list, rather than inventing an unadvertised resource type that the setter must refuse.
+  const hosts = Array.from({ length: 200 }, (_, i) => `${"h".repeat(50)}-${i}.example.test`);
+  const serialized = JSON.stringify(hosts);
+  expect(serialized.length).toBeGreaterThan(MAX_ADMIN_AUDIT_VALUE_LENGTH);
+  try {
+    await admin.setRestrictedWebFetchHosts(hosts);
     last = await newSetting(last);
-    expect(last.method).toBe("setResourceEnabled");
+    expect(last.method).toBe("setRestrictedWebFetchHosts");
     expect(last.changes).toHaveLength(1);
     const [change] = last.changes;
     expect(change).toMatchObject({
-      setting: "enabledResources", key: TEST_VENDOR_ID,
-      excerpt: { offset, beforeLength: shorter.length, afterLength: longer.length },
+      setting: "restrictedWebFetchHosts", excerpt: { offset: 0, afterLength: serialized.length },
     });
-    expect(change!.before!.length).toBeLessThanOrEqual(MAX_ADMIN_AUDIT_VALUE_LENGTH);
     expect(change!.after!.length).toBeLessThanOrEqual(MAX_ADMIN_AUDIT_VALUE_LENGTH);
-    expect(shorter.slice(offset).startsWith(change!.before!)).toBe(true);
-    expect(longer.slice(offset).startsWith(change!.after!)).toBe(true);
-
-    await admin.setResourceEnabled(TEST_VENDOR_ID, patterns[4]!, false);
-    last = await newSetting(last);
-    expect(last.changes).toEqual([expect.objectContaining({
-      setting: "enabledResources", key: TEST_VENDOR_ID,
-      excerpt: { offset, beforeLength: longer.length, afterLength: shorter.length },
-    })]);
+    expect(serialized.startsWith(change!.after!)).toBe(true);
   } finally {
-    for (const pattern of patterns) await admin.setResourceEnabled(TEST_VENDOR_ID, pattern, false);
+    await admin.setRestrictedWebFetchHosts(settings.restrictedWebFetchHosts);
   }
-  last = await newestSetting();
+  last = await newSetting(last);
+  expect(last.method).toBe("setRestrictedWebFetchHosts");
+  expect(last.changes).toEqual([expect.objectContaining({
+    setting: "restrictedWebFetchHosts", excerpt: { offset: 0, beforeLength: serialized.length,
+      afterLength: JSON.stringify(settings.restrictedWebFetchHosts).length },
+  })]);
 
   try {
     await admin.setUpdateCheckIntervalMinutes(120);
@@ -277,25 +290,21 @@ async function kinds(kind: AdminAuditKind): Promise<AdminAuditKind[]> {
 }
 
 it("filters the log by kind", async () => {
-  // A workspace access record, as the table can hold, which a setting filter leaves out.
-  const storage = await harness.server.getWorker("workshop-backend")
-      .getDurableObjectStorage("AdminAuditDurableObject", { name: "" });
+  using stack = new DisposableStack();
+  const { id } = await newWorkspace(stack, "kinds");
   const settingsBefore = await admin.getAdminAuditStats({ kind: "setting" });
-  await storage.exec(`INSERT INTO admin_audit
-      (at, kind, admin, workspace_id, workspace_title, exposed, record)
-      VALUES (${Date.now()}, 'workspace', 'filter-check', 'workspace-1', 'Filter check',
-          'metadata', '{}')`);
-  try {
-    const setting = await kinds("setting");
-    expect(setting.length).toBeGreaterThan(0);
-    expect(new Set(setting)).toEqual(new Set(["setting"]));
-    const settingsAfter = await admin.getAdminAuditStats({ kind: "setting" });
-    expect(settingsAfter.totalEvents)
-        .toBe(settingsBefore.totalEvents - droppedDays(settingsBefore, settingsAfter));
-    expect(settingsAfter.topAdmins.map(entry => entry.admin)).not.toContain("filter-check");
-  } finally {
-    await storage.exec("DELETE FROM admin_audit WHERE admin = 'filter-check'");
+  {
+    using _view = await admin.inspectWorkspace(id, REASON);
   }
+  const workspace = await kinds("workspace");
+  expect(workspace.length).toBeGreaterThan(0);
+  expect(new Set(workspace)).toEqual(new Set(["workspace"]));
+  const setting = await kinds("setting");
+  expect(setting.length).toBeGreaterThan(0);
+  expect(new Set(setting)).toEqual(new Set(["setting"]));
+  const settingsAfter = await admin.getAdminAuditStats({ kind: "setting" });
+  expect(settingsAfter.totalEvents)
+      .toBe(settingsBefore.totalEvents - droppedDays(settingsBefore, settingsAfter));
 });
 
 it("filters the log by method, and refuses a method that is not audited", async () => {
@@ -332,19 +341,30 @@ function droppedDays(before: AdminAuditStats, after: AdminAuditStats): number {
 }
 
 it("counts the log across two admins", async () => {
+  using stack = new DisposableStack();
+  const a = await newWorkspace(stack, "statsa");
+  const b = await newWorkspace(stack, "statsb");
   const before = await admin.getAdminAuditStats();
   const settingsBefore = await admin.getAdminAuditStats({ kind: "setting" });
 
   try {
+    {
+      using view = await admin.inspectWorkspace(a.id, REASON);
+      await view.describe();
+      await view.listChats();
+      await view.getDiagnostics();
+    }
     await admin.setUserSearchEnabled(true);
-    await auditor.setSiteName("Stats check");
-    await auditor.setSiteName("");
+    {
+      using view = await auditor.inspectWorkspace(b.id, REASON);
+      await view.listChats();
+    }
 
     const after = await admin.getAdminAuditStats();
     expect(after.days).toBe(7);
-    expect(after.totalEvents).toBe(before.totalEvents + 3 - droppedDays(before, after));
+    expect(after.totalEvents).toBe(before.totalEvents + 7 - droppedDays(before, after));
     const byDay = growth(before.byDay, after.byDay, entry => entry.day, entry => entry.count);
-    expect([...byDay.values()].reduce((sum, count) => sum + count, 0)).toBe(3);
+    expect([...byDay.values()].reduce((sum, count) => sum + count, 0)).toBe(7);
 
     expect(after.byDay).toHaveLength(7);
     const days = after.byDay.map(({ day }) => Date.parse(`${day}T00:00:00Z`));
@@ -352,12 +372,36 @@ it("counts the log across two admins", async () => {
 
     const admins = growth(before.topAdmins, after.topAdmins, entry => entry.admin,
         entry => entry.count);
-    expect(admins.get(ADMIN_USERNAME)).toBe(1);
+    expect(admins.get(ADMIN_USERNAME)).toBe(5);
     expect(admins.get(AUDITOR_USERNAME)).toBe(2);
+    // The statistics count records, and say nothing of what a recorded call returned.
+    expect(Object.keys(after).toSorted())
+        .toEqual(["byDay", "days", "topAdmins", "totalEvents", "writes"]);
+    for (const entry of after.topAdmins) {
+      expect(Object.keys(entry).toSorted()).toEqual(["admin", "count"]);
+    }
+    // Setting records name no workspace, so A lists its four access records alone.
+    for (const [workspace, count] of [[a.id, 4], [b.id, 2]] as const) {
+      expect((await admin.listAdminAudit({ workspace, limit: 200 })).records).toHaveLength(count);
+    }
+
+    // Each workspace's records, found by its owner, newest first. The setting change names no
+    // workspace, so no owner's listing holds it.
+    const owned = (await admin.listAdminAudit({ owner: a.ownerName, limit: 200 })).records;
+    expect(owned.map(record => record.method))
+        .toEqual(["getDiagnostics", "listChats", "describe", "inspectWorkspace"]);
+    expect(new Set(owned.map(record => record.kind === "workspace" && record.workspaceId)))
+        .toEqual(new Set([a.id]));
+    expect((await admin.listAdminAudit({ owner: b.ownerName, limit: 200 })).records
+        .map(record => record.admin)).toEqual([AUDITOR_USERNAME, AUDITOR_USERNAME]);
+    expect((await admin.listAdminAudit({ owner: a.ownerName, admin: AUDITOR_USERNAME })).records)
+        .toEqual([]);
 
     const settingsAfter = await admin.getAdminAuditStats({ kind: "setting" });
     expect(settingsAfter.totalEvents)
-        .toBe(settingsBefore.totalEvents + 3 - droppedDays(settingsBefore, settingsAfter));
+        .toBe(settingsBefore.totalEvents + 1 - droppedDays(settingsBefore, settingsAfter));
+    expect(growth(settingsBefore.topAdmins, settingsAfter.topAdmins, entry => entry.admin,
+        entry => entry.count).get(ADMIN_USERNAME)).toBe(1);
   } finally {
     await admin.setUserSearchEnabled(false);
   }

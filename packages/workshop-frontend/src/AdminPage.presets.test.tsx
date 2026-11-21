@@ -68,7 +68,7 @@ vi.mock('@cloudflare/kumo', async () => {
 })
 
 const view = (promptPresets: PromptPreset[]): AdminSettingsView => ({
-  signupsEnabled: true, userSearchEnabled: false, siteName: '', instanceInstructions: '', announcement: '',
+  signupsEnabled: true, userSearchEnabled: false, snapshotSharingEnabled: false, adminWorkspaceAccess: { effective: 'metadata', chosen: 'metadata', max: 'metadata' }, siteName: '', instanceInstructions: '', announcement: '',
   banner: { text: '', color: 'info' }, accentColor: '', resourceVendors: [], formats: [],
   promptPresets, restrictedWebFetchHosts: [], restrictedWebFetchApprovals: false,
   adminAuditRetentionDays: { effective: 90, chosen: 90, min: 90 }, voice: DEFAULT_VOICE_CONFIG,

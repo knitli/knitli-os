@@ -23,7 +23,7 @@ it("returns the committed prompt sequence, not an earlier message or a command e
       getChatContext: async () => ({profile: user}),
       setWorkspaceLastActive: async () => {},
     };
-    impl.users = {idFromString: (id: string) => id, get: () => userStub};
+    impl.users = {idFromString: (id: string) => id, idFromName: (name: string) => name, get: () => userStub};
     impl.ensureAmbientCapsules = async () => {};
     impl.syncOutputsTo = async () => true;
     using notifyClosed = new NativeRpcStub<() => void>(() => {});

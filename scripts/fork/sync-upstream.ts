@@ -645,13 +645,16 @@ export function printStaleSurvivorAcks(stale: SurvivorException[]): void {
 /**
  * Paths the survivor grep reads: Tier 1 plus the sync's Tier 2, minus the boundary config
  * itself -- its ack entries name the tokens they ack, so without the exclusion every ack would
- * report itself as a new survivor.
+ * report itself as a new survivor -- and minus the lockfile, which is generated: when upstream
+ * drops a package a fork dependency still pulls in, each surviving integrity hash reads as a
+ * removed name (98 of them in the 2026-11-21 sync).
  */
 export function survivorScope(boundary: ForkBoundary, tier2: string[]): string[] {
   return [
     ...boundary.forkOwned.map(entry => entry.path),
     ...tier2,
     ":(exclude)scripts/fork/fork-boundary.json",
+    ":(exclude)pnpm-lock.yaml",
   ];
 }
 

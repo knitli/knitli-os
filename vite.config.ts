@@ -123,6 +123,7 @@ export default defineConfig({
           'packages/workshop-backend/**/*.ts',
           'packages/router/**/*.ts',
           'packages/gatekeeper-*/src/**/*.ts',
+          'packages/pdf-renderer/src/**/*.ts',
           'packages/workshop-shared/**/*.ts',
           'packages/typed-storage/**/*.ts',
         ],
@@ -155,8 +156,8 @@ export default defineConfig({
             'error',
             {
               allow: [
-                './comment-types', './docs-read-types', './drive-read-types', './sheets-read-types',
-                './slides-read-types',
+                './comment-types', './docs-read-types', './docs-types', './drive-read-types',
+                './sheets-read-types', './sheets-types', './slides-read-types', './slides-types',
               ],
             },
           ],

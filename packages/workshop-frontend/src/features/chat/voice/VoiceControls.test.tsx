@@ -104,25 +104,24 @@ it("reports the pending editor selection from before a replacement", async () =>
 });
 
 
-it("offers named icon controls for conversation and stopping persistent dictation", async () => {
-  const onStart = vi.fn<(mode: "dictate" | "conversation") => void>();
+it("offers named icon controls for starting and ending a conversation", async () => {
+  const onStart = vi.fn<() => void>();
   const onEnd = vi.fn<() => void>();
   const container = document.createElement("div");
   const root = createRoot(container);
-  const render = (mode: "dictate" | null) => <VoiceControls
+  const render = (mode: "conversation" | null) => <VoiceControls
     state={{ mode, status: "listening", muted: false, interimTranscript: null, error: null, pendingText: "" }}
     disabled={false} onStart={onStart} onEnd={onEnd} onMute={() => {}}
   />;
   try {
     await act(async () => root.render(render(null)));
-    expect(container.querySelector("button")?.getAttribute("aria-label")).toBe("Start dictation");
     const conversation = container.querySelector<HTMLButtonElement>('[aria-label="Start conversation"]')!;
     expect(conversation.querySelector("svg")).not.toBeNull();
     await act(async () => conversation.click());
-    expect(onStart).toHaveBeenCalledExactlyOnceWith("conversation");
-    await act(async () => root.render(render("dictate")));
-    expect(container.querySelector("button")?.getAttribute("aria-label")).toBe("Stop dictation");
-    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Stop dictation"]')!.click());
+    expect(onStart).toHaveBeenCalledOnce();
+    await act(async () => root.render(render("conversation")));
+    expect(container.querySelector("button")?.getAttribute("aria-label")).toBe("End voice call");
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="End voice call"]')!.click());
     expect(onEnd).toHaveBeenCalledOnce();
     expect(container.querySelector('[aria-live="polite"]')?.classList.contains("sr-only")).toBe(true);
   } finally {
@@ -131,8 +130,8 @@ it("offers named icon controls for conversation and stopping persistent dictatio
 });
 
 
-it("explains a blocked conversation while keeping dictation available", async () => {
-  const onStart = vi.fn<(mode: "dictate" | "conversation") => void>();
+it("explains a blocked conversation", async () => {
+  const onStart = vi.fn<() => void>();
   const container = document.createElement("div");
   const root = createRoot(container);
   const reason = "Send or clear the draft before starting a conversation.";
@@ -147,10 +146,6 @@ it("explains a blocked conversation while keeping dictation available", async ()
     expect(container.querySelector(`[id="${conversation.getAttribute("aria-describedby")}"]`)?.textContent).toBe(reason);
     await act(async () => conversation.click());
     expect(onStart).not.toHaveBeenCalled();
-    const dictate = container.querySelector<HTMLButtonElement>('[aria-label="Start dictation"]')!;
-    expect(dictate.disabled).toBe(false);
-    await act(async () => dictate.click());
-    expect(onStart).toHaveBeenCalledExactlyOnceWith("dictate");
   } finally {
     await act(async () => root.unmount());
   }
@@ -174,7 +169,7 @@ it("opens voice settings from the idle controls", async () => {
   } finally { await act(async () => root.unmount()); }
 });
 
-it("keeps pending speech visible for review before starting another voice mode", async () => {
+it("keeps pending speech visible for review before starting another conversation", async () => {
   const container = document.createElement("div");
   const root = createRoot(container);
   try {
@@ -182,7 +177,7 @@ it("keeps pending speech visible for review before starting another voice mode",
       state={{ mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "Review me" }}
       disabled={false} onStart={() => {}} onEnd={() => {}} onMute={() => {}}
     />));
-    expect(container.querySelector<HTMLButtonElement>('[aria-label="Start dictation"]')!.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>('[aria-label="Start conversation"]')!.disabled).toBe(true);
     expect(container.textContent).toContain("Send or clear");
   } finally { await act(async () => root.unmount()); }
 });

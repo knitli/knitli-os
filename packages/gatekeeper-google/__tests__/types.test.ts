@@ -5,6 +5,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import ts from "typescript6";
+import { RENDER_LIMITS } from "@gadgets/pdf-renderer/api";
+import { READ_AHEAD } from "../src/pdf-read-ahead";
 import {
   DOCS_TYPES_MODULE_PREFIX, DRIVE_READ_TYPES_MODULE_PREFIX, DRIVE_TYPES_MODULE_PREFIX,
   GMAIL_TYPES_MODULE_PREFIX, SHEETS_TYPES_MODULE_PREFIX, SLIDES_TYPES_MODULE_PREFIX,
@@ -87,6 +89,17 @@ function duplicates(names: string[]): string[] {
   return names.filter((name, i) => names.indexOf(name) !== i);
 }
 
+/** What a PDF's types say of the pages read ahead of the text's reader: how many, and that they are billed. */
+const PAGES_AHEAD = [
+  `up to ${READ_AHEAD.pages} pages that are drawn, and up to ${READ_AHEAD.storedPages} of a scan read as the file stores it`,
+  "billed, for a page begun ahead of you also when you never read it",
+];
+
+/** The lines in square brackets that `text` holds in double quotes, after any line breaks, sorted. */
+function quotedNotes(text: string): string[] {
+  return [...text.matchAll(/"(?:\\n)*(\[[^"\]]+\])"/g)].map(match => match[1]!).toSorted();
+}
+
 function docBundle(): string {
   return [
     source("docs-read-types.txt"),
@@ -110,6 +123,9 @@ function driveReadBundle(): string {
 function driveWriteBundle(): string {
   return [
     driveReadBundle(),
+    stripTypeModulePrefix(source("docs-types.txt"), DOCS_TYPES_MODULE_PREFIX),
+    stripTypeModulePrefix(source("sheets-types.txt"), SHEETS_TYPES_MODULE_PREFIX),
+    stripTypeModulePrefix(source("slides-types.txt"), SLIDES_TYPES_MODULE_PREFIX),
     stripTypeModulePrefix(source("drive-types.txt"), DRIVE_TYPES_MODULE_PREFIX),
   ].join("\n");
 }
@@ -224,15 +240,17 @@ message.addAttachment(file);
     },
   );
 
-  it("keeps Drive Docs authority read-only", () => {
+  it("keeps the Doc read session free of writes, and gives them to the edit session", () => {
     const readTypes = source("docs-read-types.d.ts");
     expect(readTypes).toContain("export interface GoogleDocReadSession");
     expect(readTypes).not.toContain("replaceText");
     expect(readTypes).not.toContain("appendText");
     const writeTypes = source("docs-types.d.ts");
     expect(writeTypes).toContain(
-      "export interface GoogleDocSession extends GoogleDocReadSession",
+      "export interface GoogleDocEditSession extends GoogleDocReadSession",
     );
+    // A directly bound Doc's session adds its comments to the edits.
+    expect(writeTypes).toContain("export interface GoogleDocSession extends GoogleDocEditSession");
     expect(writeTypes).toContain(
       "replaceText(oldMarkdown: string, newMarkdown: string, tabId?: string): Promise<void>;",
     );
@@ -258,7 +276,21 @@ doc.addTab("Notes", { parentTabId: { id: "t.0" } });
 `)).toEqual([]);
   });
 
-  it("gives a directly bound spreadsheet its own session and Drive only the read session", () => {
+  it("gives a Doc opened from a read and write Drive binding its text edits and no tab add", () => {
+    expect(compileAgentTypes(driveWriteBundle() + `
+declare const doc: GoogleDocEditSession;
+async function use(): Promise<void> {
+  await doc.appendText("Hello");
+  await doc.replaceText("Hello", "Hi");
+}
+// @ts-expect-error A Doc opened from Drive adds no tabs.
+doc.addTab("Notes");
+// @ts-expect-error A Drive binding's own comment writes reach the file.
+doc.listComments();
+`)).toEqual([]);
+  });
+
+  it("gives a spreadsheet's write session to its own binding and to a read and write Drive one", () => {
     expect(topLevelNames(vendorBundle())).toContain("GoogleSpreadsheetSession");
     expect(compileAgentTypes(vendorBundle() + `
 declare const sheet: GoogleSpreadsheetSession;
@@ -291,14 +323,14 @@ sheet.updateSpreadsheet([{ op: "addSheet" }]);
     expect(compileAgentTypes(sheetsBundle() +
       "\nconst readable: GoogleSpreadsheetReadSession = null! as GoogleSpreadsheetSession;\n"))
       .toEqual([]);
-    // Neither Drive bundle carries a spreadsheet write type: a read and write Drive binding edits
-    // no spreadsheet.
-    for (const bundle of [driveReadBundle, driveWriteBundle]) {
-      const driveNames = topLevelNames(bundle());
-      expect(driveNames).toContain("GoogleSpreadsheetReadSession");
-      expect(driveNames).not.toContain("GoogleSpreadsheetSession");
-      expect(driveNames).not.toContain("SheetChange");
-    }
+    // Only a read and write Drive binding's bundle carries the spreadsheet write types.
+    const readNames = topLevelNames(driveReadBundle());
+    expect(readNames).toContain("GoogleSpreadsheetReadSession");
+    expect(readNames).not.toContain("GoogleSpreadsheetSession");
+    expect(readNames).not.toContain("SheetChange");
+    const writeNames = topLevelNames(driveWriteBundle());
+    expect(writeNames).toContain("GoogleSpreadsheetSession");
+    expect(writeNames).toContain("SheetChange");
     expect(source("sheets-types.d.ts")).toContain(
       "export interface GoogleSpreadsheetSession extends GoogleSpreadsheetReadSession",
     );
@@ -333,7 +365,7 @@ const legacy: SheetCellFormat = { wrap: "OVERFLOW_CELL" };
 `).filter(message => !message.includes("'cloudflare:workers'"))).toEqual([]);
   });
 
-  it("hands out only read-only native sessions from Drive", () => {
+  it("hands out read-only native sessions from a read-only Drive binding", () => {
     const readTypes = source("drive-read-types.d.ts");
     expect(readTypes).toContain(
       "openGoogleDoc(fileId: string): Promise<GoogleDocReadSession>",
@@ -345,11 +377,43 @@ const legacy: SheetCellFormat = { wrap: "OVERFLOW_CELL" };
       "openGoogleSlides(fileId: string): Promise<GooglePresentationReadSession>",
     );
     expect(readTypes).toContain("export interface GoogleDriveReadSession");
-    for (const driveTypes of [readTypes, source("drive-types.d.ts")]) {
-      expect(driveTypes).not.toContain("GoogleDocSession>");
-      expect(driveTypes).not.toContain("GoogleSpreadsheetSession>");
-      expect(driveTypes).not.toContain("GooglePresentationSession>");
-    }
+    expect(readTypes).not.toContain("GoogleDocSession>");
+    expect(readTypes).not.toContain("GoogleDocEditSession>");
+    expect(readTypes).not.toContain("GoogleSpreadsheetSession>");
+    expect(readTypes).not.toContain("GooglePresentationSession>");
+    expect(topLevelNames(driveReadBundle())).not.toContain("GooglePresentationSession");
+    expect(topLevelNames(driveReadBundle())).not.toContain("GoogleSpreadsheetSession");
+  });
+
+  it("hands out editable Docs, spreadsheets and presentations from every read and write Drive session", () => {
+    const writeTypes = source("drive-types.d.ts");
+    expect(writeTypes.split("openGoogleDoc(fileId: string): Promise<GoogleDocEditSession>;"))
+      .toHaveLength(4);
+    expect(writeTypes.split("openGoogleSlides(fileId: string): Promise<GooglePresentationSession>;"))
+      .toHaveLength(4);
+    expect(writeTypes.split("openGoogleSheet(fileId: string): Promise<GoogleSpreadsheetSession>;"))
+      .toHaveLength(4);
+    // Not the directly bound Doc's session: the binding's own comment writes reach the file.
+    expect(writeTypes).not.toContain("GoogleDocSession>");
+    expect(topLevelNames(driveWriteBundle())).toContain("GooglePresentationSession");
+    expect(topLevelNames(driveWriteBundle())).toContain("GoogleSpreadsheetSession");
+    expect(compileAgentTypes(driveWriteBundle() + `
+      declare const drive: GoogleDriveSession;
+      declare const folder: GoogleDriveFolderSession;
+      declare const file: GoogleDriveFileSession;
+      async function edit() {
+        for (const binding of [drive, folder, file]) {
+          const deck = await binding.openGoogleSlides("deck");
+          await deck.updateSlides([{ op: "editText", slideId: "s", elementId: "e", find: "a", replace: "b" }]);
+          const doc = await binding.openGoogleDoc("doc");
+          await doc.appendText("More");
+          // @ts-expect-error A Doc opened from Drive takes comments through the binding.
+          await doc.comment("Hi", { quote: "More" });
+          const sheet = await binding.openGoogleSheet("sheet");
+          await sheet.updateSpreadsheet([{ op: "clearRange", range: "Sheet1!A1:B2" }]);
+        }
+      }
+    `)).toEqual([]);
   });
 
   it("declares comment reads on both read-only Drive sessions, and no write", () => {
@@ -634,14 +698,67 @@ async function read(): Promise<string> {
   const reader = (await folder.readPdf("file-2")).text.getReader();
   const first: Uint8Array | undefined = (await reader.read()).value;
   await reader.cancel();
+  const scan = await folder.readPdf("file-3");
+  const read: boolean = scan.transcribed && !scan.hasText;
   return new Response(text).text();
 }
+// @ts-expect-error Pages without text are read without being asked for: there is no option.
+void drive.readPdf("file-4", { ocr: true });
 // @ts-expect-error The text is a stream, not a string.
-const whole: DrivePdfText = { text: "", hasText: true };
+const whole: DrivePdfText = { text: "", hasText: true, transcribed: false };
 // @ts-expect-error Nothing is cut, so there is no truncation flag.
-const cut: DrivePdfText = { text: new ReadableStream(), hasText: true, truncated: false };
+const cut: DrivePdfText = { text: new ReadableStream(), hasText: true, transcribed: false, truncated: false };
+// @ts-expect-error Whether the text was transcribed is always said.
+const unsaid: DrivePdfText = { text: new ReadableStream(), hasText: true };
 `), account).toEqual([]);
     }
+  });
+
+  it("quotes the notes a PDF's text can carry as they are given, and the size a PDF is drawn to", () => {
+    // The comments are wrapped, so a note they quote may run over two of their lines.
+    const driveTypes = source("drive-read-types.d.ts").replace(/\n\s*\* ?/g, " ");
+    const given = quotedNotes(source("drive-pdf.ts"));
+    expect(given).not.toEqual([]);
+    expect(quotedNotes(driveTypes)).toEqual(given);
+    expect(driveTypes).toContain(`up to ${RENDER_LIMITS.fileBytes / (1024 * 1024)} MiB`);
+    for (const said of PAGES_AHEAD) expect(driveTypes).toContain(said);
+  });
+
+  it("streams a PDF's text from a Gmail attachment, a draft's too, and takes no argument", () => {
+    const types = source("types.txt");
+    expect(types).toContain("export type GmailPdfText = {");
+    expect(compileAgentTypes(types + `
+declare const attachment: GmailAttachment;
+declare const draftAttachment: GmailDraftAttachment;
+async function read(): Promise<string> {
+  const { text, hasText } = await attachment.readPdf();
+  const flag: boolean = hasText;
+  const reader = (await draftAttachment.readPdf()).text.getReader();
+  const first: Uint8Array | undefined = (await reader.read()).value;
+  await reader.cancel();
+  const scan = await attachment.readPdf();
+  const read: boolean = scan.transcribed && !scan.hasText;
+  return new Response(text).text();
+}
+// @ts-expect-error Pages without text are read without being asked for: there is no option.
+void attachment.readPdf({ ocr: true });
+// @ts-expect-error The text is a stream, not a string.
+const whole: GmailPdfText = { text: "", hasText: true, transcribed: false };
+// @ts-expect-error Nothing is cut, so there is no truncation flag.
+const cut: GmailPdfText = { text: new ReadableStream(), hasText: true, transcribed: false, truncated: false };
+// @ts-expect-error Whether the text was transcribed is always said.
+const unsaid: GmailPdfText = { text: new ReadableStream(), hasText: true };
+`).filter(message => !message.includes("'cloudflare:workers'"))).toEqual([]);
+  });
+
+  it("quotes the notes a PDF attachment's text can carry as they are given, and the size a PDF is drawn to", () => {
+    // The comments are wrapped, so a note they quote may run over two of their lines.
+    const gmailTypes = source("types.d.ts").replace(/\n\s*\* ?/g, " ");
+    const given = quotedNotes(source("drive-pdf.ts"));
+    expect(given).not.toEqual([]);
+    expect(quotedNotes(gmailTypes)).toEqual(given);
+    expect(gmailTypes).toContain(`up to ${RENDER_LIMITS.fileBytes / (1024 * 1024)} MiB`);
+    for (const said of PAGES_AHEAD) expect(gmailTypes).toContain(said);
   });
 
   it("streams a file's bytes from both Drive sessions, whole or by range", () => {

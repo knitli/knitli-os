@@ -1,9 +1,9 @@
 import { useId } from "react";
-import { ChatCircleDots, GearSix, Microphone, PhoneDisconnect, Stop, SpeakerHigh, SpeakerSlash } from "@phosphor-icons/react";
+import { ChatCircleDots, GearSix, PhoneDisconnect, SpeakerHigh, SpeakerSlash } from "@phosphor-icons/react";
 import { WorkshopIconButton } from "../../../components/WorkshopControls";
 
 export type VoiceControlsState = {
-  mode: "dictate" | "conversation" | null;
+  mode: "conversation" | null;
   status: "idle" | "listening" | "thinking" | "speaking";
   muted: boolean;
   interimTranscript: string | null;
@@ -23,7 +23,7 @@ export const VoiceControls = ({
 }: {
   state: VoiceControlsState;
   disabled: boolean;
-  onStart: (mode: "dictate" | "conversation") => void;
+  onStart: () => void;
   onEnd: () => void;
   onMute: () => void;
   conversationAvailable?: boolean;
@@ -38,10 +38,10 @@ export const VoiceControls = ({
       {active ? (
         <>
           <span className="sr-only" aria-live="polite">
-            {state.mode === "dictate" ? "Dictating · Stop to edit or send" : `Conversation · ${state.status}`}
+            {`Conversation · ${state.status}`}
           </span>
-          <WorkshopIconButton onClick={onEnd} danger aria-label={state.mode === "dictate" ? "Stop dictation" : "End voice call"}>
-            {state.mode === "dictate" ? <Stop size={16} /> : <PhoneDisconnect size={16} />}
+          <WorkshopIconButton onClick={onEnd} danger aria-label="End voice call">
+            <PhoneDisconnect size={16} />
           </WorkshopIconButton>
           <WorkshopIconButton onClick={onMute} aria-label={state.muted ? "Unmute microphone" : "Mute microphone"}>
             {state.muted ? <SpeakerSlash size={16} /> : <SpeakerHigh size={16} />}
@@ -49,13 +49,10 @@ export const VoiceControls = ({
         </>
       ) : (
         <>
-          <WorkshopIconButton disabled={disabled || !!state.pendingText} onClick={() => onStart("dictate")} aria-label="Start dictation">
-            <Microphone size={16} />
-          </WorkshopIconButton>
           {conversationAvailable && <WorkshopIconButton
             disabled={disabled || !!state.pendingText || !!conversationBlockedReason}
             aria-describedby={conversationBlockedReason ? blockedReasonId : undefined}
-            onClick={() => onStart("conversation")}
+            onClick={onStart}
             aria-label="Start conversation"
           >
             <ChatCircleDots size={16} />

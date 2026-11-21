@@ -17,7 +17,6 @@ import server from "../src/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const PASSWORD_HASH = new Uint8Array([1, 2, 3]);
-const DELIVERY_RETENTION_MS = 24 * 60 * 60 * 1000;
 const PAST_THE_LEASE_MS = SESSION_LEASE_MS + 60_000;
 const LEASE_ABORT_REASON = "idle session lease expired";
 
@@ -282,25 +281,6 @@ describe("workspace client-activity lease", () => {
     expect(await scheduledAlarm(metadata.id)).toBe(null);
   });
 
-  it("leaves another concern's alarm behind when it ends the object", async () => {
-    const { authenticated } = await signIn();
-    using workspace = await authenticated.newWorkspace();
-    const metadata = await workspace.getMetadata();
-
-    // A delivered external-message response is kept for a day: a legitimate deadline the expiry
-    // must not drop.
-    const deliveredAt = Date.now();
-    await runInDurableObject(overseerStub(metadata.id), instance => {
-      asImpl(instance).storage.gadgetResponseDeliveries.put({
-        idempotencyKey: "delivered-response", chatId: 1, promptSequence: 1,
-        createdAt: deliveredAt, status: "delivered", deliveredAt,
-      });
-    });
-    advanceBeyondTheLease();
-    await runAlarm(metadata.id);
-    expect(await scheduledAlarm(metadata.id)).toBe(deliveredAt + DELIVERY_RETENTION_MS);
-  });
-
   // The kernel can land before the UI that understands the idle close code, so unless a deployment
   // opts in the lease must not end anything.
   it.each([["absent", null], ["off", "off"]])("enforces nothing unless enabled (%s)", async (_label, value) => {
@@ -375,7 +355,6 @@ type OverseerImplForTest = {
   runAlarmTasks(): Promise<void>;
   storage: {
     pendingAgentCalls: { put(record: object): void; delete(key: string): void };
-    gadgetResponseDeliveries: { put(record: object): void };
   };
 };
 

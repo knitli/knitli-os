@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Check, Plus, UserCircle } from '@phosphor-icons/react'
-import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
+import { AccountDescription, SupportedResource, VendorDescription, getGrantedResourceTypeIds } from '@gadgets/workshop-shared/gatekeeper'
 
 /**
  * Account info as consumed by the chooser. Matches the shape used by GatekeeperModal and the
@@ -38,7 +38,7 @@ export function AccountChooser({
   resourceTitle,
   connecting,
   reconnectingAccountId,
-  requiredResourceUrlPatterns,
+  requiredResourceTypeIds,
   grantingAccountId = null,
   allowAdditionalAccount = true,
   onSelect,
@@ -53,7 +53,7 @@ export function AccountChooser({
   resourceTitle?: string
   connecting: boolean
   reconnectingAccountId: number | null
-  requiredResourceUrlPatterns?: string[] | ((account: AccountOption) => string[])
+  requiredResourceTypeIds?: string[] | ((account: AccountOption) => string[])
   grantingAccountId?: number | null
   /** Whether an account can be added when this vendor already has one. */
   allowAdditionalAccount?: boolean
@@ -80,9 +80,9 @@ export function AccountChooser({
           const name = account.description.uniqueName || account.description.displayName || 'Connected account'
           const expired = !account.credentialsValid
           const reconnecting = reconnectingAccountId === account.id
-          const granted = account.description.grantedResourceUrlPatterns
-          const required = typeof requiredResourceUrlPatterns === 'function'
-            ? requiredResourceUrlPatterns(account) : requiredResourceUrlPatterns
+          const granted = getGrantedResourceTypeIds(account.description, account.supportedResources)
+          const required = typeof requiredResourceTypeIds === 'function'
+            ? requiredResourceTypeIds(account) : requiredResourceTypeIds
           const accountMissing =
             required && granted !== undefined
               ? required.filter(p => !granted.includes(p))

@@ -8,7 +8,6 @@ import type { OverseerDurableObject } from "../src/overseer";
 import { UserDurableObject } from "../src/user";
 import { OVERSEER_STORAGE_VERSION } from "../src/storage-schema/overseer-migrations";
 import { openFakeOverseer } from "./fixtures";
-import type { FakeChatResponseTarget } from "./response-target";
 
 const CHAT = 1;
 const USER = {type: "user" as const, id: "original-user", name: "Original user"};
@@ -135,6 +134,7 @@ function decisionClient(impl: Impl, profile = USER, overrides: object = {}) {
         getChatContext: async () => ({profile: USER, aiModel: MODEL}), recordSharedWorkspaceOpen: async () => {}})},
     nextChatSequencePeek: impl.nextChatSequencePeek.bind(impl),
     chatHead: impl.chatHead.bind(impl),
+    chatParticipationDefault: impl.chatParticipationDefault.bind(impl),
     rememberDecisionInitiator: impl.rememberDecisionInitiator.bind(impl),
     resumeAgentAfterDecision: impl.resumeAgentAfterDecision.bind(impl),
     getChatTimestamp: impl.getChatTimestamp.bind(impl),
@@ -152,6 +152,7 @@ function modelLookup(impl: Impl, lookup: () => Promise<{profile: typeof USER, ai
   impl.users = new Proxy(impl.users, {
     get(target, key) {
       if (key === "idFromString") return (id: string) => target.idFromString(id);
+      if (key === "idFromName") return (name: string) => target.idFromName(name);
       if (key === "get") return (id: DurableObjectId) => new Proxy(target.get(id), {
         get(user, method) {
           if (method === "getChatContext") return lookup;
@@ -171,6 +172,73 @@ function recordNotifications() {
   });
   return notifications;
 }
+
+describe("awaitingDecision on a chat's metadata", () => {
+  const delivered = (impl: Impl) => impl.chatMetaForClient(impl.storage.chatMeta.get(CHAT)!);
+
+  // What a metadata subscriber hears from now on: whether each delivery says the chat is waiting,
+  // and whether its agent is responding.
+  function listen(impl: Impl) {
+    const heard: {awaiting?: true, responding: boolean}[] = [];
+    impl.storage.chatMeta.subscribe({add() {}, remove() {}, update: (_, record) => {
+      const meta = impl.chatMetaForClient(record);
+      heard.push({awaiting: meta.awaitingDecision, responding: meta.activeAgent !== undefined});
+    }});
+    return heard;
+  }
+
+  async function openClient(s: Awaited<ReturnType<typeof scenario>>) {
+    return env.TEST_OVERSEER.get(s.stub.id).open(s.user.id.toString(), USER.id, new RpcStub(() => {}));
+  }
+
+  it("is absent with no request, and while the agent is responding", async () => {
+    for (const s of [await scenario(null), await scenario("connection", true)]) {
+      await s.visit(impl => { expect(delivered(impl).awaitingDecision).toBeUndefined(); });
+    }
+  });
+
+  it.each([["connection", false], ["action", false], ["connection", true], ["action", true]] as const)(
+      "reports a pending %s request until it is denied (legacy pause: %s)", async (kind, legacy) => {
+    const s = await scenario(kind);
+    let heard: ReturnType<typeof listen> = [];
+    await s.visit(impl => {
+      if (legacy) impl.storage.activeAgents.delete(CHAT);
+      expect(delivered(impl).awaitingDecision).toBe(true);
+      fakeGatekeeper(impl);
+      heard = listen(impl);
+    });
+    using client = await openClient(s);
+    await (kind === "connection" ? client.denyConnectionRequest("1:connection") : client.rejectAction(7));
+    // A denial resumes nothing, which is the write subscribers would otherwise hear it through.
+    expect(heard).toEqual([{awaiting: undefined, responding: false}]);
+  });
+
+  it("is not sent again when a turn ends with no decision", async () => {
+    const s = await scenario("connection");
+    await s.visit(impl => {
+      // As an ordinary turn's teardown leaves the chat, before it checks for a decision to resume.
+      impl.storage.activeAgents.delete(CHAT);
+      const heard = listen(impl);
+      impl.resumeAgentAfterDecision(CHAT);
+      expect(heard).toEqual([]);
+    });
+  });
+
+  it("is cleared when an approval resumes the turn", async () => {
+    const requests = inference(), s = await scenario("action");
+    let heard: ReturnType<typeof listen> = [];
+    await s.visit(impl => {
+      fakeGatekeeper(impl);
+      heard = listen(impl);
+    });
+    using client = await openClient(s);
+    await client.approveAction(7);
+    expect(heard).toContainEqual({awaiting: undefined, responding: true});
+    expect(heard.filter(({awaiting}) => awaiting)).toEqual([]);
+    await s.visit(impl => impl.waitForAllAgentsToComplete());
+    expect(requests()).toBe(1);
+  });
+});
 
 describe("decision handoff using the existing execution row", () => {
   it.each(["connection", "action"] as const)("recovers a committed %s decision, before or after teardown", async kind => {
@@ -553,9 +621,9 @@ describe("decision handoff using the existing execution row", () => {
         if (attempt < 4) {
           await expect(impl.runAlarmTasks(0)).rejects.toThrow("reset");
           expect(impl.storage.activeAgents.get(CHAT)?.resumeAttempts).toBe(attempt);
-          // An unrelated response-delivery pass recomputes the shared alarm, resetting its
+          // An unrelated unread fan-out pass recomputes the shared alarm, resetting its
           // platform retry count. It must not reset this execution's budget.
-          await impl.deliverReadyExternalMessageResponses();
+          await impl.deliverDirtyChats();
           expect(await impl.ctx.storage.getAlarm()).not.toBeNull();
         } else {
           await expect(impl.runAlarmTasks(0)).resolves.toBeUndefined();
@@ -660,6 +728,38 @@ describe("decision handoff using the existing execution row", () => {
     });
   });
 
+  it("hands a long run off to an immediate next alarm, which joins it", async () => {
+    const s = await scenario(), requests = inference(), gate = Promise.withResolvers<void>();
+    await s.visit(async impl => {
+      modelLookup(impl, async () => { await gate.promise; return {profile: USER, aiModel: MODEL}; });
+      decide(impl, "connection"); impl.resumeAgentAfterDecision(CHAT);
+      await impl.deliverDirtyChats();
+      const deliveries = vi.spyOn(impl, "waitForAllAgentsToComplete");
+      vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+      try {
+        let settled = false;
+        const alarm = impl.runAlarmTasks(0).then(() => { settled = true; });
+        await vi.advanceTimersByTimeAsync(10 * 60_000 - 1_000);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1_000);
+        await alarm;
+      } finally {
+        vi.useRealTimers();
+      }
+      // The turn is still running, and the next invocation is due at once.
+      expect(impl.storage.chatMeta.get(CHAT)?.activeAgent).toBeDefined();
+      expect(await impl.ctx.storage.getAlarm()).toBeLessThanOrEqual(Date.now());
+      // The next invocation joins the same run rather than starting its concerns again.
+      const next = impl.runAlarmTasks(0);
+      gate.resolve();
+      await next;
+      expect(deliveries).toHaveBeenCalledTimes(1);
+      expect(requests()).toBe(1);
+      expect(impl.storage.chatMeta.get(CHAT)?.activeAgent).toBeUndefined();
+      expect(impl.storage.activeAgents.get(CHAT)).toBeUndefined();
+    });
+  });
+
   it("persists the attempt before lookup and bounds retries across a real reset", async () => {
     const s = await scenario(), requests = inference(), gate = Promise.withResolvers<void>();
     await expect(s.visit(async impl => {
@@ -700,55 +800,80 @@ describe("decision handoff using the existing execution row", () => {
     expect(requests()).toBe(0);
   });
 
-  it("re-arms failed response delivery after the platform's last retry, then recovers", async () => {
-    const s = await scenario(), name = crypto.randomUUID();
+  it("re-arms failed unread fan-out after the platform's last retry, then recovers", async () => {
+    const s = await scenario(null);
     await s.visit(async impl => {
-      impl.storage.activeAgents.delete(CHAT);
-      // Mint in the storing DO's invocation, not through a test-pool wrapper or another DO.
-      using target: RpcStub<FakeChatResponseTarget> = await impl.ctx.restore({
-        type: "test-response-target", name,
+      // Settle the fan-out the fixture's chat started, which the failure below must not join.
+      await impl.deliverDirtyChats();
+      expect(impl.storage.dirtyChats.get(CHAT)).toBeUndefined();
+
+      // The owner's user DO refuses the chat's unread handoff until it recovers.
+      let recipientDown = true;
+      const users = impl.users;
+      impl.users = new Proxy(users, {
+        get(target, key) {
+          if (key === "get") return (id: DurableObjectId) => new Proxy(target.get(id), {
+            get(user, member) {
+              if (member !== "messageArrived") return Reflect.get(user, member);
+              return (...args: Parameters<UserDurableObject["messageArrived"]>) => recipientDown
+                ? Promise.reject(new Error("Recipient unavailable")) : user.messageArrived(...args);
+            },
+          });
+          if (key === "idFromString") return (id: string) => target.idFromString(id);
+          if (key === "idFromName") return (name: string) => target.idFromName(name);
+          return Reflect.get(target, key);
+        },
       });
-      await target.setAvailable(false);
-      impl.storage.gadgetResponseDeliveries.put({idempotencyKey: "external-response", chatId: CHAT,
-        promptSequence: 0, createdAt: Date.now(), status: "ready", responseText: "Done.",
-        chatGatewayRpcTarget: target});
+      impl.addChatMessages(CHAT, USER, [{type: "message", message: "Hello"}]);
+      await expect(impl.deliverDirtyChats()).rejects.toThrow("Recipient unavailable");
+      expect(impl.storage.dirtyChats.get(CHAT)).toBeDefined();
+
+      // A failed alarm arms nothing of its own: the platform retries it, until its last retry.
       for (let retry = 0; retry <= 6; retry++) {
-        await impl.ctx.storage.deleteAlarm();
-        await expect(impl.runAlarmTasks(retry)).rejects.toThrow("Response target unavailable");
-        expect(impl.storage.gadgetResponseDeliveries.get("external-response")?.status).toBe("ready");
+        await impl.ctx.storage.deleteAlarm(); // The platform consumed the scheduled alarm.
+        await expect(impl.runAlarmTasks(retry)).rejects.toThrow("Recipient unavailable");
+        expect(impl.storage.dirtyChats.get(CHAT)).toBeDefined();
+        if (retry < 6) expect(await impl.ctx.storage.getAlarm()).toBeNull();
       }
-      const next = await impl.ctx.storage.getAlarm();
-      expect(next).toBeGreaterThan(Date.now()); // Avoid an immediate failure loop.
-      await target.setAvailable(true);
+      expect(await impl.ctx.storage.getAlarm()).toBeGreaterThan(Date.now()); // Not a failure loop.
+
+      recipientDown = false;
       await impl.runAlarmTasks();
-      expect(await target.calls()).toBe(8);
-      expect(impl.storage.gadgetResponseDeliveries.get("external-response")?.status).toBe("delivered");
-      expect(await impl.ctx.storage.getAlarm()).toBeGreaterThan(next!); // Retention sweep only.
+      expect(impl.storage.dirtyChats.get(CHAT)).toBeUndefined();
     });
   });
 
-  it("re-arms failed response delivery when the alarm guard reaches its failure limit", async () => {
-    const s = await scenario(), name = crypto.randomUUID();
+  it("re-arms failed unread fan-out when the alarm guard reaches its failure limit", async () => {
+    const s = await scenario(null);
     await s.visit(async impl => {
-      impl.storage.activeAgents.delete(CHAT);
-      using target: RpcStub<FakeChatResponseTarget> = await impl.ctx.restore({
-        type: "test-response-target", name,
+      await impl.deliverDirtyChats();
+      let recipientDown = true;
+      const users = impl.users;
+      impl.users = new Proxy(users, {
+        get(target, key) {
+          if (key === "get") return (id: DurableObjectId) => new Proxy(target.get(id), {
+            get(user, member) {
+              if (member !== "messageArrived") return Reflect.get(user, member);
+              return (...args: Parameters<UserDurableObject["messageArrived"]>) => recipientDown
+                ? Promise.reject(new Error("Recipient unavailable")) : user.messageArrived(...args);
+            },
+          });
+          if (key === "idFromString") return (id: string) => target.idFromString(id);
+          if (key === "idFromName") return (name: string) => target.idFromName(name);
+          return Reflect.get(target, key);
+        },
       });
-      await target.setAvailable(false);
-      impl.storage.gadgetResponseDeliveries.put({idempotencyKey: "external-response", chatId: CHAT,
-        promptSequence: 0, createdAt: Date.now(), status: "ready", responseText: "Done.",
-        chatGatewayRpcTarget: target});
+      impl.addChatMessages(CHAT, USER, [{type: "message", message: "Hello"}]);
       // The guard has recorded seven consecutive failures; this one reaches its limit, so the
       // fresh wake-up must be armed even though the platform retry count never advances.
       impl.ctx.storage.kv.put("alarm-guard:overseer",
           { bucket: Math.floor(Date.now() / 60_000), count: 1, failures: 7 });
       await impl.ctx.storage.deleteAlarm();
-      await expect(impl.runAlarmTasks(0)).rejects.toThrow("Response target unavailable");
+      await expect(impl.runAlarmTasks(0)).rejects.toThrow("Recipient unavailable");
       expect(await impl.ctx.storage.getAlarm()).toBeGreaterThan(Date.now());
-      await target.setAvailable(true);
+      recipientDown = false;
       await impl.runAlarmTasks();
-      expect(impl.storage.gadgetResponseDeliveries.get("external-response")?.status)
-          .toBe("delivered");
+      expect(impl.storage.dirtyChats.get(CHAT)).toBeUndefined();
     });
   });
 

@@ -671,7 +671,9 @@ the seams below were re-applied or retired on top of it.
 - **What:** deployment bindings, vars, and limits differ from upstream's: backend assets
   (`ASSETS` binding + `assets` + `assetsDirectory`) with `limits.cpuMs: 300000` and smart
   placement, the backend `v4` `VoiceSession` migration, context's remote `ARTIFACTS` binding,
-  and router smart placement. Each delta carries a `// Fork:` comment in the config.
+  and router smart placement. Each delta carries a `// Fork:` comment in the config. Since the
+  2026-11-19 sync the release manifest carries `limits` (upstream #1079), so customer instances get
+  the backend's `cpu_ms` too; smart placement stays first-party only.
 - **Why:** this deployment binds workers differently than upstream's; the generated files cannot
   be byte-identical.
 - **How it is kept:** Tier 2, resolved by hand at each sync — usually take ours, but an upstream
@@ -809,6 +811,230 @@ authorizes a read after fetching it.
     guard refuses. Each pull lists the checked trees recursively.
   - **Still to decide** before a container gatekeeper ships: keep refusing such worktrees, or
     strip prompt files from snapshots and refuse submissions that touch them.
+- **Admin inspection of owner-only workspaces (open since 2026-11-18).** Upstream #1026/#1066 let
+  a deployment admin open any workspace (and any user's account) read-only: metadata only, every
+  call audited, refused while the admin-set `adminWorkspaceAccess` is `off` (default
+  `metadata`, i.e. on). Nothing in it reads through a connection, and it ignores the fork's
+  owner-only tier (`prohibitWorkspaceSharing`, restricted ambient reads), which was designed
+  against collaborators and share links, not admins. Adopted unchanged; whether an owner-only
+  workspace should also be withheld from admin inspection (or only its titles and file names) is a
+  product decision for the maintainer.
+- **Voice typing is upstream's; voice conversation stays the fork's (decided 2026-11-21,
+  maintainer).** Upstream #1216 added on-device voice typing to the composer (the browser's
+  `SpeechRecognition` with `processLocally`, a strip of dictated words below the draft,
+  `useComposerDictation`). The fork's server-side dictation is retired in its favour; its
+  conversation mode (`features/chat/voice/`, `VoiceSession`) is kept.
+  - **Removed:** the dictate mode of `useVoiceChat` (`start()` now always opens a conversation)
+    and its button in `VoiceControls`; `useDictationAppendQueue.ts`; the composer's
+    `appendText`/`onAppendTextApplied`/`isDictating` props and every `isDictating` gate; the
+    main draft's speech-range tracking (`useComposerDraft`, `composerDraft`, `composerDocument`
+    and their tests are byte-identical to upstream again); the home page's `useVoiceChat` (the
+    home controls only launch a conversation, so they render an idle state); the "Dictation"
+    model row in the voice settings dialog and the admin voice panel; `homeVoiceFlow.test.tsx`.
+    `speechRanges.ts` moved to `features/chat/voice/`, the conversation draft being its one user.
+  - **Seams in `ChatComposer.tsx`:** upstream's voice-typing button is disabled while a voice
+    conversation holds the composer, and `canStartConversation()` is false while dictated words
+    are shown but not yet added (`dictationShownRef`). Pinned by `ChatComposer.fork.test.tsx`.
+  - **Given up:** a message written by voice typing is no longer marked `hasSpeech`, so the agent
+    no longer gets the transcription note (`withTranscriptionContext`) for it; conversation turns
+    still carry it. Re-adding it would mean tracking dictated ranges in the draft again.
+  - **Left for a kernel PR:** `VoiceSession`'s `dictate` mode, `VoiceMode`'s `"dictate"` and the
+    `dictationStt` preference and admin default are unused by the UI now. Removing them changes
+    `workshop-shared`'s API and the backend, so it belongs in its own reviewed change.
+- **Seams added by the 2026-11-21 sync (foundation `b84d5842`).**
+  - **Retired with upstream #1188 (external message gateway removed):** the fork's hardening of
+    that path has nothing left to guard. Deleted: `chat-commit-guard.ts`
+    (`prepareAuthorizedChatCommit`) and its two tests, the `commitGuard` on the response-target
+    registration, `ExternalMessageAccessRevokedError`, the fork's revocation rechecks in
+    `receiveExternalMessage()`, the fixture's `/control/submit-external-message` route, and the
+    `observer-privacy` case "denies an external build collaborator until observer setup is
+    complete". `newChat()`/`sendChatMessage()` call `#prepareChatMessage()` directly again, as
+    upstream does.
+  - **Kept: the chat submission receipt.** `Overseer.sendChatMessage()` returns the committed
+    prompt's sequence (`api.ts`; pinned by `__tests__/chat-submission-receipt.test.ts`). Upstream
+    made `#commitPreparedChatMessage()` return nothing once its only reader was gone, so the fork
+    now carries its return type and two `return messageSequence` lines, beside the
+    `promptSequence` lines in `sendChatMessage()`.
+  - Fork tests re-pointed at what replaced external delivery: the alarm-guard give-up case in
+    `durable-decision-resume.test.ts` now fails the unread fan-out (as upstream's neighbouring
+    test does), and `docs/alarm-audit.md`'s overseer row names user-update and unread delivery.
+    `knitli-session-lease.test.ts` lost "leaves another concern's alarm behind": the delivered
+    response's one-day retention was the only long-lived deadline beside the lease, and the ones
+    left (delivery retries about a second out, the agent keep-alive) either clear in the same
+    alarm run or block the reap.
+  - `SandboxedGatekeeperApp.tsx` (upstream #942, deep links): the host takes upstream's `path` and
+    `navigatePath` before the fork's optional `adminResourceControl`, and its `dispose` is now
+    the private `#dispose` behind `GatekeeperAppHostImpl.controls()`. Admin frames pass
+    `path="/"` and still reach the host only through `AdminGatekeeperAppRpcTarget`, which does
+    not expose `subscribePath`/`navigatePath`, so an admin frame cannot navigate the Workshop.
+  - `ChatComposer.test.tsx` is byte-identical to upstream again: the fork's voice-conversation
+    cases moved to the Tier-1 `ChatComposer.fork.test.tsx` (they conflicted with upstream's
+    voice-typing tests), including a copy of the add-connection case that carries the fork's
+    `canStartConversation` assertions.
+  - `patches/capnweb-validate@0.3.2.patch` replaces the `0.3.0` one (upstream #1252 bumped
+    capnweb to 0.13.1 and capnweb-validate to 0.3.2, which still wraps native Workers
+    capabilities). Same two hunks, re-made with `pnpm patch` against the new hashed file names.
+  - Admin workspace writes (upstream #1075: `stopAgent`, `restartWorkspace`) are adopted as is.
+    They are off unless the environment sets `ADMIN_WORKSPACE_WRITES=on`, are audited before they
+    run, and `restartWorkspace` uses upstream's `scheduleAccessRestart()` directly: it revokes
+    nothing, so it does not go through the fork's revocation gate.
+- **2026-11-20 sync (foundation `7f9f7a8f`): no new seams.** Five gatekeeper commits (#1217, #1232,
+  #1215, #1213, #1238), no conflicts. The five files changed on both sides auto-merged and still
+  carry only their recorded fork lines: the alarm-guard calls in `gatekeeper-gitlab/src/gitlab.ts`,
+  `gatekeeper-google/src/google.ts` and `gmail-hooks.ts`, the idle-alarm test include in Google's
+  `vitest.worker.config.ts` (now beside upstream's `gmail-group.test.ts`), and the fork's entries in
+  the golden manifest.
+  - Upstream #1232 dropped the kit `ObserverTracker`'s `maxObservers` option and its cap of 10
+    collaborators; no fork gatekeeper passed it.
+  - Upstream #1213 adds a Google Group resource type to the Google gatekeeper (Gmail for a group,
+    shared with its members). Under the fork's opt-in `enabledResources` it is off until an admin
+    enables it. It adds no `alarm()` handler, Durable Object class or migration. Google's connect
+    links stay unbound (`OUT_OF_SCOPE` in `connect-initiator-enforced.test.ts`).
+  - `reviewedSurvivors`: the 2026-11-19 ack no longer matched and was dropped; one added for a
+    GitLab docs URL in a comment of upstream's own `gitlab.ts` (#1238 removed its other mentions).
+- **Seams added by the 2026-11-19 sync (foundation `303e0d71`).**
+  - Snapshot sharing (upstream #1173, #1189, #1227): adopted as is, on by default
+    (`snapshotSharingEnabled`). A view grant is a "use" grant whose holder gets a static copy of the
+    gadget (`GadgetSnapshotClientImpl`) and is verified as no observer, which is how the fork's
+    audience attestation already treats a "use" admission (it claims nothing). The owner-only tier
+    is unaffected: `createShareLink`/`newShareLinkKey` still refuse first, view grants pass
+    `beforeAuthorityExpansion` like any other, and an owner-only workspace has no collaborators to
+    keep a view. Snapshots run the same commit modules and UI bundle as the live gadget, so the
+    prompt blindfold needs nothing new.
+  - `overseer.ts`: upstream moved the facet proxy out of `getGadgetFacet` into the module-level
+    `facetRpcStub()`; the fork's lease renewal is its optional fourth argument (see "Workspace
+    client-activity lease", which now covers snapshot clients too). `removeCollaborator` takes
+    upstream's `keepView` inside the fork's revocation gate: `requireSnapshotSharing()` is awaited
+    before `assertCanRemoveCollaborator()`, so everything after it stays synchronous.
+  - `sharing.ts`: upstream renamed the live-ceiling helper to `#existingCeiling` (a ceiling now keeps
+    a view grant's `mode`); the fork's re-resolving redemption and post-mint rechecks call it.
+    `removeCollaborator` keeps `assertCanRemoveCollaborator()` and takes `keepView`.
+  - Release manifest (upstream #1079, the `pdf-renderer` internal worker): `limits` now travel
+    verbatim into the manifest, so the fork's "limits are read and dropped" rule is retired, as its
+    own comment said it would be once the contract had a field. The backend's and AI Executor's
+    `cpu_ms: 300000` therefore reach customer manifests (upstream's `pdf-renderer` ships the same
+    value). `placement` is still dropped. Upstream's "a worker without limits carries none"
+    assertion checks the router, not the backend, which sets `cpu_ms` in the fork.
+  - `scripts/preview/`: upstream's internal-worker tier sits beside the fork's
+    standalone-gatekeeper filter, Access secrets and browser-binding rebuild.
+  - Fork fixtures: `AdminSettingsView` gains `snapshotSharingEnabled`; the fork's
+    `ObserverConfigModal` test (still inside upstream's test file) passes the new `subject`.
+    `__tests__/fixtures.ts`' `openFakeOverseer` returns a real `SharingManager` whole (upstream's
+    new `gadget-snapshot` test passes one); only plain-object fakes get the fork's preflight stubs.
+  - `reviewedSurvivors`: the two 2026-11-18 acks no longer matched and were dropped; one added for
+    the live UI-bundle reader in `overseer.ts` (upstream #1173 kept the same three uses the fork has).
+- **Seams added by the 2026-11-18 sync (foundation `941b36e9`).**
+  - `overseer.ts` `runAlarmTasks`: upstream #1184 made the alarm's work one run that may span
+    invocations (each held open for at most `ALARM_HANDLER_BUDGET_MS`, then re-armed at once), and
+    moved the after-the-last-retry wake-up from `#runAlarmTasksOnce`'s `finally` into
+    `runAlarmTasks`'s `catch`. The fork's `guardWillGiveUp` condition (see "Alarm guards") moved
+    with it, unchanged. A handed-off invocation returns normally, so the guard counts it as a
+    success and its flood detector sees one run per budget.
+  - `user.ts` `saveFile` (upstream #1178, save a gadget's export to a connected account): it calls
+    `#assertResourceEnabled` like the two mints; the fork passes the account's
+    `autoProvisioned` flag as `getGatekeeperClassFor()` does, or the opt-in check would refuse
+    every save through an ambient account (see "Gatekeeper resources are opt-in").
+  - Admin workspace and user inspection (upstream #1026, #1066): adopted as is. The view is
+    metadata-only, audited, and gated by the admin-set `adminWorkspaceAccess`; it does not consult
+    the fork's owner-only tier (`prohibitWorkspaceSharing`), which governs sharing with
+    collaborators, not deployment admins. See Open questions.
+  - Imports, storage-schema fields (`createdAt`/`titleRev`/`directoryRev` beside
+    `prohibitWorkspaceSharing`), `ADMIN_SETTING_METHODS` (`setAdminWorkspaceAccess` beside the
+    fork's voice/preset setters) and the `AdminApi` doc comments keep both sides. Fork
+    `AdminSettingsView` fixtures gained `adminWorkspaceAccess`.
+  - `reviewedSurvivors`: the six 2026-11-17 acks no longer matched and were dropped; two acks
+    added for #1187 false positives (see the file).
+  - Upstream tests edited for fork divergences: `admin-workspace-view.test.ts` (its
+    `ObserverBindingNeed` constants carry the fork's `ambient` field), `connection-creator.test.ts`
+    (a collaborator's `withClient` open adds a real `workspace` grant, since the fork's `open()`
+    re-checks `getEffectiveAccess` after its last handoff guard), and `worktrees.test.ts` (the
+    fold's failed pull reports the fork's categorical message, not the remote's; see "Git pull
+    failures are reported categorically"). The fork's `authorized-collaborator-bookkeeping.test.ts`
+    stubs `syncDirectory`, which now reads the owner's profile on open, as upstream's tests do.
+- **Seams added by the 2026-11-17 sync (foundation `30df0fb5`).**
+  - Resource policy by stable type ID (upstream #1031): see "Gatekeeper resources are opt-in"
+    below. Kernel lines: `admin-config.ts` (`enabledResourceTypeIds` parse/lowercase/reader,
+    the opt-in `isResourceDisabled`/`filterEnabledResources` with a trailing `ambient`),
+    `admin-settings.ts` `setResourceEnabled` (upstream's catalog lookup, then the inverted
+    allow-list edit), and `user.ts` callers threading `ambient` after upstream's new
+    `advertisedResources` argument.
+  - `overseer.ts` `requestConnection`: the fork's connector-side `resolveGatekeeperResource()`
+    now runs beside upstream #1031's explicit `resourceTypeId`. A connector reading is adopted
+    only when no type was named, when it refuses the URL, or when it agrees with the named type;
+    a connector-resolved URL then skips upstream's pattern-mismatch check (the connector exists
+    for URLs the pattern grammar cannot read). Without this the connector could have overridden
+    an explicit type and bypassed upstream's mismatch refusal.
+  - `ConnectInitiator` threading (see "Connect links are bound…"): upstream #1031 renamed
+    `connectAccount`/`ensureAccountResources`/`ensureResources` arguments to `resourceTypeIds`;
+    the fork's trailing `initiator` is re-applied on each, and in the Cloudflare, Microsoft and X
+    gatekeepers' `ensureResources`/`setCallback`.
+  - `GadgetUI.tsx`: upstream #1143 moved the frame's console and Escape reports from
+    `postMessage` to RPC on `GadgetFrameRoot`; the fork's idle-lease `activity` signal stays a
+    `postMessage` (the one remaining branch of `handleMessage`).
+  - `GadgetEditor.tsx`: upstream #1148 split the selected chat into `workingChatId`/`shownChatId`
+    and moved `isAgentActive` onto `paneChatId`; `useWorkspaceIdle(isAgentActive)` and
+    `useInitialVoiceChat(id, workingChatId)` now follow that definition, and `ChatInterface` gets
+    `initialVoice` beside upstream's `codeChatId`/`returnChatId`.
+  - `reviewedSurvivors`: the four 2026-11-14 acks no longer matched and were dropped; six acks
+    added for false positives (see the file).
+  - Approval summaries vs upstream #1112 (chat notifications on first participation): the fork's
+    approval-continuation summary is stored as a `message` authored by the approver, so upstream's
+    `isChatParticipation` read it as that user's first participation (enabling notifications on
+    approval, which #1112 deliberately avoids) and counted it as their unread message.
+    `src/fork/approval-continuation.ts` now exports `isApprovalSummaryMessage`/
+    `isUserChatParticipation`; `overseer.ts` uses the latter at its three participation checks and
+    excludes summaries in its local `isCountableChatMessage` (one clause). Upstream's
+    `workshop-chat-notifications.test.ts` approval case pins it unchanged.
+  - `AdminPage.tsx` `handleResourceToggle`: upstream #1031 added a refresh after a successful save
+    (with a "saved, but could not refresh" toast) beside its error-path refresh; the fork already
+    refreshes once in `finally`, after the row stops being busy, so a failed write rolls back
+    (B-PARENT-004/005). Resolved to that single refresh, with upstream's toast when the write had
+    succeeded. Upstream's `AdminPage.test.tsx` "refresh fails" case now fails both attempts, since
+    the fork's `reloadResources()` retries once.
+  - `admin-settings.ts` `isCatalogConflict` (fork AI executor): upstream #1152's workerd
+    1.20261113 delivers a remote error over Workers RPC as a plain `Error` whose message starts
+    with the original name, so the name/stack test no longer matched and a profile revision
+    conflict surfaced as "service unavailable". It now also checks the message prefix
+    (`ai-executor-admin-rpc` integration test). Fork test fakes of the Overseer's `users`
+    namespace also gained `idFromName`, which #1112 calls when a message is stored.
+  - `ChatInterface.tsx` effort selector: its mount-time `getModelReasoning` read returns early with
+    no `authenticatedApi`, as upstream's new `ChatInterface.codeChat.test.tsx` renders without one.
+- **Seams added by the 2026-11-14 sync (foundation `9e8acadb`).**
+  - `overseer.ts` `#resumeAgent`: upstream #1128 split the `wait.pending || isPreparingChatMessage`
+    return in two (the second now calls `staysStopped()`); the fork's approved-action summary
+    follows both, unchanged.
+  - `overseer.ts` `createShareLink` and `sharing.ts` `createShareLink`: upstream #1126 added
+    `default` links, where a repeat request stores the new key as an alias of the caller's existing
+    default link. The fork's sharing-prohibited refusal stays first in the Overseer, and
+    `beforeAuthorityExpansion()` runs before both writes (the alias is a new bearer key too).
+  - `api.ts` / the denying Overseer: upstream's `readBlob` (#863) and the `ChatMetadata`
+    `spawnerId`/`awaitingDecision` fields (#1128) sit beside the fork's
+    `uploadChatAttachment`/`deleteChatAttachment` and `reasoningEffort`/`promptRef`.
+  - Spreadsheet download name: upstream #1133 moved chat-attachment downloads out of
+    `ChatInterface.tsx` into `features/chat/attachments/AttachmentViewer.tsx`. The fork's
+    `attachmentDownloadName()` (in `attachmentFormatting.ts`; saves a converted spreadsheet as
+    `<name>.summary.md`, since its stored bytes are the summary, not the workbook) is now one call
+    there, and `attachmentFile.ts`'s `AttachmentFile` gains an optional `convertedFrom`.
+    `ChatInterface.tsx` no longer carries any of it. Retire when upstream converts attachments
+    itself or stops storing a summary under the original name.
+  - Always-on recipient requirements: upstream #1126 moved the share dialog's
+    "Recipients must prove…" list into a Protected-resources panel (`ProtectedResourceList` in
+    `ShareModal.tsx`). The fork's ` (always on)` suffix for ambient requirements and the
+    explanatory line under the list are re-applied there; the fork's test in
+    `ShareModal.test.tsx` opens the panel first. Moving it to a fork-owned test file would stop it
+    conflicting with upstream's share-modal tests.
+  - `overseer.ts` `applyPendingAction`: upstream #1118 opens with `using _decision =
+    claimDecision(record.id)`; the fork's `assertNoRevocationPending()` fence moved above it, so a
+    revocation or deletion in flight is refused before any decision is claimed (and
+    `knitli-deletion-fence.test.ts` exercises the fence, not the claim).
+  - `integration-tests/__tests__/workshop-lifecycle.test.ts`: the fork's `assertDeletionRestart()`
+    (it observes the deleter's session being severed, since the fork's revocation restart holds the
+    input gate) still accepted the old "removed collaborator" reason; upstream's `deleteSelf` has
+    restarted with "…because the workspace was deleted." since `e39537b4`. Only a race exposes the
+    reason text, so this failed intermittently (first seen on PR #93's CI). The list now accepts the
+    deletion reason and rejects the collaborator one.
+  - `reviewedSurvivors`: the Google fingerprint ack no longer matched and was dropped; four acks
+    added for false positives (see the file).
 - **Seams added by the 2026-11-13 sync (foundation `769474eb`).**
   - `worktree-session.ts` `writeBytes`: upstream #1081 rechecks writability after a re-root, around
     the fork's blindfold refusal and pre-write schema validation; upstream's post-write
@@ -864,7 +1090,7 @@ authorizes a read after fetching it.
   - Upstream #895 renamed the `AuthenticatedApi` gadget methods to workspace names (`openWorkspace`,
     `newWorkspace`, `newWorkspaceFromBlueprint`, `listWorkspaces`), the gadget metadata types to
     `WorkspaceMetadata*`, the open-gadget error-code family to `OPEN_WORKSPACE_*`, and the User DO
-    methods (`getWorkspace`, `setWorkspaceLastActive`, `ensureWorkspaceRegistered`,
+    methods (`getWorkspace`, `setWorkspaceLastActive`,
     `recordSharedWorkspaceOpen`, ...). Fork code and tests were renamed to match; the fork-owned
     `collaborator-bookkeeping.ts` option followed. The integration-test session's own `openGadget`
     is not that API and keeps its name.
@@ -1046,7 +1272,7 @@ features wrote are left in place; typed-storage ignores undeclared collections.
   management is disjoint (chat LLMs vs speech models), and `getModelReasoning` was ported
   onto the new `#resolveModel` helper.
 
-### Gatekeeper resources are opt-in (`enabledResources`)
+### Gatekeeper resources are opt-in (`enabledResources`, `enabledResourceTypeIds`)
 
 - **Where:** `AdminConfig` in `packages/workshop-backend/src/storage-schema/admin-settings-storage.ts`,
   `normalizeAdminConfig`/`parseAdminConfig`, the `AdminSettings` resource toggles, and the
@@ -1080,6 +1306,32 @@ features wrote are left in place; typed-storage ignores undeclared collections.
 - **Upstream integration tests edited for it (2026-11-13 sync):** `google-drive-comments.test.ts`
   and `google-drive-sharing.test.ts` (new upstream, #1065/#1068) get the same one-line
   `enableBoundGatekeeperResources(harness)` call.
+- **2026-11-17 sync (upstream #1031, stable resource type IDs):** upstream keyed admin policy
+  by vendor-scoped type ID (`disabledResourceTypeIds`), kept `disabledResources` as legacy
+  patterns, and made `setResourceEnabled(vendorId, resourceTypeId, …)` accept only an advertised
+  type (or clear an existing legacy entry). The fork mirrors that shape, inverted:
+  `enabledResourceTypeIds` beside the legacy `enabledResources`; a resource is on when its ID
+  (`getResourceTypeId`) or its exact current pattern is listed; editing a vendor upgrades exact
+  legacy matches to IDs. Deliberate differences from upstream: an unmatched legacy entry fails
+  closed by enabling nothing, so the fork has no `unresolvedResourceRestrictions` and no
+  "Unavailable resource type" rows (upstream needs both because an unmatched opt-out restriction
+  must keep the vendor blocked); an unbound vendor's stale entries can still be removed; the
+  per-vendor cap and config-size cap still apply when enabling. The fork's 2 KiB pattern cap and
+  `URLPattern` validation were retired: the setter no longer stores admin-supplied patterns.
+  Rollback note (upstream `docs/gatekeeper-resource-types.md`): a Workshop that reads only
+  `enabledResources` would turn ID-enabled types *off* — fail-closed, unlike upstream's case.
+  The fork's allow-list unit tests moved out of upstream's `admin-config.test.ts` into fork-owned
+  `__tests__/knitli-resource-allow-list.test.ts`. Upstream tests edited for it:
+  `resource-type-identity.test.ts` (two migration cases restated as allow-lists, and the
+  "blocks the vendor" expectation inverted), `resource-creation.test.ts` (the two stable-ID admin
+  cases restated for opt-in; the discovery fake user gains a null `resolveGatekeeperResource`),
+  `admin-settings-audit.test.ts` (records enabling, not disabling), `AdminPage.test.tsx` (the
+  fork's `promptPresets`/`voice` view fields), and integration `workshop-admin-audit.test.ts`
+  (audits `enabledResourceTypeIds`; upstream moved the long-value excerpt case to
+  `restrictedWebFetchHosts`, so the fork's five-pattern variant is gone).
+- **2026-11-18 sync (upstream #1178, `saveFile`):** the third `#assertResourceEnabled` caller
+  threads `autoProvisioned` as the mint does; a save to a type the admin has not enabled is
+  refused before the file is read.
 
 ### Ambient-provisioned accounts bypass resource policy at minting
 
@@ -1413,8 +1665,10 @@ ids are facet-local, not Activity ids.
   the lease deadline); `noteWorkEnded()` in `#unregisterRunningAgent`; `alarm()` also calls
   `reapIdleSession()`; `open()` takes `notifyClosed(reason?: "idle")`, arms the lease and
   registers a notifier with a `using`; both client interfaces register/release a notifier;
-  browser mints wrap their capability in `ownedByClient(...)`; `getGadgetFacet` takes an optional
-  `activity` callback; five `renewOnClientCalls(Class)` lines. `server.ts`: per-open counting,
+  browser mints wrap their capability in `ownedByClient(...)`; `getGadgetFacet` and
+  `getSnapshotFacet` take an optional `activity` callback, which upstream's module-level
+  `facetRpcStub()` takes as its fourth argument (`onCall`, since the 2026-11-19 sync); six
+  `renewOnClientCalls(Class)` lines (`GadgetSnapshotClientImpl` added for upstream #1173). `server.ts`: per-open counting,
   `IdleSessionError`, and the idle close code in the abort listener. `blueprints-kv.ts`: the
   reserved key. `workshop-shared/src/api.ts`: `SESSION_IDLE_CLOSE_CODE`.
   `vitest.integration.config.ts` and `__tests__/fixtures.ts` gain the expected-abort filter and
@@ -1462,8 +1716,10 @@ ids are facet-local, not Activity ids.
   guard; checked per method, and fails if the guard is removed from any one). Exceptions: `schedule-driver.test.ts` is an upstream test edited for the backoff.
 - **At sync:** Tier 2 for each seam. A new upstream `alarm()` fails the coverage test until it gets
   the one-line check and a row in `docs/alarm-audit.md`. If upstream adds its own alarm guard, drop
-  ours. The overseer breaker only bounds an undeliverable external-response loop (see the audit);
-  it does not delete the record.
+  ours. The overseer breaker only bounds an undeliverable user-update or unread-delivery loop (see the audit);
+  it does not delete the record. Since upstream #1184 (2026-11-18 sync) the Overseer's alarm work
+  can span invocations; the guard wraps each invocation, and the fork's give-up wake-up lives in
+  `runAlarmTasks`'s `catch`.
 
 ### Email send action (ported from michielappelman/cloudflare-os)
 
@@ -1472,6 +1728,27 @@ ids are facet-local, not Activity ids.
 - **Divergences from the source fork:** durable rolling-hour cap of 100 recipients that also binds auto-approved sends (checked at submit, charged at apply); stricter address, Message-ID, MIME type, filename and `fromName` validation; messages whose approval view would truncate are refused.
 - **Fail closed:** sending needs `EMAIL_DOMAIN` and `EMAIL_SEND_PREFIX` (administrator-set worker vars; the manifest has no input for a non-installable gatekeeper) so users cannot claim `admin@` and send as it.
 - **At sync:** Tier 2 seams in `email.ts`/`types.d.ts`; if upstream adds sending, drop this entry and the port.
+
+### GitLab: recorded CI-data roles stay required (2026-11-21)
+
+- **Where:** `packages/gatekeeper-gitlab/src/fork/legacy-ci-roles.ts` (Tier 1). Seams:
+  `project-subresources.ts` (a recorded `project/<id>/role/<role>` ID parses with a
+  `minAccessLevel`), `gitlab.ts` (`checkSubresourceAccess()` checks that level; the verifier's
+  `hasProjectAccess`/`hasProjectPathAccess` take an optional level again) and
+  `gitlab-gatekeeper.ts` (the legacy tracker's `hasCollectionAccess`/`denyMessage`).
+- **What:** upstream #1238 reports CI reads by job and, for what earlier releases recorded,
+  reads a role ID as the project alone and admits any member for the marked `ci-logs` /
+  `ci-test-reports` sets. The fork keeps the role for those records: Developer for
+  `role/developer` and `ci-logs`, Maintainer for `role/maintainer` and `ci-test-reports`. New
+  reads are upstream's, unchanged.
+- **Why:** nothing rewrites a workspace's recorded requirements, and the data read under them may
+  still be in the workspace. `REVIEW.md` asks an existing gatekeeper's migration to keep old
+  enforcement until the historical requirements are imported.
+- **Tests:** two upstream tests pinned the relaxed behaviour and are edited in place:
+  `observers.test.ts` "holds the role IDs earlier releases reported to their role" and
+  `ci.test.ts` "admits only the role %s needed" (upstream's pre-#1238 case).
+- **At sync:** Tier 2 for the seams. Drop it once a kernel importer rewrites recorded role
+  requirements as job requirements, or the maintainer accepts upstream's relaxation.
 
 ### Workshop route table
 

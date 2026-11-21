@@ -1,12 +1,12 @@
-import { AI_EXECUTOR_ADMIN_ERROR_CODES, AdminApi, AdminAuditPage, AdminAuditQuery, AdminAuditStats, AdminAuditStatsQuery, AdminFormat, AdminFormatPatch, AdminModel, AdminResourceVendor, AdminSettingChange, AdminSettingMethod, AdminSettingsView, AdminVia, AiExecutorProfile, AiExecutorProfileInput, AiModelConfig, AiModelProvider, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, DeploymentUpdateStatus, GatewayModel, GatewayModelLevelTest, GatewayModelMode, GatewayModelSettings, GatewayModelTest, MAX_ADMIN_AUDIT_RETENTION_DAYS, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, MAX_UPDATE_CHECK_INTERVAL_MINUTES, MAX_UPDATE_HOURS, PromptPreset, PromptPresetPatch, ReasoningLevel, SUGGESTED_MODELS, VoiceAdminConfig, createAiExecutorAdminError, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
-import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
+import { ADMIN_ACCESS_ERROR_CODES, AI_EXECUTOR_ADMIN_ERROR_CODES, AdminApi, AdminAuditPage, AdminAuditQuery, AdminAuditStats, AdminAuditStatsQuery, AdminFormat, AdminFormatPatch, AdminInspectOptions, AdminModel, AdminResourceVendor, AdminSettingChange, AdminSettingMethod, AdminSettingsView, AdminUserPage, AdminUserQuery, AdminUserView, AdminVia, AdminWorkspaceAccess, AdminWorkspacePage, AdminWorkspaceQuery, AdminWorkspaceView, AdminWriteAction, AdminWriteArgs, AiExecutorProfile, AiExecutorProfileInput, AiModelConfig, AiModelProvider, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, DeploymentUpdateStatus, GatewayModel, GatewayModelLevelTest, GatewayModelMode, GatewayModelSettings, GatewayModelTest, MAX_ADMIN_AUDIT_RETENTION_DAYS, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_PROMPT_PRESET_NAME_LENGTH, MAX_SITE_NAME_LENGTH, MAX_UPDATE_CHECK_INTERVAL_MINUTES, MAX_UPDATE_HOURS, PromptPreset, PromptPresetPatch, ReasoningLevel, SUGGESTED_MODELS, VoiceAdminConfig, createAdminAccessError, createAiExecutorAdminError, getAdminAccessErrorCode, isAdminWorkspaceAccess, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
+import { GatekeeperVendor, getResourceTypeId, findResourceType } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject, type WorkerEntrypoint } from 'cloudflare:workers';
-import { RpcTarget } from 'capnweb';
+import { RpcTarget, type RpcStub } from 'capnweb';
 import { validateRpc } from 'capnweb-validate';
 import { createWorkshopLogger } from "./observability";
 import { sanitizeBlueprintOutput } from './blueprint-archive.js';
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, readBlueprintKvRecord, serializeFeaturedBlueprints } from './storage-schema/blueprints-kv.js';
-import { MAX_AGENT_HINT, MAX_ALLOWED_MODELS, adminConfigSeed, assertPermutation, changesModelSettings, defaultOutputFormatId, diffAdminConfig, effectiveAdminConfig, enabledResourcePatterns, isAllowedModelName, isUpdateCheckInterval, isUpdateHours, listPromotedFormats, parseRestrictedWebFetchHosts, reorderFormats, sanitizeAddedModel, sanitizeModelSettings, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
+import { MAX_AGENT_HINT, MAX_ALLOWED_MODELS, adminConfigSeed, assertPermutation, changesModelSettings, defaultOutputFormatId, diffAdminConfig, effectiveAdminConfig, enabledResourcePatterns, enabledResourceTypeIds, isAllowedModelName, isUpdateCheckInterval, isUpdateHours, listPromotedFormats, parseRestrictedWebFetchHosts, reorderFormats, sanitizeAddedModel, sanitizeModelSettings, sanitizeOutputOverrides, serializeAdminConfig, isResourceDisabled } from './admin-config.js';
 import { makeAdminSettingsStorage, type AdminConfig, type AdminSettingsStorage, type FormatCuration } from './storage-schema/admin-settings-storage.js';
 import { getModelTokenLimits } from './agent-compaction.js';
 import { AUTO_ROUTER_PROVIDER_NAMES, AiGatewayConfig, GatewayModels, assertGatewayProvider, gatewayModelConfig, gatewayRunConfig, getAiGatewayConfig, isCatalogModel } from './ai-gateway.js';
@@ -16,8 +16,11 @@ import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.j
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
+import type { UserDirectoryDurableObject } from './user-directory.js';
 import type { AdminAuditDurableObject } from './admin-audit.js';
-import { type AdminSettingActor, adminAccessPolicy, adminAuditStatsDays, adminListLimit, adminSettingChange, minAdminAuditRetentionDays } from './admin-access.js';
+import type { OverseerDurableObject } from './overseer.js';
+import { type AdminSettingActor, type AdminViewTerms, adminAccessPolicy, adminAuditStatsDays, adminListLimit, adminSettingChange, adminViewLifetimeMs, adminWorkspaceWritesEnabled, lowerAdminWorkspaceAccess, maxAdminWorkspaceAccess, minAdminAuditRetentionDays, validateAdminAccessReason } from './admin-access.js';
+import { isDeploymentAdmin } from './auth/config.js';
 import { AdminGatekeeperApps } from './fork/admin-gatekeeper-apps.js';
 import { validateVoiceConfig } from './voice-config.js';
 import { bundledBlueprintsManifestVersion, installBundledBlueprints } from './bundled-blueprints.js';
@@ -34,8 +37,6 @@ const VERSION_TAGS_TTL_MS = 60_000;
 const AI_EXECUTOR_PROTOCOL_VERSION = 1 as const;
 const adminSettingsEncoder = new TextEncoder();
 
-/** Maximum UTF-8 bytes accepted for one resource URLPattern. */
-export const MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES = 2 * 1024;
 /** Maximum enabled resources for one currently bound vendor. */
 export const MAX_ENABLED_RESOURCES_PER_VENDOR = 128;
 /** Maximum UTF-8 bytes for the serialized deployment admin config. */
@@ -56,9 +57,12 @@ export interface InferenceAdmin extends WorkerEntrypoint {
   disableProfile(id: string, revision: number): Promise<AiExecutorProfile>;
 }
 
+// Workers RPC may deliver a remote error as a plain `Error` whose message (and stack) carries the
+// original name as a prefix, as workerd 1.20261113 does.
 function isCatalogConflict(error: unknown): boolean {
   return error instanceof Error && (
     error.name === "CatalogConflictError" ||
+    error.message.startsWith("CatalogConflictError:") ||
     error.stack?.startsWith("CatalogConflictError:") === true
   );
 }
@@ -595,6 +599,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     return {
       signupsEnabled: config.signupsEnabled,
       userSearchEnabled: config.userSearchEnabled,
+      snapshotSharingEnabled: config.snapshotSharingEnabled,
       siteName: config.siteName,
       siteLogo: siteLogoImage(config.siteLogoConfigured),
       instanceInstructions: config.instanceInstructions,
@@ -608,12 +613,35 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       formats: await this.#listFormatConfig(config),
       voice: config.voice,
       gatewayModels: this.#listGatewayModels(config),
+      adminWorkspaceAccess: {
+        effective: policy.access,
+        chosen: config.adminWorkspaceAccess,
+        max: maxAdminWorkspaceAccess(this.env),
+      },
       adminAuditRetentionDays: {
         effective: policy.retentionDays,
         chosen: config.adminAuditRetentionDays,
         min: minAdminAuditRetentionDays(this.env),
       },
     };
+  }
+
+  /**
+   * Set the access level admins choose for inspectWorkspace() and inspectUser(), recording the
+   * change `actor` makes. Throws for a value that is not a level, and for a level above the one
+   * ADMIN_WORKSPACE_ACCESS_MAX allows, which a compromised admin session can never raise.
+   */
+  async setAdminWorkspaceAccess(access: AdminWorkspaceAccess, actor: AdminSettingActor)
+      : Promise<void> {
+    if (!isAdminWorkspaceAccess(access)) {
+      throw new Error(`Invalid admin workspace access: ${access}`);
+    }
+    let max = maxAdminWorkspaceAccess(this.env);
+    if (lowerAdminWorkspaceAccess(access, max) !== access) {
+      throw new Error(`Admin access can't be set above "${max}", the most this deployment's ` +
+          "ADMIN_WORKSPACE_ACCESS_MAX allows.");
+    }
+    await this.#mutateAdminConfig(actor, config => ({ ...config, adminWorkspaceAccess: access }));
   }
 
   /**
@@ -1178,35 +1206,53 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   }
 
   /** Enable/disable a single gatekeeper resource type atomically (read-modify-write within the DO). */
-  async setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean,
-                           actor: AdminSettingActor): Promise<void> {
+  async setResourceEnabled(
+      vendorId: string, resourceTypeId: string, enabled: boolean, actor: AdminSettingActor): Promise<void> {
     vendorId = vendorId.toLowerCase();
+    const vendor = this.vendors.get(vendorId);
+    // Fork: an unbound vendor's stale grants can still be removed.
+    if (!vendor && enabled) throw new Error("Unknown gatekeeper vendor.");
+    const resources = vendor ? await vendor.getSupportedResources({ userId: actor.admin }) : [];
+    const resource = findResourceType(resources, resourceTypeId)
+      ?? findResourceType(resources, undefined, resourceTypeId);
     await this.#mutateAdminConfig(actor, config => {
-      let on = new Set(enabledResourcePatterns(config, vendorId));
-      if (!enabled) {
-        on.delete(urlPattern);
-        return this.#withEnabledResources(config, vendorId, on);
+      // Fork: opt-in, so the allow-lists are inverted relative to upstream's restrictions.
+      const legacy = new Set(enabledResourcePatterns(config, vendorId));
+      const ids = new Set(enabledResourceTypeIds(config, vendorId));
+      if (!resource && (enabled || (!legacy.has(resourceTypeId) && !ids.has(resourceTypeId)))) {
+        throw new Error("Unknown resource type; only an existing grant can be removed.");
       }
-      if (on.has(urlPattern)) return config;
-      if (!urlPattern || adminSettingsEncoder.encode(urlPattern).byteLength > MAX_ADMIN_RESOURCE_URL_PATTERN_BYTES) {
-        throw new Error('Resource URL pattern is too long.');
+      // Upgrade only exact matches; an unmatched legacy pattern enables nothing.
+      for (const type of resources) {
+        if (type.id !== undefined && legacy.delete(type.urlPattern)) ids.add(type.id);
       }
-      try { void new URLPattern(urlPattern); } catch { throw new Error('Resource URL pattern is invalid.'); }
-      if (!this.vendors.has(vendorId)) throw new Error('Unknown gatekeeper vendor.');
-      if (on.size >= MAX_ENABLED_RESOURCES_PER_VENDOR) throw new Error('Too many enabled resources for gatekeeper vendor.');
-      on.add(urlPattern);
-      let next = this.#withEnabledResources(config, vendorId, on);
-      if (adminSettingsEncoder.encode(serializeAdminConfig(next)).byteLength > MAX_ADMIN_CONFIG_BYTES) {
+      if (resource) {
+        const [list, key] = resource.id !== undefined ? [ids, resource.id] : [legacy, resource.urlPattern];
+        if (enabled) list.add(key); else list.delete(key);
+      } else { legacy.delete(resourceTypeId); ids.delete(resourceTypeId); }
+      const same = (stored: string[], next: Set<string>) => stored.length === next.size && stored.every(v => next.has(v));
+      if (same(enabledResourcePatterns(config, vendorId), legacy) && same(enabledResourceTypeIds(config, vendorId), ids)) {
+        return config;
+      }
+      if (enabled && legacy.size + ids.size > MAX_ENABLED_RESOURCES_PER_VENDOR) {
+        throw new Error('Too many enabled resources for gatekeeper vendor.');
+      }
+      let next = this.#withEnabledResources(config, vendorId, legacy, ids);
+      if (enabled && adminSettingsEncoder.encode(serializeAdminConfig(next)).byteLength > MAX_ADMIN_CONFIG_BYTES) {
         throw new Error('Admin config is too large.');
       }
       return next;
     });
   }
 
-  #withEnabledResources(config: AdminConfig, vendorId: string, patterns: Set<string>): AdminConfig {
-    let entries = Object.entries(config.enabledResources).filter(([id]) => id !== vendorId);
-    if (patterns.size > 0) entries.push([vendorId, [...patterns]]);
-    return { ...config, enabledResources: Object.fromEntries(entries) };
+  #withEnabledResources(config: AdminConfig, vendorId: string, patterns: Set<string>, ids: Set<string>): AdminConfig {
+    const replace = (map: Record<string, string[]>, values: Set<string>) => {
+      let entries = Object.entries(map).filter(([id]) => id !== vendorId);
+      if (values.size > 0) entries.push([vendorId, [...values]]);
+      return Object.fromEntries(entries);
+    };
+    return { ...config, enabledResources: replace(config.enabledResources, patterns),
+      enabledResourceTypeIds: replace(config.enabledResourceTypeIds ?? {}, ids) };
   }
 
   async setSiteLogo(data: Uint8Array | null, actor: AdminSettingActor): Promise<boolean> {
@@ -1331,7 +1377,6 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
             // Nothing to toggle for this gatekeeper.
             return null;
           }
-          let enabled = new Set(enabledResourcePatterns(config, id));
           return {
             vendorId: id,
             displayName: description.displayName,
@@ -1339,11 +1384,12 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
             autoProvisions: false,
             enabled: !disabledGatekeeperSet.has(id),
             resources: supportedResources.map(r => ({
+              resourceTypeId: getResourceTypeId(r),
               urlPattern: r.urlPattern,
               title: r.title,
               description: r.description,
               icon: r.icon,
-              enabled: enabled.has(r.urlPattern),
+              enabled: !isResourceDisabled(config, id, r, supportedResources),
             })),
           };
         } catch (err) {
@@ -1362,32 +1408,45 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   }
 }
 
-// Capability for managing deployment-wide admin settings, obtained via
-// AuthenticatedApi.getAdminApi() (which is null for non-admins). The admin access check happens once
-// when the capability is minted in server.ts, so these methods don't re-check. This is a thin
-// validation+forwarding facade over the AdminSettings DO — fully user-independent — so a disabled
-// gatekeeper/resource can't be re-enabled via a crafted request, and the client never receives a
-// stub to the DO's internal methods. Every setter's change is recorded in the deployment's audit
-// log before it takes effect (see #mutateAdminConfig()). Covers branding, agent instructions,
-// signups, gatekeeper connector/resource availability, vendor administration frames, AI Gateway
-// models, whether an update is available, and the audit log itself; authentication config stays env-var driven.
+// Capability for managing and investigating the deployment, obtained via
+// AuthenticatedApi.getAdminApi() (which is null for non-admins). The admin access check happens
+// once, when the capability is minted in server.ts, so its methods don't re-check, with two
+// exceptions. inspectWorkspace() and inspectUser() re-check, as openForAdmin() and every call on
+// the view either mints do, since a view is what an admin holds that reads users' data.
+// writeWorkspace() re-checks admin status and the environment's switch (ADMIN_WORKSPACE_WRITES),
+// and the workspace checks both again in its own environment.
+// Setting by setting, this is a thin validation+forwarding facade over the AdminSettings DO —
+// fully user-independent — so a disabled gatekeeper/resource can't be re-enabled via a crafted
+// request, and the client never receives a stub to the DO's internal methods. Every setter's
+// change is recorded in the deployment's audit log before it takes effect (see
+// #mutateAdminConfig()). Covers branding, agent instructions, signups, gatekeeper
+// connector/resource availability, vendor administration frames, AI Gateway models, whether an update is available, the user and
+// workspace directory, admin access to workspaces and to users' accounts, and admin writes to
+// workspaces; authentication config stays env-var driven.
 @validateRpc()
 export class AdminApiImpl extends RpcTarget implements AdminApi {
   private admin: DurableObjectStub<AdminSettings>;
+  private directories: DurableObjectNamespace<UserDirectoryDurableObject>;
   private audits: DurableObjectNamespace<AdminAuditDurableObject>;
+  private overseers: DurableObjectNamespace<OverseerDurableObject>;
+  private users: DurableObjectNamespace<UserDurableObject>;
   #sessionId = crypto.randomUUID();
 
   /**
    * `adminUserId` is the requesting admin's canonical id and `via` the label derived from their
    * client's User-Agent (AdminVia). The capability's audit `sessionId` is minted here, so there is
-   * one per AuthenticatedApi.getAdminApi() call. Reaches the AdminSettings and AdminAudit namespaces
-   * through `ctx.exports`, and reads the audit retention's bound from `env`.
+   * one per AuthenticatedApi.getAdminApi() call. Reaches the AdminSettings, UserDirectory,
+   * AdminAudit, Overseer and User namespaces through `ctx.exports`, and reads ADMINS and the admin
+   * access bounds from `env`.
    */
   constructor(ctx: ExecutionContext, private env: Cloudflare.Env, private adminUserId: string,
               private via: AdminVia, private inferenceAdmin?: Service<InferenceAdmin>) {
     super();
     this.admin = ctx.exports.AdminSettings.getByName("");
+    this.directories = ctx.exports.UserDirectoryDurableObject;
     this.audits = ctx.exports.AdminAuditDurableObject;
+    this.overseers = ctx.exports.OverseerDurableObject;
+    this.users = ctx.exports.UserDurableObject;
   }
 
 
@@ -1487,6 +1546,11 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
   async setUserSearchEnabled(enabled: boolean): Promise<void> {
     await this.admin.updateAdminConfig(
         { userSearchEnabled: enabled }, this.#actor("setUserSearchEnabled"));
+  }
+
+  async setSnapshotSharingEnabled(enabled: boolean): Promise<void> {
+    await this.admin.updateAdminConfig(
+        { snapshotSharingEnabled: enabled }, this.#actor("setSnapshotSharingEnabled"));
   }
 
   async setSiteName(name: string): Promise<void> {
@@ -1679,13 +1743,147 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
         hours, this.#actor("setUpdateNoticeSnoozeHours"));
   }
 
-  // --- The audit log ---
+  // --- Users, workspaces and admin access ---
+
+  async listUsers(options: AdminUserQuery = {}): Promise<AdminUserPage> {
+    let limit = adminListLimit(options.limit);
+    // Built field by field, so that nothing else the client sent reaches the directory.
+    let { users, nextCursor } = await this.directories.getByName("").listUsers(
+        { query: options.query, cursor: options.cursor, limit });
+    let page = users.map(user => ({ ...user, isAdmin: isDeploymentAdmin(this.env, user.id) }));
+    return nextCursor === undefined ? { users: page } : { users: page, nextCursor };
+  }
+
+  async listWorkspaces(options: AdminWorkspaceQuery = {}): Promise<AdminWorkspacePage> {
+    let limit = adminListLimit(options.limit);
+    return await this.directories.getByName("").listWorkspaces(
+        { owner: options.owner, query: options.query, cursor: options.cursor, limit });
+  }
+
+  /**
+   * What an open is checked for before its target is reached, in the order inspectWorkspace()
+   * documents: the reason and the lifetime, that the caller is still a deployment admin, `target`
+   * (the method's own check of the id it was given; its result is returned), and only then the
+   * deployment's level, from the committed authoritative config rather than readAdminConfig()'s KV
+   * mirror: a mirror still saying "metadata" after an admin turned access off must not mint a
+   * view (the view's calls then read the mirror, which reaches them within about a minute).
+   * `access` is that level: at "off" the method records the refused open itself and throws.
+   */
+  async #openTerms<T>(reason: string, options: AdminInspectOptions, target: () => T)
+      : Promise<{ target: T; reason: string; access: AdminWorkspaceAccess; expiresAt: Date }> {
+    reason = validateAdminAccessReason(reason);
+    let lifetimeMs = adminViewLifetimeMs(options.lifetimeSeconds);
+    if (!isDeploymentAdmin(this.env, this.adminUserId)) {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.notAdmin);
+    }
+    let checked = target();
+    let { access } = adminAccessPolicy(await this.admin.committedAdminConfig(), this.env);
+    let expiresAt = new Date(Date.now() + lifetimeMs);
+    return { target: checked, reason, access, expiresAt };
+  }
+
+  async inspectWorkspace(workspaceId: string, reason: string, options: AdminInspectOptions = {})
+      : Promise<RpcStub<AdminWorkspaceView>> {
+    let { target: id, reason: trimmedReason, access, expiresAt } =
+        await this.#openTerms(reason, options, () => {
+          try {
+            return this.overseers.idFromString(workspaceId);
+          } catch {
+            throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.workspaceNotFound);
+          }
+        });
+    if (access === "off") {
+      // Refused before any workspace is reached, so its title and owner come from the directory.
+      // Appended without a retention, as a view's records are: the directory read awaits, and a
+      // retention an admin raised meanwhile must not be pruned to the one read above.
+      let listing = await this.#directoryListing(id.toString());
+      await this.audits.getByName("").append({
+        kind: "workspace", at: new Date(), admin: this.adminUserId, sessionId: this.#sessionId,
+        via: this.via, workspaceId: id.toString(), workspaceOwner: listing.ownerId,
+        workspaceTitle: listing.title, method: "inspectWorkspace",
+        args: { expiresAt: expiresAt.toISOString() }, reason: trimmedReason, access: "off",
+        refused: ADMIN_ACCESS_ERROR_CODES.accessOff,
+      });
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.accessOff);
+    }
+
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
+    //     system doesn't know this.
+    return this.#openForAdmin(id, trimmedReason, { via: this.via, expiresAt });
+  }
+
+  // Mint the view. A workspace that turns out not to exist leaves the directory (see
+  // #dropIfMissing()).
+  async #openForAdmin(id: DurableObjectId, reason: string, terms: AdminViewTerms) {
+    try {
+      return await this.overseers.get(id).openForAdmin(
+          this.adminUserId, reason, this.#sessionId, terms);
+    } catch (error) {
+      await this.#dropIfMissing(id, error);
+      throw error;
+    }
+  }
+
+  // Drops the workspace `id` from the directory when `error` is its refusal `workspaceNotFound`:
+  // the directory lists a workspace only until something finds it gone.
+  async #dropIfMissing(id: DurableObjectId, error: unknown): Promise<void> {
+    if (getAdminAccessErrorCode(error) !== ADMIN_ACCESS_ERROR_CODES.workspaceNotFound) return;
+    try {
+      await this.directories.getByName("").removeWorkspace(id.toString());
+    } catch (removal) {
+      logger.warn("failed to drop a missing workspace from the directory", {
+        event: "admin.directory.heal.failed", error: removal,
+      });
+    }
+  }
+
+  // The title (clamped there to MAX_DIRECTORY_TEXT_LENGTH) and owner the directory lists for a
+  // workspace, for the record of an open refused before it reaches the workspace: "" for each when
+  // the directory lists none or cannot be asked, since the refusal is recorded either way.
+  async #directoryListing(workspaceId: string): Promise<{ title: string; ownerId: string }> {
+    try {
+      return await this.directories.getByName("").workspaceListing(workspaceId) ??
+          { title: "", ownerId: "" };
+    } catch (error) {
+      logger.warn("failed to read a workspace's listing from the directory", {
+        event: "admin.directory.listing.failed", error,
+      });
+      return { title: "", ownerId: "" };
+    }
+  }
+
+  async inspectUser(userId: string, reason: string, options: AdminInspectOptions = {})
+      : Promise<RpcStub<AdminUserView>> {
+    let { reason: trimmedReason, access, expiresAt } =
+        await this.#openTerms(reason, options, () => {
+          if (userId === "") throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.userNotFound);
+        });
+    if (access === "off") {
+      // Refused before the account is reached, so the record names the id as the admin gave it.
+      // Appended without a retention, as a view's records are.
+      await this.audits.getByName("").append({
+        kind: "user", at: new Date(), admin: this.adminUserId, sessionId: this.#sessionId,
+        via: this.via, userId, method: "inspectUser",
+        args: { expiresAt: expiresAt.toISOString() }, reason: trimmedReason, access: "off",
+        refused: ADMIN_ACCESS_ERROR_CODES.accessOff,
+      });
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.accessOff);
+    }
+
+    // Reaching the account by name creates none: openForAdmin() refuses an id that names no
+    // account.
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
+    //     system doesn't know this.
+    return this.users.getByName(userId).openForAdmin(
+        this.adminUserId, trimmedReason, this.#sessionId, { via: this.via, expiresAt });
+  }
 
   async listAdminAudit(options: AdminAuditQuery = {}): Promise<AdminAuditPage> {
     let limit = adminListLimit(options.limit);
-    let { kind, admin, method, since, cursor } = options;
+    let { kind, admin, method, workspace, owner, since, cursor } = options;
     return await this.audits.getByName("").list(
-        { kind, admin, method, since, cursor, limit }, await this.#retentionDays());
+        { kind, admin, method, workspace, owner, since, cursor, limit },
+        await this.#retentionDays());
   }
 
   async getAdminAuditStats(options: AdminAuditStatsQuery = {}): Promise<AdminAuditStats> {
@@ -1700,7 +1898,41 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
     return adminAccessPolicy(await this.admin.committedAdminConfig(), this.env).retentionDays;
   }
 
+  setAdminWorkspaceAccess(access: AdminWorkspaceAccess): Promise<void> {
+    return this.admin.setAdminWorkspaceAccess(access, this.#actor("setAdminWorkspaceAccess"));
+  }
+
   setAdminAuditRetentionDays(days: number): Promise<void> {
     return this.admin.setAdminAuditRetentionDays(days, this.#actor("setAdminAuditRetentionDays"));
+  }
+
+  /** The one caller of OverseerDurableObject.applyAdminWrite(), which validates the call, checks
+   * the admin and the switch again in its own environment, and records the write before it runs. */
+  async writeWorkspace(workspaceId: string, action: AdminWriteAction, args: AdminWriteArgs,
+                       reason: string): Promise<void> {
+    if (!isDeploymentAdmin(this.env, this.adminUserId)) {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.notAdmin);
+    }
+    if (!adminWorkspaceWritesEnabled(this.env)) {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.writesOff);
+    }
+    let id: DurableObjectId;
+    try {
+      id = this.overseers.idFromString(workspaceId);
+    } catch {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.workspaceNotFound);
+    }
+    try {
+      await this.overseers.get(id).applyAdminWrite({
+        action, args, reason, admin: this.adminUserId, sessionId: this.#sessionId, via: this.via,
+      });
+    } catch (error) {
+      await this.#dropIfMissing(id, error);
+      // Never the reason or the arguments.
+      logger.warn("an admin write failed", {
+        event: "admin.write.failed", operation: action, error,
+      });
+      throw error;
+    }
   }
 }

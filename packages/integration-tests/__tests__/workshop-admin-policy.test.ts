@@ -114,7 +114,7 @@ it("enforces deployment gatekeeper policy through the admin API", async () => {
     // toggle above bites only regular accounts, as asserted for newGatekeeper.
     const model = models.script([
       { toolCall: { id: "create-thing", name: "createExternalResource", arguments: {
-        vendorId: TEST_VENDOR_ID, resourceUrlPattern: "https://gadgets-test.example/things/*",
+        vendorId: TEST_VENDOR_ID, resourceTypeId: "thing",
         title: "Queued", bindingName: "QUEUED",
       } } },
       { text: "The creation is queued." },

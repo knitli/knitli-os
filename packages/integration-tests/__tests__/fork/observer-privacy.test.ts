@@ -59,17 +59,6 @@ beforeAll(async () => {
       {
         binding: TEST_GATEKEEPER_BINDING,
         dir: TEST_GATEKEEPER_DIR,
-        patch(config) {
-          config.services = [
-            ...(config.services ?? []),
-            {
-              binding: "EXTERNAL_MESSAGE_GATEWAY",
-              service: "workshop-backend",
-              entrypoint: "ExternalMessageGateway",
-              props: { source: "observer-readiness" },
-            },
-          ];
-        },
       },
     ],
   });
@@ -187,25 +176,6 @@ async function startFixtureHook(key: string): Promise<{ status: number; error?: 
   );
   const body = res.status === 204 ? {} : ((await res.json()) as { error?: string });
   return { status: res.status, ...body };
-}
-
-async function submitExternalMessage(
-  callerEmail: string,
-  gadgetKey: string,
-  gadgetTitle: string,
-): Promise<{ accepted: boolean; message?: string }> {
-  const res = await harness.fetchWorker(
-    TEST_GATEKEEPER_WORKER,
-    "http://gatekeeper-test.test/control/submit-external-message",
-    {
-      method: "POST",
-      body: JSON.stringify({ callerEmail, gadgetKey, gadgetTitle }),
-    },
-  );
-  if (res.status !== 200) {
-    throw new Error(`External message control failed with ${res.status}: ${await res.text()}`);
-  }
-  return (await res.json()) as { accepted: boolean; message?: string };
 }
 
 describe("observer readiness and privacy", () => {
@@ -795,48 +765,6 @@ describe("observer readiness and privacy", () => {
       }
       expect(recorder.callCount).toBe(1);
       expect(recorder.calls[0].map(need => need.gatekeeperId)).toEqual([connId]);
-    });
-  });
-
-  it("denies an external build collaborator until observer setup is complete", async () => {
-    await withSession(async (publicApi) => {
-      const [alice, bob] = nextUsernames("externalalice", "externalbob");
-      using aliceApi = await signUp(publicApi, alice);
-      using bobApi = await signUp(publicApi, bob);
-      const gadgetKey = crypto.randomUUID();
-      const title = `External observer ${gadgetKey}`;
-      const backend = harness.server.getWorker("workshop-backend");
-      const beforeIds = new Set(await backend.listDurableObjectIds("OverseerDurableObject"));
-
-      // The first external submission creates Alice's deterministic workspace. It stops at model
-      // resolution because these test accounts intentionally have no model configured.
-      await expect(submitExternalMessage(alice, gadgetKey, title)).resolves.toMatchObject({
-        accepted: false,
-        message: expect.stringMatching(/AI model configured/i),
-      });
-      const createdIds = (await backend.listDurableObjectIds("OverseerDurableObject")).filter(
-        (id) => !beforeIds.has(id),
-      );
-      expect(createdIds).toHaveLength(1);
-      const [workspaceId] = createdIds;
-
-      using ownerWorkspace = await aliceApi.openWorkspace(workspaceId);
-      if (!(await ownerWorkspace.addCollaborator(bob, "workspace"))) {
-        throw new Error(`Failed to share the gadget with ${bob}`);
-      }
-      // Admit Bob while scope is empty, then add a connection he has not configured.
-      (await bobApi.openWorkspace(workspaceId))[Symbol.dispose]();
-      const aliceAccount = await provisionAccount(aliceApi);
-      using _late = await ownerWorkspace.newGatekeeper(aliceAccount.id, thingUrl("external-late"));
-
-      const denied = await submitExternalMessage(bob, gadgetKey, title);
-      expect(denied.accepted).toBe(false);
-      expect(denied.message).toBe(
-          "Your access to the data this workspace has read could not be verified. " +
-          "Open the workspace in your browser to verify your access, then try again. " +
-          "(To open this workspace, you must choose connected accounts for the services it " +
-          "uses, but no configuration channel was provided.)");
-      expect(denied.message).not.toMatch(/AI model/i);
     });
   });
 });

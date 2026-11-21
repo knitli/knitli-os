@@ -4,13 +4,14 @@
 //
 // This covers the "soft" deployment customizations only (branding, agent instructions, which
 // gatekeeper connectors/resources are offered, the models an AI Gateway deployment provides, and
-// the audit retention admins choose within the bound admin-access.ts reads from the environment).
+// the access level and audit retention admins choose within the bounds admin-access.ts reads from
+// the environment).
 // Authentication/authorization config (sign-in providers, password login) is deliberately NOT
 // here — it stays env-var driven so it can't be changed by a compromised admin session. Everything
 // here is enabled by default; the admin UI opts things *out*.
 
-import { AdminSettingChange, AiModelProvider, AmbientGatekeeperMode, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, GatewayModel, GatewayModelCapabilities, GatewayModelMode, GatewayModelSettings, MAX_ADMIN_AUDIT_RETENTION_DAYS, MAX_UPDATE_CHECK_INTERVAL_MINUTES, MAX_UPDATE_HOURS, OutputFormatOffer, PromptPreset, REASONING_LEVELS, SUGGESTED_MODELS, isAmbientGatekeeperMode, isBannerColor, isGatewayModelMode, isOutputIcon, isReasoningLevel } from "@gadgets/workshop-shared/api";
-import { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
+import { AdminSettingChange, AiModelProvider, AmbientGatekeeperMode, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, GatewayModel, GatewayModelCapabilities, GatewayModelMode, GatewayModelSettings, MAX_ADMIN_AUDIT_RETENTION_DAYS, MAX_UPDATE_CHECK_INTERVAL_MINUTES, MAX_UPDATE_HOURS, OutputFormatOffer, PromptPreset, REASONING_LEVELS, SUGGESTED_MODELS, isAdminWorkspaceAccess, isAmbientGatekeeperMode, isBannerColor, isGatewayModelMode, isOutputIcon, isReasoningLevel } from "@gadgets/workshop-shared/api";
+import { SupportedResource, getResourceTypeId } from "@gadgets/workshop-shared/gatekeeper";
 import { adminSettingChange } from "./admin-access.js";
 import { sanitizeBlueprintOutput } from "./blueprint-archive.js";
 import { DEFAULT_ADMIN_CONFIG, type AdminConfig, type FormatCuration } from "./storage-schema/admin-settings-storage.js";
@@ -386,19 +387,16 @@ export function parseRestrictedWebFetchHosts(hosts: string[]): string[] {
  * storage or its KV mirror.
  */
 export function normalizeAdminConfig(p: Partial<AdminConfig>): AdminConfig {
-  // Fork: resources are opt-in (enabledResources; unlisted is off), not upstream's opt-out
-  // disabledResources (see #24). Built via fromEntries so special keys (__proto__) stay
-  // ordinary own entries rather than tripping Object.prototype setters. Case is preserved
-  // here: the AdminSettings read path round-trips bulk-written ids verbatim (B-HOST-011), and
-  // only the KV-mirror parse below lowercases (MsGraph handling, kept from #24).
-  let enabledResourceEntries: Array<[string, string[]]> = [];
-  if (p.enabledResources && typeof p.enabledResources === "object") {
-    for (let [vendorId, patterns] of Object.entries(p.enabledResources)) {
-      let list = strings(patterns);
-      if (list.length > 0) enabledResourceEntries.push([vendorId, list]);
-    }
-  }
-  let enabledResources = Object.fromEntries(enabledResourceEntries);
+  // Fork: resources are opt-in (enabledResources/enabledResourceTypeIds; unlisted is off), not
+  // upstream's opt-out disabledResources/disabledResourceTypeIds (see #24). Built via fromEntries
+  // so special keys (__proto__) stay ordinary own entries rather than tripping Object.prototype
+  // setters. Case is preserved here: the AdminSettings read path round-trips bulk-written ids
+  // verbatim (B-HOST-011), and only the KV-mirror parse below lowercases (MsGraph handling, kept from #24).
+  const allowList = (raw: Record<string, string[]> | undefined) => Object.fromEntries(
+    Object.entries(raw && typeof raw === "object" ? raw : {}).flatMap(([vendorId, values]) => {
+      const list = strings(values);
+      return list.length ? [[vendorId, list]] : [];
+    }));
   let ambientGatekeeperModes: Record<string, AmbientGatekeeperMode> = {};
   if (p.ambientGatekeeperModes && typeof p.ambientGatekeeperModes === "object") {
     for (let [vendorId, mode] of Object.entries(p.ambientGatekeeperModes)) {
@@ -431,6 +429,9 @@ export function normalizeAdminConfig(p: Partial<AdminConfig>): AdminConfig {
     userSearchEnabled: typeof p.userSearchEnabled === "boolean"
       ? p.userSearchEnabled
       : !signupsEnabled,
+    snapshotSharingEnabled: typeof p.snapshotSharingEnabled === "boolean"
+      ? p.snapshotSharingEnabled
+      : DEFAULT_ADMIN_CONFIG.snapshotSharingEnabled,
     siteName: typeof p.siteName === "string" ? p.siteName : "",
     siteLogoConfigured: typeof p.siteLogoConfigured === "boolean" ? p.siteLogoConfigured : false,
     instanceInstructions: typeof p.instanceInstructions === "string" ? p.instanceInstructions : "",
@@ -441,7 +442,8 @@ export function normalizeAdminConfig(p: Partial<AdminConfig>): AdminConfig {
       color: isBannerColor(p.banner?.color) ? p.banner!.color : DEFAULT_BANNER_COLOR,
     },
     accentColor: typeof p.accentColor === "string" ? p.accentColor : "",
-    enabledResources,
+    enabledResources: allowList(p.enabledResources),
+    enabledResourceTypeIds: allowList(p.enabledResourceTypeIds),
     disabledGatekeepers: strings(p.disabledGatekeepers).map(v => v.toLowerCase()),
     ambientGatekeeperModes,
     restrictedWebFetchHosts: strings(p.restrictedWebFetchHosts),
@@ -480,8 +482,13 @@ export function normalizeAdminConfig(p: Partial<AdminConfig>): AdminConfig {
     updateNoticeSnoozeHours: isUpdateHours(p.updateNoticeSnoozeHours)
       ? p.updateNoticeSnoozeHours
       : DEFAULT_ADMIN_CONFIG.updateNoticeSnoozeHours,
-    // The admins' choice, kept as chosen: adminAccessPolicy() (admin-access.ts) holds it within the
-    // environment's bound wherever it is enforced, so changing the bound needs no rewrite.
+    // The admins' choices, kept as chosen: adminAccessPolicy() (admin-access.ts) holds them within
+    // the environment's bounds wherever they are enforced, so changing a bound needs no rewrite.
+    // A config that stores no access level is one whose admins never chose. A stored value that
+    // is not a level fails closed, as ADMIN_WORKSPACE_ACCESS_MAX does.
+    adminWorkspaceAccess: p.adminWorkspaceAccess === undefined
+      ? DEFAULT_ADMIN_CONFIG.adminWorkspaceAccess
+      : isAdminWorkspaceAccess(p.adminWorkspaceAccess) ? p.adminWorkspaceAccess : "off",
     adminAuditRetentionDays: isAdminAuditRetention(p.adminAuditRetentionDays)
       ? p.adminAuditRetentionDays
       : DEFAULT_ADMIN_CONFIG.adminAuditRetentionDays,
@@ -684,14 +691,23 @@ export function parseAdminConfig(raw: string | null, seed: AdminConfigSeed = {})
   let config = effectiveAdminConfig(stored, seed);
   // Fork: the KV-mirror read lowercases vendor ids (see #24); the AdminSettings read path
   // preserves them (B-HOST-011), so this lives here rather than in the shared normalize.
-  config.enabledResources = Object.fromEntries(
-      Object.entries(config.enabledResources).map(([id, patterns]) => [id.toLowerCase(), patterns]));
+  const lowercased = (map: Record<string, string[]>) => Object.fromEntries(
+      Object.entries(map).map(([id, values]) => [id.toLowerCase(), values]));
+  config.enabledResources = lowercased(config.enabledResources);
+  config.enabledResourceTypeIds = lowercased(config.enabledResourceTypeIds ?? {});
   return config;
 }
 
+/** Legacy enabled resources: exact URL patterns, stored before resource types had stable IDs. */
 export function enabledResourcePatterns(config: AdminConfig, vendorId: string): string[] {
   let id = vendorId.toLowerCase();
   return Object.hasOwn(config.enabledResources, id) ? config.enabledResources[id]! : [];
+}
+
+/** Enabled stable resource type IDs (`getResourceTypeId`) for one vendor. */
+export function enabledResourceTypeIds(config: AdminConfig, vendorId: string): string[] {
+  let id = vendorId.toLowerCase(), map = config.enabledResourceTypeIds ?? {};
+  return Object.hasOwn(map, id) ? map[id]! : [];
 }
 
 export function serializeAdminConfig(config: AdminConfig): string {
@@ -710,18 +726,19 @@ export async function readAdminConfig(env: Cloudflare.Env): Promise<AdminConfig>
 // vendor, which has no resource toggles and is governed by `ambientGatekeeperMode` instead.
 
 export function isResourceDisabled(
-    config: AdminConfig, vendorId: string, urlPattern: string, ambient = false): boolean {
+    config: AdminConfig, vendorId: string, resource: SupportedResource,
+    _advertisedResources: readonly SupportedResource[], ambient = false): boolean {
+  // Fork: opt-in, so a legacy pattern that no longer matches enables nothing and needs no
+  // blocking (upstream's unresolved opt-out restrictions block the vendor instead).
   if (ambient) return false;
-  return !enabledResourcePatterns(config, vendorId).includes(urlPattern);
+  return !enabledResourceTypeIds(config, vendorId).includes(getResourceTypeId(resource)) &&
+    !enabledResourcePatterns(config, vendorId).includes(resource.urlPattern);
 }
 
 export function filterEnabledResources(
     config: AdminConfig, vendorId: string, resources: SupportedResource[],
-    ambient = false): SupportedResource[] {
-  if (ambient) return resources;
-  let enabled = enabledResourcePatterns(config, vendorId);
-  if (!enabled || enabled.length === 0) return [];
-  return resources.filter(r => enabled.includes(r.urlPattern));
+    advertisedResources: readonly SupportedResource[] = resources, ambient = false): SupportedResource[] {
+  return resources.filter(resource => !isResourceDisabled(config, vendorId, resource, advertisedResources, ambient));
 }
 
 // --- Agent system-prompt instructions ---

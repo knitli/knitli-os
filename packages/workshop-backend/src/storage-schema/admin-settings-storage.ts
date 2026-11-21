@@ -9,9 +9,10 @@
 
 import { collection, createTypedStorage } from "@gadgets/typed-storage";
 import {
-  DEFAULT_ADMIN_AUDIT_RETENTION_DAYS, DEFAULT_BANNER_COLOR,
+  DEFAULT_ADMIN_AUDIT_RETENTION_DAYS, DEFAULT_ADMIN_WORKSPACE_ACCESS, DEFAULT_BANNER_COLOR,
   DEFAULT_UPDATE_CHECK_INTERVAL_MINUTES, DEFAULT_UPDATE_MINIMUM_AGE_HOURS,
   DEFAULT_UPDATE_NOTICE_SNOOZE_HOURS, DEFAULT_VOICE_CONFIG,
+  type AdminWorkspaceAccess,
   type AiModelProvider, type AmbientGatekeeperMode, type BannerConfig, type BlueprintOutput,
   type BlueprintPublicInfo, type GatewayModel, type GatewayModelMode, type GatewayModelSettings,
   type PromptPreset, type ReasoningLevel, type VoiceAdminConfig,
@@ -30,6 +31,13 @@ export type AdminConfig = {
    * is maintained either way, and this switch just controls user access.
    */
   userSearchEnabled: boolean;
+  /**
+   * Whether gadgets may be shared to view only, as static snapshots (default true; see
+   * Overseer.getGadgetSnapshot). A view grant shows its holder what the gadget stored without
+   * verifying them as an observer. While false, no one may make a view grant or open or refresh a
+   * snapshot; the view grants already made are kept, and open again once it is true.
+   */
+  snapshotSharingEnabled: boolean;
   /**
    * Site name shown next to the top-bar logo, or "" to use DEFAULT_SITE_NAME. Resolve it for
    * display with `resolveSiteName()`.
@@ -52,11 +60,13 @@ export type AdminConfig = {
   /** Accent (brand) color hex, or "" for the default theme. */
   accentColor: string;
   /**
-   * Enabled gatekeeper resources: vendorId -> enabled resource urlPatterns. Anything unlisted
-   * is off. (Fork #24: upstream's opt-out `disabledResources` is opt-in here; enforcement reads
-   * this via #enforceGatekeeperResourcePolicy in user.ts.)
+   * Legacy enabled gatekeeper resources: vendorId -> enabled resource URL patterns. Anything
+   * unlisted in either allow-list is off. (Fork #24: upstream's opt-out `disabledResources` is
+   * opt-in here; enforcement reads this via #enforceGatekeeperResourcePolicy in user.ts.)
    */
   enabledResources: Record<string, string[]>;
+  /** Enabled stable resource type IDs, keyed by vendor (fork opt-in twin of `disabledResourceTypeIds`). */
+  enabledResourceTypeIds?: Record<string, string[]>;
   /** Fully-disabled gatekeeper vendor ids. */
   disabledGatekeepers: string[];
   /**
@@ -162,6 +172,11 @@ export type AdminConfig = {
   updateMinimumAgeHours: number;
   /** How many hours a dismissed update notice stays hidden in the browser that dismissed it. */
   updateNoticeSnoozeHours: number;
+  /** How much of a workspace or of a user's account admins chose to let inspectWorkspace() and
+   * inspectUser() show. ADMIN_WORKSPACE_ACCESS_MAX holds it in wherever it is enforced
+   * (adminAccessPolicy() in admin-access.ts), so a compromised admin session can never raise
+   * access past what the deployment allows. */
+  adminWorkspaceAccess: AdminWorkspaceAccess;
   /** How many days admins chose to keep admin audit records. Held at or above
    * ADMIN_AUDIT_RETENTION_MIN_DAYS wherever it is enforced. */
   adminAuditRetentionDays: number;
@@ -193,6 +208,7 @@ export type FormatCuration = {
 export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   signupsEnabled: true,
   userSearchEnabled: false,
+  snapshotSharingEnabled: true,
   siteName: "",
   siteLogoConfigured: false,
   instanceInstructions: "",
@@ -201,6 +217,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   banner: { text: "", color: DEFAULT_BANNER_COLOR },
   accentColor: "",
   enabledResources: {},
+  enabledResourceTypeIds: {},
   disabledGatekeepers: [],
   ambientGatekeeperModes: {},
   restrictedWebFetchHosts: [],
@@ -221,6 +238,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   updateCheckIntervalMinutes: DEFAULT_UPDATE_CHECK_INTERVAL_MINUTES,
   updateMinimumAgeHours: DEFAULT_UPDATE_MINIMUM_AGE_HOURS,
   updateNoticeSnoozeHours: DEFAULT_UPDATE_NOTICE_SNOOZE_HOURS,
+  adminWorkspaceAccess: DEFAULT_ADMIN_WORKSPACE_ACCESS,
   adminAuditRetentionDays: DEFAULT_ADMIN_AUDIT_RETENTION_DAYS,
 };
 

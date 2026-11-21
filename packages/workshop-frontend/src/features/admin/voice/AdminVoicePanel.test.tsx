@@ -146,7 +146,7 @@ describe('AdminVoicePanel', () => {
     expect(host.textContent).toContain('Nova 3')
     expect(host.textContent).toContain('Aura 2')
     // Role defaults are the checked radios.
-    expect(radio(host, 'Nova 3').getAttribute('aria-checked')).toBe('true')
+    expect(radio(host, 'Flux').getAttribute('aria-checked')).toBe('true')
     expect(host.textContent).toContain('Luna')
   })
 
@@ -170,11 +170,10 @@ describe('AdminVoicePanel', () => {
 
   it('changing a default writes the new default', async () => {
     const { admin } = await render()
-    await act(async () => radio(host, 'Flux').click())
+    await act(async () => radio(host, 'Nova 3').click())
     expect(admin.setVoiceConfig).toHaveBeenCalledOnce()
     const next = (admin.setVoiceConfig as any).mock.calls[0][0] as VoiceAdminConfig
-    // Both STT sections list Flux; the first match is the dictation default.
-    expect(next.defaults.dictationStt).toBe(FLUX)
+    expect(next.defaults.conversationStt).toBe('@cf/deepgram/nova-3')
   })
 
   it('adds a supported model that is not yet offered', async () => {

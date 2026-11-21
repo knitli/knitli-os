@@ -490,3 +490,9 @@ test("the survivor scope spares the boundary config that holds the acks", () => 
   assert.ok(scope.includes(":(exclude)scripts/fork/fork-boundary.json"),
     "ack entries name their tokens, so grepping the config would re-flag every ack");
 });
+
+test("the survivor scope spares the generated lockfile", () => {
+  const scope = survivorScope(forkBoundary(), ["pnpm-lock.yaml", "packages/touched/file.ts"]);
+  assert.ok(scope.includes(":(exclude)pnpm-lock.yaml"),
+    "integrity hashes of packages a fork dependency keeps would read as removed names");
+});

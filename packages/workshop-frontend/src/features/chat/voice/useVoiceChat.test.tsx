@@ -4,7 +4,7 @@
 import { act, useEffect, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AiChatMessage, VoiceMode } from "@gadgets/workshop-shared/api";
+import type { AiChatMessage } from "@gadgets/workshop-shared/api";
 
 const voice = vi.hoisted(() => {
   const startCall = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
@@ -90,8 +90,8 @@ describe("useVoiceChat", () => {
     showVoiceControls = true;
     await act(async () => { root.render(<Probe />); });
   };
-  const start = async (mode: VoiceMode = "conversation") => {
-    await act(async () => { controls.start(mode); });
+  const start = async () => {
+    await act(async () => { controls.start(); });
     const client = voice.clients.at(-1)!;
     expect(client.startCall).toHaveBeenCalledOnce();
     return client;
@@ -110,7 +110,7 @@ describe("useVoiceChat", () => {
           session: { close: async () => {}, [Symbol.dispose]: () => {} },
         }),
       } as unknown as Props["authenticatedApi"],
-      chatId: 7, agentActive: true, onDictation: vi.fn<Props["onDictation"]>(), sendMessage,
+      chatId: 7, agentActive: true, sendMessage,
       subscribeToEvents: (next) => { listener = next; return () => {}; },
     };
     container = document.createElement("div");
@@ -199,21 +199,19 @@ describe("useVoiceChat", () => {
     await render({ authenticatedApi: {
       createVoiceSession: () => new Promise((_, reject) => { fail = reject; }),
     } as unknown as Props["authenticatedApi"] });
-    act(() => controls.start("conversation"));
+    act(() => controls.start());
     expect(controls.state.mode).toBe("conversation");
     await act(async () => fail(new Error("Session unavailable")));
     expect(controls.state.mode).toBeNull();
     expect(controls.state.error).toBe("Session unavailable");
   });
 
-  it("keeps ended-call text for explicit review across mode changes without auto-submitting it", async () => {
+  it("keeps ended-call text for explicit review across a new call without auto-submitting it", async () => {
     const oldClient = await start();
     await transcript("Keep this draft", "old-turn");
     act(() => controls.end());
     expect(oldClient.disconnect).toHaveBeenCalledOnce();
     expect(controls.state.pendingText).toBe("Keep this draft");
-    await start("dictate");
-    act(() => controls.end());
     await start();
     await render({ agentActive: false });
     expect(sendMessage).not.toHaveBeenCalled();
@@ -244,7 +242,7 @@ describe("useVoiceChat", () => {
     expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Typed words", undefined);
   });
 
-  it("keeps speech provenance when a pending edit leaves dictated text", async () => {
+  it("keeps speech provenance when a pending edit leaves spoken text", async () => {
     await start();
     await transcript("Spoken words", "turn-1");
     act(() => controls.end());
@@ -262,19 +260,6 @@ describe("useVoiceChat", () => {
     act(() => controls.setPendingText("Spoken words", { start: 0, end: 12 }));
     await act(async () => { controls.sendPending(); });
     expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Spoken words", undefined);
-  });
-
-  it("ignores a stale dictation transcript emitted during a chat-switch layout effect", async () => {
-    const onDictation = vi.fn<Props["onDictation"]>();
-    await render({ onDictation });
-    const client = await start("dictate");
-    onLayout = () => {
-      client.emit("custommessage", {
-        type: "voice_transcript", mode: "dictate", sessionId: "session-1", text: "Wrong chat",
-      });
-    };
-    await render({ chatId: 8 });
-    expect(onDictation).not.toHaveBeenCalled();
   });
 
   it("ignores a stale idle conversation transcript emitted during a chat-switch layout effect", async () => {
@@ -354,17 +339,17 @@ describe("useVoiceChat", () => {
   });
 
   it("explains an unexpected disconnect and preserves provider errors", async () => {
-    const client = await start("dictate");
+    const client = await start();
     act(() => client.emit("connectionchange", false));
     expect(controls.state.mode).toBeNull();
     expect(controls.state.error).toBe("Voice connection closed. Start again to reconnect.");
-    const replacement = await start("dictate");
+    const replacement = await start();
     act(() => {
       replacement.emit("error", "Transcription unavailable");
       replacement.emit("connectionchange", false);
     });
     expect(controls.state.error).toBe("Transcription unavailable");
-    await start("dictate");
+    await start();
     act(() => controls.end());
     expect(controls.state.error).toBeNull();
   });
@@ -434,15 +419,11 @@ describe("useVoiceChat", () => {
     expect(controls.state.pendingText).toBe("Chat eight");
   });
 
-  it("ends conversation voice when conversation becomes unavailable but keeps dictation running", async () => {
+  it("ends a conversation when conversation becomes unavailable", async () => {
     const conversation = await start();
     await render({ conversationAvailable: false });
     expect(conversation.disconnect).toHaveBeenCalledOnce();
     expect(controls.state.mode).toBeNull();
-    const dictation = await start("dictate");
-    await render({ conversationAvailable: false });
-    expect(dictation.disconnect).not.toHaveBeenCalled();
-    expect(controls.state.mode).toBe("dictate");
   });
 
   it("disposes a conversation session that resolves after conversation becomes unavailable", async () => {
@@ -454,7 +435,7 @@ describe("useVoiceChat", () => {
         createVoiceSession: () => new Promise((next) => { resolve = next; }),
       } as unknown as Props["authenticatedApi"],
     });
-    act(() => controls.start("conversation"));
+    act(() => controls.start());
     await render({ conversationAvailable: false });
     await act(async () => {
       resolve({
@@ -719,23 +700,6 @@ describe("useVoiceChat", () => {
     expect(currentSend).toHaveBeenCalledExactlyOnceWith("Use current model", { hasSpeech: true });
   });
 
-  it("does not relay a retained turn through a newer dictation session", async () => {
-    await start();
-    await transcript("Keep this draft", "old-turn");
-    act(() => controls.end());
-    const dictation = await start("dictate");
-    await render({ agentActive: false });
-    await act(async () => {
-      controls.sendPending();
-    });
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("Keep this draft", { hasSpeech: true });
-    act(() => {
-      listener({ type: "message", message: user(10) });
-      listener({ type: "message", message: assistant(11) });
-    });
-    expect(dictation.sendJSON).not.toHaveBeenCalled();
-  });
-
   it("does not relay a retained turn through a newer conversation session", async () => {
     await start();
     await transcript("Keep this draft", "old-turn");
@@ -767,7 +731,7 @@ describe("useVoiceChat", () => {
           }),
       } as unknown as Props["authenticatedApi"],
     });
-    act(() => controls.start("conversation"));
+    act(() => controls.start());
     await render({ chatId: 8 });
     await act(async () => {
       resolve({

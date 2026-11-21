@@ -1,8 +1,9 @@
 import { haltIfAlarmsDisabled } from "@gadgets/observability/fork/alarm-guard";
 import { RpcStub } from "capnweb";
 import type { ChatReadState, ChatTimelineHead, UnreadStateScope, UnreadStateSubscriber, UserUnreadState, UnreadThread, UserUnreadSummary, WorkspaceUnreadSummary } from "@gadgets/workshop-shared/api";
-import { WorkspaceMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelKind, modelKind, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, WorkspaceMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, NotificationMute, UserNotification, type DeviceSessionHandoffStart, type WebPushSubscription, ModelReasoningInfo, WebPushSubscriptionInfo, VoiceOptions, VoicePreferences } from '@gadgets/workshop-shared/api';
-import { ActionDescription, Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, GatekeeperUserSelection, GatekeeperUserSelectionExchange, RedeemedGatekeeperUserSelection, type ConnectInitiator, type ResolveRequestedResourceResult } from "@gadgets/workshop-shared/gatekeeper";
+import { ADMIN_ACCESS_ERROR_CODES, createAdminAccessError, type AdminUserView } from "@gadgets/workshop-shared/api";
+import { WorkspaceMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, ModelKind, modelKind, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, NotificationMute, UserNotification, type DeviceSessionHandoffStart, type WebPushSubscription, ModelReasoningInfo, WebPushSubscriptionInfo, VoiceOptions, VoicePreferences } from '@gadgets/workshop-shared/api';
+import { ActionDescription, Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, GatekeeperUserSelection, GatekeeperUserSelectionExchange, RedeemedGatekeeperUserSelection, getResourceTypeId, findResourceType, type ConnectInitiator, type ResolveRequestedResourceResult } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -36,6 +37,9 @@ import {
   type DeviceSessionCredential, type DeviceSessionHandoff,
 } from "./auth/device-session-handoff.js";
 import { addWebPushSubscription, deliverWebPush, webPushPublicKey } from "./fork/web-push.js";
+import { DIRECTORY_ACTIVITY_INTERVAL_MS, type UserDirectoryActivity } from "./user-directory.js";
+import type { AdminViewTerms } from "./admin-access.js";
+import { openAdminUserView } from "./admin-user-view.js";
 
 const logger = createWorkshopLogger("workshop.user");
 
@@ -69,6 +73,12 @@ export const DEVICE_SESSION_LIFETIME_MS = 30 * 24 * 60 * 60_000;
  * it twice is harmless. "Sequence" and "visible sequence" are as described on `ChatReadCursor`.
  */
 export type ChatMessageProgress = {
+  /** Skip alerts at or before the user's first enrollment, without clearing queued approvals. */
+  notificationBaseline?: number;
+  /** Participation default for new chats. Absent on existing chats, which stay subscribed by default. */
+  hasParticipated?: boolean;
+  /** Whether this is enrolled fanout, rather than a one-off approval. Absent on legacy chats. */
+  fanoutEnrolled?: boolean;
   /** The chat's current title and latest-message preview, for the inbox. */
   head: ChatTimelineHead;
   /**
@@ -117,6 +127,8 @@ export type ChatMessageProgress = {
  * described on `ChatReadCursor`.
  */
 export type ChatReadPosition = {
+  /** Participation default for new chats. Absent on existing chats, which stay subscribed by default. */
+  hasParticipated?: boolean;
   /** The chat's current title and latest-message preview. */
   head: ChatTimelineHead;
   /** Workspace metadata time used to order otherwise identical heads. */
@@ -137,6 +149,8 @@ export type ChatReadPosition = {
 
 /** Captured chat state sent on shared-workspace admission to initialize read and alert horizons. */
 export type ChatAdmissionBaseline = {
+  /** Participation default for new chats. Absent on existing chats, which stay subscribed by default. */
+  hasParticipated?: boolean;
   /** The chat's ID within the workspace. */
   chatId: number;
   /** Earlier notifications, through this timeline sequence, are already handled. */
@@ -182,6 +196,7 @@ type ResourceResolverStub = Required<Pick<GatekeeperVendor, "resolveResourceUrl"
 type ResourceCreatorStub = Required<Pick<GatekeeperVendor, "createResource">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
 type CreationConfiguratorStub = Required<Pick<GatekeeperUser, "startCreationConfigurator">>;
+type FileSaverStub = Required<Pick<GatekeeperUser, "saveFile">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
@@ -383,21 +398,35 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  // Mirrors the profile into the deployment-wide user directory. Best-effort
-  // and does not block the caller. The `syncUser` call opens this DO's input
-  // gate, so a rename can start a second sync while one is in flight, and the
-  // two can reach the directory in either order. Each sync carries its
-  // `profileRev` and the directory keeps the highest, so no ordering is needed
-  // here. The revision counter only increases, and a failed sync leaves it
-  // behind so the next authentication retries.
-  #syncDirectory(): void {
+  // Mirrors the profile into the deployment-wide user directory, with when the
+  // account was created and, when `session` says a session is starting, its
+  // start, at most once per DIRECTORY_ACTIVITY_INTERVAL_MS. Best-effort and
+  // does not block the caller. The `syncUser` call opens this DO's input gate,
+  // so a rename can start a second sync while one is in flight, and the two can
+  // reach the directory in either order. Each sync carries its `profileRev` and
+  // the directory keeps the highest, and it keeps the latest login time it is
+  // sent: the profile converges by revision and the login time by maximum, so
+  // neither needs ordering here. `directoryRev` and `directoryLoginAt` only
+  // advance, and a failed sync leaves both behind so the next session retries.
+  #syncDirectory(session: boolean): void {
     const rev = this.storage.profileRev.get();
-    if (rev === this.storage.directoryRev.get()) return;
+    const now = Date.now();
+    const reportLogin =
+        session && now - this.storage.directoryLoginAt.get() >= DIRECTORY_ACTIVITY_INTERVAL_MS;
+    if (rev === this.storage.directoryRev.get() && !reportLogin) return;
     const profile = this.storage.profile.get();
+    const createdAt = this.storage.createdAt.get();
+    const activity: UserDirectoryActivity = {
+      ...createdAt && { created: createdAt },
+      ...reportLogin && { lastLogin: new Date(now) },
+    };
     this.ctx.exports.UserDirectoryDurableObject.getByName("")
-        .syncUser({ id: profile.id, name: profile.name }, rev)
+        .syncUser({ id: profile.id, name: profile.name }, rev, activity)
         .then(() => {
           if (rev > this.storage.directoryRev.get()) this.storage.directoryRev.put(rev);
+          if (reportLogin && now > this.storage.directoryLoginAt.get()) {
+            this.storage.directoryLoginAt.put(now);
+          }
         }, (error: unknown) => {
           logger.warn("failed to sync user directory record", {
             event: "user.directory.sync.failed",
@@ -430,7 +459,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (session.pendingUntil) {
       throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
     }
-    this.#syncDirectory();
+    this.#syncDirectory(true);
   }
 
   /**
@@ -446,13 +475,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
       // Create on first use.
       this.storage.created.put(true);
+      this.storage.createdAt.put(new Date());
       this.storage.profile.put({
         type: "user",
         name: email.split("@")[0],
         id: email,
       });
     }
-    this.#syncDirectory();
+    this.#syncDirectory(true);
     return isNew;
   }
 
@@ -585,6 +615,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     this.storage.created.put(true);
+    this.storage.createdAt.put(new Date());
     this.storage.profile.put({
       type: "user",
       name: displayName,
@@ -615,6 +646,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!this.storage.created.get()) {
       if (!allowCreate) return null;
       this.storage.created.put(true);
+      this.storage.createdAt.put(new Date());
       this.storage.profile.put({
         type: "user",
         name: email.split("@")[0],
@@ -765,6 +797,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         old.latestVisibleSequence === cursor.latestVisibleSequence &&
         old.unreadCount === cursor.unreadCount &&
         old.notifiedThroughSequence === cursor.notifiedThroughSequence &&
+        old.notificationsEnabled === cursor.notificationsEnabled &&
+        old.hasParticipated === cursor.hasParticipated &&
+        old.fanoutEnrolled === cursor.fanoutEnrolled &&
         old.notifiedEventIds?.join() === cursor.notifiedEventIds?.join() && old.deleted === cursor.deleted &&
         old.head?.chatTitle === cursor.head?.chatTitle && old.head?.latestSequence === cursor.head?.latestSequence &&
         old.head?.latestMessagePreview === cursor.head?.latestMessagePreview &&
@@ -774,13 +809,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return true;
   }
 
-  #mergeHead(current: ChatReadCursor, incoming: {head?: ChatTimelineHead; headUpdatedAt?: Date}) {
+  #mergeHead(current: ChatReadCursor, incoming: {head?: ChatTimelineHead; headUpdatedAt?: Date; hasParticipated?: boolean}) {
     let at = incoming.headUpdatedAt?.getTime(), previous = current.headUpdatedAt?.getTime();
     let newer = incoming.head && (!current.head || incoming.head.latestSequence > current.head.latestSequence ||
       (incoming.head.latestSequence === current.head.latestSequence &&
         at !== undefined && (previous === undefined || at > previous)));
-    return newer ? {head: incoming.head, headUpdatedAt: incoming.headUpdatedAt} :
-      {head: current.head, headUpdatedAt: current.headUpdatedAt};
+    return {...(newer ? {head: incoming.head, headUpdatedAt: incoming.headUpdatedAt} :
+      {head: current.head, headUpdatedAt: current.headUpdatedAt}),
+      hasParticipated: current.hasParticipated === true ? true : incoming.hasParticipated ?? current.hasParticipated};
   }
 
   #hasWorkspace(workspaceId: string): boolean {
@@ -791,6 +827,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return event.sequence < cursor.notifiedThroughSequence ||
       (event.sequence === cursor.notifiedThroughSequence &&
         (!cursor.notifiedEventIds || cursor.notifiedEventIds.includes(event.id)));
+  }
+
+  #acknowledgeNotification(cursor: ChatReadCursor, event: {sequence: number; id: string}): ChatReadCursor {
+    return this.#wasNotified(cursor, event) ? cursor : {...cursor, notifiedThroughSequence: event.sequence,
+      notifiedEventIds: [...(event.sequence === cursor.notifiedThroughSequence
+        ? cursor.notifiedEventIds ?? [] : []), event.id]};
   }
 
   // Only alert delivery awaits under the mutex. Counts and read commands commit synchronously
@@ -808,7 +850,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (scope !== "summary") {
       for (let cursor of this.#readCursors.values()) {
         if (this.#hasWorkspace(cursor.workspaceId) && !cursor.deleted &&
-            (scope === "unread" ? cursor.unreadCount > 0 : cursor.workspaceId === scope.workspaceId)) {
+            (scope === "unread" ? cursor.unreadCount > 0 && this.#chatNotificationsEnabled(cursor) : cursor.workspaceId === scope.workspaceId)) {
           chats.push(this.#readState(cursor));
         }
       }
@@ -818,7 +860,50 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   #readState(cursor: ChatReadCursor): ChatReadState {
     return {workspaceId: cursor.workspaceId, chatId: cursor.chatId,
-      readThroughSequence: cursor.readThroughSequence, unreadMessageCount: cursor.unreadCount};
+      readThroughSequence: cursor.readThroughSequence, unreadMessageCount: cursor.unreadCount,
+      ...(cursor.readThroughVisibleSequence === undefined || cursor.fanoutEnrolled === false
+        ? {readStatePending: true as const} : {}),
+      notificationsEnabled: this.#chatNotificationsEnabled(cursor),
+      notificationsEnabledOverride: cursor.notificationsEnabled};
+  }
+
+  #chatNotificationsEnabled(cursor: ChatReadCursor): boolean {
+    return cursor.notificationsEnabled ?? cursor.hasParticipated !== false;
+  }
+
+  #chatAlertEnabled(cursor: ChatReadCursor, kind: UserNotification["kind"]): boolean {
+    // Approval requests bypass the participation default, but never an explicit mute.
+    return this.#chatNotificationsEnabled(cursor) ||
+      (kind === "permissionRequested" && cursor.notificationsEnabled !== false);
+  }
+
+  // Consume alerts independently of read history, so unmuting cannot replay them.
+  #skipChatNotifications(cursor: ChatReadCursor, through = cursor.head?.latestSequence ?? -1): ChatReadCursor {
+    let events = this.#notificationChats.has(`${cursor.workspaceId}:${cursor.chatId}`)
+      ? Array.from(this.storage.notificationOutbox.list({prefix: `${cursor.workspaceId}:${chatKeyPrefix(cursor.chatId)}`})) : [];
+    for (let event of events) {
+      through = Math.max(through, event.sequence);
+      this.storage.notificationOutbox.deleteRecord(event);
+    }
+    return {...cursor,
+      notifiedThroughSequence: Math.max(cursor.notifiedThroughSequence, through), notifiedEventIds: undefined};
+  }
+
+  /** Store this user's per-chat override using an authorized workspace snapshot, without a callback. */
+  async setChatNotificationsEnabled(workspaceId: string, chatId: number, enabled: boolean,
+      baseline: Pick<ChatAdmissionBaseline, "hasParticipated" | "notifiedThroughSequence">): Promise<void> {
+    if (!this.#hasWorkspace(workspaceId)) throw new Error("Workspace is not available.");
+    let current = this.#cursor(workspaceId, chatId);
+    if (current.deleted) throw new Error("Chat has been deleted.");
+    if (current.notificationsEnabled === enabled) return;
+    this.ctx.storage.transactionSync(() => {
+      // Preference changes leave read accounting and its paired head to ordinary fanout.
+      let cursor = {...current, notificationsEnabled: enabled,
+        hasParticipated: current.hasParticipated === true ? true : baseline.hasParticipated ?? current.hasParticipated};
+      this.#storeCursor(this.#skipChatNotifications(cursor, baseline.notifiedThroughSequence));
+    });
+    this.#unreadChanged(workspaceId, chatId);
+    await this.#armExpirySweep();
   }
 
   /**
@@ -843,6 +928,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let latest = Math.max(current.latestVisibleSequence ?? 0, position.latestVisibleSequence);
     let changed = this.#storeCursor({...current, ...this.#mergeHead(current, position),
       readThroughSequence: through, readThroughVisibleSequence: visible,
+      fanoutEnrolled: true,
       latestVisibleSequence: latest, unreadCount: latest - visible,
       notifiedThroughSequence: this.#readCursors.has(key) ? current.notifiedThroughSequence : position.notificationBaseline});
     if (changed) this.#unreadChanged(workspaceId, chatId);
@@ -863,16 +949,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           if (this.#unreadWorkspaces.get(workspaceId) !== admission) return;
           let cursor = this.#readCursors.get(key);
           if (!cursor || cursor.deleted) return;
+          if (cursor.notificationsEnabled === false) {
+            this.ctx.storage.transactionSync(() => this.#storeCursor(this.#skipChatNotifications(cursor)));
+            return;
+          }
           let expired = event.expiresAt.getTime() <= Date.now();
+          let skipped = !this.#chatAlertEnabled(cursor, event.kind);
           // Arrivals deliver new work; only alarm/restart recovery retries failed destinations.
-          if (!expired && event.failedSubscriptions !== undefined && !retryFailures) continue;
-          if (!expired) {
+          if (!expired && !skipped && event.failedSubscriptions !== undefined && !retryFailures) continue;
+          if (!expired && !skipped) {
             let {sequence: _, expiresAt, failedSubscriptions, ...notification} = event;
             try {
-              await this.publishNotification(notification, expiresAt.getTime(), failedSubscriptions);
+              await this.publishNotification(notification, expiresAt.getTime(), failedSubscriptions, event.sequence);
             } catch (error) {
               if (this.#unreadWorkspaces.get(workspaceId) !== admission) return;
-              if (this.#readCursors.get(key)?.deleted) return;
+              let current = this.#readCursors.get(key);
+              if (!current || current.deleted || !this.#chatAlertEnabled(current, event.kind) ||
+                  !this.storage.notificationOutbox.get(`${workspaceId}:${chatKey(chatId, event.sequence)}:${event.id}`)) return;
               if (Date.now() < expiresAt.getTime()) {
                 let failed = error instanceof NotificationDeliveryError ? error.failedSubscriptions : failedSubscriptions;
                 failed ??= [];
@@ -894,11 +987,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           this.ctx.storage.transactionSync(() => {
             this.storage.notificationOutbox.deleteRecord(event);
             // Lower positions can remain queued for failed devices after a later event completes.
-            if (!this.#wasNotified(checkpoint, event)) {
-              this.#storeCursor({...checkpoint, notifiedThroughSequence: event.sequence,
-                notifiedEventIds: [...(event.sequence === checkpoint.notifiedThroughSequence
-                  ? checkpoint.notifiedEventIds ?? [] : []), event.id]});
-            }
+            this.#storeCursor(this.#acknowledgeNotification(checkpoint, event));
           });
         }
         if (failures.length) throw failures[0];
@@ -911,7 +1000,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** Read inbox rows directly from the user's local projection. */
   async getUnreadThreads(): Promise<UnreadThread[]> {
     return [...this.#readCursors.values()]
-      .filter(cursor => this.#hasWorkspace(cursor.workspaceId) && !cursor.deleted && cursor.unreadCount > 0)
+      .filter(cursor => this.#hasWorkspace(cursor.workspaceId) && !cursor.deleted && cursor.unreadCount > 0 && this.#chatNotificationsEnabled(cursor))
       .map(cursor => ({...this.#readState(cursor),
         chatTitle: cursor.head?.chatTitle ?? `Thread ${cursor.chatId}`,
         latestSequence: cursor.head?.latestSequence ?? -1,
@@ -938,7 +1027,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let workspaces = new Map<string, WorkspaceUnreadSummary>();
     let unreadChatCount = 0, unreadMessageCount = 0;
     for (let cursor of this.#readCursors.values()) {
-      if (!this.#hasWorkspace(cursor.workspaceId) || cursor.deleted || cursor.unreadCount <= 0) continue;
+      if (!this.#hasWorkspace(cursor.workspaceId) || cursor.deleted || cursor.unreadCount <= 0 ||
+          !this.#chatNotificationsEnabled(cursor)) continue;
       unreadChatCount++;
       unreadMessageCount += cursor.unreadCount;
       let summary = workspaces.get(cursor.workspaceId) ??
@@ -982,7 +1072,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         update = subscriber.summaryUpdated(change.summary);
       } else {
         update = subscriber.chatUpdated(change.workspaceId, change.chatId,
-          scope === "unread" && !chat?.unreadMessageCount ? null : chat, change.summary);
+          scope === "unread" && (!chat?.unreadMessageCount || !chat.notificationsEnabled) ? null : chat, change.summary);
       }
       this.ctx.waitUntil(update.catch(() => {
         this.#unreadSubscribers.delete(token);
@@ -1043,9 +1133,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /**
    * Called by a workspace when one of its chats changes (see `ChatMessageProgress`), or with null
-   * when the chat was deleted. Saves the new unread count and queues any notifications before
-   * returning, so the workspace can stop retrying. Notifications are then delivered in the
-   * background, so a slow delivery never holds up the workspace.
+   * when the chat was deleted. Saves the new unread count and
+   * queues any notifications before returning, so the workspace can stop retrying. Notifications
+   * are then delivered in the background, so a slow delivery never holds up the workspace.
    */
   async messageArrived(workspaceId: string, chatId: number, progress: ChatMessageProgress | null): Promise<void> {
     if (!this.#hasWorkspace(workspaceId)) return;
@@ -1058,16 +1148,19 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
     let cursor = this.#cursor(workspaceId, chatId);
     if (cursor.deleted) return;
-    // Metadata changes don't enroll history. Wait for a new message or an explicit command.
-    if (progress.firstMessageSequence === undefined && !this.#readCursors.has(key)) return;
+    // Preference-only rows aren't enrolled either. Wait for a new message or a read command.
+    if (progress.firstMessageSequence === undefined && cursor.readThroughVisibleSequence === undefined) return;
     let readThroughVisibleSequence = cursor.readThroughVisibleSequence;
     if (readThroughVisibleSequence === undefined) {
       readThroughVisibleSequence = (progress.firstVisibleSequence ?? progress.latestVisibleSequence + 1) - 1;
       cursor = {...cursor,
         readThroughSequence: (progress.firstMessageSequence ?? 0) - 1,
         readThroughVisibleSequence,
-        notifiedThroughSequence: this.#readCursors.has(key) ? cursor.notifiedThroughSequence :
-          (progress.firstMessageSequence ?? 0) - 1};
+        notifiedThroughSequence: this.#readCursors.has(key)
+          ? cursor.notifiedThroughSequence : (progress.firstMessageSequence ?? 0) - 1};
+    }
+    if (progress.notificationBaseline !== undefined && progress.notificationBaseline >= cursor.notifiedThroughSequence) {
+      cursor = {...cursor, notifiedThroughSequence: progress.notificationBaseline, notifiedEventIds: undefined};
     }
     let latest = Math.max(cursor.latestVisibleSequence ?? 0, progress.latestVisibleSequence);
     // Consume only a single own message when already caught up. Gaps/coalesced arrivals keep
@@ -1079,21 +1172,31 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       cursor = {...cursor, readThroughSequence: progress.head.latestSequence, readThroughVisibleSequence};
     }
     cursor = {...cursor, ...this.#mergeHead(cursor, progress), latestVisibleSequence: latest,
+      fanoutEnrolled: cursor.fanoutEnrolled === true ? true : progress.fanoutEnrolled ?? cursor.fanoutEnrolled,
       unreadCount: latest - readThroughVisibleSequence};
+    let hadNotifications = this.#notificationChats.has(key);
     let changed = this.ctx.storage.transactionSync(() => {
-      let stored = this.#storeCursor(cursor);
+      if (cursor.notificationsEnabled === false) {
+        return this.#storeCursor(this.#skipChatNotifications(cursor,
+          Math.max(progress.head.latestSequence, ...progress.notifications.map(event => event.sequence))));
+      }
+      let updated = cursor;
       for (let event of progress.notifications) {
         let eventKey = `${workspaceId}:${chatKey(chatId, event.sequence)}:${event.id}`;
         if (!this.#wasNotified(cursor, event) && !this.storage.notificationOutbox.get(eventKey)) {
-          this.storage.notificationOutbox.put({...event, workspaceId, chatId,
-            expiresAt: new Date(Date.now() + NOTIFICATION_RETRY_LIFETIME_MS)});
+          if (this.#chatAlertEnabled(cursor, event.kind)) {
+            this.storage.notificationOutbox.put({...event, workspaceId, chatId,
+              expiresAt: new Date(Date.now() + NOTIFICATION_RETRY_LIFETIME_MS)});
+          } else {
+            updated = this.#acknowledgeNotification(updated, event);
+          }
         }
       }
-      return stored;
+      return this.#storeCursor(updated);
     });
     if (changed) this.#unreadChanged(workspaceId, chatId);
+    if (hadNotifications || this.#notificationChats.has(key)) await this.#armExpirySweep();
     if (this.#notificationChats.has(key)) {
-      await this.#armExpirySweep();
       this.ctx.waitUntil(this.#processChat(workspaceId, chatId).catch(error => {
         logger.warn("notification delivery deferred", {event: "notification.delivery.deferred", error});
       }));
@@ -1163,7 +1266,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * notifiedThroughSequence only once this delivery succeeds or policy intentionally skips it.
    */
   async publishNotification(notification: UserNotification,
-      retryUntil = Date.now() + NOTIFICATION_ATTEMPT_TIMEOUT_MS, retrySubscriptions?: string[]): Promise<void> {
+      retryUntil = Date.now() + NOTIFICATION_ATTEMPT_TIMEOUT_MS, retrySubscriptions?: string[], sequence?: number): Promise<void> {
+    let chatEnabled = () => {
+      let cursor = this.#readCursors.get(`${notification.workspaceId}:${notification.chatId}`);
+      if (cursor && (cursor.deleted || !this.#chatAlertEnabled(cursor, notification.kind))) return false;
+      // A mute may have consumed this queued event while a browser was deciding whether to show it.
+      return sequence === undefined || !!this.storage.notificationOutbox.get(
+        `${notification.workspaceId}:${chatKey(notification.chatId, sequence)}:${notification.id}`);
+    };
+    if (!chatEnabled()) return;
     let mute = this.storage.gadgets.get(notification.workspaceId)?.notificationMute;
     if (notification.kind === "taskCompleted" && mute &&
         ("indefinite" in mute || mute.until.getTime() > Date.now())) {
@@ -1190,7 +1301,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           timeout = setTimeout(() => resolve(false), Math.max(1, Math.min(3_000, attemptUntil - Date.now())));
         }),
       ]).finally(() => clearTimeout(timeout));
-      if (acknowledged) return;
+      if (acknowledged || !chatEnabled()) return;
       signal.throwIfAborted();
       if (Date.now() >= attemptUntil) throw new Error("Notification delivery attempt timed out.");
       // Fork: Web Push goes beside the platform delivery, once per notification: a retry names the
@@ -1245,6 +1356,46 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
+   * Mint a deployment admin's read-only view of this account (AdminUserView), for
+   * AdminApiImpl.inspectUser(): reachable only over the Workshop's Durable Object binding, never
+   * through a capability a user holds.
+   *
+   * Refuses (`userNotFound`) an account never created, before anything else and writing nothing:
+   * reaching this object by a name no one signed up with creates no account. `reason` and `terms`
+   * arrive validated (see AdminApiImpl.inspectUser()).
+   *
+   * The open is the view's first call ("inspectUser"): it passes the view's checks (a caller no
+   * longer an admin is refused unrecorded), is recorded as refused and throws `accessOff` while
+   * the deployment's level is "off", and is otherwise recorded in the deployment-wide log before
+   * the view is returned; a record that cannot be written refuses the open.
+   *
+   * Nothing is written to this object, no session starts, the directory is not synced, no alarm
+   * is set and no gatekeeper is called: the view is handed this object's store to read, and each
+   * connected account without its gatekeeper stub. Waking the object still runs what its
+   * constructor runs for any wake, which delivers notifications already queued and re-arms a
+   * missing alarm.
+   */
+  async openForAdmin(adminId: string, reason: string, sessionId: string, terms: AdminViewTerms)
+      : Promise<AdminUserView> {
+    if (!this.storage.created.get()) {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.userNotFound);
+    }
+
+    let view = await openAdminUserView({
+      // A function, so that the view reads this object's environment at each use.
+      env: () => this.env,
+      storage: this.storage,
+      audits: this.ctx.exports.AdminAuditDurableObject,
+      // The stub is dropped here, so the view never holds one.
+      connectedAccounts: () => Array.from(
+          this.#connectedAccountRecords(), ({ account: _account, ...record }) => record),
+      nextAlarm: () => this.ctx.storage.getAlarm(),
+    }, adminId, reason, sessionId, terms);
+    logger.info("admin user view opened", { event: "admin.user.view.opened" });
+    return view;
+  }
+
+  /**
    * Called by the overseer every time a collaborator opens a shared workspace.
    * Creates the record on first open; updates lastActive on subsequent opens.
    *
@@ -1286,11 +1437,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       this.ctx.storage.transactionSync(() => {
         for (let baseline of notificationBaselines) {
           let cursor = this.#readCursors.get(`${workspaceId}:${baseline.chatId}`);
-          if (cursor?.deleted || (!cursor && !firstAdmission)) continue;
+          if (cursor?.deleted || (!firstAdmission && cursor?.readThroughVisibleSequence === undefined)) continue;
           let visible = baseline.readThroughVisibleSequence ?? 0;
           if (!cursor || cursor.readThroughVisibleSequence === undefined) {
             this.#storeCursor({workspaceId, chatId: baseline.chatId,
               head: baseline.head, headUpdatedAt: baseline.headUpdatedAt,
+              notificationsEnabled: cursor?.notificationsEnabled,
+              hasParticipated: cursor?.hasParticipated === true ? true : baseline.hasParticipated,
               readThroughSequence: baseline.notifiedThroughSequence, readThroughVisibleSequence: visible,
               latestVisibleSequence: visible, unreadCount: 0, notifiedThroughSequence: baseline.notifiedThroughSequence});
             changed = true;
@@ -1338,7 +1491,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     profile.name = name;
     this.storage.profile.put(profile);
     this.storage.profileRev.put(this.storage.profileRev.get() + 1);
-    this.#syncDirectory();
+    this.#syncDirectory(false);
   }
 
   async setOwnCommitEmail(email: string | null): Promise<void> {
@@ -1353,10 +1506,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async listModels(kind: ModelKind = "language"): Promise<AiChatAuthorInfo[]> {
-    return this.#listModels(await getGatewayModels(this.env), kind);
-  }
-
-  #listModels(models: GatewayModels | null, kind: ModelKind): AiChatAuthorInfo[] {
+    let models = await getGatewayModels(this.env);
     let result: AiChatAuthorInfo[] = [];
 
     // When AI Gateway mode is active, include the gateway models the deployment offers.
@@ -1484,7 +1634,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async setPreferredModel(id: string | null): Promise<void> {
     if (id !== null) {
-      // Any model that resolves is accepted, hidden ones included (see getExternalMessageChatContext()).
+      // Any model that resolves is accepted, hidden ones included (see
+      // AuthenticatedApi.setPreferredModel()).
       if (!this.#resolveModel(id, await getGatewayModels(this.env))) {
         throw new Error(`No such model: ${id}`);
       }
@@ -1606,10 +1757,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** DO NOT MAKE PUBLIC -- returns API keys. Pure read: call sites replay it across DO resets
    * via retryOnDoReset, so it must stay free of writes and side effects. */
   async getChatContext(modelId: string | null): Promise<UserChatContext> {
-    return this.#getChatContext(modelId, await getGatewayModels(this.env));
-  }
-
-  #getChatContext(modelId: string | null, models: GatewayModels | null): UserChatContext {
+    let models = await getGatewayModels(this.env);
     let result: UserChatContext = {
       profile: this.storage.profile.get()
     };
@@ -1631,21 +1779,6 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     result.quickModel = this.#chosenQuickModel(models)?.config ??
         models?.gateway.getQuickModelConfig();
     return result;
-  }
-
-  async getExternalMessageChatContext(existingChatModelId: string | null): Promise<UserChatContext> {
-    // An existing chat keeps its model while it still resolves, even once no longer offered. A new
-    // conversation takes the user's preferred model only while it is still offered, as the web
-    // composer does with its stored choice, and otherwise the first available model.
-    let models = await getGatewayModels(this.env);
-    let selectedModelId = existingChatModelId;
-    if (selectedModelId === null || !this.#resolveModel(selectedModelId, models)) {
-      let offered = this.#listModels(models, "language");
-      let preferredModel = this.storage.preferredModel.get();
-      selectedModelId = (offered.find(model => model.id === preferredModel) ?? offered[0])?.id ?? null;
-    }
-
-    return this.#getChatContext(selectedModelId, models);
   }
 
   /**
@@ -1686,18 +1819,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.gadgets.put(record);
   }
 
-  async getWorkspace(id: string): Promise<WorkspaceMetadata | null> {
+  /** The stored record of one of the user's workspaces, whose `created` the Overseer reads once to
+   * date a workspace older than the directory. */
+  async getWorkspace(id: string): Promise<GadgetRecord | null> {
     return this.storage.gadgets.get(id) || null;
   }
 
   async newWorkspace(id: string, title: string): Promise<void> {
     let created = new Date();
     this.storage.gadgets.put({id, title, created});
-  }
-
-  async ensureWorkspaceRegistered(id: string, title: string): Promise<void> {
-    if (this.storage.gadgets.get(id)) return;
-    await this.newWorkspace(id, title);
   }
 
   async setWorkspaceLastActive(id: string, time: Date, totalCost: number | undefined): Promise<void> {
@@ -2042,7 +2172,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
             vendor.getSupportedResources(options),
           ]);
           let enabledResources =
-              filterEnabledResources(config, id, supportedResources, description.autoProvisionsAccount === true)
+              filterEnabledResources(config, id, supportedResources, supportedResources, description.autoProvisionsAccount === true)
                   .filter(resource => resource.connectable !== false || resource.creatable);
           if (enabledResources.length === 0) {
             // No admin-enabled resource offers connection or creation — hide the vendor.
@@ -2090,7 +2220,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       config = await readAdminConfig(this.env);
       if (config.disabledGatekeepers.includes(canonicalVendorId)) return rejected();
       const enabled = filterEnabledResources(
-          config, canonicalVendorId, resources, description.autoProvisionsAccount === true);
+          config, canonicalVendorId, resources, resources, description.autoProvisionsAccount === true);
       const resource = enabled.find(candidate => candidate.urlPattern === pattern);
       return resource ? { ok: true, resource } : rejected();
     } catch {
@@ -2101,7 +2231,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  async connectAccount(vendorId: string, resourceUrlPatterns?: string[], initiator?: ConnectInitiator)
+  async connectAccount(vendorId: string, resourceTypeIds?: string[], initiator?: ConnectInitiator)
       : Promise<ConnectFlowStart> {
     let vendor = this.vendors.get(vendorId);
     if (!vendor) {
@@ -2120,7 +2250,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     let callback = this.ctx.exports.GatekeeperConnectCallbackImpl({props});
 
-    let {url} = await vendor.connectAccount(callback, {resourceUrlPatterns, initiator});
+    let usesIds = resourceTypeIds !== undefined &&
+      (await vendor.getSupportedResources({ userId: this.storage.profile.get().id }))
+        .some(resource => resource.id !== undefined);
+    let {url} = await vendor.connectAccount(callback, usesIds
+        ? {resourceTypeIds, initiator} : {resourceUrlPatterns: resourceTypeIds, initiator});
     let nonce = await this.openConnectFlow(accountId);
     logger.info("account connect started", {
       event: "account.connect.started", vendorId, accountId,
@@ -2408,16 +2542,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Make the account's grant cover the resource types `resourceUrlPatterns` names. Only the
+   * Make the account's grant cover the resource types `resourceTypeIds` names. Only the
    * gatekeeper knows what it was granted, so it decides: it returns the URL of a consent flow that
    * widens the grant, opened here as a connect flow, or no URL when the grant already covers them.
    */
   async ensureAccountResources(
-    accountId: number, resourceUrlPatterns: string[], initiator?: ConnectInitiator,
+    accountId: number, resourceTypeIds: string[], initiator?: ConnectInitiator,
   ): Promise<ConnectFlowStart | null> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
-    let { url } = await record.account.ensureResources(resourceUrlPatterns, { initiator });
+    let { url } = await record.account.ensureResources(resourceTypeIds, { initiator });
     if (url === undefined) {
       // Nothing to grant, yet callers ask for what the account's stored description doesn't list as
       // granted, so that list is out of date. A gatekeeper that renames a resource type's
@@ -2508,8 +2642,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       try {
         supportedResources = await record.account.getSupportedResources();
         supportedResources =
-            filterEnabledResources(config, record.vendorId, supportedResources, record.autoProvisioned === true);
+            filterEnabledResources(config, record.vendorId, supportedResources, supportedResources,
+              record.autoProvisioned === true);
       } catch (err) {
+        supportedResources = [];
         logger.warn("failed to get supported resources for connected account", {
           event: "connected.account.supported.resources.failed",
           accountId: record.id, vendorId: record.vendorId, error: err,
@@ -2611,18 +2747,38 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async startResourceConfigurator(
       accountId: number,
-      resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+      resourceTypeId: string): Promise<ResourceConfiguratorFrame> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
-    return record.account.startResourceConfigurator(resourceUrlPattern);
+    return record.account.startResourceConfigurator(resourceTypeId);
   }
 
-  async startCreationConfigurator(accountId: number, resourceUrlPattern: string)
+  async startCreationConfigurator(
+      accountId: number, resourceTypeId: string, purpose?: "create" | "save")
       : Promise<GatekeeperUiFrame> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
     return (record.account as unknown as CreationConfiguratorStub)
-        .startCreationConfigurator(resourceUrlPattern);
+        .startCreationConfigurator(resourceTypeId, purpose);
+  }
+
+  async saveFile(accountId: number, resourceTypeId: string, destination: string, name: string,
+      contentType: string, file: ReadableStream<Uint8Array>): Promise<{url: string}> {
+    try {
+      let record = this.storage.connectedAccounts.get(accountId);
+      if (!record) throw new Error("No such account.");
+      let resource = findResourceType(await record.account.getSupportedResources(), resourceTypeId);
+      if (!resource?.savableFrom?.includes(contentType)) {
+        throw new Error("This account cannot save that kind of file as that resource type.");
+      }
+      await this.#assertResourceEnabled(record.vendorId, resource, record.autoProvisioned === true);
+      return await (record.account as unknown as FileSaverStub)
+          .saveFile(resourceTypeId, destination, name, contentType, file);
+    } catch (err) {
+      // A refusal leaves the file unread: tell its producer now, not at its own deadline.
+      void file.cancel(err).catch(() => {});
+      throw err;
+    }
   }
 
   /**
@@ -2980,7 +3136,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async #enforceGatekeeperResourcePolicy(accountVendorId: string, resource: SupportedResource,
       ambient = false) {
     const config = await this.#enforceGatekeeperVendorPolicy(accountVendorId);
-    if (isResourceDisabled(config, accountVendorId, resource.urlPattern, ambient)) {
+    if (isResourceDisabled(config, accountVendorId, resource, [resource], ambient)) {
       throw new Error(
         `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
     }
@@ -2988,7 +3144,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getGatekeeperClassFor(accountId: number, url: string)
       : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string,
-                  typeUrlPattern: string}> {
+                  typeUrlPattern: string, resourceTypeId?: string}> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
@@ -2998,7 +3154,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let ambient = account.autoProvisioned === true;
     await this.#assertResourceEnabled(account.vendorId, resource, ambient);
     await this.#enforceGatekeeperResourcePolicy(account.vendorId, resource, ambient);
-    return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
+    return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern,
+      resourceTypeId: resource.id};
   }
 
   /**
@@ -3007,16 +3164,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * creation to queue. A suggested `configuration` must be a URL, for a type that describes one
    * (see SupportedResource.creationConfigurationDescription).
    */
-  async createResourceGatekeeper(vendorId: string, resourceUrlPattern: string, title: string,
-                                 configuration?: string)
+  async createResourceGatekeeper(
+      vendorId: string, resourceTypeId: string | undefined, title: string,
+      legacyUrlPattern?: string, configuration?: string)
       : Promise<{class: DurableObjectClass<Gatekeeper<any>>, typeUrlPattern: string,
-                  action: ActionDescription}> {
+                  resourceTypeId?: string, action: ActionDescription}> {
     let vendor = this.vendors.get(vendorId);
     if (!vendor) throw new Error(`Unknown vendor "${vendorId}".`);
-    let advertised = (await vendor.getSupportedResources({ userId: this.storage.profile.get().id }))
-        .find(r => r.urlPattern === resourceUrlPattern && r.creatable);
-    if (!advertised) {
-      throw new Error(`This vendor does not advertise creation of "${resourceUrlPattern}". ` +
+    let advertised = findResourceType(
+        await vendor.getSupportedResources({ userId: this.storage.profile.get().id }),
+        resourceTypeId, legacyUrlPattern);
+    if (!advertised?.creatable) {
+      throw new Error(`This vendor does not advertise creation of "${resourceTypeId ?? legacyUrlPattern}". ` +
           "Call listConnectableResources to see the available creations.");
     }
     let takes = advertised.creationConfigurator && advertised.creationConfigurationDescription;
@@ -3032,11 +3191,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let ambient = (await vendor.describe()).autoProvisionsAccount === true;
     await this.#assertResourceEnabled(vendorId, advertised, ambient);
     let {class: cls, resource, action} = await (vendor as unknown as ResourceCreatorStub)
-        .createResource(resourceUrlPattern, title);
-    if (resource.urlPattern !== resourceUrlPattern) {
+        .createResource(getResourceTypeId(advertised), title);
+    if (getResourceTypeId(resource) !== getResourceTypeId(advertised)) {
       throw new Error("Created resource type does not match the requested type.");
     }
-    return {class: cls, typeUrlPattern: resource.urlPattern, action};
+    return {class: cls, typeUrlPattern: resource.urlPattern,
+      resourceTypeId: resource.id, action};
   }
 
   // Block whole gatekeepers + disabled resources at the core-side chokepoints where a gatekeeper
@@ -3054,8 +3214,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           `The "${vendorId}" gatekeeper is disabled on this deployment by an administrator.`);
     }
     // Fork: `ambient` bypasses the resource check (ambient vendors have no resource toggles),
-    // but never the gatekeeper/mode block above.
-    if (isResourceDisabled(config, normalized, resource.urlPattern, ambient)) {
+    // but never the gatekeeper/mode block above. Opt-in policy needs no vendor catalog: an
+    // unmatched legacy grant enables nothing.
+    if (isResourceDisabled(config, normalized, resource, [resource], ambient)) {
       throw new Error(
           `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
     }

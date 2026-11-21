@@ -128,7 +128,7 @@ async function withOwnerOverseer(
       getChatContext: async () => ({ profile: USER }),
       setWorkspaceLastActive: async () => {},
     };
-    impl.users = { idFromString: (id: string) => id, get: () => userStub };
+    impl.users = { idFromString: (id: string) => id, idFromName: (name: string) => name, get: () => userStub };
     impl.ensureAmbientCapsules = async () => {};
     impl.syncOutputsTo = async () => true;
     // The test worker binds no BLUEPRINTS KV; the admin mirror is faked instead.

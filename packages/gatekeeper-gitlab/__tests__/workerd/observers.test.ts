@@ -644,15 +644,21 @@ describe("verifyObserverAccess", () => {
       .toEqual({ ok: ["reporter"] });
   });
 
-  it("reads the role IDs earlier releases reported as the project alone", async () => {
+  // Fork: upstream reads these IDs as the project alone; see docs/fork-maintenance.md.
+  it("holds the role IDs earlier releases reported to their role", async () => {
     const gitlab = new ObserverGitLab();
     gitlab.install();
-    const [reporter, outsider] = await Promise.all([account("reporter"), account("outsider")]);
+    const [reporter, developer, maintainer, outsider] = await Promise.all(
+        ["reporter", "developer", "maintainer", "outsider"].map(name => account(name)));
     gitlab.member("reporter", { [PROJECT_ID]: REPORTER });
+    gitlab.member("developer", { [PROJECT_ID]: DEVELOPER_LEVEL });
+    gitlab.member("maintainer", { [PROJECT_ID]: MAINTAINER_LEVEL });
     gitlab.member("outsider");
     const gk = await binding();
+    const everyone = { reporter, developer, maintainer, outsider };
 
-    expect(await gk.verify({ reporter, outsider }, [LEGACY_DEVELOPER, LEGACY_MAINTAINER])).toEqual({ ok: ["reporter"] });
+    expect(await gk.verify(everyone, [LEGACY_DEVELOPER])).toEqual({ ok: ["developer", "maintainer"] });
+    expect(await gk.verify(everyone, [LEGACY_DEVELOPER, LEGACY_MAINTAINER])).toEqual({ ok: ["maintainer"] });
   });
 
   it("fails, denying no one for good, when an outage keeps GitLab from answering", async () => {

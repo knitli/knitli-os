@@ -551,8 +551,10 @@ export class UserAccount extends DurableObject<Env> implements AccountCredential
       // A running job's log may yet become a debug trace, and its artifacts restricted, so an
       // answer allowing it is kept no longer than a denial.
       const answers = await mapLimit(subresources.map((subresource, index) => ({ subresource, ...required[index] })),
-        JOB_CHECK_CONCURRENCY, async ({ subresource, projectId, job }) =>
-          members.get(projectId)! && (job === undefined || (await this.#access.cached(subresource,
+        JOB_CHECK_CONCURRENCY, async ({ subresource, projectId, job, minAccessLevel }) =>
+          members.get(projectId)! && (minAccessLevel === undefined || await this.#access.cached(subresource,
+            projectAccessTtl, () => hasProjectMembership(this.env, this, projectId, minAccessLevel))) &&
+          (job === undefined || (await this.#access.cached(subresource,
             ({ readable, running }: JobDataAccess) =>
               readable && !running ? PROJECT_ACCESS_ALLOWED_TTL_MS : PROJECT_ACCESS_DENIED_TTL_MS,
             () => canReadJobData(this.env, this, projectId, job.data, job.jobId))).readable));
@@ -800,12 +802,12 @@ export interface GitLabVerifierApi extends GatekeeperUserVerifier {
    * id `projectId`, asked now. A reconnect mid-probe answers false; the overseer asks again on the
    * next open.
    */
-  hasProjectAccess(projectId: number): Promise<boolean>;
+  hasProjectAccess(projectId: number, minAccessLevel?: number): Promise<boolean>;
   /**
    * As hasProjectAccess, for the project at `projectPath` now: the check made before reads were
    * addressed by id, kept for what they read by path (see GitLabGatekeeperImpl.addObserver).
    */
-  hasProjectPathAccess(projectPath: string): Promise<boolean>;
+  hasProjectPathAccess(projectPath: string, minAccessLevel?: number): Promise<boolean>;
   /**
    * Whether the user's account can read each project subresource, in order, reusing recent answers
    * (see UserAccount.checkSubresourceAccess). Throws for an ID it can't check, or when access can't
@@ -817,12 +819,12 @@ export interface GitLabVerifierApi extends GatekeeperUserVerifier {
 @validateRpc()
 export class GitLabVerifier extends WorkerEntrypoint<Env, GitLabVerifierProps>
     implements GitLabVerifierApi {
-  async hasProjectAccess(projectId: number): Promise<boolean> {
-    return await hasProjectMembership(this.env, this.#account(), projectId);
+  async hasProjectAccess(projectId: number, minAccessLevel?: number): Promise<boolean> {
+    return await hasProjectMembership(this.env, this.#account(), projectId, minAccessLevel);
   }
 
-  async hasProjectPathAccess(projectPath: string): Promise<boolean> {
-    return await hasProjectMembership(this.env, this.#account(), projectPath);
+  async hasProjectPathAccess(projectPath: string, minAccessLevel?: number): Promise<boolean> {
+    return await hasProjectMembership(this.env, this.#account(), projectPath, minAccessLevel);
   }
 
   async checkSubresourceAccess(subresources: string[]): Promise<boolean[]> {

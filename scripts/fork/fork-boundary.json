@@ -241,6 +241,10 @@
       "reason": "The AI Executor gatekeeper, bound by the outer deployment rather than deployed as its own worker; zero conflict surface by construction."
     },
     {
+      "path": "packages/gatekeeper-gitlab/src/fork/",
+      "reason": "Fork-owned GitLab policy: the roles earlier releases recorded for CI data stay required of observers; upstream's files carry one-line seams into it."
+    },
+    {
       "path": "packages/gatekeeper-microsoft/src/fork/",
       "reason": "Stub Durable Object classes of the fork's retired Microsoft Worker, kept exported so its migration history stays valid; upstream has no such directory."
     },

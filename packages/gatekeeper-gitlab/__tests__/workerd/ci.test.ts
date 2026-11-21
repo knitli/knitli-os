@@ -987,11 +987,16 @@ describe("what CI reads disclose to observers", () => {
 
   describe("after CI data an earlier version marked", () => {
     // Those versions marked the binding when it read job logs or test reports, and held observers
-    // to a role for the marks; they now need only the baseline membership.
-    it.each(["ci-logs", "ci-test-reports"])("admits any member for %s", async set => {
-      const { props, name } = await setup(gateFake(), { reporter: 20 });
+    // to a role for the marks. Fork: they still do (upstream now needs only the baseline; see
+    // docs/fork-maintenance.md).
+    it.each([
+      ["job logs", "ci-logs", { below: 20, at: 30 }, /Developer role or above/],
+      ["a Maintainer's test reports", "ci-test-reports", { below: 30, at: 40 }, /Maintainer role or above/],
+    ] as const)("admits only the role %s needed", async (_, set, { below, at }, denied) => {
+      const { props, name } = await setup(gateFake(), { below, at });
       await hooks().startOnEarlierStorage(name, props, { [`observedSet:${set}`]: "observed" });
-      await observer(name, props, "reporter");
+      await expect(observer(name, props, "below")).rejects.toThrow(denied);
+      await observer(name, props, "at");
     });
 
     it.each([["the pinned id", false], ["the project its path names now", true]] as const)(

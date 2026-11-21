@@ -1718,6 +1718,27 @@ ids are facet-local, not Activity ids.
 - **Fail closed:** sending needs `EMAIL_DOMAIN` and `EMAIL_SEND_PREFIX` (administrator-set worker vars; the manifest has no input for a non-installable gatekeeper) so users cannot claim `admin@` and send as it.
 - **At sync:** Tier 2 seams in `email.ts`/`types.d.ts`; if upstream adds sending, drop this entry and the port.
 
+### GitLab: recorded CI-data roles stay required (2026-11-21)
+
+- **Where:** `packages/gatekeeper-gitlab/src/fork/legacy-ci-roles.ts` (Tier 1). Seams:
+  `project-subresources.ts` (a recorded `project/<id>/role/<role>` ID parses with a
+  `minAccessLevel`), `gitlab.ts` (`checkSubresourceAccess()` checks that level; the verifier's
+  `hasProjectAccess`/`hasProjectPathAccess` take an optional level again) and
+  `gitlab-gatekeeper.ts` (the legacy tracker's `hasCollectionAccess`/`denyMessage`).
+- **What:** upstream #1238 reports CI reads by job and, for what earlier releases recorded,
+  reads a role ID as the project alone and admits any member for the marked `ci-logs` /
+  `ci-test-reports` sets. The fork keeps the role for those records: Developer for
+  `role/developer` and `ci-logs`, Maintainer for `role/maintainer` and `ci-test-reports`. New
+  reads are upstream's, unchanged.
+- **Why:** nothing rewrites a workspace's recorded requirements, and the data read under them may
+  still be in the workspace. `REVIEW.md` asks an existing gatekeeper's migration to keep old
+  enforcement until the historical requirements are imported.
+- **Tests:** two upstream tests pinned the relaxed behaviour and are edited in place:
+  `observers.test.ts` "holds the role IDs earlier releases reported to their role" and
+  `ci.test.ts` "admits only the role %s needed" (upstream's pre-#1238 case).
+- **At sync:** Tier 2 for the seams. Drop it once a kernel importer rewrites recorded role
+  requirements as job requirements, or the maintainer accepts upstream's relaxation.
+
 ### Workshop route table
 
 - **Where:** `packages/workshop-backend/src/fork/workshop-routes.ts` (Tier 1), its snapshot `packages/workshop-backend/workshop-routes.json`, and `__tests__/knitli-workshop-routes.test.ts`. No upstream file is edited.

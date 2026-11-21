@@ -10,6 +10,7 @@
 // UserAccount.checkSubresourceAccess).
 
 import { formatSubresourceId, parseSubresourceId } from "@gadgets/gatekeeper-kit/subresource-ids";
+import { legacyRoleAccessLevel } from "./fork/legacy-ci-roles";
 
 const PROJECT_FRAGMENT = "project";
 const JOB_TRACE_FRAGMENT = "jobTrace";
@@ -27,7 +28,7 @@ const ID = /^[1-9][0-9]*$/;
 export type JobData = "trace" | "artifacts";
 
 /** A parsed project subresource: the project, and the job data it names, if any. */
-export type ProjectSubresource = { projectId: number; job?: { data: JobData; jobId: number } };
+export type ProjectSubresource = { projectId: number; job?: { data: JobData; jobId: number }; minAccessLevel?: number };
 
 function checkId(id: number, what: string): string {
   if (!Number.isSafeInteger(id) || id < 1) throw new Error(`${id} is not a GitLab ${what} id.`);
@@ -72,7 +73,7 @@ export function parseProjectSubresource(subresource: string): ProjectSubresource
   if (namespace === undefined && fragments.length <= 2 && project.name === PROJECT_FRAGMENT && projectId !== undefined) {
     if (child === undefined) return { projectId };
     if (child.name === LEGACY_ROLE_FRAGMENT && (child.id === "developer" || child.id === "maintainer")) {
-      return { projectId };
+      return { projectId, minAccessLevel: legacyRoleAccessLevel(child.id) };
     }
     const jobId = parseId(child.id);
     if (jobId !== undefined && child.name === JOB_TRACE_FRAGMENT) return { projectId, job: { data: "trace", jobId } };

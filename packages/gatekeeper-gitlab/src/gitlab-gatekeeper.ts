@@ -170,6 +170,7 @@ import { StreamingCursor, mapPage } from "./gitlab-cursors";
 import type { GitLabVerifierApi } from "./gitlab";
 import { GitLabIssueImpl, GitLabMergeRequestImpl, GitLabProjectSessionImpl } from "./gitlab-sessions";
 import { jobSubresourceId, parseProjectSubresource, projectSubresourceId } from "./project-subresources";
+import { legacyCiSetAccessLevel, legacyCiSetDenyMessage } from "./fork/legacy-ci-roles";
 import type {
   GitLabActor,
   GitLabBranchFilter,
@@ -2055,9 +2056,14 @@ export class GitLabGatekeeperImpl extends DurableObject<Env, GitLabGatekeeperImp
             `so they cannot be allowed to observe data this workspace read from it.`);
         }
       },
-      // The baseline above already holds every observer the tracker admits.
-      hasCollectionAccess: async (_verifier, setIds) => setIds.map(id => Object.hasOwn(CI_DATA_SETS, id)),
-      denyMessage: () => "This workspace has read CI data from this GitLab project that this collaborator cannot be allowed to observe.",
+      // Fork: a marked set still needs the role it was marked for (see fork/legacy-ci-roles.ts).
+      hasCollectionAccess: async (verifier, setIds) => await Promise.all(setIds.map(async setId => {
+        const level = legacyCiSetAccessLevel(setId), id = this.ctx.storage.kv.get<number>("projectId");
+        return Object.hasOwn(CI_DATA_SETS, setId) && level !== undefined &&
+          (id === undefined || await verifier.hasProjectAccess(id, level)) &&
+          await verifier.hasProjectPathAccess(this.#projectPath(), level);
+      })),
+      denyMessage: legacyCiSetDenyMessage,
     });
   }
 

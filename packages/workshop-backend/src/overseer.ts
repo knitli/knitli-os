@@ -25,7 +25,7 @@ import {
   type AdminAccessRecord, type AdminAutoApproval, type AdminChatAttachment, type AdminChatState,
   type AdminGatekeeperInfo, type AdminObserver, type AdminPendingChange,
   type AdminWorkspaceDescription, type AdminWorkspaceDiagnostics, type AdminWorkspaceMethod,
-  type AdminWorkspaceView,
+  type AdminWorkspaceView, type AdminWriteAction, type AdminWriteArgs, type AdminWriteRecord,
 } from "@gadgets/workshop-shared/api";
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange,
   MAX_CODE_CHANGE_SIZE, transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
@@ -44,7 +44,7 @@ import {
   type AiChatAgentContext, type BindingRecord,
   type BlueprintGadgetRecord, type BoundHookRecord, type ChatBindingEntry,
   type ChatChangeBoundaryRecord, type ChatChangeRecord, type ChatFanoutStart, type CompactionCheckpoint,
-  type ExternalChatRecord, type ExternalMessageRecord, type GadgetRecord, type GatekeeperCaller,
+  type GadgetRecord, type GatekeeperCaller,
   type GatekeeperClass, type GatekeeperRecord, type ObserverRecord, type OverseerStorage,
   type StoredAssistantMessage, type StoredChatMessage, type StoredChatMetadata,
   type WorkpieceRecord, type WorktreeRecord,
@@ -84,13 +84,15 @@ import WORKTREE_BINDING_TYPES from "./worktree-binding.txt";
 import EXPORTS_BINDING_TYPES from "./exports-binding.txt";
 import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminConfig } from "./admin-config";
 import {
-  adminCommitLogDepth, assertAdminViewLive, cutAdminAuditText, redactAdminAuditArgs,
-  withholdActionContent, withholdBlueprintContent, withholdChatContent, withholdCommitContent,
-  withholdCreationContent, withholdHookContent,
+  adminCommitLogDepth, adminWorkspaceWritesEnabled, assertAdminViewLive, cutAdminAuditText, redactAdminAuditArgs, validateAdminAccessReason, withholdActionContent,
+  withholdBlueprintContent, withholdChatContent, withholdCommitContent, withholdCreationContent,
+  withholdHookContent,
   type AdminViewTerms,
 } from "./admin-access";
 import { adminViewCall } from "./admin-view";
 import type { AdminAuditDurableObject } from "./admin-audit";
+import { adminWriteArgs, type AdminWriteCall } from "./admin-writes";
+import { isDeploymentAdmin } from "./auth/config";
 import { DIRECTORY_ACTIVITY_INTERVAL_MS, type UserDirectoryDurableObject } from "./user-directory";
 import { chatChangeStatuses, foldCompactedCode, isTurnPrompt } from "./agent-compaction";
 import type { CachedRequest } from "./ai-models";
@@ -121,7 +123,6 @@ import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection
 import {
   SharingManager, SharingCaller, accessIncludesGadget, accessIncludesLiveGadget,
 } from "./sharing";
-import { prepareAuthorizedChatCommit } from "./chat-commit-guard";
 import { discardInterruptedGatekeeperInitializations } from
   "./gatekeeper-initialization-recovery";
 import { runAuthorizedCollaboratorBookkeeping } from "./collaborator-bookkeeping";
@@ -136,7 +137,6 @@ import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
 import {
   abortFacetOnReset, isLoopLimitError, retryOnDoReset, shouldRetryAfterReset, wrapDoStubForTelemetry,
 } from "./do-retry";
-import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
 import type { AmbientVendorStatus, CreationApproval, GadgetExportFormat } from "@gadgets/workshop-shared/api";
 import {
   assertChatAttachmentSize,
@@ -647,32 +647,6 @@ function validateChatAttachmentId(id: string): string {
 // the gatekeeper, so no lookup is ever attempted.
 const BUILTIN_TOOL_GATEKEEPER_ID = -1;
 
-type ExternalMessageResponseTargetRegistration = {
-  idempotencyKey: string;
-  chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
-  commitGuard: () => void;
-};
-
-class ExternalMessageAccessRevokedError extends Error {}
-
-type ExternalMessageResponseTargetRegistrationDecision =
-  | {
-      reuseExisting: false;
-    }
-  | {
-      reuseExisting: true;
-      record: ExternalMessageRecord;
-    };
-
-type ExternalMessageSubmitInput = {
-  callerEmail: string;
-  externalChatKey: string;
-  idempotencyKey: string;
-  prompt: string;
-  chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>;
-  title: string;
-};
-
 // If live change rows exist whose newest author differs from a new submission's author and the
 // stream has been idle this long, the older author's rows are materialized into their own
 // "changes" message first, keeping attribution per author (see submitCodeChange).
@@ -696,8 +670,6 @@ const CHAT_CHANGE_RETIRED_TTL_MS = 60_000;
 // client-minted (a UUID satisfies this), becomes part of a storage key, and needs no other
 // structure.
 const CHAT_CHANGE_CLIENT_ID_PATTERN = /^[0-9A-Za-z_-]{1,64}$/;
-
-const AGENT_RESPONSE_DELIVERED_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 // How long after agent work becomes outstanding (a turn starts, or a call to a callable agent is
 // recorded) the keep-alive alarm fires. See #agentKeepAliveTime.
@@ -1383,19 +1355,6 @@ class OverseerImpl implements AgentHooks {
       times.push(this.#agentKeepAliveTime);
     }
 
-    // External-message responses: a ready one is delivered as soon as possible, and delivered
-    // records are swept once they age out.
-    this.#sweepDeliveredExternalMessageResponses();
-    let hasReadyExternalMessageResponse = [...this.storage.gadgetResponseDeliveries.readyByIdempotencyKey.list({ limit: 1 })]
-      .length > 0;
-    if (hasReadyExternalMessageResponse) {
-      times.push(Date.now());
-    }
-    let nextDeliveredRecord = [...this.storage.gadgetResponseDeliveries.deliveredByDeliveredAt.list({ limit: 1 })][0];
-    if (nextDeliveredRecord?.status === "delivered") {
-      times.push(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
-    }
-
     let leaseTime = this.idleLease.alarmTime();
     if (leaseTime !== undefined) times.push(leaseTime);
 
@@ -1414,7 +1373,7 @@ class OverseerImpl implements AgentHooks {
 
   // The body of the alarm handler: perform every concern the alarm exists for, together, and hold
   // the DO open until all of them are done. They run concurrently so none waits on another -- in
-  // particular a response retry never waits behind an unrelated chat's long turn -- and since work
+  // particular a chat delivery never waits behind an unrelated chat's long turn -- and since work
   // begets work (a drain starts a turn, a turn's end drains more calls), passes repeat until one
   // ends with no turn running and no drain in flight. Both checks are needed: between a turn's end
   // and the next turn's start, the only sign of work in progress is the drain (which the next pass
@@ -1423,7 +1382,7 @@ class OverseerImpl implements AgentHooks {
   // from now rather than re-firing on the time that has just passed. A delivery failure is
   // rethrown once everything else has settled. After the last retry — the platform's, or the
   // alarm guard's where the guard is what retries — schedule a fresh wake-up: a long
-  // response-target outage must not strand durable work.
+  // outage must not strand durable work.
   //
   // That work is one run, which may outlast an invocation: each holds the DO open for at most
   // ALARM_HANDLER_BUDGET_MS. When that runs out first, the invocation returns successfully and
@@ -1477,7 +1436,6 @@ class OverseerImpl implements AgentHooks {
         let results = await Promise.allSettled([
           this.waitForAllAgentsToComplete(),
           this.drainAllPendingAgentCalls(),
-          this.deliverReadyExternalMessageResponses(),
           this.deliverDirtyChats(),
           this.deliverUserUpdates(),
         ]);
@@ -1873,22 +1831,6 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  #deleteExternalMessageResponseDeliveryRecord(record: ExternalMessageRecord): void {
-    this.storage.gadgetResponseDeliveries.delete(record.idempotencyKey);
-    if (record.status !== "delivered") {
-      record.chatGatewayRpcTarget[Symbol.dispose]();
-    }
-  }
-
-  #sweepDeliveredExternalMessageResponses(): void {
-    let cutoff = Date.now() - AGENT_RESPONSE_DELIVERED_RETENTION_MS;
-    this.ctx.storage.transactionSync(() => {
-      for (let record of Array.from(this.storage.gadgetResponseDeliveries.deliveredByDeliveredAt.list({ end: cutoff }))) {
-        this.storage.gadgetResponseDeliveries.delete(record.idempotencyKey);
-      }
-    });
-  }
-
   // Resolves once no agents are running. Used by `alarm()` to keep the DO alive until all running
   // agents complete.
   async waitForAllAgentsToComplete(): Promise<void> {
@@ -2016,7 +1958,6 @@ class OverseerImpl implements AgentHooks {
           this.storage.chatMeta.put(meta);
         }
         this.#unregisterRunningAgent(record.chatId);
-        this.#deliverWaitingExternalMessageResponse(record.chatId);
         return;
       }
     }
@@ -2038,9 +1979,9 @@ class OverseerImpl implements AgentHooks {
   // The hand-off once a chat's turn is over and its running-agent state has been torn down: drop
   // the turn's live context, then deliver whatever was waiting for the chat to go idle -- steers
   // the turn never read, calls to the agent recorded during the turn (which start another turn),
-  // or failing that the response an external message is waiting on. Every path that ends a turn
-  // goes through here, so nothing sent mid-turn is stranded by the way the turn ended. `turn` is
-  // the turn that ended, absent if none ran.
+  // or failing that a turn whose awaited decision has been made (see resumeAgentAfterDecision).
+  // Every path that ends a turn goes through here, so nothing sent mid-turn is stranded by the way
+  // the turn ended. `turn` is the turn that ended, absent if none ran.
   #finishAgentTurn(chatId: number, turn?: {
     aiModel: UserAiModelRecord, initiator: AiChatAuthorInfo, initiatorUserId: string,
   }): void {
@@ -2066,9 +2007,6 @@ class OverseerImpl implements AgentHooks {
       this.drainPendingAgentCalls(chatId);
     } else {
       this.resumeAgentAfterDecision(chatId);
-      if (!this.storage.chatMeta.get(chatId)?.activeAgent) {
-        this.#deliverWaitingExternalMessageResponse(chatId);
-      }
     }
   }
 
@@ -2122,11 +2060,10 @@ class OverseerImpl implements AgentHooks {
     });
 
     // Mirror the title into the deployment directory. The title singleton is the one chokepoint
-    // every writer passes (renames, agent-chosen titles, blueprint and external-message
-    // initialisation). typed-storage runs this inside the write's transaction, before the value
-    // lands, so the revision bump is atomic with the write and the sync itself is deferred. The
-    // revision is time-based so that a workspace reinitialised under the same id (an external
-    // message names its workspace by key) outranks whatever its earlier life reported.
+    // every writer passes (renames, agent-chosen titles, blueprint initialisation). typed-storage
+    // runs this inside the write's transaction, before the value lands, so the revision bump is
+    // atomic with the write and the sync itself is deferred. The revision is time-based so that a
+    // workspace reinitialised under the same id outranks whatever its earlier life reported.
     this.storage.title.subscribe({
       update: () => {
         this.storage.titleRev.put(Math.max(this.storage.titleRev.get() + 1, Date.now()));
@@ -2201,7 +2138,6 @@ class OverseerImpl implements AgentHooks {
             "Agent interrupted due to server restart.");
         delete thread.activeAgent;
         this.storage.chatMeta.put(thread);
-        this.#deliverWaitingExternalMessageResponse(thread.id);
       }
     }
 
@@ -8237,18 +8173,11 @@ class OverseerImpl implements AgentHooks {
     initialMessage: string | SlashCommandRequest,
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
-    responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
-    externalChatKey?: string,
     formats?: MessageFormatRef[],
     effort?: string | null,
     prompt?: PromptSelection | null,
     hasSpeech?: true,
   ): Promise<number> {
-    if (responseTargetRegistration) {
-      responseTargetRegistration.commitGuard();
-      let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
-      if (decision.reuseExisting) return decision.record.chatId;
-    }
     if (typeof initialMessage !== "string" && (capsules?.length || attachments?.length)) {
       throw new Error("Slash commands cannot include resources or attachments.");
     }
@@ -8259,11 +8188,9 @@ class OverseerImpl implements AgentHooks {
     let promptRef = prompt !== undefined && prompt !== null
         ? await this.stampPromptRef(prompt) : undefined;
     let canonicalAttachments = this.canonicalizeChatAttachmentRefs(attachments);
-    let prepared = await prepareAuthorizedChatCommit(
-      () => this.#prepareChatMessage(
-          initialMessage, !!canonicalAttachments?.length, undefined, hasSpeech, !capsules?.length),
-      responseTargetRegistration?.commitGuard,
-    );
+    let prepared = await this.#prepareChatMessage(
+        initialMessage, (canonicalAttachments?.length ?? 0) > 0, undefined, hasSpeech,
+        !capsules?.length);
 
     // No code base is established at creation: gadgets pin lazily, when their code is first
     // modified in the chat (see ChatCodeBase). Until then the chat reads committed code live at
@@ -8293,29 +8220,13 @@ class OverseerImpl implements AgentHooks {
       this.storage.chatMeta.put(meta);
       this.storage.chatContext.put({...this.getChatAgentContext(chatId), attachmentsMigrated: true});
 
-      let promptSequence = this.#commitPreparedChatMessage(
+      this.#commitPreparedChatMessage(
           chatId, timestamp, userMeta.profile, prepared, capsules, canonicalAttachments, formats,
           scratchWorktree, scratchWorktree?.commitId);
-      if (responseTargetRegistration) {
-        if (promptSequence === undefined) {
-          throw new Error("External messages require a prompt.");
-        }
-        this.registerExternalMessageResponseTarget(
-          responseTargetRegistration.idempotencyKey,
-          chatId,
-          promptSequence,
-          responseTargetRegistration.chatGatewayRpcTarget,
-        );
-      }
-      if (externalChatKey) {
-        this.storage.externalChats.put({ externalChatKey, chatId });
-      }
     });
 
     if (prepared.message !== undefined && userMeta.aiModel) {
-      let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
-      this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                      clientUser.id.toString(), false, needsAgentTurnKeepAlive);
+      this.startAgent(chatId, userMeta.aiModel, userMeta.profile, clientUser.id.toString());
     }
 
     this.#titlePreparedChat(chatId, prepared, canonicalAttachments, userMeta);
@@ -8362,15 +8273,9 @@ class OverseerImpl implements AgentHooks {
     message: string | SlashCommandRequest,
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
-    responseTargetRegistration?: ExternalMessageResponseTargetRegistration,
     formats?: MessageFormatRef[],
     hasSpeech?: true,
   ): Promise<number | undefined> {
-    if (responseTargetRegistration) {
-      responseTargetRegistration.commitGuard();
-      let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
-      if (decision.reuseExisting) return decision.record.promptSequence;
-    }
     if (typeof message !== "string" && (capsules?.length || attachments?.length)) {
       throw new Error("Slash commands cannot include resources or attachments.");
     }
@@ -8378,15 +8283,8 @@ class OverseerImpl implements AgentHooks {
     this.assertChatNotActive(chatId);
     using _chatMessageReservation = this.reserveChatMessagePreparation(chatId);
     await this.#migrateChatAttachments(chatId);
-    let prepared = await prepareAuthorizedChatCommit(
-      () => this.#prepareChatMessage(
-        message,
-        (canonicalAttachments?.length ?? 0) > 0,
-        chatId,
-        hasSpeech,
-      ),
-      responseTargetRegistration?.commitGuard,
-    );
+    let prepared = await this.#prepareChatMessage(
+        message, (canonicalAttachments?.length ?? 0) > 0, chatId, hasSpeech);
 
     let attachmentFiles = await this.#prepareWorkspaceAttachmentFiles(chatId, canonicalAttachments);
     let scratchWorktree = this.#scratchWorktree(chatId);
@@ -8433,17 +8331,6 @@ class OverseerImpl implements AgentHooks {
         if (scratchWorktree && attachmentFiles.size) {
           this.#appendWorkspaceAttachments(chatId, scratchWorktree, attachmentChanges, userMeta.profile);
         }
-        if (responseTargetRegistration) {
-          if (promptSequence === undefined) {
-            throw new Error("External messages require a prompt.");
-          }
-          this.registerExternalMessageResponseTarget(
-            responseTargetRegistration.idempotencyKey,
-            chatId,
-            promptSequence,
-            responseTargetRegistration.chatGatewayRpcTarget,
-          );
-        }
       });
     } catch (error) {
       // The row appender updates disposable caches too; discard them after storage rollback.
@@ -8453,9 +8340,7 @@ class OverseerImpl implements AgentHooks {
     }
 
     if (runsAgentTurn && userMeta.aiModel) {
-      let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
-      this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                      clientUser.id.toString(), false, needsAgentTurnKeepAlive);
+      this.startAgent(chatId, userMeta.aiModel, userMeta.profile, clientUser.id.toString());
     }
     if (needsTitle) this.#titlePreparedChat(chatId, prepared, canonicalAttachments, userMeta);
     this.recordGadgetAnalytics({
@@ -8465,130 +8350,6 @@ class OverseerImpl implements AgentHooks {
       interaction_type: "chat_message_sent",
     });
     return promptSequence;
-  }
-
-  registerExternalMessageResponseTarget(
-    idempotencyKey: string,
-    chatId: number,
-    promptSequence: number,
-    chatGatewayRpcTarget: NativeRpcStub<ChatGatewayRpcTarget>,
-  ): void {
-    if (this.storage.gadgetResponseDeliveries.undeliveredByChatId.get(chatId)) {
-      throw new Error("This chat already has an undelivered workspace response target.");
-    }
-    chatGatewayRpcTarget = chatGatewayRpcTarget.dup();
-    try {
-      this.storage.gadgetResponseDeliveries.put({
-        idempotencyKey,
-        chatId,
-        promptSequence,
-        chatGatewayRpcTarget,
-        createdAt: Date.now(),
-        status: "waiting",
-      });
-    } catch (err) {
-      chatGatewayRpcTarget[Symbol.dispose]();
-      throw err;
-    }
-  }
-
-  #prepareExternalMessageResponseTargetRegistration(
-    { idempotencyKey }: ExternalMessageResponseTargetRegistration,
-  ): ExternalMessageResponseTargetRegistrationDecision {
-    let existing = this.storage.gadgetResponseDeliveries.get(idempotencyKey);
-
-    // No prior record exists for this external message, so process it as fresh.
-    if (!existing) return { reuseExisting: false };
-
-    // A prior record points at a deleted chat, so discard it and process the retry fresh.
-    if (!this.storage.chatMeta.get(existing.chatId)) {
-      this.#deleteExternalMessageResponseDeliveryRecord(existing);
-      return { reuseExisting: false };
-    }
-
-    if (existing.status === "ready") {
-      this.deliverExternalMessageResponse(existing, existing.responseText);
-    }
-    return { reuseExisting: true, record: existing };
-  }
-
-  #deliverWaitingExternalMessageResponse(chatId: number): void {
-    let response = this.storage.gadgetResponseDeliveries.undeliveredByChatId.get(chatId);
-    if (response?.status !== "waiting") return;
-
-    // Chat storage is a single ordered table for all threads; each key starts with the chat ID.
-    let messagesAfterPrompt = [...this.storage.chats.list({
-      prefix: chatKeyPrefix(chatId),
-      startAfter: chatKey(chatId, response.promptSequence),
-    })];
-    let nextUserMessageIndex = messagesAfterPrompt.findIndex(
-      message => message.type === "message" && message.author.type === "user" && !message.steered,
-    );
-    // Stop at the next user message, which starts a later turn in the same chat. A steer doesn't.
-    let messagesInSameTurn = nextUserMessageIndex === -1
-      ? messagesAfterPrompt
-      : messagesAfterPrompt.slice(0, nextUserMessageIndex);
-    // Prefer the final agent message or terminal agent error in this turn.
-    for (let message of messagesInSameTurn.toReversed()) {
-      if (
-        (message.type === "error" ||
-          (message.type === "message" && message.author.type === "agent")) &&
-        message.message.trim()
-      ) {
-        this.deliverExternalMessageResponse(response, message.message);
-        return;
-      }
-    }
-    this.deliverExternalMessageResponse(response, "Agent turn completed without a response.");
-  }
-
-  deliverExternalMessageResponse(record: ExternalMessageRecord, text: string): void {
-    if (record.status === "delivered") return;
-
-    let readyRecord: ExternalMessageRecord = { ...record, status: "ready", responseText: text };
-    this.storage.gadgetResponseDeliveries.put(readyRecord);
-    this.#updateAlarm();
-    this.ctx.waitUntil(this.#deliverExternalMessageResponseToTarget(readyRecord).finally(() => {
-      this.#updateAlarm();
-    }));
-  }
-
-  async #deliverExternalMessageResponseToTarget(record: ExternalMessageRecord): Promise<void> {
-    if (record.status !== "ready") return;
-
-    try {
-      await record.chatGatewayRpcTarget.onGadgetResponse({
-        text: record.responseText,
-      });
-    } catch (err) {
-      this.logger.error("failed to deliver external message response", {
-        event: "external.message.response.delivery.failed",
-        chatId: record.chatId,
-        error: err,
-      });
-      throw err;
-    }
-    this.storage.gadgetResponseDeliveries.put({
-      idempotencyKey: record.idempotencyKey,
-      chatId: record.chatId,
-      promptSequence: record.promptSequence,
-      status: "delivered",
-      createdAt: record.createdAt,
-      deliveredAt: Date.now(),
-    });
-    record.chatGatewayRpcTarget[Symbol.dispose]();
-  }
-
-  async deliverReadyExternalMessageResponses(): Promise<void> {
-    let readyRecords = [...this.storage.gadgetResponseDeliveries.readyByIdempotencyKey.list()];
-
-    let results = await Promise.allSettled(
-      readyRecords.map(record => this.#deliverExternalMessageResponseToTarget(record)),
-    );
-    for (let result of results) {
-      if (result.status === "rejected") throw result.reason;
-    }
-    this.#updateAlarm();
   }
 
   // Stops the chat's running agent. Its queued steers are dropped: the client that stops puts them
@@ -8900,8 +8661,7 @@ class OverseerImpl implements AgentHooks {
   // needed to re-resolve the model config on resume.
   startAgent(chatId: number, aiModel: UserAiModelRecord,
              initiator: AiChatAuthorInfo, initiatorUserId: string,
-             callbackInitiated: boolean = false,
-             keepAlive: boolean = false): void {
+             callbackInitiated: boolean = false): void {
     // Register before starting the turn so registration always precedes the turn's teardown
     // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
     this.#registerRunningAgent(chatId);
@@ -8915,9 +8675,7 @@ class OverseerImpl implements AgentHooks {
     });
 
     let liveChat = this.#getLiveChat(chatId);
-    let turn = this.#runAgentTurn(
-        chatId, aiModel, initiator, initiatorUserId, callbackInitiated, liveChat);
-    if (keepAlive) this.ctx.waitUntil(turn);
+    this.#runAgentTurn(chatId, aiModel, initiator, initiatorUserId, callbackInitiated, liveChat);
   }
 
   #runAgentTurn(chatId: number, aiModel: UserAiModelRecord,
@@ -9331,12 +9089,10 @@ class OverseerImpl implements AgentHooks {
         });
         this.postAgentErrorMessage(chatId, author,
             `Could not start the agent to handle its call(s): ${stringifyError(modelError)}`);
-        this.#deliverWaitingExternalMessageResponse(chatId);
         return;
       }
       if (!userMeta.aiModel) {
         // The spawner has no model: the calls sit in the chat for a human to pick up.
-        this.#deliverWaitingExternalMessageResponse(chatId);
         return;
       }
 
@@ -9352,7 +9108,6 @@ class OverseerImpl implements AgentHooks {
       if (author) {
         this.postAgentErrorMessage(chatId, author,
             `Failed to start the agent to handle its pending call(s): ${stringifyError(err)}`);
-        this.#deliverWaitingExternalMessageResponse(chatId);
       }
     } finally {
       // The set of pending calls changed (or a turn started): recompute the alarm.
@@ -11982,18 +11737,17 @@ class OverseerImpl implements AgentHooks {
     await work;
   }
 
-  // The authorization gate every non-owner entry point (open(), receiveExternalMessage()) must
-  // pass through: resolve the caller's effective access, then verify a "build" collaborator as an
-  // observer of everything this workspace has read. Returns null for no access; verification
-  // failures throw. Collaborators with "use" access are not verified here: what they are admitted
-  // to is a workspace shell showing nothing any gadget read, and they are verified for each gadget
-  // as they get it (see authorizeGadget). A caller that requires "build" (e.g.
-  // receiveExternalMessage) passes `requireBuild` so other access is denied *before* verification
-  // runs -- otherwise the caller would be verified (real addObserver calls, a persisted observer
-  // record) only to be turned away, or worse, told to fix a verification failure that can never
-  // grant them access. `configureCb` is forwarded to ensureObserver to prompt for unconfigured
-  // account choices; without it, verification is non-interactive and an unconfigured binding
-  // denies access.
+  // The authorization gate every non-owner entry point (open(), and resumed agent turns in
+  // #resumeAgent) must pass through: resolve the caller's effective access, then verify a "build"
+  // collaborator as an observer of everything this workspace has read. Returns null for no access;
+  // verification failures throw. Collaborators with "use" access are not verified here: what they
+  // are admitted to is a workspace shell showing nothing any gadget read, and they are verified for
+  // each gadget as they get it (see authorizeGadget). A caller that requires "build" passes
+  // `requireBuild`, which returns null for any other access: without it, a "use" collaborator's
+  // access comes back unverified and truthy. #resumeAgent relies on this to hold a resumed turn's
+  // initiator to build access. `configureCb` is forwarded to ensureObserver to prompt for
+  // unconfigured account choices; without it, verification is non-interactive and an unconfigured
+  // binding denies access.
   async authorizeCollaborator(
       profileId: string,
       clientUser: DurableObjectStub<UserDurableObject>,
@@ -12613,7 +12367,6 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    *   alarm, picking the work up yet again. Work that outlasts ALARM_HANDLER_BUDGET_MS is held
    *   open by a chain of invocations, each handing off to the next, since the runtime aborts a DO
    *   whose alarm handler runs past 15 minutes.
-   * - External-message responses ready to deliver, and delivered records due to be swept.
    *
    * See OverseerImpl.runAlarmTasks for how the concerns are run together.
    */
@@ -12911,205 +12664,94 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return view;
   }
 
-  #getExternalChat(externalChatKey: string): ExternalChatRecord | undefined {
-    let externalChat = this.impl.storage.externalChats.get(externalChatKey);
-    if (externalChat && !this.impl.storage.chatMeta.get(externalChat.chatId)) {
-      this.impl.storage.externalChats.delete(externalChat.externalChatKey);
-      externalChat = undefined;
-    }
-    return externalChat;
-  }
-
-  async receiveExternalMessage(
-    input: ExternalMessageSubmitInput,
-  ): Promise<SubmitExternalMessageResult> {
-    if (this.impl.storage.deleting.get()) return {accepted: false, message: "Workspace was deleted."};
-    if (!input.prompt.trim()) {
-      return { accepted: false, message: "Please include a prompt." };
-    }
-
-    // Resolve the caller.
-    let caller = this.impl.wrapUserDo(this.impl.users.getByName(input.callerEmail));
-    let callerId = caller.id.toString();
-    let callerProfile = await caller.whoamiIfExists();
-    if (!callerProfile) {
-      let siteName = resolveSiteName((await readAdminConfig(this.impl.env)).siteName);
-      return {
-        accepted: false,
-        message: `Please create a ${siteName} account to continue.`,
-      };
-    }
-
-    // Create the Gadget if it doesn't exist yet.
-    let ownerId = this.impl.ownerId;
-    if (!ownerId) {
-      this.impl.ownerId = callerId;
-      this.impl.ownerProfileId = callerProfile.id;
-      this.impl.storage.ownerId.put(callerId);
-      this.impl.storage.title.put(input.title);
-      this.impl.storage.ownerRegistrationPending.put(true);
-      this.#initializeNewWorkspace();
-      ownerId = callerId;
-      this.impl.recordGadgetAnalytics({
-        event_name: "gadget_created",
-        user_id: callerId,
-        source: "external_message",
-      });
+  /**
+   * Run an admin write (AdminApiImpl.writeWorkspace()). Reachable only over the Workshop's Durable
+   * Object binding, never through a capability a user holds. Reads its environment only through
+   * the OverseerImpl.
+   *
+   * As for openForAdmin(), by explicit policy the admin is not checked by authorizeCollaborator()
+   * or observer verification and joins no session, presence or outputs fan-out. Unlike
+   * openForAdmin(), a write does to the workspace what its operation does for a member.
+   *
+   * Refuses, writing and recording nothing:
+   *   - a workspace never initialised or since deleted (`workspaceNotFound`), before anything else
+   *     and again once its owner has been read;
+   *   - a malformed call (TypeError): a blank or over-long reason, a `via` that is not "api" or
+   *     "cli", or arguments that are not the action's;
+   *   - an admin who is no longer a deployment admin (`notAdmin`), and writes turned off
+   *     (`writesOff`), both read from this workspace's own environment.
+   *
+   * Then, in this order:
+   *   1. The AdminWriteRecord is appended to the deployment-wide log. A write whose record cannot
+   *      be written does not happen. Nor does one whose workspace was deleted while the record was
+   *      appended (`workspaceNotFound`): the record is kept, and nothing follows it.
+   *   2. The operation runs (see runAdminWrite()). If it throws, the error is rethrown; the
+   *      record stays.
+   * The workspace keeps no note of the write: the record is its only trace, and members see only
+   * what the operation did.
+   */
+  async applyAdminWrite(call: AdminWriteCall): Promise<void> {
+    let impl = this.impl;
+    if (!impl.ownerId) {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.workspaceNotFound);
     }
 
-    // A non-owner caller counts as a live "build" session from the moment they are authorized
-    // until this call completes: their reply is produced from whatever the workspace holds, and
-    // this path never constructs one of the counted client interfaces, so without a lease a scope
-    // widening mid-call would find no session to sever and the reply would be produced under
-    // stale verification. With it, the widening resets the DO, this call dies with it, and the
-    // caller retries. The lease deliberately starts only after authorizeCollaborator returns:
-    // verification itself is covered by that call's own internal lease, and a caller it turns
-    // away must never have counted at all -- a stranger racing an addGatekeeper would otherwise
-    // cause a needless workspace reset. The handoff between the two leases is microtask-only,
-    // the same argument as open()'s.
-    //
-    // KNOWN GAP, tolerable only while nothing calls this endpoint: this call's lease does not
-    // cover the fire-and-forget turn's initial run. A scope widening after this call returns can
-    // find no session to sever, and the reply can egress under stale verification. #resumeAgent
-    // already re-authorizes the original non-owner person and holds a build lease through a
-    // resumed run; its existing ActiveAgentRecord carries that identity. Before wiring this
-    // endpoint to real callers, give the initial run its own per-turn build lease too.
-    let leaveSession = () => {};
-    using _sessionLease = {[Symbol.dispose]: () => leaveSession()};
+    let reason = validateAdminAccessReason(call.reason);
+    if (call.via !== "api" && call.via !== "cli") {
+      throw new TypeError("An admin write's via must be \"api\" or \"cli\".");
+    }
+    let args = adminWriteArgs(call.action, call.args);
 
-    // Caller must be the owner or a build collaborator. The agent's reply can surface anything
-    // the workspace has already read (chat history, gadget storage), so a collaborator passes the
-    // same authorization gate as open() -- but non-interactively: with no way to configure
-    // accounts here, an unverified caller is sent to open the workspace, which is where
-    // verification happens. Requiring "build" up front means a "use" collaborator gets the plain
-    // denial below rather than being verified (or told to fix a verification failure) for access
-    // this path can never grant them.
-    let collaboratorSharing: SharingManager | undefined;
-    if (ownerId !== callerId) {
-      if (this.impl.isWorkspaceSharingProhibited()) {
-        return {
-          accepted: false,
-          message: "This workspace has sharing disabled, so only its owner can access it.",
-        };
-      }
-      let access: CollaboratorAccess | null;
-      try {
-        access = await this.impl.authorizeCollaborator(
-            callerProfile.id, caller, {requireBuild: true});
-      } catch (err) {
-        return {
-          accepted: false,
-          message: "Your access to the data this workspace has read could not be verified. Open " +
-              "the workspace in your browser to verify your access, then try again. " +
-              `(${stringifyError(err)})`,
-        };
-      }
-      collaboratorSharing = await this.impl.getSharingManager();
-      if (access?.role !== "build") {
-        return {
-          accepted: false,
-          message: "You do not have access to interact with this workspace through its agent.",
-        };
-      }
-      leaveSession = this.impl.joinSession({kind: "build", profileId: callerProfile.id});
+    // Read from the OverseerImpl's environment, so that the checks hold for this workspace's
+    // isolate even if the Worker that called ran an older config.
+    if (!isDeploymentAdmin(impl.env, call.admin)) {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.notAdmin);
+    }
+    if (!adminWorkspaceWritesEnabled(impl.env)) {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.writesOff);
     }
 
-    // Complete pending registration in the owner's UserDO.
-    if (this.impl.storage.ownerRegistrationPending.get()) {
-      let owner = this.impl.wrapUserDo(
-          this.impl.users.get(this.impl.users.idFromString(ownerId)));
-      await owner.ensureWorkspaceRegistered(this.ctx.id.toString(), this.impl.storage.title.get());
-      this.impl.storage.ownerRegistrationPending.put(false);
+    // Resolved before the record, so that nothing but its append is awaited between the record
+    // and the effect.
+    let ownerId = await impl.getOwnerProfileId();
+    // Deleted during that read: a deleted workspace gets no record, as for a view's call.
+    if (!impl.ownerId) {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.workspaceNotFound);
     }
 
-    // Find the external conversation's chat if it exists.
-    let externalChat = this.#getExternalChat(input.externalChatKey);
-    let modelId = null;
-    if (externalChat) {
-      // Continue existing chats with the most recent agent model used in that chat.
-      for (let msg of this.impl.storage.chats.list({ prefix: chatKeyPrefix(externalChat.chatId), reverse: true })) {
-        if (msg.author.type === "agent") {
-          modelId = msg.author.id;
-          break;
-        }
-      }
-    }
-
-    // Resolve the caller's profile and model.
-    let userContext = await caller.getExternalMessageChatContext(modelId);
-
-    // The caller must have an available agent model.
-    let aiModel = userContext.aiModel;
-    if (!aiModel) {
-      let siteName = resolveSiteName((await readAdminConfig(this.impl.env)).siteName);
-      return {
-        accepted: false,
-        message: `Your ${siteName} account needs an AI model configured before it can respond.`,
-      };
-    }
-
-    // Re-check because another request may have created the external chat while resolving the model.
-    externalChat = this.#getExternalChat(input.externalChatKey);
-
-    // Model/config resolution above releases the input gate. Re-check live collaborator authority
-    // synchronously at the chat-write boundary so a concurrent revocation cannot submit one final
-    // prompt through a retained external capability.
-    if (collaboratorSharing &&
-        (this.impl.isRevocationPaused() ||
-         collaboratorSharing.getEffectiveAccess(callerProfile.id)?.role !== "build" ||
-         this.impl.isWorkspaceSharingProhibited())) {
-      return {
-        accepted: false,
-        message: "You do not have access to interact with this workspace through its agent.",
-      };
-    }
-    let commitGuard = collaboratorSharing ? () => {
-      if (this.impl.isRevocationPaused() ||
-          collaboratorSharing.getEffectiveAccess(callerProfile.id)?.role !== "build" ||
-          this.impl.isWorkspaceSharingProhibited()) {
-        throw new ExternalMessageAccessRevokedError();
-      }
-    } : undefined;
-
-    // Submit the prompt to the existing external chat, or start a new external chat.
-    let responseTargetRegistration: ExternalMessageResponseTargetRegistration = {
-      idempotencyKey: input.idempotencyKey,
-      chatGatewayRpcTarget: input.chatGatewayRpcTarget,
-      commitGuard: commitGuard ?? (() => {}),
+    let record: AdminWriteRecord = {
+      kind: "write",
+      at: new Date(),
+      admin: call.admin,
+      sessionId: call.sessionId,
+      via: call.via,
+      workspaceId: impl.ctx.id.toString(),
+      workspaceOwner: ownerId,
+      workspaceTitle: cutAdminAuditText(impl.storage.title.get(), MAX_ADMIN_AUDIT_ARG_LENGTH),
+      method: call.action,
+      args: redactAdminAuditArgs(args),
+      reason,
     };
-    let chatId: number;
     try {
-      if (externalChat) {
-        await this.impl.sendChatMessage(
-          caller,
-          userContext,
-          externalChat.chatId,
-          input.prompt,
-          undefined,
-          undefined,
-          responseTargetRegistration,
-        );
-        chatId = externalChat.chatId;
-      } else {
-        chatId = await this.impl.newChat(
-          caller,
-          userContext,
-          input.prompt,
-          undefined,
-          undefined,
-          responseTargetRegistration,
-          input.externalChatKey,
-        );
-      }
-    } catch (error) {
-      if (!(error instanceof ExternalMessageAccessRevokedError)) throw error;
-      return {
-        accepted: false,
-        message: "You do not have access to interact with this workspace through its agent.",
-      };
+      // No retention, as for a view's call (see adminViewCall()).
+      await impl.adminAudits.getByName("").append(record);
+    } catch (err) {
+      // Nothing has changed.
+      impl.logger.warn("failed to append to the admin audit log", {
+        event: "admin.audit.append.failed", operation: call.action, error: err,
+      });
+      throw err;
+    }
+    // Deleted while the record was appended.
+    if (!impl.ownerId) {
+      throw createAdminAccessError(ADMIN_ACCESS_ERROR_CODES.workspaceNotFound);
     }
 
-    return { accepted: true, chatPath: `/workspace/${this.ctx.id.toString()}?chat=${chatId}` };
+    await runAdminWrite(impl, call.action, args);
+    // Never the reason or the arguments.
+    impl.logger.info("admin write applied", {
+      event: "admin.write.applied", operation: call.action,
+    });
   }
 
   /**
@@ -14951,7 +14593,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
     return this.impl.newChat(this.#clientUser, userMeta, initialMessage, capsules, attachments,
-                             undefined, undefined, formats, effort, prompt, hasSpeech);
+                             formats, effort, prompt, hasSpeech);
   }
 
   async sendChatMessage(
@@ -14969,8 +14611,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
     return this.impl.sendChatMessage(
-        this.#clientUser, userMeta, chatId, message, capsules, attachments, undefined, formats,
-        hasSpeech);
+        this.#clientUser, userMeta, chatId, message, capsules, attachments, formats, hasSpeech);
   }
 
   async setChatTitle(chatId: number, title: string): Promise<void> {
@@ -15040,11 +14681,6 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async deleteChat(chatId: number): Promise<void> {
     let startedAt = Date.now();
-    let response = this.impl.storage.gadgetResponseDeliveries.undeliveredByChatId.get(chatId);
-    if (response?.status === "waiting") {
-      this.impl.deliverExternalMessageResponse(response, "The chat was deleted before the agent responded.");
-    }
-
     // Delete the chat's workpiece registry footprint: provisional gadgets, all of its worktrees,
     // and provisional binding edges.
     await this.impl.removeChatWorkpieces(chatId);
@@ -16186,10 +15822,37 @@ class AdminWorkspaceViewImpl extends RpcTarget implements AdminWorkspaceView {
         storageBytes: impl.ctx.storage.sql.databaseSize,
         present: impl.presenceSnapshot(),
         nextAlarm: nextAlarm === null ? undefined : new Date(nextAlarm),
-        ownerRegistrationPending: storage.ownerRegistrationPending.get(),
       };
     });
   }
+}
+
+// Runs the operation of an admin write (see OverseerDurableObject.applyAdminWrite()): for each
+// action, the one a member's session runs for it, but for a stop that keeps the chat's queued
+// messages (see AdminApi.writeWorkspace()). `args` are as adminWriteArgs() kept them.
+async function runAdminWrite(impl: OverseerImpl, action: AdminWriteAction, args: AdminWriteArgs)
+    : Promise<void> {
+  // adminWriteArgs() checked that every argument the action needs was given.
+  let {chatId} = args as Required<AdminWriteArgs>;
+
+  switch (action) {
+    case "stopAgent":
+      impl.getChatMetaOrThrow(chatId);
+      // A stop drops the chat's queued steers, which the client that stops puts in its draft. No
+      // client stops this turn, so they are logged first, as when a turn fails: they stay in the
+      // chat as their senders' messages, and the agent reads them when it next runs.
+      impl.takeSteers(chatId);
+      impl.cancelAgent(chatId);
+      return;
+
+    case "restartWorkspace":
+      // Not awaited: the restart ends every call on the workspace, and this one is answered
+      // first.
+      impl.scheduleAccessRestart("Gadget restarted.");
+      return;
+  }
+  // Reached by no action: one without an operation above does not compile.
+  action satisfies never;
 }
 
 // Capability representing one gadget workpiece, handed to "build"-role sessions via

@@ -84,7 +84,7 @@ export const AdminGatekeeperAppsPanel = ({ admin, vendors = [], onResourcesChang
         <Button className="text-sm" ref={backButtonRef} onClick={close}>Back to connectors</Button>
       </div>
       <div role="region" aria-label={`${selected.app.title} administration`} className="h-[75vh]">
-        <SandboxedGatekeeperApp frame={selected.frame} gatekeeperVendorId={selected.app.id} title={`${selected.app.title} administration`} adminResourceControl={{ vendorId: selected.app.id, admin, onResourcesChanged }} />
+        <SandboxedGatekeeperApp frame={selected.frame} gatekeeperVendorId={selected.app.id} path="/" title={`${selected.app.title} administration`} adminResourceControl={{ vendorId: selected.app.id, admin, onResourcesChanged }} />
       </div>
     </section>
   )

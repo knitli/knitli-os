@@ -1,8 +1,8 @@
-diff --git a/dist/transform-module-Zgpw_4Fc.mjs b/dist/transform-module-Zgpw_4Fc.mjs
-index ebbaaed7236d2dd563a88ece9d32c77ed5ecad0c..a0d44c40663f51febfdf6797c1ae08967749da53 100644
---- a/dist/transform-module-Zgpw_4Fc.mjs
-+++ b/dist/transform-module-Zgpw_4Fc.mjs
-@@ -898,6 +898,13 @@ function getStubServiceType(ctx, type) {
+diff --git a/dist/transform-module-CBShdfvJ.cjs b/dist/transform-module-CBShdfvJ.cjs
+index 44e09743e99ee967b464f84c31b69351bf3c7789..c23c21c67510819a03dbf98ae4bac80937d37586 100644
+--- a/dist/transform-module-CBShdfvJ.cjs
++++ b/dist/transform-module-CBShdfvJ.cjs
+@@ -903,6 +903,13 @@ function getStubServiceType(ctx, type) {
  	let { TypeFlags } = ctx.tsm;
  	if (flags & TypeFlags.Conditional) return getProperty(ctx, type, "__RPC_STUB_BRAND") !== void 0 || hasRpcCapabilityBrand(ctx, type) ? {} : null;
  	if (!(flags & TypeFlags.Object) && !(flags & TypeFlags.Intersection)) return null;
@@ -16,7 +16,7 @@ index ebbaaed7236d2dd563a88ece9d32c77ed5ecad0c..a0d44c40663f51febfdf6797c1ae0896
  	let fetcherServiceType = getFetcherServiceType(ctx, type);
  	if (fetcherServiceType !== null) return fetcherServiceType ? { type: fetcherServiceType } : {};
  	let sym = type.getSymbol();
-@@ -913,6 +920,14 @@ function getStubServiceType(ctx, type) {
+@@ -918,6 +925,14 @@ function getStubServiceType(ctx, type) {
  	if (extendsRpcReferenceTarget(checker, type)) return { type };
  	return null;
  }
@@ -31,11 +31,11 @@ index ebbaaed7236d2dd563a88ece9d32c77ed5ecad0c..a0d44c40663f51febfdf6797c1ae0896
  function getFetcherServiceType(ctx, type) {
  	if (!isFetcherLikeType(ctx, type)) return null;
  	let serviceType = (type.aliasTypeArguments ?? [])[0];
-diff --git a/dist/transform-module-w5ITXjhk.cjs b/dist/transform-module-w5ITXjhk.cjs
-index 0ebdf71b4cef324d0bb04a1b5cf1cdd5a11cc114..319603949f96d162ef889ef8078c8a0254740a83 100644
---- a/dist/transform-module-w5ITXjhk.cjs
-+++ b/dist/transform-module-w5ITXjhk.cjs
-@@ -900,6 +900,13 @@ function getStubServiceType(ctx, type) {
+diff --git a/dist/transform-module-DwX1nVgE.mjs b/dist/transform-module-DwX1nVgE.mjs
+index 29e632e4a3a3d5f6dade6f2592e68f1c5229b3ab..8ad9b9e462f0a447b884f4e2a58ba805534b17a4 100644
+--- a/dist/transform-module-DwX1nVgE.mjs
++++ b/dist/transform-module-DwX1nVgE.mjs
+@@ -901,6 +901,13 @@ function getStubServiceType(ctx, type) {
  	let { TypeFlags } = ctx.tsm;
  	if (flags & TypeFlags.Conditional) return getProperty(ctx, type, "__RPC_STUB_BRAND") !== void 0 || hasRpcCapabilityBrand(ctx, type) ? {} : null;
  	if (!(flags & TypeFlags.Object) && !(flags & TypeFlags.Intersection)) return null;
@@ -49,7 +49,7 @@ index 0ebdf71b4cef324d0bb04a1b5cf1cdd5a11cc114..319603949f96d162ef889ef8078c8a02
  	let fetcherServiceType = getFetcherServiceType(ctx, type);
  	if (fetcherServiceType !== null) return fetcherServiceType ? { type: fetcherServiceType } : {};
  	let sym = type.getSymbol();
-@@ -915,6 +922,14 @@ function getStubServiceType(ctx, type) {
+@@ -916,6 +923,14 @@ function getStubServiceType(ctx, type) {
  	if (extendsRpcReferenceTarget(checker, type)) return { type };
  	return null;
  }

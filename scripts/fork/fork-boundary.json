@@ -402,7 +402,7 @@
     },
     {
       "path": "packages/workshop-frontend/src/features/chat/composer/ChatComposer.fork.test.tsx",
-      "reason": "Fork voice-controls, server-dictation and conversation-draft cases for the composer, kept out of upstream's ChatComposer.test.tsx so that file stays byte-identical."
+      "reason": "Fork voice-conversation cases for the composer (controls placement, conversation draft), kept out of upstream's ChatComposer.test.tsx so that file stays byte-identical."
     },
     {
       "path": "packages/workshop-frontend/src/features/chat/composer/useComposerResources.fork.test.tsx",
@@ -487,18 +487,6 @@
     {
       "path": "packages/workshop-frontend/src/features/chat/voice/",
       "reason": "Fork-owned voice chat UI (controls, settings, protocol, transport); no upstream counterpart."
-    },
-    {
-      "path": "packages/workshop-frontend/src/features/chat/composer/draft/speechRanges.ts",
-      "reason": "Fork-owned speech-range tracking for dictation; the draft/ dir is otherwise upstream's."
-    },
-    {
-      "path": "packages/workshop-frontend/src/features/chat/composer/useDictationAppendQueue.ts",
-      "reason": "Fork-owned dictation append queue; the composer dir is otherwise upstream's."
-    },
-    {
-      "path": "packages/workshop-frontend/src/homeVoiceFlow.test.tsx",
-      "reason": "Regression test for the fork-owned home voice flow."
     },
     {
       "path": "packages/workshop-frontend/src/hooks/useVoicePreview.ts",

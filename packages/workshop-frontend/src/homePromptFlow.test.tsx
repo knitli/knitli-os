@@ -11,8 +11,6 @@ const testState = vi.hoisted(() => {
   return {
     conversationDraftEmpty: true,
     composerProps: null as unknown as ComponentProps<typeof import("./features/chat/composer/ChatComposer").ChatComposer>,
-    voiceProps: null as unknown as Parameters<typeof import("./features/chat/voice/useVoiceChat").useVoiceChat>[0],
-    startVoice: vi.fn<(mode: string) => void>(),
     addToast: vi.fn<(toast: unknown) => void>(),
     authenticatedApi: { listModels, newWorkspace },
     currentUser: { id: "user-a", name: "User A" },
@@ -47,16 +45,6 @@ vi.mock("./features/chat/composer/ChatComposer", () => ({
     testState.seeds.push({ text: props.seedText, nonce: props.seedNonce });
     testState.draftStorageKeys.push(props.draftStorageKey);
     return <><textarea aria-label="Prompt" readOnly value={props.seedText ?? ""} />{typeof props.voiceControls === "function" ? props.voiceControls({ canStartConversation: () => testState.conversationDraftEmpty }) : props.voiceControls}</>;
-  },
-}));
-
-vi.mock("./features/chat/voice/useVoiceChat", () => ({
-  useVoiceChat: (props: typeof testState.voiceProps) => {
-    testState.voiceProps = props;
-    return {
-      state: { mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "" },
-      start: testState.startVoice, end: vi.fn<() => void>(), toggleMute: vi.fn<() => void>(), setPendingText: vi.fn<() => void>(), sendPending: vi.fn<() => void>(),
-    };
   },
 }));
 
@@ -97,21 +85,6 @@ describe("Home prompt route flow", () => {
     expect(testState.newWorkspace).not.toHaveBeenCalled();
     expect(testState.draftStorageKeys).toContain("gadgets:composer-draft:v1:user-a:home");
   });
-  it("appends dictation at home and preserves speech provenance when creating the chat", async () => {
-    const newChat = vi.fn<() => Promise<number>>().mockResolvedValue(0);
-    testState.newWorkspace.mockReturnValue({ newChat, getMetadata: async () => ({ id: "workspace" }), [Symbol.dispose]: vi.fn<() => void>() });
-    container = document.createElement("div");
-    root = createRoot(container);
-    await act(async () => root!.render(<HomePageContent />));
-    await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Start dictation"]')!.click());
-    expect(testState.startVoice).toHaveBeenCalledWith("dictate");
-    expect(testState.newWorkspace).not.toHaveBeenCalled();
-    await act(async () => testState.voiceProps.onDictation("Spoken request"));
-    expect(testState.composerProps.appendText).toMatchObject({ text: "Spoken request", chatKey: null });
-    await act(async () => testState.composerProps.onSend("Spoken request", "model", undefined, undefined, undefined, { hasSpeech: true }));
-    expect(newChat).toHaveBeenCalledWith("Spoken request", "model", undefined, undefined, undefined, undefined, undefined, true);
-  });
-
   it("creates an empty chat and carries one-shot conversation intent only after creation succeeds", async () => {
     testState.listModels.mockResolvedValue([{ id: "model" }]);
     const newChat = vi.fn<() => Promise<number>>().mockResolvedValue(0);
@@ -121,7 +94,6 @@ describe("Home prompt route flow", () => {
     await act(async () => root!.render(<HomePageContent />));
     await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Start conversation"]')!.click());
     expect(newChat).toHaveBeenCalledExactlyOnceWith("", "model");
-    expect(testState.startVoice).not.toHaveBeenCalled();
     const navigation = testState.navigate.mock.calls.at(-1)![0] as { search: unknown; state: (previous: object) => object };
     expect(navigation.search).toEqual({ chat: 0 });
     expect(navigation.state({})).toEqual({ startVoiceChat: { chatId: 0, modelId: "model" } });
@@ -136,7 +108,6 @@ describe("Home prompt route flow", () => {
     await act(async () => root!.render(<HomePageContent />));
     await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Start conversation"]')!.click());
     expect(testState.navigate).not.toHaveBeenCalled();
-    expect(testState.startVoice).not.toHaveBeenCalled();
     expect(testState.addToast).toHaveBeenCalledWith({ title: "Failed to start conversation", variant: "error" });
     await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Start conversation"]')!.click());
     expect(newChat).toHaveBeenCalledTimes(2);
@@ -183,7 +154,6 @@ describe("Home prompt route flow", () => {
     await act(async () => testState.composerProps.onModelChange(modelId));
     await act(async () => resolveChat(0));
     expect(testState.navigate).not.toHaveBeenCalled();
-    expect(testState.startVoice).not.toHaveBeenCalled();
     if (modelId === null) await act(async () => testState.composerProps.onModelChange("other-model"));
     await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Start conversation"]')!.click());
     const navigation = testState.navigate.mock.calls.at(-1)![0] as { state: (previous: object) => object };
@@ -191,7 +161,7 @@ describe("Home prompt route flow", () => {
     expect(newChat).toHaveBeenCalledTimes(1);
   });
 
-  it.each([false, true])("sends the draft through the cached voice chat after navigation failure (slash command: %s)", async (slashCommand) => {
+  it.each([false, true])("sends the draft through the cached conversation chat after navigation failure (slash command: %s)", async (slashCommand) => {
     testState.listModels.mockResolvedValue([{ id: "model" }]);
     const newChat = vi.fn<() => Promise<number>>().mockResolvedValue(0);
     const sendChatMessage = vi.fn<() => Promise<number>>().mockResolvedValue(1);
@@ -207,11 +177,9 @@ describe("Home prompt route flow", () => {
     } }];
     const attachments = slashCommand ? undefined : [{ id: "uploaded-attachment" }];
     const formats = [{ position: 4, length: 5, noun: "draft", icon: "fileText" as const }];
-    await act(async () => testState.composerProps.onSend(message, null, capsules, attachments, formats, { hasSpeech: true }));
+    await act(async () => testState.composerProps.onSend(message, null, capsules, attachments, formats));
     expect(newChat).toHaveBeenCalledExactlyOnceWith("", "model");
-    expect(sendChatMessage).toHaveBeenCalledExactlyOnceWith(0,
-      slashCommand ? { ...message as object, hasSpeech: true } : message,
-      null, capsules, attachments, formats, slashCommand ? undefined : true);
+    expect(sendChatMessage).toHaveBeenCalledExactlyOnceWith(0, message, null, capsules, attachments, formats);
     expect(testState.newWorkspace).toHaveBeenCalledTimes(1);
     expect(testState.navigate).toHaveBeenLastCalledWith({ to: "/workspace/$id", params: { id: "workspace" }, search: { chat: 0 } });
   });
@@ -228,7 +196,6 @@ describe("Home prompt route flow", () => {
     testState.conversationDraftEmpty = false;
     await act(async () => resolveChat(0));
     expect(testState.navigate).not.toHaveBeenCalled();
-    expect(testState.startVoice).not.toHaveBeenCalled();
   });
 
   it("does not navigate or start capture if Home unmounts while creating the chat", async () => {
@@ -245,7 +212,6 @@ describe("Home prompt route flow", () => {
     await act(async () => root!.render(null));
     await act(async () => resolveChat(0));
     expect(testState.navigate).not.toHaveBeenCalled();
-    expect(testState.startVoice).not.toHaveBeenCalled();
   });
 
 });

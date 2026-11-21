@@ -819,17 +819,28 @@ authorizes a read after fetching it.
   against collaborators and share links, not admins. Adopted unchanged; whether an owner-only
   workspace should also be withheld from admin inspection (or only its titles and file names) is a
   product decision for the maintainer.
-- **Voice typing: the fork's dictation and upstream's on-device one (open since 2026-11-21).**
-  Upstream #1216 adds on-device voice typing to the composer (the browser's `SpeechRecognition`
-  with `processLocally`, a strip of dictated words below the draft, `useComposerDictation`). The
-  fork already has its own voice controls there (`features/chat/voice/`, server speech models
-  through `VoiceSession`: dictation in any browser, plus conversation mode). Two microphone buttons
-  side by side would be a product choice, so the sync keeps what users see today: upstream's code
-  is merged whole, and its button renders only when the composer is given no `voiceControls`
-  (one `&& !voiceControls` in `ChatComposer.tsx`). Both Workshop composers pass the fork's
-  controls, so upstream's button is currently never shown there. For the maintainer: keep the
-  fork's dictation, switch dictation to upstream's and keep only the fork's conversation mode, or
-  offer both (for example upstream's when no speech model is configured).
+- **Voice typing is upstream's; voice conversation stays the fork's (decided 2026-11-21,
+  maintainer).** Upstream #1216 added on-device voice typing to the composer (the browser's
+  `SpeechRecognition` with `processLocally`, a strip of dictated words below the draft,
+  `useComposerDictation`). The fork's server-side dictation is retired in its favour; its
+  conversation mode (`features/chat/voice/`, `VoiceSession`) is kept.
+  - **Removed:** the dictate mode of `useVoiceChat` (`start()` now always opens a conversation)
+    and its button in `VoiceControls`; `useDictationAppendQueue.ts`; the composer's
+    `appendText`/`onAppendTextApplied`/`isDictating` props and every `isDictating` gate; the
+    main draft's speech-range tracking (`useComposerDraft`, `composerDraft`, `composerDocument`
+    and their tests are byte-identical to upstream again); the home page's `useVoiceChat` (the
+    home controls only launch a conversation, so they render an idle state); the "Dictation"
+    model row in the voice settings dialog and the admin voice panel; `homeVoiceFlow.test.tsx`.
+    `speechRanges.ts` moved to `features/chat/voice/`, the conversation draft being its one user.
+  - **Seams in `ChatComposer.tsx`:** upstream's voice-typing button is disabled while a voice
+    conversation holds the composer, and `canStartConversation()` is false while dictated words
+    are shown but not yet added (`dictationShownRef`). Pinned by `ChatComposer.fork.test.tsx`.
+  - **Given up:** a message written by voice typing is no longer marked `hasSpeech`, so the agent
+    no longer gets the transcription note (`withTranscriptionContext`) for it; conversation turns
+    still carry it. Re-adding it would mean tracking dictated ranges in the draft again.
+  - **Left for a kernel PR:** `VoiceSession`'s `dictate` mode, `VoiceMode`'s `"dictate"` and the
+    `dictationStt` preference and admin default are unused by the UI now. Removing them changes
+    `workshop-shared`'s API and the backend, so it belongs in its own reviewed change.
 - **Seams added by the 2026-11-21 sync (foundation `b84d5842`).**
   - **Retired with upstream #1188 (external message gateway removed):** the fork's hardening of
     that path has nothing left to guard. Deleted: `chat-commit-guard.ts`
@@ -856,10 +867,10 @@ authorizes a read after fetching it.
     the private `#dispose` behind `GatekeeperAppHostImpl.controls()`. Admin frames pass
     `path="/"` and still reach the host only through `AdminGatekeeperAppRpcTarget`, which does
     not expose `subscribePath`/`navigatePath`, so an admin frame cannot navigate the Workshop.
-  - `ChatComposer.test.tsx` is byte-identical to upstream again: the fork's voice, dictation and
-    conversation-draft cases moved to the Tier-1 `ChatComposer.fork.test.tsx` (they conflicted
-    with upstream's dictation tests), including a copy of the add-connection case that carries
-    the fork's `canStartConversation` assertions.
+  - `ChatComposer.test.tsx` is byte-identical to upstream again: the fork's voice-conversation
+    cases moved to the Tier-1 `ChatComposer.fork.test.tsx` (they conflicted with upstream's
+    voice-typing tests), including a copy of the add-connection case that carries the fork's
+    `canStartConversation` assertions.
   - `patches/capnweb-validate@0.3.2.patch` replaces the `0.3.0` one (upstream #1252 bumped
     capnweb to 0.13.1 and capnweb-validate to 0.3.2, which still wraps native Workers
     capabilities). Same two hunks, re-made with `pnpm patch` against the new hashed file names.

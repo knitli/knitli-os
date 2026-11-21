@@ -6,7 +6,7 @@ import {
   speechRangesAfterTextEdit,
   type SpeechRange,
   type SpeechTextSelection,
-} from "../composer/draft/speechRanges";
+} from "./speechRanges";
 import { VoiceSessionTransport, voiceWebSocketUrl } from "./voiceProtocol";
 import { resumeConnection } from "../../../connectionPause";
 import type { VoiceControlsState } from "./VoiceControls";
@@ -25,7 +25,6 @@ export const useVoiceChat = ({
   authenticatedApi,
   chatId,
   agentActive,
-  onDictation,
   sendMessage,
   subscribeToEvents,
   conversationAvailable = true,
@@ -34,7 +33,6 @@ export const useVoiceChat = ({
   authenticatedApi: RpcStub<AuthenticatedApi>;
   chatId: number | null;
   agentActive: boolean;
-  onDictation: (text: string, segment?: { segmentId: number; final: boolean }) => void;
   sendMessage: (text: string, metadata?: { hasSpeech?: boolean }) => Promise<number | undefined>;
   subscribeToEvents: (listener: (event: VoiceChatEvent) => void) => () => void;
   conversationAvailable?: boolean;
@@ -50,15 +48,13 @@ export const useVoiceChat = ({
   const sessionIdRef = useRef<string | null>(null);
   const sessionChatRef = useRef<number | null>(null);
   const modeRef = useRef<VoiceMode | null>(null);
-  const nextDictationSegment = useRef(0);
-  const dictationSegment = useRef<{ id: number; text: string; deliver: typeof onDictation } | null>(null);
   const interimRef = useRef("");
   const chatIdRef = useRef(chatId);
   const responseRelayRef = useRef(new VoiceResponseRelay());
   const queuedConversationRef = useRef<QueuedConversation | null>(null);
   const queuedConversationsRef = useRef(new Map<number, QueuedConversation>());
   const displayedChatRef = useRef(chatId);
-  const callbacksRef = useRef({ onDictation, sendMessage });
+  const callbacksRef = useRef({ sendMessage });
   const activeRef = useRef(agentActive);
   const generationRef = useRef(0);
   const startingRef = useRef(false);
@@ -66,7 +62,7 @@ export const useVoiceChat = ({
   const submissionAvailableRef = useRef(submissionAvailable);
   chatIdRef.current = chatId;
   activeRef.current = agentActive;
-  callbacksRef.current = { onDictation, sendMessage };
+  callbacksRef.current = { sendMessage };
   submissionAvailableRef.current = submissionAvailable;
   if (displayedChatRef.current !== chatId) {
     queuedConversationRef.current = chatId === null ? null : queuedConversationsRef.current.get(chatId) ?? null;
@@ -79,9 +75,6 @@ export const useVoiceChat = ({
   };
 
   const release = () => {
-    const segment = dictationSegment.current;
-    dictationSegment.current = null;
-    if (segment && sessionChatRef.current === chatIdRef.current) segment.deliver(segment.text, { segmentId: segment.id, final: true });
     if (modeRef.current === "conversation" && interimRef.current && sessionIdRef.current && sessionChatRef.current !== null) {
       const previous = queuedConversationsRef.current.get(sessionChatRef.current);
       const text = previous ? `${previous.text}\n${interimRef.current}` : interimRef.current;
@@ -269,8 +262,10 @@ export const useVoiceChat = ({
     setState((current) => ({ ...current, mode: null, status: "idle", muted: false }));
   }, [conversationAvailable]);
 
-  const start = (mode: VoiceMode) => {
-    if ((mode === "conversation" && (chatId === null || !conversationAvailable)) || modeRef.current !== null || startingRef.current) return;
+  // Dictation is the composer's own on-device voice typing; a session here is always a conversation.
+  const start = () => {
+    const mode: VoiceMode = "conversation";
+    if (chatId === null || !conversationAvailable || modeRef.current !== null || startingRef.current) return;
     startingRef.current = true;
     resumeConnection();  // the session is created over the API connection; wake it if paused
     startingModeRef.current = mode;
@@ -329,17 +324,7 @@ export const useVoiceChat = ({
           if (generation !== generationRef.current || chatIdRef.current !== sessionChatId) return;
           // The SDK clears interim immediately before delivering the final transcript.
           // Keep the current segment until that final arrives or the user stops.
-          if (interimTranscript?.trim()) {
-            interimRef.current = interimTranscript.trim();
-            if (mode === "dictate") {
-              const segment = dictationSegment.current ?? {
-                id: ++nextDictationSegment.current, text: "", deliver: callbacksRef.current.onDictation,
-              };
-              segment.text = interimRef.current;
-              dictationSegment.current = segment;
-              segment.deliver(segment.text, { segmentId: segment.id, final: false });
-            }
-          }
+          if (interimTranscript?.trim()) interimRef.current = interimTranscript.trim();
           if (interimTranscript !== null) setState((current) => ({ ...current, interimTranscript }));
         });
         client.addEventListener("voiceerror", (error) => {
@@ -359,13 +344,7 @@ export const useVoiceChat = ({
           if (event.type !== "voice_transcript" || event.sessionId !== connection.id || !event.text?.trim()) return;
           interimRef.current = "";
           setState((current) => ({ ...current, interimTranscript: null }));
-          if (event.mode === "dictate") {
-            const segment = dictationSegment.current;
-            dictationSegment.current = null;
-            if (segment) segment.deliver(event.text.trim(), { segmentId: segment.id, final: true });
-            else callbacksRef.current.onDictation(event.text.trim());
-          }
-          else if (event.mode === "conversation" && event.turnId) {
+          if (event.mode === "conversation" && event.turnId) {
             if (activeRef.current || submittingRef.current || !submissionAvailableRef.current ||
                 queuedConversationRef.current?.sessionId === connection.id) {
               const previous = queuedConversationRef.current;

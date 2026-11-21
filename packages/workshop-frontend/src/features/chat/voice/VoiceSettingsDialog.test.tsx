@@ -77,6 +77,7 @@ const toastState = vi.hoisted(() => {
 })
 
 const FLUX = '@cf/deepgram/flux'
+const NOVA = '@cf/deepgram/nova-3'
 
 function apiStub(preferences: VoicePreferences = {}) {
   const options: VoiceOptions = {
@@ -138,9 +139,9 @@ describe('VoiceSettingsDialog', () => {
 
   it('shows the effective selection with the admin default marked', async () => {
     await render(apiStub())
-    // Dictation resolves to the admin default (Nova 3), marked as the default.
-    expect(radio(host, 'Nova 3Default').getAttribute('aria-checked')).toBe('true')
-    expect(radio(host, 'Flux').getAttribute('aria-checked')).toBe('false')
+    // Conversation input resolves to the admin default (Flux), marked as the default.
+    expect(radio(host, 'FluxDefault').getAttribute('aria-checked')).toBe('true')
+    expect(radio(host, 'Nova 3').getAttribute('aria-checked')).toBe('false')
     const voice = host.querySelector('[aria-label="Voice"]') as HTMLSelectElement
     expect(voice.value).toBe('luna')
   })
@@ -148,11 +149,10 @@ describe('VoiceSettingsDialog', () => {
   it('changing a role saves the new pick', async () => {
     const api = apiStub()
     await render(api)
-    // First Flux radio is the dictation section's.
-    await act(async () => radio(host, 'Flux').click())
+    await act(async () => radio(host, 'Nova 3').click())
     expect(api.setVoicePreferences).toHaveBeenCalledOnce()
     expect(api.setVoicePreferences).toHaveBeenCalledWith(
-        expect.objectContaining({ dictationStt: FLUX }))
+        expect.objectContaining({ conversationStt: NOVA }))
   })
 
   it('switching the conversation voice model clears the speaker', async () => {
@@ -172,9 +172,9 @@ describe('VoiceSettingsDialog', () => {
   it('switching a transcription model keeps the speaker', async () => {
     const api = apiStub({ voice: 'zeus' })
     await render(api)
-    await act(async () => radio(host, 'Flux').click())
+    await act(async () => radio(host, 'Nova 3').click())
     expect(api.setVoicePreferences).toHaveBeenCalledWith(
-        expect.objectContaining({ dictationStt: FLUX, voice: 'zeus' }))
+        expect.objectContaining({ conversationStt: NOVA, voice: 'zeus' }))
   })
 
   it('resetting clears every pick back to the defaults', async () => {
@@ -205,7 +205,7 @@ describe('VoiceSettingsDialog', () => {
     const api = apiStub()
     api.setVoicePreferences.mockRejectedValueOnce(new Error('Voice model "x" is not offered.'))
     await render(api)
-    await act(async () => radio(host, 'Flux').click())
+    await act(async () => radio(host, 'Nova 3').click())
     expect(toastState.titles).toEqual(['Voice model "x" is not offered.'])
     expect(api.getVoiceOptions).toHaveBeenCalledTimes(2)
   })

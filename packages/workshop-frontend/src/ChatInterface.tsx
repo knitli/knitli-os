@@ -166,7 +166,6 @@ import { appliedBlueprintMerges } from "./features/blueprint-updates/blueprintPr
 import { VoiceControls } from "./features/chat/voice/VoiceControls";
 import { VoiceSettingsDialog } from "./features/chat/voice/VoiceSettingsDialog";
 import { useVoiceChat } from "./features/chat/voice/useVoiceChat";
-import { useDictationAppendQueue } from "./features/chat/composer/useDictationAppendQueue";
 
 /**
  * The selected chat's live (accepted but not yet materialized) change row stream, delivered via
@@ -2731,7 +2730,6 @@ function ChatInterface({
       | { type: "message"; message: AiChatMessage }
       | { type: "activity"; chatId: number; active: boolean }
       | { type: "generation"; chatId: number }) => void>());
-  const dictationAppend = useDictationAppendQueue();
   // Last server-instance generation seen (survives reconnects). Used to detect a full DO restart,
   // in which case in-flight provisional streams were lost and must be discarded. See
   // AiChatSubscriber.streamGeneration.
@@ -4324,9 +4322,6 @@ function ChatInterface({
     authenticatedApi,
     chatId: selectedChatId,
     agentActive: isAgentActive,
-    onDictation: (text, segment) => {
-      dictationAppend.enqueue(text, selectedChatId, segment?.segmentId, segment?.final);
-    },
     sendMessage: sendVoiceMessage,
     subscribeToEvents: subscribeToChatEvents,
     conversationAvailable: selectedChatId !== null && selectedModel !== null,
@@ -4343,7 +4338,7 @@ function ChatInterface({
         !availableModels.some((model) => model.id === selectedModel)) return;
     startedVoiceRequestRef.current = voiceStartRequest;
     initialVoice!.onConsumed();
-    voice.start("conversation");
+    voice.start();
   }, [voiceStartRequest, selectedChatId, isSubscribed, chatListReady, selectedModel, availableModels, initialVoice, voice.start]);
 
   // Handle creating a new chat from the sidebar (always creates, never sends to existing)
@@ -7183,9 +7178,6 @@ function ChatInterface({
                     }
                     getOverseer={getOverseer}
                     onSend={handleSend}
-                    appendText={dictationAppend.appendForChat(selectedChatId)}
-                    onAppendTextApplied={dictationAppend.acknowledge}
-                    isDictating={voice.state.mode === "dictate"}
                     conversationDraft={voice.state.pendingText || voice.state.mode === "conversation" ? {
                       text: voice.state.mode === "conversation" && !voice.state.error ? "" : voice.state.pendingText,
                       readOnly: voice.starting || voice.state.mode === "conversation" && (!voice.state.error || !!voice.state.interimTranscript),
@@ -7227,10 +7219,10 @@ function ChatInterface({
                         <VoiceControls
                           state={voice.state}
                           disabled={hasPendingConnectionRequest || hasPendingAwaitedAction}
-                          onStart={(mode) => {
-                            if (mode === "dictate" || canStartConversation()) voice.start(mode);
+                          onStart={() => {
+                            if (canStartConversation()) voice.start();
                           }}
-                          conversationBlockedReason={!canStartConversation() ? "Send or clear the draft before starting a conversation." : undefined}
+                          conversationBlockedReason={!canStartConversation() ? "Send or clear the draft and any dictated words before starting a conversation." : undefined}
                           onEnd={voice.end}
                           onMute={voice.toggleMute}
                           conversationAvailable={selectedChatId !== null && selectedModel !== null}

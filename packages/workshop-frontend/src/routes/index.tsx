@@ -27,12 +27,13 @@ import { useDocumentTitle } from "../useDocumentTitle";
 import { homePromptFromSearch } from "../homePrompt";
 import { composerDraftStorageKey } from "../features/chat/composer/draft/composerDraft";
 
-import { VoiceControls } from "../features/chat/voice/VoiceControls";
+import { VoiceControls, type VoiceControlsState } from "../features/chat/voice/VoiceControls";
 import { VoiceSettingsDialog } from "../features/chat/voice/VoiceSettingsDialog";
-import { useVoiceChat } from "../features/chat/voice/useVoiceChat";
-import { useDictationAppendQueue } from "../features/chat/composer/useDictationAppendQueue";
 
-const subscribeToNoChatEvents = () => () => {};
+// A conversation starts in the workspace it creates, so the home page's voice controls stay idle.
+const IDLE_VOICE: VoiceControlsState = {
+  mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "",
+};
 
 type HomeSearch = {
   prompt?: string;
@@ -141,7 +142,6 @@ export function HomePageContent({ prompt }: HomeSearch) {
       capsules?: CapsuleSpecifier[],
       attachments?: ChatAttachmentHandle[],
       formats?: MessageFormatRef[],
-      submissionMeta?: { hasSpeech: boolean },
     ) => {
       try {
         ensureProvisionalGadget();
@@ -149,14 +149,12 @@ export function HomePageContent({ prompt }: HomeSearch) {
         setStartingConversation(false);
         const provisional = provisionalOverseerRef.current!;
         const overseer = provisional.stub;
-        const submittedMessage = submissionMeta?.hasSpeech && typeof message !== "string" ? { ...message, hasSpeech: true as const } : message;
-        const hasSpeech = submissionMeta?.hasSpeech && typeof message === "string" ? true : undefined;
         const existingChat = provisional.voiceChat ? await provisional.voiceChat : undefined;
         // Pipeline both independent calls in one batch, but settle both before releasing the stub.
         const [chat, {id}] = await Promise.all([
           existingChat !== undefined
-            ? overseer.sendChatMessage(existingChat, submittedMessage, modelId, capsules, attachments, formats, hasSpeech).then(() => existingChat)
-            : overseer.newChat(submittedMessage, modelId, capsules, attachments, formats, undefined, undefined, hasSpeech),
+            ? overseer.sendChatMessage(existingChat, message, modelId, capsules, attachments, formats).then(() => existingChat)
+            : overseer.newChat(message, modelId, capsules, attachments, formats),
           overseer.getMetadata(),
         ]);
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
@@ -184,19 +182,8 @@ export function HomePageContent({ prompt }: HomeSearch) {
     [ensureProvisionalGadget, navigate, toasts],
   );
 
-  const dictationAppend = useDictationAppendQueue();
-  const voice = useVoiceChat({
-    authenticatedApi,
-    chatId: null,
-    agentActive: false,
-    onDictation: (text, segment) => dictationAppend.enqueue(text, null, segment?.segmentId, segment?.final),
-    sendMessage: async () => undefined,
-    subscribeToEvents: subscribeToNoChatEvents,
-    conversationAvailable: false,
-  });
   useEffect(() => () => { voiceLaunchGeneration.current++; }, [authenticatedApi]);
-  const startVoice = async (mode: "dictate" | "conversation", canStartConversation: () => boolean) => {
-    if (mode === "dictate") return voice.start(mode);
+  const startConversation = async (canStartConversation: () => boolean) => {
     if (startingConversation || selectedModel === null || !canStartConversation()) return;
     const generation = ++voiceLaunchGeneration.current;
     setStartingConversation(true);
@@ -272,20 +259,17 @@ export function HomePageContent({ prompt }: HomeSearch) {
         {/* Composer */}
         <ChatComposer
           chatKey={null}
-          isDictating={voice.state.mode === "dictate"}
           createCapsuleGatekeeper={createCapsuleGatekeeper}
           getOverseer={getOverseer}
           onSend={handleSend}
-          appendText={dictationAppend.appendForChat(null)}
-          onAppendTextApplied={dictationAppend.acknowledge}
           voiceControls={({ canStartConversation }) => <>
             <VoiceControls
-              state={voice.state}
+              state={IDLE_VOICE}
               disabled={startingConversation}
-              onStart={(mode) => { void startVoice(mode, canStartConversation); }}
-              onEnd={voice.end}
-              onMute={voice.toggleMute}
-              conversationBlockedReason={canStartConversation() ? undefined : "Send or clear the draft before starting a conversation."}
+              onStart={() => { void startConversation(canStartConversation); }}
+              onEnd={() => {}}
+              onMute={() => {}}
+              conversationBlockedReason={canStartConversation() ? undefined : "Send or clear the draft and any dictated words before starting a conversation."}
               conversationAvailable={selectedModel !== null}
               onSettings={() => setVoiceSettingsOpen(true)}
             />

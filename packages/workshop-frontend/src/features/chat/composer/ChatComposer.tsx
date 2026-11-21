@@ -60,8 +60,7 @@ import { ComposerEffortSelector } from "../controls/ComposerEffortSelector";
 import {
   ComposerPromptSelector, type PromptPresetOption,
 } from "../controls/ComposerPromptSelector";
-import type { DictationAppend } from "./useDictationAppendQueue";
-import type { SpeechTextSelection } from "./draft/speechRanges";
+import type { SpeechTextSelection } from "../voice/speechRanges";
 import { useComposerDraft } from "./draft/useComposerDraft";
 import { buildComposerSubmission } from "./composerSubmission";
 import {
@@ -110,8 +109,6 @@ export const ChatComposer = ({
   minRows = 2,
   seedText,
   seedNonce,
-  appendText,
-  onAppendTextApplied,
   draftStorageKey,
   draftUpdateBanner,
   blockedReason,
@@ -124,7 +121,6 @@ export const ChatComposer = ({
   promptControl,
   voiceControls,
   conversationDraft,
-  isDictating = false,
 }: {
   createCapsuleGatekeeper: (
     accountId: number,
@@ -141,7 +137,6 @@ export const ChatComposer = ({
     capsules?: CapsuleSpecifier[],
     attachments?: ChatAttachmentHandle[],
     formats?: MessageFormatRef[],
-    submissionMeta?: { hasSpeech: boolean },
   ) => Promise<unknown> | void;
   isAgentActive: boolean;
   models: AiChatAuthorInfo[];
@@ -171,7 +166,6 @@ export const ChatComposer = ({
   };
   /** Voice controls owned by the chat session, placed beside the composer actions. */
   voiceControls?: ReactNode | ((draft: { canStartConversation: () => boolean }) => ReactNode);
-  isDictating?: boolean;
   conversationDraft?: {
     text: string;
     readOnly: boolean;
@@ -198,9 +192,6 @@ export const ChatComposer = ({
    * whenever `seedNonce` changes, so the same text can be re-seeded by bumping the nonce. */
   seedText?: string;
   seedNonce?: number;
-  /** Dictate segments update the existing editable draft without sending it. */
-  appendText?: DictationAppend | null;
-  onAppendTextApplied?: (token: number) => void;
   /** Session-storage key used to recover this composer's draft prompt after a page refresh. */
   draftStorageKey?: string;
   /** Optional label for the attach menu item. */
@@ -237,7 +228,7 @@ export const ChatComposer = ({
   const [preparingFiles, setPreparingFiles] = useState(0);
   const preparingFilesRef = useRef(0);
   const addFiles = async (files: FileList | File[]) => {
-    if (conversationDraft || isDictating) return;
+    if (conversationDraft) return;
     setPreparingFiles(++preparingFilesRef.current);
     try {
       await prepareFiles(files);
@@ -253,7 +244,6 @@ export const ChatComposer = ({
     getDocumentSnapshot,
     presentationRequest: draftPresentationRequest,
     recordEdit: recordDraftEdit,
-    applyDictation,
     replaceDocument: replaceComposerDocument,
     updateDocument: updateComposerDocument,
   } = useComposerDraft({
@@ -394,7 +384,7 @@ export const ChatComposer = ({
     onDrop: handleAttachmentDrop,
   } = useComposerAttachmentDrop({
     attachmentCount: pendingAttachments.length,
-    maxAttachments: conversationDraft || isDictating ? 0 : MAX_COMPOSER_ATTACHMENTS,
+    maxAttachments: conversationDraft ? 0 : MAX_COMPOSER_ATTACHMENTS,
     onFilesDropped: (files) => void addFiles(files),
   });
 
@@ -430,25 +420,6 @@ export const ChatComposer = ({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seedNonce]);
-  useEffect(() => {
-    if (!appendText?.text || appendText.chatKey !== chatKey) return;
-    const editor = composerTextareaRef.current;
-    const selection = editor && document.activeElement === editor
-      ? { start: editor.selectionStart, end: editor.selectionEnd } : null;
-    const edit = applyDictation(appendText.text, appendText.segmentId, appendText.final);
-    onAppendTextApplied?.(appendText.token);
-    if (!edit) return;
-    requestAnimationFrame(() => {
-      const textarea = composerTextareaRef.current;
-      if (!textarea) return;
-      textarea.focus();
-      const move = (position: number) => position < edit.start ? position
-        : position >= edit.end ? position + edit.nextEnd - edit.end : edit.nextEnd;
-      textarea.setSelectionRange(selection ? move(selection.start) : edit.nextEnd,
-        selection ? move(selection.end) : edit.nextEnd);
-      resizeTextarea(textarea);
-    });
-  }, [appendText?.token, chatKey, onAppendTextApplied]);
   const capsulesRef = useRef(capsules);
   capsulesRef.current = capsules;
   // Reset overlay selection when the overlay appears or changes URL, preferring a connected account
@@ -491,6 +462,9 @@ export const ChatComposer = ({
   const dictatedText = (dictation.words.final + dictation.words.interim).trim();
   const showDictation = dictation.status === "listening" || dictation.status === "finishing" ||
     dictatedText !== "";
+  // Fork: a voice conversation waits until dictated words are added or discarded.
+  const dictationShownRef = useRef(false);
+  dictationShownRef.current = showDictation;
   const dictatedTextId = useId();
   // Adds the words dictation shows now, and returns the document that holds them, since
   // inputValueRef and the token refs catch up only on the next render.
@@ -558,17 +532,14 @@ export const ChatComposer = ({
     command: selectedSlashCommandRef.current,
   });
 
-  const commitComposerDocument = (
-    document: ComposerDocument,
-    selection?: { start: number; end: number },
-  ) => {
-    replaceComposerDocument(document, selection);
+  const commitComposerDocument = (document: ComposerDocument) => {
+    replaceComposerDocument(document);
   };
 
   const removeTokenAt = (range: ComposerRange) => {
     recordDraftEdit();
     const transition = removeComposerDocumentToken(currentComposerDocument(), range);
-    commitComposerDocument(transition.document, transition.textEdit);
+    commitComposerDocument(transition.document);
     requestAnimationFrame(() => moveCaret(transition.caret));
   };
 
@@ -593,7 +564,7 @@ export const ChatComposer = ({
     const transition = resolveComposerSlashCommand(
       currentComposerDocument(), choice, tokenStart, tokenEnd, commandText,
     );
-    commitComposerDocument(transition.document, transition.textEdit);
+    commitComposerDocument(transition.document);
     requestAnimationFrame(() => {
       composerTextareaRef.current?.focus();
       moveCaret(transition.caret);
@@ -606,7 +577,7 @@ export const ChatComposer = ({
     inputValue,
     cursorPosition,
     selectedCommand: selectedSlashCommand?.choice ?? null,
-    disabled: isBlocked || !!conversationDraft || isDictating,
+    disabled: isBlocked || !!conversationDraft,
     anchorRef: promptCardRef,
     getOverseer,
     onSelect: applySlashCommandSelection,
@@ -619,7 +590,6 @@ export const ChatComposer = ({
   };
 
   const handleSend = async () => {
-    if (isDictating) return;
     if (conversationDraft) {
       if (conversationDraft.canSend && !conversationDraft.readOnly) {
         resumeConnection();
@@ -676,8 +646,7 @@ export const ChatComposer = ({
         await onSend(message, selectedModel?.id ?? null,
             capsuleSpecifiers,
             readyAttachments.length ? readyAttachments : undefined,
-            formatRefs,
-            ...(draftSend.hasSpeech ? [{ hasSpeech: true }] : []));
+            formatRefs);
         delivered = true;
       } finally {
         release(delivered);
@@ -719,14 +688,14 @@ export const ChatComposer = ({
   };
 
   const handleAttachLogs = () => {
-    if (conversationDraft || isDictating) return;
+    if (conversationDraft) return;
     const formatted = onConsumeConsoleLogs();
     recordDraftEdit();
     setInputValue((prev) => prev + "\n\n" + formatted);
   };
 
   const handleAttachOpen = () => {
-    if (isDictating || conversationDraft) return;
+    if (conversationDraft) return;
     const position = composerTextareaRef.current?.selectionStart ?? inputValueRef.current.length;
     openAttachModal(snapCaretOutOfRanges(position, currentTokenRanges(), "nearest"));
   };
@@ -744,11 +713,9 @@ export const ChatComposer = ({
   };
 
   const handleInputChange = (newValue: string, editCursorPos?: number) => {
-    if (isDictating) return;
-    const previousDocument = currentComposerDocument();
-    const selection = pendingTextSelectionRef.current;
-    pendingTextSelectionRef.current = null;
-    const transition = applyComposerTextEdit(previousDocument, newValue, editCursorPos);
+    const transition = applyComposerTextEdit(
+      currentComposerDocument(), newValue, editCursorPos,
+    );
     if (transition.rejected) {
       const textarea = composerTextareaRef.current;
       if (textarea) {
@@ -759,10 +726,7 @@ export const ChatComposer = ({
     }
 
     recordDraftEdit();
-    commitComposerDocument(
-      transition.document,
-      selection?.text === previousDocument.text ? selection : undefined,
-    );
+    commitComposerDocument(transition.document);
     if (transition.caret !== undefined) {
       const caret = transition.caret;
       requestAnimationFrame(() => moveCaret(caret));
@@ -772,7 +736,7 @@ export const ChatComposer = ({
   // Detect whether the cursor is currently inside a URL in the input text.
   // Called on every cursor movement (select, click, keyup).
   const handleCursorChange = () => {
-    if (conversationDraft || isDictating) return;
+    if (conversationDraft) return;
     const textarea = composerTextareaRef.current;
     if (!textarea) return;
 
@@ -807,7 +771,7 @@ export const ChatComposer = ({
 
   // A format is only context on the message, so it coexists with everything else the composer can
   // carry, including a slash command ("/writing-review turn this into a Doc").
-  const canChooseFormat = offerFormats && !conversationDraft && !isDictating;
+  const canChooseFormat = offerFormats && !conversationDraft;
 
   // Inserted at the caret, like a capsule, so the noun lands in the sentence that needs it.
   const chooseFormat = async (format: OutputFormatOffer) => {
@@ -825,7 +789,7 @@ export const ChatComposer = ({
     );
     if (!transition) return;
     recordDraftEdit();
-    commitComposerDocument(transition.document, transition.textEdit);
+    commitComposerDocument(transition.document);
     requestAnimationFrame(() => {
       composerTextareaRef.current?.focus();
       moveCaret(transition.caret);
@@ -873,12 +837,12 @@ export const ChatComposer = ({
     const draft = getDocumentSnapshot().document;
     return !draft.text.trim() && draft.capsules.length === 0 && draft.formats.length === 0
       && draft.command === null && !sendInFlightRef.current && preparingFilesRef.current === 0
-      && !hasAttachments() && conversationResourcesReadyRef.current;
+      && !hasAttachments() && conversationResourcesReadyRef.current && !dictationShownRef.current;
   };
   const messageText = appendDictatedText(inputValue, dictatedText);
-  const canSend = !isDictating && (conversationDraft ? conversationDraft.canSend && !conversationDraft.readOnly : !isSending && !isAgentActive && !isBlocked &&
+  const canSend = conversationDraft ? conversationDraft.canSend && !conversationDraft.readOnly : !isSending && !isAgentActive && !isBlocked &&
     (messageText.trim().length > 0 || selectedSlashCommand !== null || hasReadyAttachment) &&
-    !hasUnreadyAttachment && !isCreatingResource);
+    !hasUnreadyAttachment && !isCreatingResource;
   // While the agent works, a plain message steers it (see ChatInterface's handleSend).
   const canSteer = !conversationDraft && isAgentActive && !isSending && !isStopping && !isBlocked &&
     messageText.trim().length > 0 && selectedSlashCommand === null && capsules.length === 0 &&
@@ -925,7 +889,7 @@ export const ChatComposer = ({
               <span className={`grid h-7 w-7 place-items-center rounded-full ${canAttachMore ? "bg-kumo-brand/12 text-kumo-brand" : "bg-kumo-warning/15 text-kumo-warning"}`}>
                 <FileIcon size={16} weight="duotone" />
               </span>
-              {isDictating ? "Stop dictation before attaching files" : conversationDraft ? "Send or clear the voice instruction before attaching files" : canAttachMore ? "Drop files to attach" : "Messages are limited to 5 attachments"}
+              {conversationDraft ? "Send or clear the voice instruction before attaching files" : canAttachMore ? "Drop files to attach" : "Messages are limited to 5 attachments"}
             </div>
           </div>
         )}
@@ -940,7 +904,7 @@ export const ChatComposer = ({
         )}
         <ComposerAttachmentTray
           attachments={pendingAttachments}
-          disabled={isSending || isDictating || !!conversationDraft}
+          disabled={isSending || !!conversationDraft}
           onRemove={removeAttachment}
         />
         {/* Textarea */}
@@ -954,7 +918,7 @@ export const ChatComposer = ({
                 : "")}
           </div>
           <div ref={wrapperRef} className={styles.capsuleInputWrapper}>
-            {!conversationDraft && !isDictating && activeUrl && (
+            {!conversationDraft && activeUrl && (
               <CapsuleOverlay
                 url={activeUrl.text}
                 onSelectAccount={(accountId, vendorId, resource) => {
@@ -976,7 +940,7 @@ export const ChatComposer = ({
             />
             <textarea
               value={conversationDraft?.text ?? inputValue}
-              readOnly={isDictating || conversationDraft?.readOnly}
+              readOnly={conversationDraft?.readOnly}
               role="combobox"
               aria-autocomplete="list"
               aria-expanded={!conversationDraft && slashCommandPicker.open}
@@ -1009,7 +973,7 @@ export const ChatComposer = ({
               onKeyUp={handleCursorChange}
 
               onMouseDown={(e) => {
-                if (conversationDraft || isDictating) return;
+                if (conversationDraft) return;
                 if (e.button !== 0) return;
                 const token = tokenAtPoint(e.clientX, e.clientY);
                 if (!token) return;
@@ -1018,7 +982,7 @@ export const ChatComposer = ({
                 moveCaret(token.edge);
               }}
               onMouseMove={(e) => {
-                if (conversationDraft || isDictating) return;
+                if (conversationDraft) return;
                 const token = tokenAtPoint(e.clientX, e.clientY);
                 mirrorRef.current?.setHoveredToken(token?.start ?? null);
                 const cursor = token ? "default" : "";
@@ -1047,7 +1011,7 @@ export const ChatComposer = ({
               rows={minRows}
               onPaste={(e) => {
                 captureTextSelection(e.currentTarget);
-                if (conversationDraft || isDictating) return;
+                if (conversationDraft) return;
                 const files = Array.from(e.clipboardData.items)
                   .filter((item) => item.kind === "file")
                   .map((item) => item.getAsFile())
@@ -1067,7 +1031,7 @@ export const ChatComposer = ({
                 // user who types through an IME, so hand the whole keystroke back to the IME: Enter
                 // is not the only key it owns -- Escape cancels a composition and the arrows move
                 // through candidates.
-                if (isImeComposing(e) || isDictating) return;
+                if (isImeComposing(e)) return;
                 if (conversationDraft) {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
@@ -1190,7 +1154,7 @@ export const ChatComposer = ({
             <ComposerAddMenu
               anchorRef={promptCardRef}
               catalogVersion={catalogVersion}
-              disabled={isBlocked || !!conversationDraft || isDictating}
+              disabled={isBlocked || !!conversationDraft}
               getOverseer={getOverseer}
               chatExists={!newChat}
               skillSelected={selectedSlashCommand !== null}
@@ -1199,10 +1163,10 @@ export const ChatComposer = ({
               onAddConnection={handleAttachOpen}
               onSelectSkill={selectSkillFromAddMenu}
             />
-            {dictation.supported && !voiceControls && (
+            {dictation.supported && (
               <ComposerDictationButton
                 status={dictation.status}
-                disabled={isBlocked || isSending}
+                disabled={isBlocked || isSending || !!conversationDraft}
                 onToggle={() => {
                   if (dictation.status === "listening") dictation.finish();
                   else if (dictation.status === "finishing") {

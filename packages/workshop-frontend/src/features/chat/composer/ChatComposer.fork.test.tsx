@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Fork-owned: the voice-controls, server-dictation and conversation-draft cases, kept out of
+// Fork-owned: the voice-conversation cases (controls, conversation draft), kept out of
 // upstream's ChatComposer.test.tsx so that file stays byte-identical (docs/fork-maintenance.md,
 // rule 4). The harness above the tests mirrors that file's.
 /* eslint-disable react/react-in-jsx-scope */
@@ -7,7 +7,7 @@
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { RpcStub } from "capnweb";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { Overseer, SlashCommandChoice } from "@gadgets/workshop-shared/api";
 
 type TestToast = {
@@ -64,7 +64,6 @@ vi.mock("../../../GatekeeperModal", () => ({
 }));
 
 import { ChatComposer } from "./ChatComposer";
-import { useDictationAppendQueue } from "./useDictationAppendQueue";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 Element.prototype.scrollIntoView ??= () => {};
@@ -75,6 +74,28 @@ class TestResizeObserver {
 }
 
 vi.stubGlobal("ResizeObserver", TestResizeObserver);
+
+class TestSpeechRecognition extends EventTarget {
+  static current: TestSpeechRecognition;
+  // An accessor, as the browser's: support is detected on the prototype.
+  #processLocally = false;
+  get processLocally() { return this.#processLocally; }
+  set processLocally(value: boolean) { this.#processLocally = value; }
+  interimResults = false;
+  lang = "";
+  start = vi.fn<() => void>(() => {
+    TestSpeechRecognition.current = this;
+    this.dispatchEvent(new Event("start"));
+  });
+  stop = vi.fn<() => void>();
+  abort = vi.fn<() => void>();
+
+  report(text: string) {
+    this.dispatchEvent(Object.assign(new Event("result"), {
+      resultIndex: 0, results: [{ isFinal: true, 0: { transcript: text } }],
+    }));
+  }
+}
 
 describe("ChatComposer (fork)", () => {
   let container: HTMLDivElement | undefined;
@@ -153,70 +174,6 @@ describe("ChatComposer (fork)", () => {
     }
   });
 
-  it("replaces live dictation in the real composer without overwriting edits or resurrecting sent speech", async () => {
-    let dictation!: ReturnType<typeof useDictationAppendQueue>;
-    const onSend = vi.fn<(...args: unknown[]) => Promise<void>>(async () => {});
-    const DictationComposer = () => {
-      dictation = useDictationAppendQueue();
-      return <ChatComposer
-        chatKey={7}
-        createCapsuleGatekeeper={async () => null}
-        getOverseer={() => ({} as RpcStub<Overseer>)}
-        onSend={onSend}
-        appendText={dictation.appendForChat(7)}
-        onAppendTextApplied={dictation.acknowledge}
-        isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
-      />;
-    };
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-    await act(async () => root!.render(<DictationComposer />));
-    const textarea = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
-    const edit = async (value: string) => act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, value);
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await edit("Typed draft");
-    await act(async () => dictation.enqueue("First", 7, 1, false));
-    expect(textarea.value).toBe("Typed draft\nFirst");
-    textarea.focus();
-    textarea.setSelectionRange(0, 5);
-    await act(async () => {
-      dictation.enqueue("First sentence", 7, 1, false);
-    });
-    await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
-    expect([textarea.selectionStart, textarea.selectionEnd]).toEqual([0, 5]);
-    expect(textarea.value).toBe("Typed draft\nFirst sentence");
-    await edit("Edited draft\nFirst sentence");
-    await edit("Edited draft\nFirst sentence and typed suffix");
-    await act(async () => dictation.enqueue("First sentence.", 7, 1, true));
-    expect(textarea.value).toBe("Edited draft\nFirst sentence. and typed suffix");
-    await act(async () => dictation.enqueue("Second mistake", 7, 2, false));
-    await edit("Edited draft\nFirst sentence. and typed suffix\nSecond correction");
-    await act(async () => dictation.enqueue("Second mistake.", 7, 2, true));
-    expect(textarea.value).toBe("Edited draft\nFirst sentence. and typed suffix\nSecond correction");
-    await act(async () => dictation.enqueue("Third", 7, 3, false));
-    await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.click());
-    expect(onSend).toHaveBeenCalledOnce();
-    expect(onSend.mock.calls[0][0]).toBe("Edited draft\nFirst sentence. and typed suffix\nSecond correction\nThird");
-    expect(onSend.mock.calls[0].at(-1)).toEqual({ hasSpeech: true });
-    expect(textarea.value).toBe("");
-    await act(async () => dictation.enqueue("Third sentence.", 7, 3, true));
-    expect(textarea.value).toBe("");
-    await act(async () => dictation.enqueue("Fourth", 7, 4, false));
-    await edit("Entirely typed replacement");
-    await act(async () => dictation.enqueue("Fourth sentence.", 7, 4, true));
-    await act(async () => container!.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.click());
-    expect(onSend.mock.calls[1][0]).toBe("Entirely typed replacement");
-    expect(onSend.mock.calls[1].at(-1)).not.toEqual({ hasSpeech: true });
-    await act(async () => dictation.enqueue("Stop keeps this", 7, 5, false));
-    await act(async () => dictation.enqueue("Stop keeps this", 7, 5, true));
-    expect(textarea.value).toBe("Stop keeps this");
-    await act(async () => dictation.enqueue("Duplicate late final", 7, 5, true));
-    expect(textarea.value).toBe("Stop keeps this");
-  });
-
   it("edits and sends controlled conversation text through the main composer with original selections", async () => {
     const onSend = vi.fn<(text: string) => void>();
     const onChange = vi.fn<(text: string, selection?: { start: number; end: number }) => void>();
@@ -259,200 +216,52 @@ describe("ChatComposer (fork)", () => {
     expect(normalSend).not.toHaveBeenCalled();
   });
 
-  it("keeps dictation read-only until Stop, then sends the complete latest transcript", async () => {
-    const onSend = vi.fn<Parameters<typeof ChatComposer>[0]["onSend"]>(async () => {});
-    const upload = vi.fn<() => Promise<never>>();
-    let dictation!: ReturnType<typeof useDictationAppendQueue>;
-    const Harness = ({ recording }: { recording: boolean }) => {
-      dictation = useDictationAppendQueue();
-      return <ChatComposer
-        chatKey={7} isDictating={recording}
-        createCapsuleGatekeeper={async () => null}
-        getOverseer={() => ({ uploadChatAttachment: upload }) as unknown as RpcStub<Overseer>}
-        onSend={onSend} isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
-        appendText={dictation.appendForChat(7)} onAppendTextApplied={dictation.acknowledge}
-      />;
-    };
+  it("offers on-device voice typing beside the voice controls, and holds a conversation until its words are settled", async () => {
+    vi.stubGlobal("webkitSpeechRecognition", TestSpeechRecognition);
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+      vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    });
+    let canStartConversation: (() => boolean) | undefined;
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
-    await act(async () => root!.render(<Harness recording />));
-    await act(async () => dictation.enqueue("First words", 7, 1, false));
-    const editor = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
-    expect(editor.readOnly).toBe(true);
-    expect(editor.disabled).toBe(false);
-    const send = container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!;
-    expect(send.disabled).toBe(true);
-    const file = new File(["text"], "note.txt", { type: "text/plain" });
-    Object.defineProperty(file, "arrayBuffer", { value: async () => new ArrayBuffer(4) });
-    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
-    Object.defineProperty(input, "files", { value: [file] });
-    await act(async () => {
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      send.click();
-    });
-    expect(upload).not.toHaveBeenCalled();
-    expect(onSend).not.toHaveBeenCalled();
-    await act(async () => dictation.enqueue("First words and the complete sentence.", 7, 1, false));
-    await act(async () => {
-      dictation.enqueue("First words and the complete sentence.", 7, 1, true);
-      root!.render(<Harness recording={false} />);
-    });
-    expect(editor.value).toBe("First words and the complete sentence.");
-    expect(editor.readOnly).toBe(false);
-    expect(send.disabled).toBe(false);
-    await act(async () => send.click());
-    expect(onSend).toHaveBeenCalledExactlyOnceWith("First words and the complete sentence.", "model-a", undefined, undefined, undefined, { hasSpeech: true });
+    await act(async () => root!.render(<ChatComposer
+      createCapsuleGatekeeper={async () => null}
+      getOverseer={() => ({} as RpcStub<Overseer>)} onSend={() => {}}
+      isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
+      voiceControls={(draft) => { canStartConversation ??= draft.canStartConversation; return null; }}
+    />));
+    const button = (label: string) => container!.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+    expect(canStartConversation!()).toBe(true);
+
+    await act(async () => button("Start voice typing")!.click());
+    expect(canStartConversation!()).toBe(false);
+    await act(async () => TestSpeechRecognition.current.report("make a chart"));
+    await act(async () => button("Stop voice typing")!.click());
+    await act(async () => TestSpeechRecognition.current.dispatchEvent(new Event("end")));
+    // Stop adds the words to the draft, which a conversation waits on like any draft.
+    expect(container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!.value).toBe("make a chart");
+    expect(canStartConversation!()).toBe(false);
   });
 
-  it("appends two finalized dictation segments batched before the composer effect", async () => {
-    let dictation: ReturnType<typeof useDictationAppendQueue> | undefined;
-    const DictationComposer = () => {
-      dictation = useDictationAppendQueue();
-      return <ChatComposer
-        chatKey={7}
-        createCapsuleGatekeeper={async () => null}
-        getOverseer={() => ({} as RpcStub<Overseer>)}
-        onSend={() => {}}
-        appendText={dictation.appendForChat(7)}
-        onAppendTextApplied={dictation.acknowledge}
-        isAgentActive={false}
-        models={[]}
-        selectedModel={{ id: "model-a" }}
-        onModelChange={() => {}}
-      />;
-    };
+  it("disables voice typing while a voice conversation holds the composer", async () => {
+    vi.stubGlobal("webkitSpeechRecognition", TestSpeechRecognition);
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+      vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    });
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
-    await act(async () => root!.render(<DictationComposer />));
-
-    await act(async () => {
-      dictation!.enqueue("First dictated segment.", 7);
-      dictation!.enqueue("Second dictated segment.", 7);
-    });
-
-    expect(container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!.value)
-      .toBe("First dictated segment.\nSecond dictated segment.");
+    await act(async () => root!.render(<ChatComposer
+      createCapsuleGatekeeper={async () => null}
+      getOverseer={() => ({} as RpcStub<Overseer>)} onSend={() => {}}
+      isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
+      conversationDraft={{ text: "", readOnly: true, canSend: false, onChange: () => {}, onSend: () => {} }}
+    />));
+    expect(container.querySelector<HTMLButtonElement>('button[aria-label="Start voice typing"]')!.disabled).toBe(true);
   });
-
-  it("keeps a late dictation segment with its originating chat", async () => {
-    let dictation: ReturnType<typeof useDictationAppendQueue> | undefined;
-    const DictationComposer = ({ chatKey }: { chatKey: number }) => {
-      dictation = useDictationAppendQueue();
-      return <ChatComposer
-        key={chatKey}
-        chatKey={chatKey}
-        createCapsuleGatekeeper={async () => null}
-        getOverseer={() => ({} as RpcStub<Overseer>)}
-        onSend={() => {}}
-        appendText={dictation.appendForChat(chatKey)}
-        onAppendTextApplied={dictation.acknowledge}
-        isAgentActive={false}
-        models={[]}
-        selectedModel={{ id: "model-a" }}
-        onModelChange={() => {}}
-      />;
-    };
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-    await act(async () => root!.render(<DictationComposer chatKey={7} />));
-
-    await act(async () => {
-      dictation!.enqueue("For chat seven.", 7);
-      root!.render(<DictationComposer chatKey={8} />);
-    });
-    await act(async () => dictation!.enqueue("For chat eight.", 8));
-    expect(container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!.value)
-      .toBe("For chat eight.");
-
-    await act(async () => root!.render(<DictationComposer chatKey={7} />));
-    expect(container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!.value)
-      .toBe("For chat seven.");
-  });
-
-  it.each([
-    ["typing", "Typed replacement."],
-    ["pasting", "Pasted replacement."],
-  ])("does not send speech provenance after select-all %s replaces dictated text", async (
-      _method, replacement) => {
-    const onSend = vi.fn<Parameters<typeof ChatComposer>[0]["onSend"]>(async () => {});
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-    await act(async () => root!.render(
-      <ChatComposer
-        chatKey={7}
-        createCapsuleGatekeeper={async () => null}
-        getOverseer={() => ({} as RpcStub<Overseer>)}
-        onSend={onSend}
-        appendText={{ token: 1, text: "Dictated draft.", chatKey: 7 }}
-        isAgentActive={false}
-        models={[]}
-        selectedModel={{ id: "model-a" }}
-        onModelChange={() => {}}
-      />,
-    ));
-    const textarea = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
-    expect(textarea.value).toBe("Dictated draft.");
-
-    await act(async () => {
-      textarea.setSelectionRange(0, textarea.value.length);
-      textarea.dispatchEvent(new KeyboardEvent("keydown", {
-        key: _method === "typing" ? "T" : "v", ctrlKey: _method === "pasting", bubbles: true,
-      }));
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
-        textarea, replacement,
-      );
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => {
-      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      await Promise.resolve();
-    });
-
-    expect(onSend).toHaveBeenCalledWith(replacement, "model-a", undefined, undefined, undefined);
-  });
-
-  it("retains speech provenance after a partial edit of dictated text", async () => {
-    const onSend = vi.fn<Parameters<typeof ChatComposer>[0]["onSend"]>(async () => {});
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-    await act(async () => root!.render(
-      <ChatComposer
-        chatKey={7}
-        createCapsuleGatekeeper={async () => null}
-        getOverseer={() => ({} as RpcStub<Overseer>)}
-        onSend={onSend}
-        appendText={{ token: 1, text: "Dictated draft.", chatKey: 7 }}
-        isAgentActive={false}
-        models={[]}
-        selectedModel={{ id: "model-a" }}
-        onModelChange={() => {}}
-      />,
-    ));
-    const textarea = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
-    await act(async () => {
-      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "!", bubbles: true }));
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
-        textarea, "Dictated draft!",
-      );
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => {
-      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      await Promise.resolve();
-    });
-
-    expect(onSend).toHaveBeenCalledWith(
-      "Dictated draft!", "model-a", undefined, undefined, undefined, { hasSpeech: true },
-    );
-  });
-
 
   it("blocks a voice conversation while a connection is added", async () => {
     let canStartConversation: (() => boolean) | undefined;

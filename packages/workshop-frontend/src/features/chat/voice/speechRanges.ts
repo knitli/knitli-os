@@ -1,11 +1,13 @@
-import type { ComposerTextEdit } from "../composerDocument";
-
 export type SpeechRange = {
   start: number;
   end: number;
 };
 
-export type SpeechTextSelection = ComposerTextEdit;
+/** The range of the previous text an edit replaced. */
+export type SpeechTextSelection = {
+  start: number;
+  end: number;
+};
 
 export const speechRangesAfterTextEdit = (
   ranges: readonly SpeechRange[],

@@ -14,12 +14,6 @@ import { WorkshopIconButton } from '../../../components/WorkshopControls'
 
 const ROLE_SECTIONS: { role: VoiceRole; title: string; blurb: string; kind: VoiceModelKind }[] = [
   {
-    role: 'dictationStt',
-    title: 'Dictation',
-    blurb: 'Transcribes dictated text into the composer.',
-    kind: 'stt',
-  },
-  {
     role: 'conversationStt',
     title: 'Conversation input',
     blurb: 'Hears you during voice conversations.',

@@ -51,7 +51,7 @@ vi.mock('./ThemeContext', async (importOriginal) => ({
 }))
 
 const voiceBoundary = vi.hoisted(() => ({
-  start: vi.fn<(mode: string) => void>(),
+  start: vi.fn<() => void>(),
   available: false,
   state: { mode: null, status: "idle", muted: false, interimTranscript: null, error: null, pendingText: "" } as import("./features/chat/voice/VoiceControls").VoiceControlsState,
 }));
@@ -60,7 +60,7 @@ vi.mock('./features/chat/voice/useVoiceChat', () => ({
     voiceBoundary.available = props.conversationAvailable;
     return {
       state: voiceBoundary.state,
-      start: (mode: string) => { voiceBoundary.start(mode); void props.sendMessage("First spoken request", { hasSpeech: true }); }, end: () => {}, toggleMute: () => {}, setPendingText: () => {}, sendPending: () => {},
+      start: () => { voiceBoundary.start(); void props.sendMessage("First spoken request", { hasSpeech: true }); }, end: () => {}, toggleMute: () => {}, setPendingText: () => {}, sendPending: () => {},
     };
   },
 }));
@@ -573,7 +573,7 @@ it('starts initial voice once after subscription and models are ready, preservin
   await renderChat(server.overseer, { selectedChatId: 0, initialVoice: { chatId: 0, modelId: "voice-model", onConsumed: consumed } });
   expect(voiceBoundary.start).not.toHaveBeenCalled();
   await act(async () => resolveModels([{ id: "default-model", name: "Default", type: "agent" }, { id: "voice-model", name: "Voice model", type: "agent" }]));
-  expect(voiceBoundary.start).toHaveBeenCalledExactlyOnceWith("conversation");
+  expect(voiceBoundary.start).toHaveBeenCalledOnce();
   expect(consumed).toHaveBeenCalledOnce();
   expect(sendChatMessage).toHaveBeenCalledExactlyOnceWith(0, "First spoken request", "voice-model", undefined, undefined, undefined, true);
   await renderChat(server.overseer, { selectedChatId: 0 });

@@ -819,6 +819,54 @@ authorizes a read after fetching it.
   against collaborators and share links, not admins. Adopted unchanged; whether an owner-only
   workspace should also be withheld from admin inspection (or only its titles and file names) is a
   product decision for the maintainer.
+- **Voice typing: the fork's dictation and upstream's on-device one (open since 2026-11-21).**
+  Upstream #1216 adds on-device voice typing to the composer (the browser's `SpeechRecognition`
+  with `processLocally`, a strip of dictated words below the draft, `useComposerDictation`). The
+  fork already has its own voice controls there (`features/chat/voice/`, server speech models
+  through `VoiceSession`: dictation in any browser, plus conversation mode). Two microphone buttons
+  side by side would be a product choice, so the sync keeps what users see today: upstream's code
+  is merged whole, and its button renders only when the composer is given no `voiceControls`
+  (one `&& !voiceControls` in `ChatComposer.tsx`). Both Workshop composers pass the fork's
+  controls, so upstream's button is currently never shown there. For the maintainer: keep the
+  fork's dictation, switch dictation to upstream's and keep only the fork's conversation mode, or
+  offer both (for example upstream's when no speech model is configured).
+- **Seams added by the 2026-11-21 sync (foundation `b84d5842`).**
+  - **Retired with upstream #1188 (external message gateway removed):** the fork's hardening of
+    that path has nothing left to guard. Deleted: `chat-commit-guard.ts`
+    (`prepareAuthorizedChatCommit`) and its two tests, the `commitGuard` on the response-target
+    registration, `ExternalMessageAccessRevokedError`, the fork's revocation rechecks in
+    `receiveExternalMessage()`, the fixture's `/control/submit-external-message` route, and the
+    `observer-privacy` case "denies an external build collaborator until observer setup is
+    complete". `newChat()`/`sendChatMessage()` call `#prepareChatMessage()` directly again, as
+    upstream does.
+  - **Kept: the chat submission receipt.** `Overseer.sendChatMessage()` returns the committed
+    prompt's sequence (`api.ts`; pinned by `__tests__/chat-submission-receipt.test.ts`). Upstream
+    made `#commitPreparedChatMessage()` return nothing once its only reader was gone, so the fork
+    now carries its return type and two `return messageSequence` lines, beside the
+    `promptSequence` lines in `sendChatMessage()`.
+  - Fork tests re-pointed at what replaced external delivery: the alarm-guard give-up case in
+    `durable-decision-resume.test.ts` now fails the unread fan-out (as upstream's neighbouring
+    test does), and `docs/alarm-audit.md`'s overseer row names user-update and unread delivery.
+    `knitli-session-lease.test.ts` lost "leaves another concern's alarm behind": the delivered
+    response's one-day retention was the only long-lived deadline beside the lease, and the ones
+    left (delivery retries about a second out, the agent keep-alive) either clear in the same
+    alarm run or block the reap.
+  - `SandboxedGatekeeperApp.tsx` (upstream #942, deep links): the host takes upstream's `path` and
+    `navigatePath` before the fork's optional `adminResourceControl`, and its `dispose` is now
+    the private `#dispose` behind `GatekeeperAppHostImpl.controls()`. Admin frames pass
+    `path="/"` and still reach the host only through `AdminGatekeeperAppRpcTarget`, which does
+    not expose `subscribePath`/`navigatePath`, so an admin frame cannot navigate the Workshop.
+  - `ChatComposer.test.tsx` is byte-identical to upstream again: the fork's voice, dictation and
+    conversation-draft cases moved to the Tier-1 `ChatComposer.fork.test.tsx` (they conflicted
+    with upstream's dictation tests), including a copy of the add-connection case that carries
+    the fork's `canStartConversation` assertions.
+  - `patches/capnweb-validate@0.3.2.patch` replaces the `0.3.0` one (upstream #1252 bumped
+    capnweb to 0.13.1 and capnweb-validate to 0.3.2, which still wraps native Workers
+    capabilities). Same two hunks, re-made with `pnpm patch` against the new hashed file names.
+  - Admin workspace writes (upstream #1075: `stopAgent`, `restartWorkspace`) are adopted as is.
+    They are off unless the environment sets `ADMIN_WORKSPACE_WRITES=on`, are audited before they
+    run, and `restartWorkspace` uses upstream's `scheduleAccessRestart()` directly: it revokes
+    nothing, so it does not go through the fork's revocation gate.
 - **2026-11-20 sync (foundation `7f9f7a8f`): no new seams.** Five gatekeeper commits (#1217, #1232,
   #1215, #1213, #1238), no conflicts. The five files changed on both sides auto-merged and still
   carry only their recorded fork lines: the alarm-guard calls in `gatekeeper-gitlab/src/gitlab.ts`,
@@ -1031,7 +1079,7 @@ authorizes a read after fetching it.
   - Upstream #895 renamed the `AuthenticatedApi` gadget methods to workspace names (`openWorkspace`,
     `newWorkspace`, `newWorkspaceFromBlueprint`, `listWorkspaces`), the gadget metadata types to
     `WorkspaceMetadata*`, the open-gadget error-code family to `OPEN_WORKSPACE_*`, and the User DO
-    methods (`getWorkspace`, `setWorkspaceLastActive`, `ensureWorkspaceRegistered`,
+    methods (`getWorkspace`, `setWorkspaceLastActive`,
     `recordSharedWorkspaceOpen`, ...). Fork code and tests were renamed to match; the fork-owned
     `collaborator-bookkeeping.ts` option followed. The integration-test session's own `openGadget`
     is not that API and keeps its name.
@@ -1657,7 +1705,7 @@ ids are facet-local, not Activity ids.
   guard; checked per method, and fails if the guard is removed from any one). Exceptions: `schedule-driver.test.ts` is an upstream test edited for the backoff.
 - **At sync:** Tier 2 for each seam. A new upstream `alarm()` fails the coverage test until it gets
   the one-line check and a row in `docs/alarm-audit.md`. If upstream adds its own alarm guard, drop
-  ours. The overseer breaker only bounds an undeliverable external-response loop (see the audit);
+  ours. The overseer breaker only bounds an undeliverable user-update or unread-delivery loop (see the audit);
   it does not delete the record. Since upstream #1184 (2026-11-18 sync) the Overseer's alarm work
   can span invocations; the guard wraps each invocation, and the fork's give-up wake-up lives in
   `runAlarmTasks`'s `catch`.

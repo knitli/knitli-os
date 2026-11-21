@@ -304,8 +304,7 @@ async function withBlindfoldTurn(
     try {
       let chatId = await impl.newChat(
           userStub, { profile: USER, aiModel: { profile: AGENT, config: CONFIG } },
-          "hi", undefined, undefined, undefined, undefined, undefined,
-          undefined, undefined);
+          "hi");
       let deadline = Date.now() + 20000;
       while (impl.storage.activeAgents.get(chatId) !== undefined) {
         if (Date.now() > deadline) {

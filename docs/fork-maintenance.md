@@ -841,6 +841,46 @@ authorizes a read after fetching it.
   - **Left for a kernel PR:** `VoiceSession`'s `dictate` mode, `VoiceMode`'s `"dictate"` and the
     `dictationStt` preference and admin default are unused by the UI now. Removing them changes
     `workshop-shared`'s API and the backend, so it belongs in its own reviewed change.
+- **Seams added by the 2026-11-24 sync (foundation `2ca27fb0`).**
+  - `newChat()`/`sendChatMessage()` (upstream #1150, gadget focus): upstream replaced the
+    positional `capsules`/`attachments`/`formats` with one `options?: ChatMessageOptions` (which
+    also carries the new `focus`). The fork's parameters trail it, in `api.ts`, both client
+    interfaces and `OverseerImpl`: `newChat(message, modelId, options?, effort?, prompt?,
+    hasSpeech?)` and `sendChatMessage(chatId, message, modelId, options?, hasSpeech?)`, which
+    still returns the submission receipt. `ChatMessageOptions` itself is upstream's, unchanged;
+    the fork's values are not message content, so they stay out of it. A speech message still
+    skips the steer path. Fork tests that called either positionally were rewritten: a stale
+    positional call does not fail to compile in `__tests__` (the backend `tsconfig` covers `src`
+    only), it silently sends the wrong argument.
+  - `ChatInterface.tsx`/`ChatComposer.tsx`/`routes/index.tsx`: `handleSend` takes upstream's
+    `options` before the fork's `submissionMeta`; the composer's `onSend` passes upstream's
+    options object inside the fork's `holdForSend` release and still returns `Promise<unknown>`
+    (the receipt); the home page's voice-chat branch forwards `options` to `sendChatMessage`.
+    The composer gets upstream's `focusOffer` beside the fork's `conversationDraft`.
+  - Always-on recipient requirements: upstream #1254 moved `ProtectedResourceList` out of
+    `ShareModal.tsx` into its own file and nests each connection under the workpieces that put
+    it in scope. The fork's ` (always on)` suffix and explanatory line are now
+    `alwaysOnSuffix()`/`<AlwaysOnNote>` in the fork-owned `AlwaysOnNote.tsx` (Tier 1),
+    called from `ProtectedResourceList.tsx` (one import, the suffix on the title line, the note
+    in the return). Their test moved to `ProtectedResourceList.fork.test.tsx` (Tier 1), so
+    `ShareModal.tsx` and `ShareModal.test.tsx` are byte-identical to upstream again.
+  - `agent.ts`: upstream's `USER_FOCUS_GUIDANCE` sits above `SYSTEM_PROMPT`, which keeps the
+    fork's `export`. A chat running a fork prompt preset replaces the static slot, so it gets a
+    message's `<user-focus>` block without that guidance paragraph.
+  - Stop and Retry (upstream #1210): the `agentNudge` record's `text` is optional now, and Stop
+    writes none. The fork's approval-continuation summary is a `message`, not a nudge, and is
+    unaffected.
+  - Google AI Gateway models ride the Workers AI binding (upstream #1250, pi 1.6.0):
+    `HTTPS_ONLY_PROVIDERS` and `AdminGatewayProvider.needsApiToken` are gone upstream; the fork
+    used neither. `run-dev-server.ts` takes upstream's shortened comment and keeps the fork's
+    `ADMINS` and `WEB_PUSH_VAPID_PRIVATE_KEY` passthroughs.
+  - Google Drive shortcuts (upstream #1262): a folder binding's reads follow shortcuts among its
+    direct children, so whoever can add to the bound folder widens what it reads to anything the
+    connected account can read (upstream's README says so). Adopted as is: Google resources are
+    off until an admin enables them, and it adds no `alarm()` handler, class or migration.
+  - `reviewedSurvivors`: all nine 2026-11-21 acks no longer matched and were dropped; nine added
+    (the AI Executor protocol's own `apiVersion` in seven fork files, and two names upstream's
+    own copies of `ObserverConfigModal.tsx` and `admin-workspace-view.test.ts` keep).
 - **Seams added by the 2026-11-21 sync (foundation `b84d5842`).**
   - **Retired with upstream #1188 (external message gateway removed):** the fork's hardening of
     that path has nothing left to guard. Deleted: `chat-commit-guard.ts`
@@ -1021,8 +1061,8 @@ authorizes a read after fetching it.
     "Recipients must prove…" list into a Protected-resources panel (`ProtectedResourceList` in
     `ShareModal.tsx`). The fork's ` (always on)` suffix for ambient requirements and the
     explanatory line under the list are re-applied there; the fork's test in
-    `ShareModal.test.tsx` opens the panel first. Moving it to a fork-owned test file would stop it
-    conflicting with upstream's share-modal tests.
+    `ShareModal.test.tsx` opens the panel first. Superseded by the 2026-11-24 sync: both now live
+    in fork-owned files and `ShareModal.tsx` carries nothing of the fork's.
   - `overseer.ts` `applyPendingAction`: upstream #1118 opens with `using _decision =
     claimDecision(record.id)`; the fork's `assertNoRevocationPending()` fence moved above it, so a
     revocation or deletion in flight is refused before any decision is claimed (and

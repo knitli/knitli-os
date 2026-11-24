@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import type { ObserverBindingNeed, ObserverBindingPathStep } from '@gadgets/workshop-shared/api'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import type { VendorBranding } from './useVendorBranding'
-import { AlwaysOnNote, alwaysOnSuffix } from './alwaysOnRequirements'
+import { AlwaysOnNote, alwaysOnSuffix } from './AlwaysOnNote'
 
 type Branches = Map<string, Branch>
 type Branch =

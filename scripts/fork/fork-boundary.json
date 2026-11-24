@@ -405,7 +405,7 @@
       "reason": "Fork voice-conversation cases for the composer (controls placement, conversation draft), kept out of upstream's ChatComposer.test.tsx so that file stays byte-identical."
     },
     {
-      "path": "packages/workshop-frontend/src/alwaysOnRequirements.tsx",
+      "path": "packages/workshop-frontend/src/AlwaysOnNote.tsx",
       "reason": "Fork-owned always-on (ambient) suffix and note for the share dialog's Protected-resources list; upstream's ProtectedResourceList.tsx only calls it."
     },
     {

@@ -575,7 +575,7 @@ it('starts initial voice once after subscription and models are ready, preservin
   await act(async () => resolveModels([{ id: "default-model", name: "Default", type: "agent" }, { id: "voice-model", name: "Voice model", type: "agent" }]));
   expect(voiceBoundary.start).toHaveBeenCalledOnce();
   expect(consumed).toHaveBeenCalledOnce();
-  expect(sendChatMessage).toHaveBeenCalledExactlyOnceWith(0, "First spoken request", "voice-model", undefined, undefined, undefined, true);
+  expect(sendChatMessage).toHaveBeenCalledExactlyOnceWith(0, "First spoken request", "voice-model", undefined, true);
   await renderChat(server.overseer, { selectedChatId: 0 });
   expect(voiceBoundary.available).toBe(true);
   chat.emitMessage({ chatId: 0, sequence: 0, timestamp: new Date(), type: "message",

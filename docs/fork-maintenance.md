@@ -865,8 +865,10 @@ authorizes a read after fetching it.
     in the return). Their test moved to `ProtectedResourceList.fork.test.tsx` (Tier 1), so
     `ShareModal.tsx` and `ShareModal.test.tsx` are byte-identical to upstream again.
   - `agent.ts`: upstream's `USER_FOCUS_GUIDANCE` sits above `SYSTEM_PROMPT`, which keeps the
-    fork's `export`. A chat running a fork prompt preset replaces the static slot, so it gets a
-    message's `<user-focus>` block without that guidance paragraph.
+    fork's `export`. Upstream appends that guidance to the static slot after the base text, so
+    a chat running a fork prompt preset gets it too; `knitli-chat-prompt.test.ts` now pins that
+    a preset swaps only the base text, comparing the rest with a default chat's instead of
+    spelling out upstream's guidance.
   - Stop and Retry (upstream #1210): the `agentNudge` record's `text` is optional now, and Stop
     writes none. The fork's approval-continuation summary is a `message`, not a nudge, and is
     unaffected.

@@ -275,6 +275,9 @@ async function runTurn(captured: {options?: unknown, systemPrompt?: string}[],
       options);
 }
 
+// What upstream appends to the static slot ends with this, whatever the base text is.
+const SHARED_TAIL = `\n\n${COMMUNICATION_GUIDANCE}\n\n` + formatInstanceInstructions(INSTRUCTIONS);
+
 describe("runAgent prompt swap", () => {
   it("swaps the static slot to the preset text, instructions still appended", async () => {
     let captured: {options?: unknown, systemPrompt?: string}[] = [];
@@ -285,9 +288,15 @@ describe("runAgent prompt swap", () => {
         {promptRef: ref});
     expect(captured.length).toBe(1);
     expect(presetCalls).toEqual([ref]);
-    expect(captured[0].systemPrompt!.startsWith(
-        `${PRESET_TEXT}\n\n${COMMUNICATION_GUIDANCE}\n\n` +
-        formatInstanceInstructions(INSTRUCTIONS))).toBe(true);
+    let prompt = captured[0].systemPrompt!;
+    expect(prompt.startsWith(`${PRESET_TEXT}\n\n`)).toBe(true);
+    expect(prompt).toContain(SHARED_TAIL);
+    // Only the base text is swapped: everything upstream layers after it (its shared guidance,
+    // which grows between syncs, and the deployment's instructions) is what a default chat gets.
+    let builtIn: {options?: unknown, systemPrompt?: string}[] = [];
+    await runTurn(builtIn, fakeHooks({instructions: INSTRUCTIONS, presetCalls: []}), {});
+    expect(prompt.slice(PRESET_TEXT.length))
+        .toBe(builtIn[0].systemPrompt!.slice(SYSTEM_PROMPT.length));
   }, 30000);
 
   it("keeps the built-in prompt byte-identical when unset", async () => {
@@ -298,9 +307,8 @@ describe("runAgent prompt swap", () => {
     expect(captured.length).toBe(1);
     // The hook is never read for default chats: no KV lookup on the common path.
     expect(presetCalls).toEqual([]);
-    expect(captured[0].systemPrompt!.startsWith(
-        `${SYSTEM_PROMPT}\n\n${COMMUNICATION_GUIDANCE}\n\n` +
-        formatInstanceInstructions(INSTRUCTIONS))).toBe(true);
+    expect(captured[0].systemPrompt!.startsWith(`${SYSTEM_PROMPT}\n\n`)).toBe(true);
+    expect(captured[0].systemPrompt).toContain(SHARED_TAIL);
   }, 30000);
 
   it("falls back to the built-in prompt when the preset is gone", async () => {

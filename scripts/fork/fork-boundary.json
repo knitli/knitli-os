@@ -405,6 +405,14 @@
       "reason": "Fork voice-conversation cases for the composer (controls placement, conversation draft), kept out of upstream's ChatComposer.test.tsx so that file stays byte-identical."
     },
     {
+      "path": "packages/workshop-frontend/src/alwaysOnRequirements.tsx",
+      "reason": "Fork-owned always-on (ambient) suffix and note for the share dialog's Protected-resources list; upstream's ProtectedResourceList.tsx only calls it."
+    },
+    {
+      "path": "packages/workshop-frontend/src/ProtectedResourceList.fork.test.tsx",
+      "reason": "Regression test for the always-on suffix and note, moved out of upstream's ShareModal.test.tsx so that file stays byte-identical."
+    },
+    {
       "path": "packages/workshop-frontend/src/features/chat/composer/useComposerResources.fork.test.tsx",
       "reason": "Regression test for the composer's fork wiring of connectionRestartRecovery.ts, so upstream's useComposerResources.test.tsx stays byte-identical."
     },
@@ -547,49 +555,49 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "ExternalMessageGateway",
-      "path": "docs/superpowers/plans/2026-09-28-cloudflare-agent-voice.md",
-      "reason": "Historical fork design record written before upstream #1188 removed the gateway; upstream left its own plans/*.md mentions in place for the same reason."
+      "token": "apiVersion",
+      "path": "packages/gatekeeper-ai-executor/__tests__/protocol-parity.test.ts",
+      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
     },
     {
-      "token": "ExternalMessageGateway",
-      "path": "docs/superpowers/specs/2026-09-28-cloudflare-agent-voice-design.md",
-      "reason": "Historical fork design record written before upstream #1188 removed the gateway; upstream left its own plans/*.md mentions in place for the same reason."
+      "token": "apiVersion",
+      "path": "packages/workshop-backend/__integration__/ai-executor-admin-rpc.test.ts",
+      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
     },
     {
-      "token": "freshPublicApi",
-      "path": "packages/integration-tests/__tests__/fork/observer-privacy.test.ts",
-      "reason": "A local variable of the fork's own test cases; upstream #1188 only deleted tests that happened to use the same name."
+      "token": "apiVersion",
+      "path": "packages/workshop-backend/src/inference-admin-protocol-v1.fixture.ts",
+      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
     },
     {
-      "token": "promptSequence",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "The fork's chat submission receipt: sendChatMessage() returns the committed prompt's sequence. Upstream #1188 dropped its own use with the external message gateway."
+      "token": "apiVersion",
+      "path": "packages/workshop-frontend/src/components/AdminAiExecutorsPanel.tsx",
+      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
     },
     {
-      "token": "promptSequence",
-      "path": "docs/fork-maintenance.md",
-      "reason": "The inventory's record of the chat submission receipt kept in overseer.ts (see the ack above)."
+      "token": "apiVersion",
+      "path": "packages/workshop-frontend/src/components/ai-executors-form-model.test.ts",
+      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
     },
     {
-      "token": "UserDO",
-      "path": "packages/workshop-backend/src/overseer.ts",
-      "reason": "In a comment upstream's own copy of this file keeps; upstream #1188 only removed other mentions."
+      "token": "apiVersion",
+      "path": "packages/workshop-frontend/src/components/ai-executors-form-model.ts",
+      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
     },
     {
-      "token": "clearSkillIndex",
-      "path": "packages/gatekeeper-context/src/context-collection.ts",
-      "reason": "Upstream's own private method, still in its copy of this file; upstream #1243 only removed some call sites."
+      "token": "apiVersion",
+      "path": "packages/workshop-shared/src/api.ts",
+      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
     },
     {
-      "token": "durable_objects",
-      "path": "packages/gatekeeper-context/cloudflare.config.ts",
-      "reason": "In a comment upstream's own copy of this file keeps; upstream #1188 only removed the test fixture's mentions."
+      "token": "accountSatisfies",
+      "path": "packages/workshop-frontend/src/ObserverConfigModal.tsx",
+      "reason": "Upstream's own helper, still in its copy of this file; upstream #1255 only removed other uses."
     },
     {
-      "token": "durable_objects",
-      "path": "packages/workshop-backend/cloudflare.config.ts",
-      "reason": "In a comment upstream's own copy of this file keeps; upstream #1188 only removed the test fixture's mentions."
+      "token": "REPO_REQUIREMENT",
+      "path": "packages/workshop-backend/__tests__/admin-workspace-view.test.ts",
+      "reason": "Upstream's own test constant, still in its copy of this file; upstream #1254 only removed other uses."
     }
   ]
 }

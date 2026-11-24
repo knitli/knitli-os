@@ -132,7 +132,7 @@ function renderChat(
       consoleLogSeverity="info"
       onConsumeConsoleLogs={() => ''}
       onDiscardConsoleLogs={() => {}}
-      onOpenGadget={() => {}}
+      onOpenGadget={() => {}} onOpenFocus={() => {}}
       outputOfWorkpiece={() => undefined}
     />,
   )

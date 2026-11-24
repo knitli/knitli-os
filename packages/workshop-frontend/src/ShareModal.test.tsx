@@ -157,13 +157,6 @@ const CRM_REQUIREMENT: ObserverBindingNeed = {
   resourceTitle: 'Pipeline dashboard',
 }
 
-const MEMORY_REQUIREMENT: ObserverBindingNeed = {
-  gatekeeperId: 9,
-  vendorId: 'memory',
-  resourceTitle: 'Knitli Memory',
-  ambient: true,
-}
-
 const SHARE_LINK: ShareLinkInfo = {
   linkId: 'link-1',
   note: 'Team link',
@@ -1263,14 +1256,46 @@ describe('ShareModal', () => {
     expect(rendered.querySelector('h2')?.textContent).toBe('Share “Itinerary”')
   })
 
-  it('labels always-on requirements and says what they cost a recipient', async () => {
-    const rendered = await render(fakeOverseer({ requirements: [DOC_REQUIREMENT, MEMORY_REQUIREMENT] }))
+  it('keeps live resource paths visible while composing a view-only invite, counting each connection once', async () => {
+    const rendered = await renderGadget(fakeOverseer({ requirements: [{
+      ...DOC_REQUIREMENT,
+      paths: [
+        [],
+        [
+          { type: 'agentSpawner', id: 8, title: 'Lookup agent' },
+          { type: 'gadget', id: 9, title: 'Lookup gadget' },
+        ],
+      ],
+    }] }))
+
+    await chooseAccess(rendered, 'Invite access: ', 'Can view')
+    const pill = resourcesPill(rendered)
+    expect(pill.textContent).toContain('(1)')
+    await click(pill)
+
+    const tree = rendered.querySelector('ul[role="list"]')!
+    const row = Array.from(tree.children).find(li => li.textContent?.includes('Q3 planning') && !li.querySelector('ul'))
+    const spawner = Array.from(tree.children).find(li => li.firstElementChild?.textContent?.includes('Lookup agent'))
+    expect(row?.textContent).toContain('Q3 planning')
+    expect(spawner?.querySelector('ul')?.textContent).toContain('Lookup gadget')
+    expect(spawner?.querySelector('ul ul')?.textContent).toContain('Q3 planning')
+  })
+
+  it('groups connections reached through one spawner under a single branch', async () => {
+    const spawnerPath = [[{ type: 'agentSpawner', id: 8, title: 'Lookup agent' } as const]]
+    const rendered = await renderGadget(fakeOverseer({ requirements: [
+      { ...DOC_REQUIREMENT, paths: spawnerPath },
+      { ...CRM_REQUIREMENT, paths: spawnerPath },
+    ] }))
+
     await click(resourcesPill(rendered))
 
-    expect(rendered.textContent).toContain('Knitli Memory (always on)')
-    expect(rendered.textContent).not.toContain('Q3 planning (always on)')
-    expect(rendered.textContent).toContain(
-      'Always-on services are part of every workspace its owner has. Anyone who can’t get their own access to one can’t open this workspace.')
+    const tree = rendered.querySelector('ul[role="list"]')!
+    const spawners = Array.from(tree.children)
+      .filter(li => li.firstElementChild?.textContent?.includes('Lookup agent'))
+    expect(spawners).toHaveLength(1)
+    expect(Array.from(spawners[0].querySelectorAll('li'), li => li.textContent))
+      .toEqual([expect.stringContaining('Q3 planning'), expect.stringContaining('Pipeline dashboard')])
   })
 
   it('shows no protected resources pill when recipients have nothing to verify', async () => {

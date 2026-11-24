@@ -10,7 +10,7 @@ import {
   WorkpieceId,
   GadgetSummary,
 } from '@gadgets/workshop-shared/api'
-import GadgetUI from './GadgetUI'
+import GadgetUI, { type GadgetUIFocus } from './GadgetUI'
 import { WorkshopButton } from './components/WorkshopControls'
 import UserMenu from './components/UserMenu'
 import { GadgetPresence } from './components/GadgetPresence'
@@ -44,6 +44,8 @@ type Props = {
     onRefresh: () => Promise<void>
   } | null
   selectedGadgetId: WorkpieceId | null
+  // The selected gadget's focus, kept in the URL by the parent.
+  gadgetFocus: GadgetUIFocus | undefined
   // Why the selected gadget couldn't be opened, such as declining to choose connected accounts;
   // the collaborator can retry it or pick another gadget.
   gadgetOpenFailure: string | null
@@ -66,6 +68,7 @@ export default function GadgetUseView({
   gadget,
   snapshot,
   selectedGadgetId,
+  gadgetFocus,
   gadgets,
   gadgetOpenFailure,
   onRetryGadget,
@@ -171,6 +174,7 @@ export default function GadgetUseView({
               renderMode={snapshot ? 'snapshot' : undefined}
               height="100%"
               isVisible={true}
+              focus={gadgetFocus}
             />
             {snapshot && (
               <GadgetSnapshotCard

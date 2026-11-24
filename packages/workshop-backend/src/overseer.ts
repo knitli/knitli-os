@@ -18,7 +18,7 @@ import {
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import type { ChatTimelineHead, GadgetSnapshotClient } from "@gadgets/workshop-shared/api";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
-import { Overseer, WorkspaceMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPinRecord, MainlineMergeGadget, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AGENT_SPAWNER_CONNECTION_ID, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, CollaboratorAccess, CollaboratorGrant, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, BlueprintMerge, ApplyBlueprintResult, GadgetUpstream, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenWorkspaceError, OPEN_WORKSPACE_ERROR_CODES, createGatekeeperError, GATEKEEPER_ERROR_CODES, resolveSiteName, modelKind, PromptPresetSummary, PromptSelection, PromptRef, ChatAttachmentUpload } from '@gadgets/workshop-shared/api'
+import { Overseer, WorkspaceMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPinRecord, MainlineMergeGadget, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AGENT_SPAWNER_CONNECTION_ID, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, CollaboratorAccess, CollaboratorGrant, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, BlueprintMerge, ApplyBlueprintResult, GadgetUpstream, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentHandle, ChatAttachmentRef, ChatMessageOptions, MessageFocus, MAX_FOCUS_ANCHOR_LENGTH, MAX_FOCUS_LABEL_LENGTH, MAX_FOCUS_CONTEXT_LENGTH, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenWorkspaceError, OPEN_WORKSPACE_ERROR_CODES, createGatekeeperError, GATEKEEPER_ERROR_CODES, resolveSiteName, modelKind, PromptPresetSummary, PromptSelection, PromptRef, ChatAttachmentUpload } from '@gadgets/workshop-shared/api'
 import {
   ADMIN_ACCESS_ERROR_CODES, MAX_ADMIN_AUDIT_ARG_LENGTH, SNAPSHOT_SHARING_ERROR_CODES,
   createAdminAccessError, createSnapshotSharingError,
@@ -26,6 +26,7 @@ import {
   type AdminGatekeeperInfo, type AdminObserver, type AdminPendingChange,
   type AdminWorkspaceDescription, type AdminWorkspaceDiagnostics, type AdminWorkspaceMethod,
   type AdminWorkspaceView, type AdminWriteAction, type AdminWriteArgs, type AdminWriteRecord,
+  type ObserverBindingPathStep,
 } from "@gadgets/workshop-shared/api";
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange,
   MAX_CODE_CHANGE_SIZE, transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
@@ -71,7 +72,7 @@ import {
   getAiGatewayLogCost,
   type AiGatewayLogRoute,
 } from "./ai-gateway";
-import { AgentGadgetInfo, AgentHooks, SeedBindingInfo, agentCodeChangeShape, alwaysAvailableResources, formatMissingBlueprintBindings, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type WorktreeTurnAccess, GIT_BINDING_NAME, MAX_TOOL_RESULT_CHARS } from "./agent";
+import { AgentGadgetInfo, AgentHooks, SeedBindingInfo, agentCodeChangeShape, alwaysAvailableResources, formatMissingBlueprintBindings, runAgent, summarizeArgs, type AgentStepChange, type AiChatMessageBodyWithModelData, type ChatHistory, type WorktreeTurnAccess, type Steer, type StampedMessageFocus, GIT_BINDING_NAME, MAX_TOOL_RESULT_CHARS } from "./agent";
 import { WorktreeSessionImpl } from "./worktree-session";
 import { GitImpl } from "./git-binding";
 import type { WorktreeGitPullHints, WorktreeReplicator } from "@gadgets/workshop-shared/worktree-replica";
@@ -94,7 +95,9 @@ import type { AdminAuditDurableObject } from "./admin-audit";
 import { adminWriteArgs, type AdminWriteCall } from "./admin-writes";
 import { isDeploymentAdmin } from "./auth/config";
 import { DIRECTORY_ACTIVITY_INTERVAL_MS, type UserDirectoryDurableObject } from "./user-directory";
-import { chatChangeStatuses, foldCompactedCode, isTurnPrompt } from "./agent-compaction";
+import {
+  chatChangeStatuses, foldCompactedCode, isCompactionTurn, isTurnPrompt,
+} from "./agent-compaction";
 import type { CachedRequest } from "./ai-models";
 import { ChatCacheWarmer } from "./chat-cache-warming";
 import { ambientGatekeeperMode } from "./provisioning-policy";
@@ -568,6 +571,13 @@ type GadgetReach = {
   gadgetIds: Set<WorkpieceId>;
   gatekeeperIds: Set<WorkpieceId>;
 };
+
+// An edge #gadgetReach() followed, for listObserverRequirements() to explain: a binding, by name,
+// or an enabled hook.
+type ObserverReachEdge =
+  | {target: WorkpieceId; binding: string}
+  | {target: WorkpieceId; hook: Extract<ObserverBindingPathStep, {type: "hook"}>};
+
 // Copied from normalizeText() in agent-catalog.ts, minus its length clamp
 function oneLineReason(reason: string): string {
   return reason.replace(/\p{Cc}/gu, " ").replace(/\s+/g, " ").trim();
@@ -1877,7 +1887,7 @@ class OverseerImpl implements AgentHooks {
       });
       this.postAgentErrorMessage(record.chatId, this.storage.chatMeta.get(record.chatId)!.activeAgent!,
           "The agent could not be resumed because it was interrupted too many times without " +
-          "making progress.");
+          "making progress.", "resume_exhausted");
       finish();
       return;
     }
@@ -8100,14 +8110,41 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  // Checks a client-supplied focus (see ChatMessageOptions.focus) and stamps it with the gadget's
+  // current title. Like a capsule, it may name only a gadget of the workspace (not a worktree or
+  // a gatekeeper, nor a gadget still pending in another chat). capnweb-validate has checked its
+  // shape but not its lengths, and passes extra properties through, so the result is rebuilt
+  // from the declared fields.
+  #stampFocus(chatId: number, focus: MessageFocus | undefined)
+      : StampedMessageFocus | undefined {
+    if (!focus) return undefined;
+    let {gadgetId, spot} = focus;
+    let gadget = this.storage.gadgets.get(gadgetId);
+    if (!gadget || gadget.type === "worktree" ||
+        (gadget.pending && gadget.pending.chatId !== chatId)) {
+      throw new Error(`Chat message is focused on ${gadgetId}, which is not a gadget in this ` +
+          `workspace.`);
+    }
+    if (!spot) return {gadgetId, gadgetTitle: gadget.title};
+    let {anchor, label, context} = spot;
+    if (anchor.length > MAX_FOCUS_ANCHOR_LENGTH || label.length > MAX_FOCUS_LABEL_LENGTH ||
+        (context?.length ?? 0) > MAX_FOCUS_CONTEXT_LENGTH) {
+      throw new Error("Chat message's focus is longer than the GadgetFocus limits allow.");
+    }
+    return {gadgetId, gadgetTitle: gadget.title,
+            spot: context === undefined ? {anchor, label} : {anchor, label, context}};
+  }
+
   #commitPreparedChatMessage(
       chatId: number, timestamp: Date, author: AiChatAuthorInfo,
       prepared: PreparedChatMessage, capsules: CapsuleSpecifier[] | undefined,
       attachments: ChatAttachmentRef[] | undefined,
       formats: MessageFormatRef[] | undefined,
+      focus: MessageFocus | undefined,
       scratchWorktree?: PreparedScratchWorktree,
       attachmentSourceCommit?: string): number | undefined {
     this.#validateCapsules(chatId, capsules);
+    let stampedFocus = this.#stampFocus(chatId, focus);
     // Format references describe the text the user wrote, which for a slash command is its
     // arguments, what the transcript shows, not the message the provider expanded them into.
     formats = sanitizeMessageFormatRefs(
@@ -8141,6 +8178,7 @@ class OverseerImpl implements AgentHooks {
         capsules,
         attachments,
         formats,
+        focus: stampedFocus,
       });
       return messageSequence;
     }
@@ -8163,6 +8201,7 @@ class OverseerImpl implements AgentHooks {
       capsules,
       attachments,
       formats,
+      focus: stampedFocus,
     });
     return messageSequence;
   }
@@ -8171,15 +8210,13 @@ class OverseerImpl implements AgentHooks {
     clientUser: DurableObjectStub<UserDurableObject>,
     userMeta: UserChatContext,
     initialMessage: string | SlashCommandRequest,
-    capsules?: CapsuleSpecifier[],
-    attachments?: ChatAttachmentHandle[],
-    formats?: MessageFormatRef[],
+    {capsules, attachments, formats, focus}: ChatMessageOptions = {},
     effort?: string | null,
     prompt?: PromptSelection | null,
     hasSpeech?: true,
   ): Promise<number> {
-    if (typeof initialMessage !== "string" && (capsules?.length || attachments?.length)) {
-      throw new Error("Slash commands cannot include resources or attachments.");
+    if (typeof initialMessage !== "string" && (capsules?.length || attachments?.length || focus)) {
+      throw new Error("Slash commands cannot include resources, attachments or a focus.");
     }
     if (effort !== undefined && effort !== null && !isReasoningLevel(effort)) {
       throw new Error(`Invalid reasoning effort: ${JSON.stringify(effort)}.`);
@@ -8222,7 +8259,7 @@ class OverseerImpl implements AgentHooks {
 
       this.#commitPreparedChatMessage(
           chatId, timestamp, userMeta.profile, prepared, capsules, canonicalAttachments, formats,
-          scratchWorktree, scratchWorktree?.commitId);
+          focus, scratchWorktree, scratchWorktree?.commitId);
     });
 
     if (prepared.message !== undefined && userMeta.aiModel) {
@@ -8246,15 +8283,16 @@ class OverseerImpl implements AgentHooks {
   // #finishAgentTurn, postAgentErrorMessage). A turn being stopped takes none: Stop has handed the
   // queue to whoever stopped it. Returns whether `message` was queued.
   steerRunningTurn(chatId: number, userId: string, author: AiChatAuthorInfo,
-                   message: string | SlashCommandRequest, capsules?: CapsuleSpecifier[],
-                   attachments?: ChatAttachmentHandle[], formats?: MessageFormatRef[]): boolean {
+                   message: string | SlashCommandRequest,
+                   {capsules, attachments, formats, focus}: ChatMessageOptions = {}): boolean {
     const isPlainTextMessage = typeof message === "string" && message.trim() !== "" &&
         !capsules?.length && !attachments?.length && !formats?.length;
     const turnTakesSteers = this.#runningAgents.has(chatId) &&
         !this.#liveChats.get(chatId)?.cancelController.signal.aborted;
     if (!isPlainTextMessage || !turnTakesSteers) return false;
+    let stampedFocus = this.#stampFocus(chatId, focus);
     let meta = this.getChatMetaOrThrow(chatId);
-    meta.queuedSteers = [...meta.queuedSteers ?? [], {text: message, author}];
+    meta.queuedSteers = [...meta.queuedSteers ?? [], {text: message, author, focus: stampedFocus}];
     meta.lastActive = this.getChatTimestamp();
     this.storage.chatMeta.put(meta);
     this.recordGadgetAnalytics({
@@ -8271,13 +8309,11 @@ class OverseerImpl implements AgentHooks {
     userMeta: UserChatContext,
     chatId: number,
     message: string | SlashCommandRequest,
-    capsules?: CapsuleSpecifier[],
-    attachments?: ChatAttachmentHandle[],
-    formats?: MessageFormatRef[],
+    {capsules, attachments, formats, focus}: ChatMessageOptions = {},
     hasSpeech?: true,
   ): Promise<number | undefined> {
-    if (typeof message !== "string" && (capsules?.length || attachments?.length)) {
-      throw new Error("Slash commands cannot include resources or attachments.");
+    if (typeof message !== "string" && (capsules?.length || attachments?.length || focus)) {
+      throw new Error("Slash commands cannot include resources, attachments or a focus.");
     }
     let canonicalAttachments = this.canonicalizeChatAttachmentRefs(attachments);
     this.assertChatNotActive(chatId);
@@ -8327,7 +8363,7 @@ class OverseerImpl implements AgentHooks {
         this.storage.chatMeta.put(meta);
         promptSequence = this.#commitPreparedChatMessage(
             chatId, meta.lastActive, userMeta.profile, prepared, capsules, canonicalAttachments,
-            formats, preparedScratchWorktree, attachmentSourceCommit);
+            formats, focus, preparedScratchWorktree, attachmentSourceCommit);
         if (scratchWorktree && attachmentFiles.size) {
           this.#appendWorkspaceAttachments(chatId, scratchWorktree, attachmentChanges, userMeta.profile);
         }
@@ -8365,9 +8401,11 @@ class OverseerImpl implements AgentHooks {
     // restart recovery clears any busy marker left without an execution row.
     this.storage.activeAgents.delete(chatId);
     this.#resumeErrors.delete(chatId);
+    // End the turn's decision segment, so approving one of its cards later doesn't resume it. The
+    // boundary tells the model nothing: Continue reruns the turn on the same history, and a new
+    // request arrives as its own prompt.
     let author = this.storage.chatMeta.get(chatId)?.activeAgent ?? this.#decisionWait(chatId)?.agent;
-    if (author) this.addChatMessages(chatId, author,
-        [{type: "agentNudge", text: "The user stopped this turn. Wait for a new request."}]);
+    if (author) this.addChatMessages(chatId, author, [{type: "agentNudge"}]);
     let ctx = this.#liveChats.get(chatId);
     if (ctx) {
       ctx.cancelController.abort(new Error("User requested to stop agent."));
@@ -8388,7 +8426,7 @@ class OverseerImpl implements AgentHooks {
 
   // AgentHooks.takeSteers: logs each queued steer at the step boundary where the agent reads it,
   // so the log keeps the order the model saw.
-  takeSteers(chatId: number): string[] {
+  takeSteers(chatId: number): Steer[] {
     let meta = this.storage.chatMeta.get(chatId);
     return meta?.queuedSteers ? this.#logQueuedSteers(meta, true) : [];
   }
@@ -8396,8 +8434,8 @@ class OverseerImpl implements AgentHooks {
   // Moves the chat's queued steers into its log as user messages, `steered` unless they prompt a
   // turn, then writes `meta` without them. Subscribers thus get the messages before the metadata,
   // as subscribeToChat's catch-up delivers them.
-  #logQueuedSteers(meta: StoredChatMetadata, steered: boolean): string[] {
-    let steers = (meta.queuedSteers ?? []).map(({text, author}) => {
+  #logQueuedSteers(meta: StoredChatMetadata, steered: boolean): Steer[] {
+    let steers = (meta.queuedSteers ?? []).map(({text, author, focus}) => {
       this.storage.chats.put({
         chatId: meta.id,
         sequence: this.nextChatSequence(meta.id),
@@ -8405,9 +8443,10 @@ class OverseerImpl implements AgentHooks {
         author,
         type: "message",
         message: text,
+        focus,
         ...(steered ? {steered: true} : {}),
       });
-      return text;
+      return {text, focus};
     });
     delete meta.queuedSteers;
     meta.lastActive = this.getChatTimestamp();
@@ -8881,8 +8920,7 @@ class OverseerImpl implements AgentHooks {
           // may already be ready; #finishAgentTurn claims it in this same synchronous span.
           if (meta && liveChat.cancelController.signal.aborted && this.#decisionWait(chatId)) {
             // A tool that was already in flight may have committed its card after Stop's boundary.
-            this.addChatMessages(chatId, initiator,
-                [{type: "agentNudge", text: "The user stopped this turn. Wait for a new request."}]);
+            this.addChatMessages(chatId, initiator, [{type: "agentNudge"}]);
           }
           let wait = this.#decisionWait(chatId);
           this.#unregisterRunningAgent(chatId,
@@ -11508,8 +11546,8 @@ class OverseerImpl implements AgentHooks {
   // whose gadget can't be resolved (none named, or its record gone) is keyed `undefined` and
   // reaches every gadget, fail-closed. A hook waking a still-provisional gadget reaches nothing
   // until promotion, which mergeChanges' scope diff reports.
-  #enabledHookConnections(): Map<WorkpieceId | undefined, WorkpieceId[]> {
-    let connections = new Map<WorkpieceId | undefined, WorkpieceId[]>();
+  #enabledHookConnections(): Map<WorkpieceId | undefined, BoundHookRecord[]> {
+    let connections = new Map<WorkpieceId | undefined, BoundHookRecord[]>();
     for (let hook of Array.from(this.storage.boundHooks.list())) {
       if (!hook.enabled) continue;
       let gadgetId = hook.gadgetId ?? this.defaultGadgetId;
@@ -11517,8 +11555,8 @@ class OverseerImpl implements AgentHooks {
       if (gadget?.pending) continue;
       let key = gadget ? gadgetId : undefined;
       let list = connections.get(key);
-      if (list) list.push(hook.gatekeeperId);
-      else connections.set(key, [hook.gatekeeperId]);
+      if (list) list.push(hook);
+      else connections.set(key, [hook]);
     }
     return connections;
   }
@@ -11544,24 +11582,40 @@ class OverseerImpl implements AgentHooks {
   // only by the former, so no accepted request can ever add a connection to a spawned chat beyond
   // the spawner's bindings. If spawned agents ever gain either tool, this closure must learn about
   // it too.
-  #gadgetReach(gadgetId: WorkpieceId, hooks = this.#enabledHookConnections()): GadgetReach {
+  #gadgetReach(gadgetId: WorkpieceId, hooks = this.#enabledHookConnections(),
+               edges?: Map<WorkpieceId, ObserverReachEdge[]>): GadgetReach {
     let reach: GadgetReach = {gadgetIds: new Set(), gatekeeperIds: new Set()};
-    let pending = [gadgetId, ...hooks.get(undefined) ?? []];
+    let unattributedHooks = hooks.get(undefined) ?? [];
+    let pending = [gadgetId, ...unattributedHooks.map(hook => hook.gatekeeperId)];
+    let hookEdge = (hook: BoundHookRecord): ObserverReachEdge => ({
+      target: hook.gatekeeperId,
+      hook: {type: "hook", id: hook.id, title: hook.description.title},
+    });
+    let followBindings = (id: WorkpieceId, bindings: [string, BindingRecord][],
+                          boundHooks: BoundHookRecord[] = []) => {
+      pending.push(...bindings.map(([, edge]) => edge.target),
+          ...boundHooks.map(hook => hook.gatekeeperId));
+      if (edges) {
+        edges.set(id, [
+          ...bindings.map(([binding, edge]): ObserverReachEdge => ({target: edge.target, binding})),
+          ...boundHooks.map(hookEdge),
+          ...(id === gadgetId ? unattributedHooks.map(hookEdge) : []),
+        ]);
+      }
+    };
     while (pending.length > 0) {
       let id = pending.pop()!;
       let gadget = this.storage.gadgets.get(id);
       if (gadget) {
         if (gadget.type !== "gadget" || gadget.pending || reach.gadgetIds.has(id)) continue;
         reach.gadgetIds.add(id);
-        pending.push(...this.visibleBindings(gadget).map(([, edge]) => edge.target),
-            ...hooks.get(id) ?? []);
+        followBindings(id, this.visibleBindings(gadget), hooks.get(id));
         continue;
       }
       let gatekeeper = this.storage.gatekeepers.get(id);
       if (!gatekeeper || reach.gatekeeperIds.has(id)) continue;
       reach.gatekeeperIds.add(id);
-      pending.push(...this.visibleBindings({bindings: gatekeeper.bindings ?? {}})
-          .map(([, edge]) => edge.target));
+      followBindings(id, this.visibleBindings({bindings: gatekeeper.bindings ?? {}}));
     }
     return reach;
   }
@@ -11608,10 +11662,11 @@ class OverseerImpl implements AgentHooks {
   //   risk -- never-bound producers" in plans/restricted-data-sharing.md.
   #inScopeGatekeepers(
       grant: CollaboratorGrant,
-      reach = grant === "workspace" ? undefined : this.#gadgetReach(grant.gadgetId))
+      reach = grant === "workspace" ? undefined : this.#gadgetReach(grant.gadgetId),
+      onProducer?: (gadgetId: WorkpieceId, gatekeeperId: WorkpieceId) => void)
       : GatekeeperRecord[] {
-    let ids = reach && new Set(
-        [...reach.gatekeeperIds, ...this.observerLedger.gadgetProducers(reach.gadgetIds)]);
+    let ids = reach && new Set([...reach.gatekeeperIds,
+        ...this.observerLedger.gadgetProducers(reach.gadgetIds, onProducer)]);
 
     let result: GatekeeperRecord[] = [];
     for (let gk of this.storage.gatekeepers.list()) {
@@ -11630,11 +11685,81 @@ class OverseerImpl implements AgentHooks {
   }
 
   listObserverRequirements(grant: CollaboratorGrant): ObserverBindingNeed[] {
-    if (grant !== "workspace" && !this.isShareableGadget(grant.gadgetId)) {
-      throw new Error(`No such gadget: ${grant.gadgetId}`);
+    if (grant === "workspace") return this.#inScopeGatekeepers(grant).map(observerBindingNeed);
+    let {gadgetId} = grant;
+    if (!this.isShareableGadget(gadgetId)) throw new Error(`No such gadget: ${gadgetId}`);
+    if (grant.mode === "view") return [];
+
+    let edges = new Map<WorkpieceId, ObserverReachEdge[]>();
+    let reach = this.#gadgetReach(gadgetId, undefined, edges);
+    // Heard from the same ledger pass that puts them in scope.
+    let producers = new Map<WorkpieceId, WorkpieceId[]>();
+    let gatekeepers = this.#inScopeGatekeepers(grant, reach, (gadget, gatekeeper) => {
+      let ids = producers.get(gadget);
+      if (ids) ids.push(gatekeeper);
+      else producers.set(gadget, [gatekeeper]);
+    });
+    // Keyed by each path's JSON, so two edges to one workpiece explain it once.
+    let paths = new Map(gatekeepers.map(
+        gk => [gk.id, new Map<string, ObserverBindingPathStep[]>()]));
+
+    // The workpieces #gadgetReach() descends into, as steps: reached gadgets, and agent spawners,
+    // whose records alone carry bindings (GatekeeperRecord.bindings), so no other connection has
+    // edges to follow. Cached, so every path names a workpiece alike.
+    let nodes = new Map<WorkpieceId, ObserverBindingPathStep | undefined>();
+    let node = (edge: ObserverReachEdge): ObserverBindingPathStep | undefined => {
+      let id = edge.target;
+      if (nodes.has(id)) return nodes.get(id);
+      let fallback = "hook" in edge ? edge.hook.title : edge.binding;
+      let step: ObserverBindingPathStep | undefined;
+      if (reach.gadgetIds.has(id)) {
+        step = {type: "gadget", id, title: this.storage.gadgets.get(id)?.title || fallback};
+      } else {
+        let spawner = this.storage.gatekeepers.get(id);
+        if (spawner?.creationSpec?.type === "agentSpawner") {
+          let title = spawner.resourceTitle || spawner.creationSpec.config.displayName;
+          step = {type: "agentSpawner", id, title: title || fallback};
+        }
+      }
+      nodes.set(id, step);
+      return step;
+    };
+    // Records what `id` reaches along `path`, returning the workpieces to descend into.
+    let visit = (id: WorkpieceId, path: ObserverBindingPathStep[]) => {
+      for (let producer of producers.get(id) ?? []) {
+        let historical: ObserverBindingPathStep[] = [...path, {type: "historicalRequirement"}];
+        paths.get(producer)?.set(JSON.stringify(historical), historical);
+      }
+      let next: {id: WorkpieceId, path: ObserverBindingPathStep[]}[] = [];
+      for (let edge of edges.get(id) ?? []) {
+        let via = "hook" in edge ? [...path, edge.hook] : path;
+        paths.get(edge.target)?.set(JSON.stringify(via), via);
+        let step = node(edge);
+        if (step) next.push({id: edge.target, path: [...via, step]});
+      }
+      return next;
+    };
+
+    // One branch per workpiece the gadget reaches first, each with a shortest route to every node
+    // within it, so a route through a node the branch already reached is not listed: enumerating
+    // every route through shared subtrees can grow exponentially.
+    let branched = new Set([gadgetId]);
+    for (let branch of visit(gadgetId, [])) {
+      if (branched.has(branch.id)) continue;
+      branched.add(branch.id);
+      let seen = new Set([gadgetId, branch.id]);
+      let queue = [branch];
+      for (let {id, path} of queue) {
+        for (let child of visit(id, path)) {
+          if (seen.has(child.id)) continue;
+          seen.add(child.id);
+          queue.push(child);
+        }
+      }
     }
-    if (grant !== "workspace" && grant.mode === "view") return [];
-    return this.#inScopeGatekeepers(grant).map(observerBindingNeed);
+
+    return gatekeepers.map(
+        gk => ({...observerBindingNeed(gk), paths: [...paths.get(gk.id)!.values()]}));
   }
 
   // Tail of the in-flight addObserver/removeObserver chain per `${observerId}/${gatekeeperId}`
@@ -14587,31 +14712,28 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
-                capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-                formats?: MessageFormatRef[], effort?: string | null,
+                options?: ChatMessageOptions, effort?: string | null,
                 prompt?: PromptSelection | null, hasSpeech?: true): Promise<number> {
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
-    return this.impl.newChat(this.#clientUser, userMeta, initialMessage, capsules, attachments,
-                             formats, effort, prompt, hasSpeech);
+    return this.impl.newChat(this.#clientUser, userMeta, initialMessage, options, effort, prompt,
+                             hasSpeech);
   }
 
   async sendChatMessage(
       chatId: number, message: string | SlashCommandRequest, chosenModelId: string | null,
-      capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
-      formats?: MessageFormatRef[], hasSpeech?: true): Promise<number | undefined> {
+      options?: ChatMessageOptions, hasSpeech?: true): Promise<number | undefined> {
     using _starting = this.#startingTurn(chatId);
     // A steer runs on the running turn's model, so it is queued before the sender's model is
     // looked up: a collaborator need not have that model. Speech keeps its marker, so it prompts.
-    if (!hasSpeech && this.impl.steerRunningTurn(
-        chatId, this.clientUserId, await this.#getClientProfile(), message, capsules, attachments,
-        formats)) {
+    let author = await this.#getClientProfile();
+    if (!hasSpeech && this.impl.steerRunningTurn(chatId, this.clientUserId, author, message, options)) {
       return undefined;
     }
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
     return this.impl.sendChatMessage(
-        this.#clientUser, userMeta, chatId, message, capsules, attachments, formats, hasSpeech);
+        this.#clientUser, userMeta, chatId, message, options, hasSpeech);
   }
 
   async setChatTitle(chatId: number, title: string): Promise<void> {
@@ -14770,13 +14892,30 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error("No AI model available.");
     }
 
+    // Error records never reach the model, so a Retry of a turn that exhausted its resume
+    // attempts would otherwise repeat it unaware. The attempts count model-lookup failures too,
+    // so the nudge states only that the turn was interrupted and keeps its advice conditional.
+    // Any other Retry reruns the turn on the same history, telling the model nothing, and so does
+    // a `/compact`'s, which a note would replace with an ordinary turn.
+    let newestFirst = {prefix: chatKeyPrefix(chatId), reverse: true};
+    let [last] = [...this.impl.storage.chats.list({...newestFirst, limit: 1})];
+    let text = last?.type === "error" && last.code === "resume_exhausted" &&
+        !isCompactionTurn(this.impl.storage.chats.list(newestFirst))
+        ? "The user asked you to try again because your previous turn was abandoned. The " +
+          "Durable Object your agent harness runs in reset repeatedly while you worked on it: " +
+          "the turn was automatically restarted several times, and each time it reset again " +
+          "before your next step could be saved. That step is not in your history. The exact " +
+          "cause is unknown, but your work may have exceeded the CPU or memory limits, for " +
+          "example by processing a large file all at once. Rethink your approach and do the " +
+          "work in small incremental pieces."
+        : undefined;
+
     let result = this.impl.materializeChatChanges(chatId, meta);
     if (result) meta = result.meta;
 
     // An explicit retry starts a fresh segment, rather than inheriting an older decision wait
     // if this execution is interrupted before it can commit its first response.
-    this.impl.addChatMessages(chatId, userMeta.profile,
-        [{type: "agentNudge", text: "Retry the previous request."}]);
+    this.impl.addChatMessages(chatId, userMeta.profile, [{type: "agentNudge", text}]);
     meta.activeAgent = userMeta.aiModel.profile;
     meta.lastActive = this.impl.getChatTimestamp();
     this.impl.storage.chatMeta.put(meta);
@@ -15342,15 +15481,13 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async viewChat(_chatId: number): Promise<RpcStub<{}>> { this.#deny(); }
   async newChat(_initialMessage: string | SlashCommandRequest, _modelId: string | null,
-                 _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[],
-                 _formats?: MessageFormatRef[], _effort?: string | null,
-                 _prompt?: PromptSelection | null, _hasSpeech?: true): Promise<number> {
+                _options?: ChatMessageOptions, _effort?: string | null,
+                _prompt?: PromptSelection | null, _hasSpeech?: true): Promise<number> {
     this.#deny();
   }
   async sendChatMessage(_chatId: number, _message: string | SlashCommandRequest,
-                        _modelId: string | null,
-                        _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[],
-                        _formats?: MessageFormatRef[], _hasSpeech?: true): Promise<number | undefined> {
+                        _modelId: string | null, _options?: ChatMessageOptions,
+                        _hasSpeech?: true): Promise<number | undefined> {
     this.#deny();
   }
   async uploadBlob(_content: Uint8Array | {stream: ReadableStream<Uint8Array>, byteLength: number})

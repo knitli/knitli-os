@@ -177,9 +177,9 @@ describe("Home prompt route flow", () => {
     } }];
     const attachments = slashCommand ? undefined : [{ id: "uploaded-attachment" }];
     const formats = [{ position: 4, length: 5, noun: "draft", icon: "fileText" as const }];
-    await act(async () => testState.composerProps.onSend(message, null, capsules, attachments, formats));
+    await act(async () => testState.composerProps.onSend(message, null, { capsules, attachments, formats }));
     expect(newChat).toHaveBeenCalledExactlyOnceWith("", "model");
-    expect(sendChatMessage).toHaveBeenCalledExactlyOnceWith(0, message, null, capsules, attachments, formats);
+    expect(sendChatMessage).toHaveBeenCalledExactlyOnceWith(0, message, null, { capsules, attachments, formats });
     expect(testState.newWorkspace).toHaveBeenCalledTimes(1);
     expect(testState.navigate).toHaveBeenLastCalledWith({ to: "/workspace/$id", params: { id: "workspace" }, search: { chat: 0 } });
   });

@@ -152,8 +152,7 @@ describe("prompt chat metadata", () => {
   it("newChat seeds the prompt preset", async () => {
     await withOwnerOverseer(FIXTURES, async (overseer, impl) => {
       let chatId = await overseer.newChat(
-          "hello", null, undefined, undefined, undefined, undefined,
-          {kind: "admin", id: "preset-1"});
+          "hello", null, undefined, undefined, {kind: "admin", id: "preset-1"});
       expect(impl.storage.chatMeta.get(chatId).promptRef)
           .toEqual({kind: "admin", id: "preset-1"});
 
@@ -161,8 +160,7 @@ describe("prompt chat metadata", () => {
       expect("promptRef" in impl.storage.chatMeta.get(plainId)).toBe(false);
 
       await expect(overseer.newChat(
-          "hello", null, undefined, undefined, undefined, undefined,
-          {kind: "admin", id: "missing"}))
+          "hello", null, undefined, undefined, {kind: "admin", id: "missing"}))
           .rejects.toThrow("No such prompt preset");
     });
   }, 30000);

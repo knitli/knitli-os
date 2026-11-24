@@ -48,7 +48,7 @@ it("returns the committed prompt sequence, not an earlier message or a command e
         sequence: second, type: "message", message: "same text",
       });
       const dictated = await overseer.sendChatMessage(
-        chatId, "Keep this visible.", null, undefined, undefined, undefined, true,
+        chatId, "Keep this visible.", null, undefined, true,
       );
       expect(await overseer.getChatMessage(chatId, dictated!)).toMatchObject({
         type: "message", message: "Keep this visible.", hasSpeech: true,
@@ -90,7 +90,7 @@ it("defers an empty chat title until its first message and preserves explicit ti
     const context = {profile: user, quickModel: {provider: "openai", model: "unused"}};
     const title = vi.fn<(...args: unknown[]) => Promise<void>>(async () => {});
     impl.generateThreadTitle = title;
-    await expect(impl.newChat(client, context, "", [{gatekeeperId: 99}])).rejects.toThrow(
+    await expect(impl.newChat(client, context, "", {capsules: [{gatekeeperId: 99}]})).rejects.toThrow(
         "Cannot send an empty chat message.");
     const chatId = await impl.newChat(client, context, "");
     expect(title).not.toHaveBeenCalled();
@@ -115,9 +115,9 @@ it("defers an empty chat title until its first message and preserves explicit ti
         state: {type: "staged", uploadedAt: Date.now(), mimeType: "text/plain", name: "notes.txt"},
       });
       const attachmentChat = await impl.newChat(
-          client, context, "", undefined, deferred ? undefined : [{id}]);
+          client, context, "", {attachments: deferred ? undefined : [{id}]});
       if (deferred) await impl.sendChatMessage(
-          client, context, attachmentChat, "", undefined, [{id}]);
+          client, context, attachmentChat, "", {attachments: [{id}]});
       expect(title).toHaveBeenLastCalledWith(
           attachmentChat, "[user attached 1 attachment(s)]", context.quickModel, user);
     }

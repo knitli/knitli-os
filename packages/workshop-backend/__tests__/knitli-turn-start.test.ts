@@ -93,7 +93,7 @@ async function withTurn(
     try {
       let chatId = await impl.newChat(
           userStub, { profile: USER, aiModel: { profile: AGENT, config: CONFIG } },
-          "hi", undefined, undefined, undefined, effort, prompt);
+          "hi", undefined, effort, prompt);
       // The turn runs detached (startAgent returns void); wait for its teardown.
       let deadline = Date.now() + 20000;
       while (impl.storage.activeAgents.get(chatId) !== undefined) {

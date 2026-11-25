@@ -59,7 +59,7 @@ describe("effort chat metadata", () => {
   it("newChat seeds the effort override", async () => {
     await withOwnerOverseer(async (overseer, impl) => {
       let chatId = await overseer.newChat(
-          "hello", null, undefined, undefined, undefined, "high");
+          "hello", null, undefined, "high");
       expect(impl.storage.chatMeta.get(chatId).reasoningEffort).toBe("high");
 
       let plainId = await overseer.newChat("hello", null);
@@ -83,7 +83,7 @@ describe("effort chat metadata", () => {
       await expect(overseer.setChatEffort(chatId, "ultra")).rejects.toThrow(
           "Invalid reasoning effort");
       await expect(overseer.newChat(
-          "hello", null, undefined, undefined, undefined, "ultra")).rejects.toThrow(
+          "hello", null, undefined, "ultra")).rejects.toThrow(
           "Invalid reasoning effort");
       await expect(overseer.setChatEffort(999, "low")).rejects.toThrow("No such chatId");
       // Failed writes leave no trace.

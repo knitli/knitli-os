@@ -213,7 +213,7 @@ describe("spreadsheet attachment in the agent", () => {
     impl.storage.chatAttachmentContent.put({ fileId: note, data: new TextEncoder().encode("hi\n"),
       state: { type: "staged", uploadedAt: Date.now(), mimeType: "text/plain", name: "notes.txt" } });
     let user = env.TEST_USER.getByName(crypto.randomUUID());
-    let chatId = await impl.newChat(user, { profile: OWNER }, "Look", undefined, [sheet, { id: note }]);
+    let chatId = await impl.newChat(user, { profile: OWNER }, "Look", { attachments: [sheet, { id: note }] });
     let worktree = impl.getChatAgentContext(chatId).scratch!.worktreeId;
     let paths = await impl.gitCache.listCommitTreePaths(impl.getWorktreePinBase(worktree)!);
     expect(paths.map((entry: { path: string }) => entry.path)).toStrictEqual(["notes.txt"]);

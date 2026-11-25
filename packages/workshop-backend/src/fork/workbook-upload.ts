@@ -25,6 +25,21 @@ export { UNTRUSTED_SPREADSHEET_NOTICE, fenceUntrustedFileName };
 /** Raw size ceiling for a spreadsheet upload. Only its summary and row pages are stored. */
 export const MAX_WORKBOOK_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MiB
 
+/**
+ * Size ceiling for every other staged upload. A staged file arrives whole in one RPC message and
+ * is held as one storage record until a send commits it, so it keeps the bound upstream's
+ * validation applied before upstream #1230 raised the limit, for its streamed `uploadBlob()`
+ * path, to 100 MB. Mirrors the frontend's MAX_CHAT_ATTACHMENT_BYTES (prepareChatAttachment.ts).
+ */
+export const MAX_STAGED_UPLOAD_BYTES = 4 * 1024 * 1024; // 4 MiB
+
+/** Refuses a staged upload over MAX_STAGED_UPLOAD_BYTES, before anything is stored. */
+export function assertStagedUploadSize(byteLength: number): void {
+  if (byteLength > MAX_STAGED_UPLOAD_BYTES) {
+    throw new Error("Attachments must be 4 MB or smaller.");
+  }
+}
+
 /** MIME type of the summary a workbook attachment is stored as. */
 const SUMMARY_MIME_TYPE = "text/markdown";
 

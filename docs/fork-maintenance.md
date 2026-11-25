@@ -862,17 +862,21 @@ authorizes a read after fetching it.
     pin is what the Workshop frame checks (`readSnapshotFile` refuses anything unpinned), so
     refusing the pin closes the frame read too. Test: the new case in
     `knitli-replica-blindfold.test.ts`, which now covers both replica pulls and view pins.
-  - **Staged chat attachments keep the 4 MB bound (upstream #1230).** Upstream raised
-    `MAX_CHAT_ATTACHMENT_BYTES` to 100 MB and moved the size check out of
-    `validateChatAttachmentUpload()` (which now takes `leadingBytes`, not `content`) onto the
-    callers of its streamed `uploadBlob()` path. The fork's composer still uploads whole, through
-    `uploadChatAttachment()`, which holds the bytes in one RPC message and one storage record, so
-    `fork/workbook-upload.ts` gains `MAX_STAGED_UPLOAD_BYTES`/`assertStagedUploadSize()` (4 MiB,
-    mirroring the frontend's `prepareChatAttachment.ts`) and the seam in `uploadChatAttachment()`
-    calls it before anything is stored, then passes `leadingBytes: attachment.content` to
-    upstream's validator. Spreadsheets keep their own 10 MiB ceiling. Retire this and adopt
-    upstream's streamed upload whole when the fork's composer moves to `uploadBlob()` — the
-    "Not adopted (kept)" line in the 2026-11-11 entry is what that costs.
+  - **The fork's staged chat attachments keep the 4 MB bound (upstream #1230).** Upstream raised
+    `MAX_CHAT_ATTACHMENT_BYTES` to 100 MB, for its streamed `uploadBlob()` path, and moved the
+    size check out of `validateChatAttachmentUpload()`, which now takes an upload's
+    `leadingBytes` rather than its whole `content` and checks only the MIME signature. The
+    fork's `uploadChatAttachment()`/`ChatAttachmentUpload`/`deleteChatAttachment` (its own RPC,
+    from the spreadsheet-attachments port; upstream has never had them) still take the bytes
+    whole, in one RPC message and one storage record, so nothing on that path would have bounded
+    them any more. `fork/workbook-upload.ts` gains `MAX_STAGED_UPLOAD_BYTES` /
+    `assertStagedUploadSize()` — 4 MiB, upstream's old limit and the frontend's
+    `MAX_CHAT_ATTACHMENT_BYTES` (`prepareChatAttachment.ts`) — and the seam in
+    `uploadChatAttachment()` calls it before anything is stored, then hands upstream's validator
+    `leadingBytes: attachment.content`. Spreadsheets keep their own 10 MiB ceiling, checked in
+    `stageWorkbookUpload()` before the parse. Retire the bound and the whole fork path together,
+    when the composer moves to upstream's streamed `uploadBlob()`; the "Not adopted (kept)" line
+    in the 2026-11-11 entry is the standing note for that.
   - `agent.ts`: upstream's `EXECUTE_CODE_INTRO` now describes the unified fetch policy (#1211);
     the fork's `${EXECUTE_CODE_OUTPUT_ADVICE}` line follows it unchanged. The replay's image
     branch takes upstream's new `inline()` helper and its inline budgets, and the fork's workbook

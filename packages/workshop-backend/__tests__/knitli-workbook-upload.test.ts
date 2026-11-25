@@ -8,7 +8,8 @@ import * as XLSX from "@e965/xlsx";
 import type { ChatAttachmentUpload } from "@gadgets/workshop-shared/api";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import {
-  MAX_WORKBOOK_UPLOAD_BYTES, isSpreadsheetUpload, stageWorkbookUpload,
+  MAX_STAGED_UPLOAD_BYTES, MAX_WORKBOOK_UPLOAD_BYTES, assertStagedUploadSize, isSpreadsheetUpload,
+  stageWorkbookUpload,
 } from "../src/fork/workbook-upload";
 
 declare module "cloudflare:workers" {
@@ -162,4 +163,24 @@ describe("legacy compaction checkpoints", () => {
     // Persisted: the stored checkpoint now carries it.
     expect([...impl.storage.chatCompactions.list()][0].requestedNames).toEqual(["big_xlsx"]);
   }));
+});
+
+// The fork's uploadChatAttachment() takes an attachment's bytes whole, in one RPC message and one
+// storage record, so its own bound is the only one left: upstream #1230 raised its limit to 100 MB
+// for the streamed uploadBlob() path and moved the size check out of
+// validateChatAttachmentUpload(), which now only matches an upload's leading bytes to its MIME
+// type.
+describe("the bound on a staged upload", () => {
+  it("refuses one byte over the limit and names the limit", () => {
+    assertStagedUploadSize(MAX_STAGED_UPLOAD_BYTES);
+    expect(() => assertStagedUploadSize(MAX_STAGED_UPLOAD_BYTES + 1))
+        .toThrow("Attachments must be 4 MB or smaller.");
+  });
+
+  it("is the limit the composer already enforces, and below the spreadsheet ceiling", () => {
+    // packages/workshop-frontend/src/features/chat/composer/attachments/prepareChatAttachment.ts
+    expect(MAX_STAGED_UPLOAD_BYTES).toBe(4 * 1024 * 1024);
+    // A spreadsheet is parsed rather than stored, so it gets the larger ceiling of its own.
+    expect(MAX_WORKBOOK_UPLOAD_BYTES).toBeGreaterThan(MAX_STAGED_UPLOAD_BYTES);
+  });
 });

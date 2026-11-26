@@ -869,7 +869,10 @@ authorizes a read after fetching it.
     `ConnectionChip`, which still replaces `ReconnectingChip` at that site.
   - `readFile` shows images (upstream #1285): the image comes from the same resolved file the
     text read uses, after the fork's blindfold check, and replay reads it by the recorded OID.
-    `AiToolCall`'s `imageBytes` is upstream's, beside the fork's `readSheet` call.
+    `AiToolCall`'s `imageBytes` is upstream's, beside the fork's `readSheet` call. Replay now
+    reads `handle.model.input` for every message, so a fork test's fake model handle needs an
+    `input` list (`knitli-blindfold.test.ts` gained one); the backend `tsconfig` covers `src`
+    only, so a fake without it fails at run time, not in the typecheck.
   - Worker bundling (upstream #1284): the config generator adds `minify` and
     `upload_source_maps` to every generated `wrangler.jsonc`, the AI Executor's included, and
     CI's Lint job now builds the release, which fails on a Worker bundle holding a character

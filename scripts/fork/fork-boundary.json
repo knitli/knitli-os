@@ -421,6 +421,22 @@
       "reason": "Regression test for the composer's fork wiring of connectionRestartRecovery.ts, so upstream's useComposerResources.test.tsx stays byte-identical."
     },
     {
+      "path": "packages/workshop-frontend/src/features/chat/composer/attachments/spreadsheetTypes.ts",
+      "reason": "Fork-owned spreadsheet MIME types and upload ceiling for the composer; prepareChatAttachment.ts and useComposerAttachments.ts call it."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/chat/composer/attachments/stagedSpreadsheetUpload.ts",
+      "reason": "Fork-owned staged upload of a spreadsheet (uploadChatAttachment) and its reclaim; upstream's useComposerAttachments.ts calls it and streams every other file itself."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/chat/composer/attachments/useComposerAttachments.fork.test.tsx",
+      "reason": "Regression test for the composer's staged spreadsheet uploads, kept out of upstream's useComposerAttachments.test.tsx so that file stays byte-identical."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/chat/composer/attachments/prepareChatAttachment.fork.test.ts",
+      "reason": "Regression test for the spreadsheet upload ceiling, kept out of upstream's prepareChatAttachment.test.ts so that file stays byte-identical."
+    },
+    {
       "path": "packages/gatekeeper-linear/__tests__/workerd/oauth-link.test.ts",
       "reason": "Workerd test for the Linear OAuth link flow; the fork stood up this harness."
     },
@@ -557,5 +573,21 @@
       "reason": "Served verbatim to the agent as types.txt, so its doc comments are agent-visible API text: the fork drops the approval wording that action simulation keeps out of the agent's view, and states startTime's inclusive bound as X applies it (PR #79 review)."
     }
   ],
-  "reviewedSurvivors": []
+  "reviewedSurvivors": [
+    {
+      "token": "PAST_LIMITS",
+      "path": "packages/workshop-backend/src/agent.ts",
+      "reason": "Upstream's own constant, still in its copy of this file; upstream #1285 only removed other uses."
+    },
+    {
+      "token": "notShown",
+      "path": "packages/workshop-backend/src/agent.ts",
+      "reason": "Upstream's own helper, still in its copy of this file; upstream #1285 only removed other uses."
+    },
+    {
+      "token": "notShown",
+      "path": "packages/workshop-backend/src/fork/chat-attachment-workbook.ts",
+      "reason": "A local variable of the fork's workbook summary (the sheets left undescribed), unrelated to the agent.ts helper upstream #1285 trimmed."
+    }
+  ]
 }

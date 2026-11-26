@@ -37,6 +37,7 @@
     "./serial-queue": "./src/serial-queue.ts",
     "./shared-approval-queue": "./src/shared-approval-queue.ts",
     "./simulation": "./src/simulation.ts",
+    "./simulation-store": "./src/simulation-store.ts",
     "./single-flight": "./src/single-flight.ts",
     "./subresource-ids": "./src/subresource-ids.ts"
   },

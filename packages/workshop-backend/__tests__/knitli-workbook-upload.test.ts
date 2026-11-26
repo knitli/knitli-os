@@ -177,8 +177,7 @@ describe("the bound on a staged upload", () => {
         .toThrow("Attachments must be 4 MB or smaller.");
   });
 
-  it("is the limit the composer already enforces, and below the spreadsheet ceiling", () => {
-    // packages/workshop-frontend/src/features/chat/composer/attachments/prepareChatAttachment.ts
+  it("is upstream's limit from before its streamed uploads, and below the spreadsheet ceiling", () => {
     expect(MAX_STAGED_UPLOAD_BYTES).toBe(4 * 1024 * 1024);
     // A spreadsheet is parsed rather than stored, so it gets the larger ceiling of its own.
     expect(MAX_WORKBOOK_UPLOAD_BYTES).toBeGreaterThan(MAX_STAGED_UPLOAD_BYTES);

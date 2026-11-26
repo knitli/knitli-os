@@ -280,8 +280,9 @@ the seams below were re-applied or retired on top of it.
 - **Bounded agent grep: retired 2026-11-25.** Upstream #1230 bounds the scan itself, by output
   characters, so the fork's `maxMatches` is gone; see the 2026-11-25 sync entry under Open
   questions.
-- **Not adopted (kept):** chat attachments still upload whole (`uploadChatAttachment`), not through
-  upstream's streamed `uploadBlob`.
+- **Adopted 2026-11-26, except for spreadsheets:** the composer uploads through upstream's
+  streamed `uploadBlob`; only a spreadsheet still goes up whole (`uploadChatAttachment`). See the
+  2026-11-26 entry under Open questions.
 
 ### Web Push channel
 
@@ -838,6 +839,48 @@ authorizes a read after fetching it.
   - **Left for a kernel PR:** `VoiceSession`'s `dictate` mode, `VoiceMode`'s `"dictate"` and the
     `dictationStt` preference and admin default are unused by the UI now. Removing them changes
     `workshop-shared`'s API and the backend, so it belongs in its own reviewed change.
+- **Seams added by the 2026-11-26 sync (foundation `73919572`; same PR as the 2026-11-25 entry
+  below).**
+  - **Adopted: upstream's streamed composer uploads (#1231), except for spreadsheets.** Upstream
+    raised the composer's per-file limit to 100 MB, dropped the per-message total, and aborts a
+    running upload when its card goes. The fork had staged every file whole through
+    `uploadChatAttachment()`, which the server bounds at 4 MiB, so keeping that would have meant
+    holding the composer to 4 MiB against upstream. `useComposerAttachments.ts` is upstream's
+    file again, plus: one branch that hands a spreadsheet to `stageSpreadsheet()`, the
+    `deleteStaged()` calls on removal and unmount, and `holdForSend`/`hasAttachments` (31 added
+    lines, none changed). The staging and its reclaim live in the fork-owned
+    `stagedSpreadsheetUpload.ts`. A spreadsheet stays staged because the server stores a parsed
+    summary and row pages under the staged ID, not the file, so there is no blob to name; it
+    keeps its own 10 MiB ceiling (`spreadsheetTypes.ts`), now below the file limit, not above it.
+    - **Given up:** an ordinary file removed from the composer after its upload finished is no
+      longer deleted from the workspace. Upstream's blobs are content-addressed and shared, so
+      they cannot be reclaimed one attachment at a time; upstream bounds them with the workspace
+      storage quota and its new storage indicator instead.
+    - **Left for a kernel PR:** `uploadChatAttachment()`'s non-spreadsheet branch (and
+      `MAX_STAGED_UPLOAD_BYTES`) has no caller in the Workshop now. Removing it narrows the
+      fork's RPC to spreadsheets, which is a `workshop-backend` change of its own.
+    - **Tests:** `useComposerAttachments.test.tsx` and `prepareChatAttachment.test.ts` are
+      byte-identical to upstream again; the fork's cases moved to
+      `useComposerAttachments.fork.test.tsx` and `prepareChatAttachment.fork.test.ts` (Tier 1).
+  - `AttachmentViewer.tsx`: upstream #1231 moved downloads onto `contents.download()` (a shared
+    read, with a busy state); the fork's `attachmentDownloadName()` is still the one call there,
+    now where upstream reads `attachment.name`.
+  - `GadgetEditor.tsx`: upstream's `WorkspaceStorageIndicator` sits before the fork's phone-width
+    `ConnectionChip`, which still replaces `ReconnectingChip` at that site.
+  - `readFile` shows images (upstream #1285): the image comes from the same resolved file the
+    text read uses, after the fork's blindfold check, and replay reads it by the recorded OID.
+    `AiToolCall`'s `imageBytes` is upstream's, beside the fork's `readSheet` call.
+  - Worker bundling (upstream #1284): the config generator adds `minify` and
+    `upload_source_maps` to every generated `wrangler.jsonc`, the AI Executor's included, and
+    CI's Lint job now builds the release, which fails on a Worker bundle holding a character
+    above U+00FF. Fork source that reaches a Worker bundle must keep to Latin-1 in what survives
+    minification (string literals and regular expressions; comments are dropped).
+  - Gatekeeper kit (upstream #1157, #1298, #1138, #1069): `./simulation-store` and streamed
+    `ActionFileStore` are adopted as is; no fork gatekeeper here imports either module. The
+    kit README's module table keeps the fork's `./shared-approval-queue` row after upstream's new
+    `./simulation-store` row.
+  - `reviewedSurvivors`: three acks added (two names upstream's own copy of `agent.ts` keeps, and
+    a same-named local variable in the fork's workbook summary).
 - **Seams added by the 2026-11-25 sync (foundation `b355717f`).**
   - **Retired for upstream's version: the bounded agent grep.** Upstream #1230 bounds the scan
     itself, by output characters rather than by match count: `scanWorkpieceForGrep()` takes
@@ -874,9 +917,9 @@ authorizes a read after fetching it.
     `MAX_CHAT_ATTACHMENT_BYTES` (`prepareChatAttachment.ts`) — and the seam in
     `uploadChatAttachment()` calls it before anything is stored, then hands upstream's validator
     `leadingBytes: attachment.content`. Spreadsheets keep their own 10 MiB ceiling, checked in
-    `stageWorkbookUpload()` before the parse. Retire the bound and the whole fork path together,
-    when the composer moves to upstream's streamed `uploadBlob()`; the "Not adopted (kept)" line
-    in the 2026-11-11 entry is the standing note for that.
+    `stageWorkbookUpload()` before the parse. Since the 2026-11-26 entry above, the composer
+    sends only spreadsheets down this path, so the 4 MiB branch has no caller in the Workshop;
+    it stays as the bound on the RPC until that branch is removed.
   - `agent.ts`: upstream's `EXECUTE_CODE_INTRO` now describes the unified fetch policy (#1211);
     the fork's `${EXECUTE_CODE_OUTPUT_ADVICE}` line follows it unchanged. The replay's image
     branch takes upstream's new `inline()` helper and its inline budgets, and the fork's workbook
@@ -888,7 +931,7 @@ authorizes a read after fetching it.
     `subscribeMetadata` paths; upstream's `#epochStart` (#1282) lands beside the fork's
     `grepWorkpiece`; `#appendWorkspaceAttachments` takes upstream's by-reference branch for a
     blob over `MAX_BUFFERED_BLOB_SIZE` before the fork's workbook skip; and upstream removed the
-    `MAX_CHAT_ATTACHMENT_TOTAL_BYTES` check from `canonicalizeChatAttachmentRefs`, where the
+    message-total size check from `canonicalizeChatAttachmentRefs`, where the
     fork's `workbookRefFields()` spread is unchanged.
   - Unified fetch (upstream #1211) is adopted as is. `ApprovalQueue.getFetcher()` is upstream's
     new member, above the fork's optional `attestAudience()` in `gatekeeper.ts`; no fork

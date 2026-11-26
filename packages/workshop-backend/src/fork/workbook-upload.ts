@@ -29,7 +29,8 @@ export const MAX_WORKBOOK_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MiB
  * Size ceiling for every other staged upload. A staged file arrives whole in one RPC message and
  * is held as one storage record until a send commits it, so it keeps the bound upstream's
  * validation applied before upstream #1230 raised the limit, for its streamed `uploadBlob()`
- * path, to 100 MB. Mirrors the frontend's MAX_CHAT_ATTACHMENT_BYTES (prepareChatAttachment.ts).
+ * path, to 100 MB. The Workshop's composer streams ordinary files through that path now and
+ * stages only spreadsheets, so this bounds whoever else calls the RPC.
  */
 export const MAX_STAGED_UPLOAD_BYTES = 4 * 1024 * 1024; // 4 MiB
 

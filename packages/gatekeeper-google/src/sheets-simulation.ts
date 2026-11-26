@@ -25,16 +25,21 @@ import type { TaggedAction } from "@gadgets/gatekeeper-kit/actions";
 import {
   replaySimulation, type SimulationResult, type SimulationStep,
 } from "@gadgets/gatekeeper-kit/simulation";
+import { createSimulationStore, type SimulationStore } from "@gadgets/gatekeeper-kit/simulation-store";
 import type { SheetArea } from "./sheets-api";
-import { mergeFormat, type BaseFormats, type FormatEntry } from "./sheets-format";
+import {
+  DEFAULT_COLUMN_WIDTH, DEFAULT_ROW_HEIGHT, mergeFormat, type Axis, type BaseFormats, type BaseSizes,
+  type FormatEntry,
+} from "./sheets-format";
 import {
   rewriteFormula, structureSensitive, tokenize, type RewriteStep, type RewrittenFormula,
 } from "./sheets-formula";
-import type { LineOp } from "./sheets-input";
+import type { LineOp, MergeType, ResizeOp } from "./sheets-input";
 import {
-  a1Of, cellName, enteredOf, findSheet, isFormula, shownValue, type EnteredValue, type Rect,
+  a1Of, byPosition, cellName, enteredOf, findSheet, intersection, isFormula, rectName, shownValue, type EnteredValue,
+  type Rect,
 } from "./sheets-model";
-import { cellKey, planSheet } from "./sheets-plan";
+import { cellKey, lineKey, planInPlace, planSheet, working, type Working } from "./sheets-plan";
 import type {
   SpreadsheetCellValue, SpreadsheetFormats, SpreadsheetRange, SpreadsheetValueMode,
 } from "./sheets-read-types";
@@ -54,6 +59,8 @@ export type SheetMeta = {
   frozenRowCount?: number;
   /** How many leading columns are frozen, when any are. */
   frozenColumnCount?: number;
+  /** Its merged cells, when it has any. */
+  merges?: readonly Rect[];
 };
 
 /**
@@ -79,31 +86,39 @@ export type StructuralStep =
 /**
  * What a read fetched, with queued changes applied: the sheets, sorted by index; what queued
  * changes entered in cells, and set on their formatting, keyed by `cellKey` from `sheets-plan.ts`
- * with the identities of the cell's row and column, so an entry moves with its lines; and every
- * change to rows, columns or sheets replayed, in order.
+ * with the identities of the cell's row and column, so an entry moves with its lines; the sizes in
+ * pixels they gave lines, keyed by `lineKey` from there; and every change to rows, columns or
+ * sheets replayed, in order.
  */
 export type Grid = {
   sheets: readonly SimSheet[];
   cells: ReadonlyMap<string, Entry>;
   formats: ReadonlyMap<string, FormatEntry>;
+  sizes: ReadonlyMap<string, number>;
   log: readonly StructuralStep[];
 };
 
 /**
  * A change as queued: the sheet it acts on by ID, its formulas as Google stores them, and the
  * first line it inserts before or deletes, zero-based. A deleted sheet's size is the approver's;
- * `appends` says inserted lines go after the last.
+ * `appends` says inserted lines go after the last. An unmerge's `merges` are the merges within its
+ * range as the changes queued before it leave the sheet, which it splits, and it applies only
+ * while the range holds exactly those.
  */
 export type PlannedChange =
   | { op: "writeCells"; sheetId: number; rect: Rect; values: SheetCellInput[][] }
   | { op: "clearRange"; sheetId: number; rect: Rect }
   | { op: "formatCells"; sheetId: number; rect: Rect; format: SheetFormatChange }
+  | { op: "mergeCells"; sheetId: number; rect: Rect; merge: MergeType }
+  | { op: "unmergeCells"; sheetId: number; rect: Rect; merges: Rect[] }
   | { op: "addSheet"; sheetId: number; title: string; index: number; rowCount: number; columnCount: number }
   | { op: "renameSheet"; sheetId: number; title: string }
   | { op: "duplicateSheet"; sheetId: number; newSheetId: number; title: string; index: number }
   | { op: "deleteSheet"; sheetId: number; rowCount: number; columnCount: number }
   | { op: Extract<LineOp, `insert${string}`>; sheetId: number; start: number; count: number; appends?: true }
-  | { op: Extract<LineOp, `delete${string}`>; sheetId: number; start: number; count: number };
+  | { op: Extract<LineOp, `delete${string}`>; sheetId: number; start: number; count: number }
+  | { op: ResizeOp; sheetId: number; start: number; count: number; size: number }
+  | { op: "freeze"; sheetId: number; rows?: number; columns?: number };
 
 /**
  * An `updateSpreadsheet()` batch. `sheets` gives the title of each sheet a change acts on or
@@ -125,14 +140,18 @@ export type SheetBatch = {
 /**
  * The payload of each kind of queued change. A batch is queued as `editSheetValues` when it only
  * enters literal values and clears cells, `formatSheets` when it only formats cells,
- * `editSpreadsheet` when it otherwise deletes no sheet, row or column and its formulas call only
- * functions that compute from the spreadsheet alone, and `updateSpreadsheet` otherwise; they differ
- * in nothing but which kinds a user may let apply without asking.
+ * `updateSpreadsheet` when a formula calls a function that does not compute from the spreadsheet
+ * alone or a change is not one this module classifies, `deleteSpreadsheetContent` when it
+ * otherwise deletes a sheet, rows or columns or merges cells, `layoutSpreadsheet` when it
+ * otherwise sizes rows or columns, freezes lines or unmerges cells, and `editSpreadsheet`
+ * otherwise; they differ in nothing but which kinds a user may let apply without asking.
  */
 export type SheetsActions = {
   editSheetValues: SheetBatch;
   formatSheets: SheetBatch;
   editSpreadsheet: SheetBatch;
+  layoutSpreadsheet: SheetBatch;
+  deleteSpreadsheetContent: SheetBatch;
   updateSpreadsheet: SheetBatch;
 };
 
@@ -152,8 +171,21 @@ export function gridOf(metadata: { sheets: readonly SheetMeta[] }): Grid {
       .toSorted((a, b) => a.index - b.index),
     cells: new Map(),
     formats: new Map(),
+    sizes: new Map(),
     log: [],
   };
+}
+
+// Throws `ChangeConflict` for a sheet `action` acts on that is no longer titled as when it was
+// queued, which its guard would refuse.
+function requireTitles(grid: Grid, action: SheetsAction): void {
+  for (let [sheetId, title] of Object.entries(action.payload.sheets)) {
+    // A sheet the change creates is not there yet.
+    let sheet = grid.sheets.find(candidate => candidate.id === Number(sheetId));
+    if (sheet && sheet.title !== title) {
+      throw new ChangeConflict(`the sheet "${title}" it acts on has been renamed "${sheet.title}"`);
+    }
+  }
 }
 
 /**
@@ -162,13 +194,7 @@ export function gridOf(metadata: { sheets: readonly SheetMeta[] }): Grid {
  * titled as when it was queued, which its guard would refuse.
  */
 export function applyChange(grid: Grid, action: SheetsAction, id = 0): Grid {
-  for (let [sheetId, title] of Object.entries(action.payload.sheets)) {
-    // A sheet the change creates is not there yet.
-    let sheet = grid.sheets.find(candidate => candidate.id === Number(sheetId));
-    if (sheet && sheet.title !== title) {
-      throw new ChangeConflict(`the sheet "${title}" it acts on has been renamed "${sheet.title}"`);
-    }
-  }
+  requireTitles(grid, action);
   return planSheet(grid, action.payload.changes, id).grid;
 }
 
@@ -182,7 +208,64 @@ function replayStep(grid: Grid, change: QueuedChange): SimulationStep<Grid> {
   }
 }
 
-/** Replays queued changes over a read, stopping at the first that no longer applies. */
+// The queued changes a fold's grid has applied, oldest first: what puts the grid back when a
+// batch stops after an earlier change of it wrote. It is that grid's own bookkeeping, a part of
+// the fold's draft kept beside it so the grid stays a `Grid` and nothing more: reached only
+// through the grid, and gone with it. The store holds nothing, and no fold reads another's.
+const APPLIED = new WeakMap<Working, QueuedChange[]>();
+
+// Makes `work` what a fold of `applied` over `base` is, in the same object: what `base` holds,
+// then each change again, under its own ID. They applied once over this base, so they apply again
+// and write the same entries in the same order.
+function restore(work: Working, base: Grid, applied: readonly QueuedChange[]): void {
+  Object.assign(work, working(base));
+  for (let { id, action } of applied) planInPlace(work, action.payload.changes, id);
+}
+
+// One queued change applied to a fold's grid in place. A batch of several changes cannot decide
+// before it writes, since each change is checked against what the one before it wrote: when one
+// of them no longer applies, the grid is put back as the batches before made it.
+function replayInPlace(work: Working, change: QueuedChange, base: Grid): SimulationStep<Working> {
+  let { changes } = change.action.payload;
+  try {
+    requireTitles(work, change.action);
+    if (changes.length === 0) return { kind: "known-no-effect" };
+    planInPlace(work, changes, change.id);
+  } catch (error) {
+    if (!(error instanceof ChangeConflict)) throw error;
+    // The title check and a batch's one change both throw before they write.
+    if (changes.length > 1) restore(work, base, APPLIED.get(work)!);
+    return { kind: "unsupported", reason: error.message };
+  }
+  APPLIED.get(work)!.push(change);
+  return { kind: "applied", value: work };
+}
+
+/**
+ * Creates a store that replays queued changes over the grid a read fetched, stopping at the first
+ * that no longer applies. The grid is its one entity, folded under the spreadsheet's own ID. The
+ * store keeps nothing: every call folds the changes it is given from the first. Each fold works
+ * on one grid of its own, which every batch changes in place: nothing is copied for a batch, and
+ * the fetched grid is left as it was. A batch that stops part-way leaves that grid as the batches
+ * before it made it.
+ */
+export function createReplay(): SimulationStore<string, Grid, Working, QueuedChange> {
+  return createSimulationStore<string, Grid, Working, QueuedChange>({
+    initial: grid => {
+      let work = working(grid);
+      APPLIED.set(work, []);
+      return work;
+    },
+    // A grid is always given: every fold has one for its base, and no change deletes it.
+    reduce: (work, change, { base }) => replayInPlace(work!, change, base!),
+  });
+}
+
+/**
+ * Replays queued changes over a grid, stopping at the first that no longer applies: what the
+ * store of `createReplay()` folds, and how many of the changes had an effect. `base` is left as
+ * it was.
+ */
 export function replayChanges(
   base: Grid, changes: readonly QueuedChange[],
 ): SimulationResult<Grid, QueuedChange> {
@@ -252,6 +335,9 @@ type LogView = {
   hosts: Map<number, { start: number; host: number }[]>;
 };
 
+// A view is made for a grid whose log is complete. A fold changes its grid's log in place, and
+// that holds for it too: no step of a fold reads a view, the grid is read through `formulaAt` only
+// once its fold has returned, and nothing changes it after.
 const LOG_VIEWS = new WeakMap<Grid, LogView>();
 
 // Adds `value` to the list `map` holds for `key`.
@@ -451,9 +537,19 @@ export function formulaAt(grid: Grid, sheetId: number, formula: string, from: nu
 type Shown = { value: SpreadsheetCellValue; pending: boolean };
 
 /**
+ * Whether Google decides the formatting of the cell keyed `key`: a cell of a row or column a queued
+ * change inserts, which takes the formatting of the line beside it, or one whose formatting a
+ * queued merge left unknown.
+ */
+function formatUnknown(grid: Grid, key: string): boolean {
+  return grid.formats.get(key)?.unknown === true ||
+    key.split(":").slice(1).some(identity => insertedLine(grid, identity));
+}
+
+/**
  * `shown`, the cell keyed `key` as `mode` reads it, made pending when a formatted read would show
  * it in a number format only Google can display: one a queued change sets or resets, or, for a
- * value queued on an inserted row or column, the one it takes from the line before it. That holds
+ * value queued into a cell whose formatting Google decides, the one it takes there. That holds
  * for a cell that reads blank too, since a format such as `;;;` hides what a cell holds; only a
  * cell a queued change empties is known to read blank.
  */
@@ -461,7 +557,7 @@ function displayed(shown: Shown, grid: Grid, key: string, mode: SpreadsheetValue
   if (mode !== "formatted") return shown;
   let input = grid.cells.get(key)?.input;
   let unknown = grid.formats.get(key)?.set.numberFormat !== undefined ||
-    (input !== undefined && key.split(":").slice(1).some(identity => insertedLine(grid, identity)));
+    input !== undefined && formatUnknown(grid, key);
   return !unknown || input === null ? shown : { value: null, pending: true };
 }
 
@@ -626,14 +722,64 @@ export function basePiecesOf(grid: Grid, areas: readonly { sheetId: number; rect
  */
 export function rangesToFetch(grid: Grid, areas: readonly { sheetId: number; rect: Rect }[]): SheetArea[] {
   let pieces = basePiecesOf(grid, areas);
+  checkReadSize(pieces);
+  return pieces;
+}
+
+/** Refuse a read of more pieces, or more cells, than one read of the queued state may make. */
+function checkReadSize(pieces: readonly SheetArea[]): void {
   let cells = pieces.reduce((total, { rect }) =>
     total + (rect.endRow - rect.startRow) * (rect.endColumn - rect.startColumn), 0);
   if (pieces.length > MAX_READ_PIECES || cells > MAX_READ_CELLS) {
     throw new Error("These ranges cannot be read with the queued changes applied. Read fewer cells, " +
       "or approve or reject the queued changes first.");
   }
-  return pieces;
 }
+
+/**
+ * The pieces a format read of `area` fetches: those `rangesToFetch` gives, and, where every column
+ * of the area or every row is one a queued change inserts, so that none of them holds a cell Google
+ * has, one line of the other kind beside its lines, whose sizes alone are read (`linesOnly`).
+ */
+export function formatPiecesToFetch(
+  grid: Grid, area: SimulatedArea,
+): { pieces: SheetArea[]; linesOnly: boolean } {
+  let pieces = rangesToFetch(grid, [area]);
+  let sheet = sheetOf(grid, area.sheetId);
+  let source = sheet.source;
+  if (pieces.length > 0 || source === undefined) return { pieces, linesOnly: false };
+  let { rect } = area;
+  // The runs of lines Google holds among the area's, each read beside the sheet's first line of
+  // the other kind: the lines between them that queued changes delete are not read.
+  let rows = basePieces(sheet.rows, rect.startRow, rect.endRow);
+  let columns = basePieces(sheet.columns, rect.startColumn, rect.endColumn);
+  let rowRuns = (run: { start: number; length: number }) => ({
+    sheetId: source, rect: { startRow: run.start, endRow: run.start + run.length, startColumn: 0, endColumn: 1 },
+  });
+  let columnRuns = (run: { start: number; length: number }) => ({
+    sheetId: source, rect: { startRow: 0, endRow: 1, startColumn: run.start, endColumn: run.start + run.length },
+  });
+  let lines = rows.length > 0 && columns.length === 0 ? rows.map(rowRuns)
+    : columns.length > 0 && rows.length === 0 ? columns.map(columnRuns) : [];
+  checkReadSize(lines);
+  return { pieces: lines, linesOnly: true };
+}
+
+/** The rows of a band, by which `baseValues` finds the pieces that hold a row. */
+const ROW_BAND = 256;
+
+/** The band a row is in. */
+const bandOf = (row: number): number => Math.floor(row / ROW_BAND);
+
+/**
+ * The columns of a band, by which `baseValues` finds the pieces of a row that hold a cell. Few:
+ * the pieces queued column changes cut a guard into are a few columns wide, and indexing a row
+ * costs its cells over `COLUMN_BAND` at most.
+ */
+const COLUMN_BAND = 16;
+
+/** The band a column is in. */
+const columnBandOf = (column: number): number => Math.floor(column / COLUMN_BAND);
 
 /** Values of cells of the sheets Google holds, by sheet ID and zero-based row and column. */
 export type BaseCells<T> = (sheetId: number, row: number, column: number) => T | null;
@@ -641,15 +787,82 @@ export type BaseCells<T> = (sheetId: number, row: number, column: number) => T |
 /** Cells of the sheets Google holds as a read shows them. */
 export type BaseValues = BaseCells<SpreadsheetCellValue>;
 
-/** `values[i]`, what a read of `pieces[i]` returned padded to its size, by cell. */
+/**
+ * `values[i]`, what a read of `pieces[i]` returned padded to its size, by cell. It reads the
+ * arrays it is given, which it keeps, and copies nothing: a cell is looked for in the pieces of
+ * its sheet that hold its row, the last first, and is the first value found that is not null.
+ * Those pieces are found once for each run of rows that the same pieces hold, and kept.
+ */
 export function baseValues<T extends EnteredValue = SpreadsheetCellValue>(
   pieces: readonly SheetArea[], values: readonly (readonly (readonly (T | null)[])[])[],
 ): BaseCells<T> {
-  let cells = new Map<string, T>();
-  pieces.forEach(({ sheetId, rect }, i) => values[i]?.forEach((line, r) => line.forEach((value, c) => {
-    if (value !== null) cells.set(`${sheetId}:${rect.startRow + r}:${rect.startColumn + c}`, value);
-  })));
-  return (sheetId, row, column) => cells.get(`${sheetId}:${row}:${column}`) ?? null;
+  // The pieces by the bands of `ROW_BAND` rows of their sheet they reach, in piece order, so the
+  // pieces of a row are looked for among those near it and not among every piece of the sheet,
+  // and the rows of each sheet where a piece starts or ends.
+  let bandsOn = new Map<number, Map<number, number[]>>();
+  let edgesOn = new Map<number, Set<number>>();
+  pieces.forEach(({ sheetId, rect }, i) => {
+    let bands = bandsOn.get(sheetId);
+    if (!bands) bandsOn.set(sheetId, bands = new Map());
+    for (let band = bandOf(rect.startRow); band <= bandOf(rect.endRow - 1); band++) {
+      let on = bands.get(band);
+      if (on) on.push(i);
+      else bands.set(band, [i]);
+    }
+    let edges = edgesOn.get(sheetId);
+    if (!edges) edgesOn.set(sheetId, edges = new Set());
+    edges.add(rect.startRow).add(rect.endRow);
+  });
+  // Every row between two edges of its sheet is held by the same pieces. Those of a span, by the
+  // bands of `COLUMN_BAND` columns they reach, in piece order, are indexed the first time a row of
+  // it is asked for and kept: a lookup checks only the pieces that hold its row near its column,
+  // whatever order it is asked in, and what is kept grows with the pieces, not with the rows read.
+  // A guarded area that queued insertions or deletions cut up has hundreds of pieces, across its
+  // rows or its columns, and a guard walks many areas over the same rows.
+  let spansOn = new Map([...edgesOn].map(([sheetId, edges]) => [sheetId, {
+    edges: [...edges].toSorted((a, b) => a - b),
+    held: new Map<number, Map<number, number[]>>(),
+  }]));
+  let holdingRow = (sheetId: number, row: number): Map<number, number[]> | undefined => {
+    let spans = spansOn.get(sheetId);
+    if (!spans) return undefined;
+    let { edges, held } = spans;
+    // The span starts at the last edge at or before the row; past the last edge no piece holds it.
+    let low = 0;
+    let high = edges.length;
+    while (low < high) {
+      let middle = (low + high) >> 1;
+      if (edges[middle] <= row) low = middle + 1;
+      else high = middle;
+    }
+    let span = low - 1;
+    if (span < 0 || span === edges.length - 1) return undefined;
+    let holding = held.get(span);
+    if (holding) return holding;
+    holding = new Map();
+    let start = edges[span];
+    for (let i of bandsOn.get(sheetId)?.get(bandOf(start)) ?? []) {
+      let { rect } = pieces[i];
+      if (start < rect.startRow || start >= rect.endRow) continue;
+      for (let band = columnBandOf(rect.startColumn); band <= columnBandOf(rect.endColumn - 1); band++) {
+        let on = holding.get(band);
+        if (on) on.push(i);
+        else holding.set(band, [i]);
+      }
+    }
+    held.set(span, holding);
+    return holding;
+  };
+  return (sheetId, row, column) => {
+    let near = holdingRow(sheetId, row)?.get(columnBandOf(column)) ?? [];
+    for (let at = near.length - 1; at >= 0; at--) {
+      let { rect } = pieces[near[at]];
+      if (column < rect.startColumn || column >= rect.endColumn) continue;
+      let value = values[near[at]]?.[row - rect.startRow]?.[column - rect.startColumn];
+      if (value !== undefined && value !== null) return value;
+    }
+    return null;
+  };
 }
 
 /**
@@ -763,15 +976,32 @@ function insertedLine(grid: Grid, identity: string): boolean {
   return match !== null && grid.log[Number(match[1])]?.kind === "insert";
 }
 
+// The size of the line with `identity` along `axis` of `sheet`, from `sizes`, those of the lines
+// of the sheet Google holds: null for a line a queued insert made, whose size Google gives it from
+// the line beside it, and the default for one of a sheet a queued change added.
+function lineSize(grid: Grid, sheet: SimSheet, axis: Axis, identity: string | undefined, sizes: BaseSizes): number | null {
+  if (identity === undefined) return null;
+  let queued = grid.sizes.get(lineKey(sheet.id, axis, identity));
+  if (queued !== undefined) return queued;
+  if (insertedLine(grid, identity)) return null;
+  let index = baseIndexOf(identity);
+  if (sheet.source !== undefined && index !== undefined) return sizes(sheet.source, axis, index);
+  return axis === "rows" ? DEFAULT_ROW_HEIGHT : DEFAULT_COLUMN_WIDTH;
+}
+
 /**
- * `area` of `grid` as a format read returns it, from `base`, the formats of the cells of the
- * spreadsheet Google holds that `basePiecesOf` gives for it, or, for a grid whose log is empty,
- * of the area itself: what queued changes set merged over what each cell has, and cells moved
- * with their lines. Cells of added sheets start with no formatting. Cells of inserted lines read
+ * `area` of `grid` as a format read returns it, from `base` and `sizes`, the formats of the cells
+ * and the sizes of the lines of the spreadsheet Google holds that `basePiecesOf` gives for it, or,
+ * for a grid whose log is empty, of the area itself: what queued changes set merged over what each
+ * cell has, and cells and sizes moved with their lines, with the merges queued changes leave
+ * overlapping it. Cells of added sheets start with no formatting. Cells of inserted lines read
  * null and pending, since Google gives an inserted row the formatting of the row beside it but not
- * its borders, and an inserted column its borders as well.
+ * its borders, and an inserted column its borders as well, as do cells a queued merge covers, which
+ * take their merged cell's.
  */
-export function simulatedFormats(grid: Grid, area: SimulatedArea, base: BaseFormats): SpreadsheetFormats {
+export function simulatedFormats(
+  grid: Grid, area: SimulatedArea, base: BaseFormats, sizes: BaseSizes,
+): SpreadsheetFormats {
   let sheet = sheetOf(grid, area.sheetId);
   let { rect } = area;
   let rows = linesAt(sheet.rows, rect.startRow, rect.endRow);
@@ -781,8 +1011,8 @@ export function simulatedFormats(grid: Grid, area: SimulatedArea, base: BaseForm
     let row = rows[r];
     let column = columns[c];
     if (row === undefined || column === undefined) return null;
-    let entry = grid.formats.get(cellKey(sheet.id, row, column));
-    if (insertedLine(grid, row) || insertedLine(grid, column)) {
+    let key = cellKey(sheet.id, row, column);
+    if (formatUnknown(grid, key)) {
       pendingCells.push(cellName(rect.startRow + r, rect.startColumn + c));
       return null;
     }
@@ -790,11 +1020,17 @@ export function simulatedFormats(grid: Grid, area: SimulatedArea, base: BaseForm
     let baseColumn = baseIndexOf(column);
     let held = sheet.source === undefined || baseRow === undefined || baseColumn === undefined
       ? null : base(sheet.source, baseRow, baseColumn);
-    return mergeFormat(held, entry);
+    return mergeFormat(held, grid.formats.get(key));
   }));
+  let merges = (sheet.merges ?? []).filter(merge => intersection(merge, rect)).toSorted(byPosition);
+  let rowLines = linesAt(sheet.rows, rect.startRow, rect.startRow + area.rows);
+  let columnLines = linesAt(sheet.columns, rect.startColumn, rect.startColumn + area.columns);
   return {
     range: a1Of(sheet.title, rect),
     formats,
+    ...(merges.length > 0 ? { merges: merges.map(rectName) } : {}),
+    rowHeights: rowLines.map(row => lineSize(grid, sheet, "rows", row, sizes)),
+    columnWidths: columnLines.map(column => lineSize(grid, sheet, "columns", column, sizes)),
     ...(pendingCells.length > 0 ? { pendingCells } : {}),
   };
 }

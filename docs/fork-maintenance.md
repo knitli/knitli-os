@@ -839,6 +839,11 @@ authorizes a read after fetching it.
   - **Left for a kernel PR:** `VoiceSession`'s `dictate` mode, `VoiceMode`'s `"dictate"` and the
     `dictationStt` preference and admin default are unused by the UI now. Removing them changes
     `workshop-shared`'s API and the backend, so it belongs in its own reviewed change.
+- **2026-11-27 sync (foundation `d1c2c5b9`; same PR as the two entries below): no new seams.** One
+  commit, upstream #1304 (a Google Doc run's `content` name and `elements()`, and
+  `DocStore.lists()`), in four `gatekeeper-google` files the fork does not edit; no conflict and
+  nothing changed on both sides. It adds no `alarm()` handler, Durable Object class, migration
+  or `reviewedSurvivors` ack.
 - **Seams added by the 2026-11-26 sync (foundation `73919572`; same PR as the 2026-11-25 entry
   below).**
   - **Adopted: upstream's streamed composer uploads (#1231), except for spreadsheets.** Upstream

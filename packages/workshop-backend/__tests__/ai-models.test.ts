@@ -4,7 +4,7 @@ import {
   SUGGESTED_MODELS, type AiChatAuthorInfo, type AiModelConfig, type BuiltInReasoning,
 } from "@gadgets/workshop-shared/api";
 import {
-  type AssistantMessage, type ClassifierContext, type ToolResultMessage,
+  type AssistantMessage, type ClassifierContext, type Message, type ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
@@ -1145,6 +1145,7 @@ describe("gateway model reasoning levels", () => {
     ["openai", "gpt-5.6-sol", ["off", ...LOW_TO_MAX]],
     ["openai", "gpt-5.6-luna", ["off", ...LOW_TO_MAX]],
     ["openai", "gpt-5.6-terra", ["off", ...LOW_TO_MAX]],
+    ["google", "gemini-4-neon", ["low", "medium", "high", "xhigh"]],
     ["google", "gemini-3.6-flash", ["minimal", "low", "medium", "high"]],
     ["cloudflare", "@cf/moonshotai/kimi-k2.7-code", OFF_TO_HIGH],
     ["cloudflare", "@cf/zai-org/glm-5.2", ["off", "high", "max"]],
@@ -1181,6 +1182,7 @@ describe("gateway model reasoning levels", () => {
     ["openai", "gpt-5.6-sol", "medium"],
     ["openai", "gpt-5.6-luna", "medium"],
     ["openai", "gpt-5.6-terra", "medium"],
+    ["google", "gemini-4-neon", null],
     ["google", "gemini-3.6-flash", null],
     ["cloudflare", "@cf/moonshotai/kimi-k2.7-code", null],
     ["cloudflare", "@cf/zai-org/glm-5.2", null],
@@ -1866,6 +1868,59 @@ describe("Gemini function call signatures", () => {
         .filter(entry => entry.functionCall !== undefined)
         .map(entry => entry.thoughtSignature))
         .toEqual(["c2lnbmF0dXJl", "skip_thought_signature_validator"]);
+  }, 15000);
+});
+
+describe("Tool-result images in provider requests", () => {
+  beforeEach(() => {
+    capturedRequests.length = 0;
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // One step that read two images: two calls, each answered with a picture.
+  const imageStep = (handle: ModelHandle): Message[] => [
+    { role: "user", content: "look", timestamp: 0 },
+    {
+      role: "assistant",
+      content: ["a", "b"].map(id => ({ type: "toolCall" as const, id, name: "readFile",
+        arguments: { workpiece: "OUTPUTS", filename: `${id}.png` } })),
+      api: handle.model.api,
+      provider: handle.model.provider,
+      model: handle.model.id,
+      usage: zeroUsage(),
+      stopReason: "toolUse",
+      timestamp: 0,
+    },
+    ...["a", "b"].map((id): ToolResultMessage => ({
+      role: "toolResult",
+      toolCallId: id,
+      toolName: "readFile",
+      content: [{ type: "text", text: `${id}.png` }, { type: "image", data: "iVBOR", mimeType: "image/png" }],
+      isError: false,
+      timestamp: 0,
+    })),
+  ];
+
+  // pi puts Gemini 2.5's tool-result images in user turns of their own, between the responses to
+  // parallel calls, and Google rejects a batch of responses split that way. pi's Google adapter
+  // refuses an injected fetch, so the request is read from the global one.
+  it("keeps the responses to parallel calls together for Gemini", async () => {
+    vi.stubGlobal("fetch", fetchStub);
+    const handle = getModel(env(), { provider: "google", model: "gemini-2.5-pro", apiToken: "ignored" },
+        INITIATOR);
+    const stream = handle.stream(handle.model, { messages: imageStep(handle) }, { maxRetries: 0 });
+    expect((await stream.result()).stopReason).toBe("error");
+    const body = z.object({ contents: z.array(z.object({
+      role: z.string(), parts: z.array(z.object({ functionResponse: z.object({}).optional(),
+        inlineData: z.object({}).optional() }).passthrough()),
+    })) }).parse(JSON.parse(capturedRequests[0].body));
+    const responseTurns = body.contents.filter(turn => turn.parts.some(part => part.functionResponse));
+    expect(responseTurns).toHaveLength(1);
+    expect(responseTurns[0].parts.filter(part => part.functionResponse)).toHaveLength(2);
+    // The images follow, in the order of their calls.
+    expect(body.contents.flatMap(turn => turn.parts).filter(part => part.inlineData)).toHaveLength(2);
   }, 15000);
 });
 

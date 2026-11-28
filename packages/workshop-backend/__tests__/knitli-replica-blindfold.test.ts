@@ -48,3 +48,23 @@ it("serves a worktree without prompt files, and refuses with upstream's unreplic
     (pulled as GitPullTransfer & Disposable)[Symbol.dispose]();
   });
 });
+
+// Upstream #1275 lets a view read any worktree file its answer quotes (`embeds.text()`), and a
+// view can hand what it read back to the agent through `agent.send()`. The pin is the one path
+// to those bytes, so it resolves a prompt file as it resolves a missing one.
+it("pins no prompt file for a view, at the root, nested or pending", async () => {
+  await withWorktree([["data.json", "{}"], ["PROMPT.md", "secret"], ["docs/PROMPT.md", "secret"]],
+      async (impl, id, head) => {
+    const turn = {
+      getOverlayFiles: () => new Map([["new/PROMPT.md", "pending secret"]]),
+      getRemovedPaths: () => new Set<string>(),
+      getBaseCommit: () => head,
+    } as unknown as Parameters<Impl["getWorktreeFileOid"]>[3];
+    expect(await impl.getWorktreeFileOid(1, id, "data.json", turn))
+        .toBe(await impl.gitCache.fileOidAtCommit(head, "data.json"));
+    expect(await impl.getWorktreeFileOid(1, id, "missing.json", turn)).toBeUndefined();
+    for (const path of ["PROMPT.md", "docs/PROMPT.md", "new/PROMPT.md"]) {
+      expect(await impl.getWorktreeFileOid(1, id, path, turn)).toBeUndefined();
+    }
+  });
+});

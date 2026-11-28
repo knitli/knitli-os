@@ -2,18 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import type { RpcStub } from "capnweb";
 import type { ChatAttachmentHandle, Overseer } from "@gadgets/workshop-shared/api";
 import { reportIssue } from "../../../../errorReporting";
-import { formatAttachmentSize } from "../../attachmentFormatting";
-import {
-  MAX_CHAT_ATTACHMENT_TOTAL_BYTES,
-  prepareChatAttachment,
-} from "./prepareChatAttachment";
+import { prepareChatAttachment } from "./prepareChatAttachment";
 import { isSpreadsheetMimeType } from "./spreadsheetTypes";
+import { deleteStaged, stageSpreadsheet } from "./stagedSpreadsheetUpload";
 
 export const MAX_COMPOSER_ATTACHMENTS = 5;
-
-// The server counts what it stores toward the message total, and a spreadsheet stores only a
-// small summary of itself, so its raw size does not count.
-const storedBytes = (mimeType: string, size: number) => isSpreadsheetMimeType(mimeType) ? 0 : size;
 
 export type ComposerAttachment = {
   id: string;
@@ -40,6 +33,9 @@ export const useComposerAttachments = ({
 }: ComposerAttachmentsOptions) => {
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const attachmentsRef = useRef<ComposerAttachment[]>([]);
+  // Each running upload, aborted when its card is removed or the composer goes: the workspace
+  // would otherwise store the rest of the file for nothing, and nothing frees it.
+  const uploadsRef = useRef(new Map<string, AbortController>());
   const mountedRef = useRef(true);
   // Attachments handed to a send in flight: that send commits or abandons them, not an unmount.
   const sendingRef = useRef(new Set<string>());
@@ -60,24 +56,16 @@ export const useComposerAttachments = ({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      for (const upload of uploadsRef.current.values()) upload.abort();
+      uploadsRef.current.clear();
       const abandoned = attachmentsRef.current;
       attachmentsRef.current = [];
       for (const attachment of abandoned) {
         if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
-        if (!sendingRef.current.has(attachment.id)) deleteStaged(attachment);
+        if (!sendingRef.current.has(attachment.id)) deleteStaged(getOverseerRef.current, attachment.ref);
       }
     };
   }, []);
-
-  // Staged uploads live server-side until a send commits them; drop them with the composer.
-  const deleteStaged = (attachment: ComposerAttachment | undefined) => {
-    const stagedId = attachment?.ref && "id" in attachment.ref ? attachment.ref.id : undefined;
-    if (stagedId === undefined) return;
-    void (async () => {
-      const overseer = await getOverseerRef.current();
-      await overseer.deleteChatAttachment(stagedId);
-    })().catch(() => {});
-  };
 
   const uploadAttachment = async (
     id: string,
@@ -88,20 +76,25 @@ export const useComposerAttachments = ({
     try {
       const overseer = await getOverseerRef.current();
       if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) return;
-      // Fork: staged uploads take the bytes (see below), so the whole file is read here; upstream
-      // streams a plain blob instead.
-      const content = new Uint8Array(await blob.arrayBuffer());
-      if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) return;
-      // Every upload is staged under its own ID, so removing or abandoning it before a send
-      // reclaims the server copy; a send commits it (spreadsheets as a parsed workbook, other
-      // files as workspace files). An immutable blob could not be reclaimed this way: identical
-      // bytes share one OID, so deleting it could break another attachment holding the same OID.
-      const ref: ChatAttachmentHandle =
-        await overseer.uploadChatAttachment({ mimeType, content, name }, null);
-      if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) {
-        if ("id" in ref) void overseer.deleteChatAttachment(ref.id).catch(() => {});
+      // Fork: a spreadsheet is staged whole for the server to parse; every other file streams.
+      if (isSpreadsheetMimeType(mimeType)) {
+        const ref = await stageSpreadsheet(overseer, { blob, mimeType, name },
+          () => mountedRef.current && attachmentsRef.current.some((item) => item.id === id));
+        if (ref) updateAttachments((current) => current.map((item) =>
+          item.id === id ? { ...item, uploadState: "ready", ref } : item));
         return;
       }
+      // Streamed, so no upload needs the whole file in memory at either end.
+      const upload = new AbortController();
+      uploadsRef.current.set(id, upload);
+      const stream = blob.stream()
+        .pipeThrough(new TransformStream<Uint8Array, Uint8Array>(), { signal: upload.signal });
+      const oid = await overseer.uploadBlob({ stream, byteLength: blob.size })
+        .finally(() => uploadsRef.current.delete(id));
+      if (!mountedRef.current || !attachmentsRef.current.some((item) => item.id === id)) {
+        return;
+      }
+      const ref: ChatAttachmentHandle = {oid, mimeType, name};
       updateAttachments((current) => current.map((item) =>
         item.id === id ? { ...item, uploadState: "ready", ref } : item));
     } catch (error) {
@@ -147,16 +140,6 @@ export const useComposerAttachments = ({
         onErrorRef.current(`You can attach up to ${MAX_COMPOSER_ATTACHMENTS} attachments`);
         continue;
       }
-      const totalBytes = attachmentsRef.current.reduce(
-        (sum, attachment) => sum + storedBytes(attachment.mimeType, attachment.blob.size),
-        0,
-      );
-      if (totalBytes + storedBytes(mimeType, blob.size) > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
-        onErrorRef.current(
-          `Attached files must total ${formatAttachmentSize(MAX_CHAT_ATTACHMENT_TOTAL_BYTES)} or less`,
-        );
-        continue;
-      }
 
       const id = crypto.randomUUID();
       const previewUrl = mimeType.startsWith("image/") ? URL.createObjectURL(blob) : undefined;
@@ -174,10 +157,12 @@ export const useComposerAttachments = ({
   };
 
   const removeAttachment = (id: string) => {
+    uploadsRef.current.get(id)?.abort();
+    uploadsRef.current.delete(id);
     const attachment = attachmentsRef.current.find((item) => item.id === id);
     if (attachment?.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
     updateAttachments((current) => current.filter((item) => item.id !== id));
-    deleteStaged(attachment);
+    deleteStaged(getOverseerRef.current, attachment?.ref);
   };
 
   /**
@@ -190,7 +175,7 @@ export const useComposerAttachments = ({
     return (delivered: boolean) => {
       for (const attachment of sent) {
         sendingRef.current.delete(attachment.id);
-        if (!delivered && !mountedRef.current) deleteStaged(attachment);
+        if (!delivered && !mountedRef.current) deleteStaged(getOverseerRef.current, attachment.ref);
       }
     };
   };

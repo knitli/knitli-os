@@ -135,19 +135,19 @@ describe("ChatComposer (fork)", () => {
 
   it("blocks conversation while an attachment is prepared and uploaded, until removed", async () => {
     let canStartConversation: (() => boolean) | undefined;
-    let finishUpload: ((handle: { id: string }) => void) | undefined;
+    let finishUpload: ((oid: string) => void) | undefined;
     const createUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
     const revokeUrl = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
-    const upload = vi.fn<() => Promise<{ id: string }>>(() => new Promise<{ id: string }>((resolve) => { finishUpload = resolve; }));
+    const upload = vi.fn<() => Promise<string>>(() => new Promise<string>((resolve) => { finishUpload = resolve; }));
     const file = new File(["image"], "draft.png", { type: "image/png" });
-    Object.defineProperty(file, "arrayBuffer", { value: async () => new ArrayBuffer(5) });
+    Object.defineProperty(file, "stream", { value: () => new ReadableStream<Uint8Array>() });
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
     try {
       await act(async () => root!.render(<ChatComposer
         createCapsuleGatekeeper={async () => null}
-        getOverseer={() => ({ uploadChatAttachment: upload, deleteChatAttachment: async () => {} }) as unknown as RpcStub<Overseer>}
+        getOverseer={() => ({ uploadBlob: upload }) as unknown as RpcStub<Overseer>}
         onSend={() => {}} isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
         voiceControls={(draft) => { canStartConversation ??= draft.canStartConversation; return null; }}
       />));
@@ -160,7 +160,7 @@ describe("ChatComposer (fork)", () => {
       });
       expect(upload).toHaveBeenCalledOnce();
       expect(canStartConversation!()).toBe(false);
-      await act(async () => finishUpload!({ id: "staged-draft" }));
+      await act(async () => finishUpload!("a".repeat(40)));
       expect(canStartConversation!()).toBe(false);
       // The attachment tray renders once: a single remove control for the one attachment.
       expect(container.querySelectorAll('[aria-label="Remove draft.png"]')).toHaveLength(1);

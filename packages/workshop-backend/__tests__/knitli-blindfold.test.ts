@@ -38,7 +38,7 @@ function userTurn(sequence: number, message: string): AiChatMessage {
 
 function capturingHandle(captured: {options?: unknown, context?: any}[]) {
   return {
-    model: { id: "test", name: "test", api: "openai-completions" },
+    model: { id: "test", name: "test", api: "openai-completions", input: ["text"] },
     stream: ((_model: unknown, context: any, options?: ModelStreamOptions) => {
       captured.push({ options, context });
       return {

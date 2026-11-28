@@ -1,33 +1,59 @@
 import { env } from "cloudflare:test";
 import { ActionJournal, APPLY_OUTCOME_UNKNOWN_MESSAGE } from "@gadgets/gatekeeper-kit/actions";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActionDescription, ActionField, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import { EDIT_OUT_OF_ORDER, SHEETS_STATE_PREFIX } from "../../src/drive-editors";
+import { editorCost } from "../../src/editor-cost";
 import { DRIVE_WRITES_GRANT, GOOGLE_DRIVE_RESOURCE } from "../../src/resources";
 import { DriveFiles, DOC_MIME, FOLDER_MIME, SHEET_MIME } from "../drive-files";
 import { DRIVE_DOCS_KINDS, DRIVE_SHEETS_KINDS, DRIVE_SLIDES_KINDS } from "../drive-edit-kinds";
 import { GoogleSpreadsheetReadSessionImpl, GoogleSpreadsheetSessionImpl } from "../../src/sheets";
 import { MARKER_RETENTION_MS, SHEETS_ACTIONS, type MarkerEntry } from "../../src/sheets-actions";
+import { MAX_QUEUED_ENTRIES } from "../../src/sheets-plan";
 import { GoogleSheetsApi } from "../../src/sheets-api";
 import type { RestCellFormat } from "../../src/sheets-format";
 import { rewriteFormula, type RewriteStep } from "../../src/sheets-formula";
-import { a1Of, enteredOf, parseRange, type EnteredValue, type Rect } from "../../src/sheets-model";
+import { a1Of, enteredOf, intersection, parseRange, type EnteredValue, type Rect } from "../../src/sheets-model";
 import type {
   SpreadsheetFormats, SpreadsheetInfo, SpreadsheetRange, SpreadsheetValueMode,
 } from "../../src/sheets-read-types";
 import type { SheetMeta, SheetsAction } from "../../src/sheets-simulation";
 import type { SheetCellInput, SheetChange } from "../../src/sheets-types";
-import { serveFakes, type ProviderFake } from "../slides-provider";
+import { meterFetches, printedAsGoogle, serveFakes, type ProviderFake } from "../slides-provider";
 import {
-  protectedRange, sheet as sheetMeta, spreadsheetMetadata, WHITESPACE_DRIFT, type FixtureGridRange,
+  gridRangeOf, protectedRange, rect as rectOf, sheet as sheetMeta, spreadsheetMetadata, WHITESPACE_DRIFT, type FixtureGridRange,
 } from "../sheets-fixture";
 
 type BatchRequest = Record<string, any>;
 
 class Invalid extends Error {}
 
-/** A sheet of the fake spreadsheet, and the ranges it protects. */
-type ProviderSheet = SheetMeta & { protectedRanges?: ReturnType<typeof protectedRange>[] };
+/**
+ * A sheet of the fake spreadsheet, the ranges it protects, and the size in pixels of each line
+ * resized from Google's 21 a row and 100 a column.
+ */
+type ProviderSheet = SheetMeta & {
+  protectedRanges?: ReturnType<typeof protectedRange>[];
+  rowHeights?: Record<number, number>;
+  columnWidths?: Record<number, number>;
+};
+
+/** `body` as Google answers a request: indented two spaces a level unless it asks `prettyPrint=false`. */
+function jsonAnswer(url: URL, body: unknown): Response {
+  let text = url.searchParams.get("prettyPrint") === "false" ? JSON.stringify(body) : JSON.stringify(body, null, 2);
+  return new Response(text, { headers: { "Content-Type": "application/json; charset=UTF-8" } });
+}
+
+/** Whether `outer` holds every cell of `inner`. */
+function holds(outer: Rect, inner: Rect): boolean {
+  return inner.startRow >= outer.startRow && inner.endRow <= outer.endRow &&
+    inner.startColumn >= outer.startColumn && inner.endColumn <= outer.endColumn;
+}
+
+/** The size of line `index` of `sheet` along an axis. */
+function sizeOf(sheet: ProviderSheet, rows: boolean, index: number): number {
+  return (rows ? sheet.rowHeights : sheet.columnWidths)?.[index] ?? (rows ? 21 : 100);
+}
 
 /** What a batch changes, committed only if every request applies. */
 type ProviderState = {
@@ -54,15 +80,23 @@ const CHANGED = "This change no longer applies: cells it overwrites or deletes, 
   "changed since it was queued.";
 
 const EDIT_SPREADSHEET = { tag: "edit-spreadsheet", label: "Spreadsheet edits that keep every sheet, row and column" };
+const LAYOUT_SPREADSHEET = {
+  tag: "layout-spreadsheet", label: "Spreadsheet edits that resize rows or columns, freeze lines or unmerge cells",
+};
+const DELETE_SPREADSHEET_CONTENT = {
+  tag: "delete-spreadsheet-content", label: "Spreadsheet changes that delete sheets, rows, columns or merged cells' values",
+};
 /** The kind of every change a user cannot let apply without asking. */
 const UPDATE_SPREADSHEET = {
-  tag: "update-spreadsheet", label: "Spreadsheet changes that delete or run unchecked formulas",
+  tag: "update-spreadsheet", label: "Spreadsheet changes that run unchecked formulas",
 };
 /** The kinds of change a user may let apply without asking. */
 const AUTO_APPROVABLE = [
   { tag: "editSheetValues", label: "Sheet value edits" },
   { tag: "formatSheets", label: "Sheet formatting" },
   EDIT_SPREADSHEET,
+  LAYOUT_SPREADSHEET,
+  DELETE_SPREADSHEET_CONTENT,
 ];
 
 /** Fields of a cell's value, which no format read may ask for. */
@@ -130,7 +164,14 @@ class SheetsProvider {
   commits = 0;
   /** Every request, in order. */
   requests: URL[] = [];
+  /** The reads answered indented, as `METHOD path`: those that did not ask for compact JSON. */
+  indented: string[] = [];
   canEdit = true;
+  /**
+   * Whether the token may only read: Google refuses `spreadsheets:getByDataFilter`, which needs a
+   * grant that may edit, with 403, and answers `spreadsheets.get`.
+   */
+  readOnlyGrant = false;
   /** Lands once, just before the next batch is checked, as a collaborator's edit would. */
   beforeNextBatch?: () => void;
   /** Lands once, just after the next batch is answered. */
@@ -164,9 +205,22 @@ class SheetsProvider {
     return this;
   }
 
-  /** Google's answer to `request`, or `undefined` for a request about another file. */
+  /**
+   * Google's answer to `request`, a Sheets answer printed as Google prints it, or `undefined` for a
+   * request about another file.
+   */
   async handle(request: Request): Promise<Response | undefined> {
     let url = new URL(request.url);
+    let answer = await this.#answer(request, url);
+    if (!answer || url.hostname !== "sheets.googleapis.com") return answer;
+    let printed = await printedAsGoogle(url, answer);
+    if (printed !== answer && !url.pathname.endsWith(":batchUpdate")) {
+      this.indented.push(`${request.method} ${url.pathname}`);
+    }
+    return printed;
+  }
+
+  async #answer(request: Request, url: URL): Promise<Response | undefined> {
     let base = `/v4/spreadsheets/${this.spreadsheetId}`;
     let drive = url.hostname === "www.googleapis.com" &&
       url.pathname === `/drive/v3/files/${this.spreadsheetId}`;
@@ -179,11 +233,13 @@ class SheetsProvider {
     if (drive) return Response.json({ capabilities: { canEdit: this.canEdit } });
     let path = url.pathname.slice(base.length);
     if (path === ":batchUpdate") return this.#batch((await request.json() as { requests: BatchRequest[] }).requests);
-    // Entered values for the guard, or formats: the field mask says which.
+    // Entered values for the guard, merges, or formats: the field mask says which.
     if (path === ":getByDataFilter") {
-      return url.searchParams.get("fields")?.includes("userEnteredValue")
-        ? this.#gridData(url, await request.json())
-        : this.#formatsByDataFilter(url, await request.json());
+      if (this.readOnlyGrant) return Response.json({ error: { code: 403, status: "PERMISSION_DENIED" } }, { status: 403 });
+      let fields = url.searchParams.get("fields") ?? "";
+      if (fields.includes("userEnteredValue")) return this.#gridData(url, await request.json());
+      if (!fields.includes("data(")) return this.#mergesByDataFilter(url, await request.json());
+      return this.#formatsByDataFilter(url, await request.json());
     }
     if (path === "" && url.searchParams.has("ranges")) return this.#formatRead(url);
     if (path === "/values:batchGetByDataFilter") return this.#byDataFilter(await request.json());
@@ -195,7 +251,7 @@ class SheetsProvider {
         ? Response.json({ metadataId: Number(metadataId), ...marker })
         : Response.json({ error: { code: 404, status: "NOT_FOUND" } }, { status: 404 });
     }
-    if (path === "") return this.#metadata(url.searchParams.get("fields") ?? "");
+    if (path === "") return this.#metadata(url);
     throw new Error(`Unexpected provider request: ${url.href}`);
   }
 
@@ -254,21 +310,30 @@ class SheetsProvider {
     return maskPaths(fields).flatMap(path => path.startsWith(prefix) ? [path.slice(prefix.length).split(".")] : []);
   }
 
-  /** `sheet` with the formats of each of `rects`, as a format read returns it, only what `paths` name. */
+  /**
+   * `sheet` with the formats and line sizes of each of `rects`, and the merges overlapping them, as
+   * a format read returns it, only the formats `paths` name.
+   */
   #formatSheet(sheet: ProviderSheet, rects: Rect[], paths: string[][]) {
     let masked = (format: RestCellFormat) => {
       let shown: Record<string, any> = {};
       for (let path of paths) setPath(shown, path, path.reduce<any>((at, part) => at?.[part], format));
       return shown;
     };
+    let merges = (sheet.merges ?? []).filter(merge => rects.some(rect => intersection(merge, rect)));
     return {
       properties: {
         sheetId: sheet.id, title: sheet.title, index: sheet.index,
         gridProperties: { rowCount: sheet.rowCount, columnCount: sheet.columnCount },
       },
+      ...(merges.length > 0 ? { merges: merges.map(merge => gridRangeOf(sheet.id, merge)) } : {}),
       data: rects.map(rect => ({
         startRow: rect.startRow,
         startColumn: rect.startColumn,
+        rowMetadata: Array.from({ length: rect.endRow - rect.startRow }, (_row, r) =>
+          ({ pixelSize: sizeOf(sheet, true, rect.startRow + r) })),
+        columnMetadata: Array.from({ length: rect.endColumn - rect.startColumn }, (_column, c) =>
+          ({ pixelSize: sizeOf(sheet, false, rect.startColumn + c) })),
         rowData: Array.from({ length: rect.endRow - rect.startRow }, (_row, r) => ({
           values: Array.from({ length: rect.endColumn - rect.startColumn }, (_column, c) => {
             let format = this.formats.get(key(sheet.id, rect.startRow + r, rect.startColumn + c));
@@ -325,16 +390,47 @@ class SheetsProvider {
     return this.requests.flatMap(url => url.searchParams.getAll("fields"));
   }
 
-  #metadata(fields: string): Response {
+  #metadata(url: URL): Response {
+    let fields = url.searchParams.get("fields") ?? "";
     let body = spreadsheetMetadata(this.spreadsheetId, this.title, this.sheets);
     // A field the mask does not name is left out, as Google leaves it out.
     for (let sheet of body.sheets) {
+      if (!fields.includes("merges")) delete (sheet as { merges?: unknown }).merges;
       if (!fields.includes("protectedRanges")) delete sheet.protectedRanges;
       for (let range of sheet.protectedRanges ?? []) {
         if (!fields.includes("editors")) delete (range as Partial<typeof range>).editors;
       }
     }
-    return Response.json(body);
+    return jsonAnswer(url, body);
+  }
+
+  /** The sheet IDs each read of merges named, in order. */
+  mergeReads: number[][] = [];
+
+  /**
+   * `spreadsheets:getByDataFilter` for the merges of whole sheets, each named by its ID alone: one
+   * entry per sheet named, in the spreadsheet's order, its ID left out when 0.
+   */
+  #mergesByDataFilter(url: URL, body: { dataFilters: { gridRange: FixtureGridRange }[]; includeGridData?: boolean }): Response {
+    if (url.searchParams.get("fields") !== "sheets(properties(sheetId),merges)") {
+      this.violations.push(`a merges read asks for ${url.searchParams.get("fields")}`);
+    }
+    if (body.includeGridData) this.violations.push("a merges read asks for grid data");
+    if (body.dataFilters.some(({ gridRange }) => Object.keys(gridRange).join() !== "sheetId")) {
+      this.violations.push("a merges read names part of a sheet");
+    }
+    let ids = body.dataFilters.map(({ gridRange }) => gridRange.sheetId);
+    this.mergeReads.push(ids);
+    if (ids.some(id => !this.sheets.some(sheet => sheet.id === id))) {
+      return Response.json({ error: { code: 400, status: "INVALID_ARGUMENT" } }, { status: 400 });
+    }
+    return jsonAnswer(url, {
+      sheets: this.sheets.filter(sheet => ids.includes(sheet.id)).toSorted((a, b) => a.index - b.index)
+        .map(sheet => ({
+          properties: sheet.id === 0 ? {} : { sheetId: sheet.id },
+          ...(sheet.merges?.length ? { merges: sheet.merges.map(merge => gridRangeOf(sheet.id, merge)) } : {}),
+        })),
+    });
   }
 
   #shown(value: EnteredValue, mode: string): SheetCellInput {
@@ -586,7 +682,10 @@ class SheetsProvider {
             ?.userEnteredValue;
           let value: EnteredValue = entered?.formulaValue !== undefined ? { formula: entered.formulaValue }
             : entered?.stringValue ?? entered?.numberValue ?? entered?.boolValue ?? null;
-          if (value === null) cells.delete(key(sheet.id, row, column));
+          // Google accepts a value written into a cell a merge covers, and drops it.
+          let covered = (sheet.merges ?? []).some(merge => intersection(merge, { startRow: row, endRow: row + 1, startColumn: column, endColumn: column + 1 }) &&
+            !(merge.startRow === row && merge.startColumn === column));
+          if (value === null || covered) cells.delete(key(sheet.id, row, column));
           else cells.set(key(sheet.id, row, column), value);
         }
       }
@@ -634,6 +733,8 @@ class SheetsProvider {
           this.#reformat(state, neighbours, format => setPath(format, ["borders", facing], undefined));
         }
       }
+    } else if (request.mergeCells || request.unmergeCells) {
+      this.#merge(request, state);
     } else if (request.addSheet) {
       let { sheetId, title, index, gridProperties } = request.addSheet.properties;
       if (index === undefined || gridProperties?.rowCount === undefined || gridProperties.columnCount === undefined) {
@@ -643,6 +744,38 @@ class SheetsProvider {
         id: this.#newSheetId(state, sheetId), title: this.#checkTitle(state, title), index,
         rowCount: gridProperties.rowCount, columnCount: gridProperties.columnCount,
       });
+    } else if (request.updateSheetProperties?.fields.startsWith("gridProperties.")) {
+      let { properties: { sheetId, gridProperties, ...rest }, fields } = request.updateSheetProperties;
+      let given = Object.keys(gridProperties);
+      if (Object.keys(rest).length > 0 || fields !== given.map(field => `gridProperties.${field}`).join(",") ||
+        given.some(field => field !== "frozenRowCount" && field !== "frozenColumnCount")) {
+        this.#violation(`updateSheetProperties sets ${fields}`);
+      }
+      let sheet = this.#sheetOf(state, sheetId);
+      for (let [field, rows] of [["frozenRowCount", true], ["frozenColumnCount", false]] as const) {
+        let count: number | undefined = gridProperties[field];
+        if (count === undefined) continue;
+        if (count >= (rows ? sheet.rowCount : sheet.columnCount)) {
+          throw new Invalid(`You can't freeze all visible ${rows ? "rows" : "columns"} on the sheet.`);
+        }
+        if ((sheet.merges ?? []).some(merge => rows
+          ? merge.startRow < count! && count! < merge.endRow
+          : merge.startColumn < count! && count! < merge.endColumn)) {
+          throw new Invalid(`Sorry, you can't freeze ${rows ? "rows" : "columns"} which contain only part of a merged cell.`);
+        }
+      }
+      state.sheets = state.sheets.map(s => s.id === sheet.id ? { ...s, ...gridProperties } : s);
+    } else if (request.updateDimensionProperties) {
+      let { range, properties, fields } = request.updateDimensionProperties;
+      if (fields !== "pixelSize" || Object.keys(properties).join() !== "pixelSize") {
+        this.#violation(`updateDimensionProperties sets ${fields}`);
+      }
+      let sheet = this.#sheetOf(state, range.sheetId);
+      let rows = range.dimension === "ROWS";
+      if (range.endIndex > (rows ? sheet.rowCount : sheet.columnCount)) throw new Invalid("range.endIndex is past the grid");
+      let sizes = { ...(rows ? sheet.rowHeights : sheet.columnWidths) };
+      for (let line = range.startIndex; line < range.endIndex; line++) sizes[line] = properties.pixelSize;
+      state.sheets = state.sheets.map(s => s.id !== sheet.id ? s : { ...s, [rows ? "rowHeights" : "columnWidths"]: sizes });
     } else if (request.updateSheetProperties) {
       let { properties, fields } = request.updateSheetProperties;
       if (fields !== "title" || Object.keys(properties).join() !== "sheetId,title") {
@@ -661,7 +794,7 @@ class SheetsProvider {
       let source = this.#sheetOf(state, sourceSheetId);
       let id = this.#newSheetId(state, newSheetId);
       let title = this.#checkTitle(state, newSheetName);
-      let { protectedRanges: _protectedRanges, hidden: _hidden, ...copied } = source;
+      let { protectedRanges: _protectedRanges, hidden: _hidden, ...copied } = structuredClone(source);
       this.#place(state, { ...copied, id, title, index: insertSheetIndex });
       let copies = [...cells].flatMap(([cell, value]) => {
         let [sheetId, row, column] = cell.split(":").map(Number);
@@ -694,6 +827,55 @@ class SheetsProvider {
     } else {
       this.#violation(`unexpected request ${Object.keys(request).join()}`);
     }
+  }
+
+  /**
+   * Merges or unmerges the cells of a range, as a scratch spreadsheet did: a merge whole, by row or
+   * by column keeps each block's top-left value, clears the others' and gives them its formatting,
+   * and replaces the merges the range holds whole; an unmerge restores nothing.
+   */
+  #merge(request: BatchRequest, state: ProviderState): void {
+    let { range, mergeType } = request.mergeCells ?? request.unmergeCells;
+    let sheet = this.#sheetOf(state, range.sheetId);
+    this.#withinGrid(sheet, range);
+    let rect = {
+      startRow: range.startRowIndex, endRow: range.endRowIndex, startColumn: range.startColumnIndex, endColumn: range.endColumnIndex,
+    };
+    let blocks: Rect[] = [rect];
+    if (request.mergeCells) {
+      if (!["MERGE_ALL", "MERGE_ROWS", "MERGE_COLUMNS"].includes(mergeType)) this.#violation(`mergeType ${mergeType}`);
+      if (mergeType === "MERGE_ROWS") {
+        blocks = Array.from({ length: rect.endRow - rect.startRow }, (_, i) => ({ ...rect, startRow: rect.startRow + i, endRow: rect.startRow + i + 1 }));
+      } else if (mergeType === "MERGE_COLUMNS") {
+        blocks = Array.from({ length: rect.endColumn - rect.startColumn }, (_, i) => ({ ...rect, startColumn: rect.startColumn + i, endColumn: rect.startColumn + i + 1 }));
+      }
+    }
+    let held = sheet.merges ?? [];
+    if (held.some(merge => intersection(merge, rect) && !blocks.some(block => holds(block, merge)))) {
+      throw new Invalid("You must select all cells in a merged range to merge or unmerge them.");
+    }
+    let merges = held.filter(merge => !holds(rect, merge));
+    if (request.mergeCells) {
+      for (let [rows, frozen] of [[true, sheet.frozenRowCount ?? 0], [false, sheet.frozenColumnCount ?? 0]] as const) {
+        if (blocks.some(block => rows ? block.startRow < frozen && frozen < block.endRow
+          : block.startColumn < frozen && frozen < block.endColumn)) {
+          throw new Invalid(`You can't merge frozen and non-frozen ${rows ? "rows" : "columns"}.`);
+        }
+      }
+      for (let block of blocks) {
+        let head = state.formats.get(key(sheet.id, block.startRow, block.startColumn));
+        for (let row = block.startRow; row < block.endRow; row++) {
+          for (let column = block.startColumn; column < block.endColumn; column++) {
+            if (row === block.startRow && column === block.startColumn) continue;
+            state.cells.delete(key(sheet.id, row, column));
+            if (head) state.formats.set(key(sheet.id, row, column), structuredClone(head));
+            else state.formats.delete(key(sheet.id, row, column));
+          }
+        }
+      }
+      merges.push(...blocks);
+    }
+    state.sheets = state.sheets.map(s => s.id === sheet.id ? { ...s, merges } : s);
   }
 
   /** Inserts or deletes rows or columns, moving cells and rewriting formulas as Google does. */
@@ -731,8 +913,37 @@ class SheetsProvider {
     state.cells = moved(state.cells);
     state.formats = moved(state.formats);
     let grown = inserting ? count : -count;
+    // A merge or the frozen lines grow by lines inserted within them and move by lines inserted
+    // before them, and shrink by lines deleted from them; a merge left one cell is gone.
+    let shifted = (position: number, edge: "start" | "end") => inserting
+      ? position > start || (edge === "start" && position === start) ? position + count : position
+      : position - Math.max(0, Math.min(end, position) - start);
+    let merges = (sheet.merges ?? []).flatMap(merge => {
+      let kept = rows
+        ? { ...merge, startRow: shifted(merge.startRow, "start"), endRow: shifted(merge.endRow, "end") }
+        : { ...merge, startColumn: shifted(merge.startColumn, "start"), endColumn: shifted(merge.endColumn, "end") };
+      return (kept.endRow - kept.startRow) * (kept.endColumn - kept.startColumn) > 1 ? [kept] : [];
+    });
+    let frozen = (rows ? sheet.frozenRowCount : sheet.frozenColumnCount) ?? 0;
+    // Inserted lines take the size of the line before them, or with `inheritFromBefore` false of
+    // the line after.
+    let sizes = rows ? sheet.rowHeights : sheet.columnWidths;
+    let resized: Record<number, number> = {};
+    let copied = sizeOf(sheet, rows, inheritFromBefore ? start - 1 : start);
+    for (let line = 0; line < size + grown; line++) {
+      let from = line < start ? line : inserting ? line < end ? undefined : line - count : line + count;
+      let held = from === undefined ? copied : sizes?.[from];
+      if (held !== undefined && held !== (rows ? 21 : 100)) resized[line] = held;
+    }
+    let layout = {
+      merges,
+      [rows ? "frozenRowCount" : "frozenColumnCount"]: inserting
+        ? frozen > start ? frozen + count : frozen
+        : shifted(frozen, "end"),
+      [rows ? "rowHeights" : "columnWidths"]: resized,
+    };
     state.sheets = state.sheets.map(s => s.id !== sheet.id ? s
-      : rows ? { ...s, rowCount: s.rowCount + grown } : { ...s, columnCount: s.columnCount + grown });
+      : rows ? { ...s, ...layout, rowCount: s.rowCount + grown } : { ...s, ...layout, columnCount: s.columnCount + grown });
     this.#rewrite(state, {
       kind: inserting ? "insert" : "delete", title: sheet.title, axis: rows ? "rows" : "columns", start, count,
     }, sheetId => sheetId === sheet.id);
@@ -1303,6 +1514,7 @@ describe.each(RUNS)("Google Sheets changes ($name)", run => {
     let { actionId } = await sheets.queued([{ op: "writeCells", range: "'Q3 Plan'!A1", values: [["x"]] }]);
 
     provider.sheets = provider.sheets.filter(s => s.id !== 7);
+    provider.mergeReads = [];
 
     let conflict = `Queued change ${actionId} no longer applies, so it and the changes queued after it ` +
       "are not shown: change 1 (writeCells): the spreadsheet has no sheet with ID 7.";
@@ -1314,6 +1526,58 @@ describe.each(RUNS)("Google Sheets changes ($name)", run => {
 
     expect(await sheets.apply(actionId!)).toBe(
       "This change no longer applies: change 1 (writeCells): the spreadsheet has no sheet with ID 7.");
+    expect(provider.batches).toEqual([]);
+    // The metadata read, the range read and the approval each read the merges beside the metadata,
+    // naming the gone sheet. Google refuses that, and with no sheet left to read the merges of, none is
+    // read again. Queuing reads the merges after the metadata, of the sheet it names.
+    expect(provider.mergeReads).toEqual([[7], [7], [0], [7]]);
+  });
+
+  it("reads every sheet's merges with spreadsheets.get while changes are queued and the grant may only read", async () => {
+    let provider = laidOut();
+    let sheets = gatekeeper(run);
+    await sheets.queued([{ op: "writeCells", range: "Sales!A1", values: [["Area"]] }]);
+    provider.readOnlyGrant = true;
+    provider.requests = [];
+
+    expect((await sheets.info()).queuedChangeConflict).toBeUndefined();
+    expect(await sheets.read("Sales!A1:B1")).toMatchObject({ values: [["Area", "Total"]] });
+    expect(await sheets.formats("Sales!B3:D5")).toMatchObject({ merges: ["C4:E6"] });
+    // Each read tries the read by sheet ID, then reads the merges of every sheet.
+    let merges = provider.requests.filter(url => url.searchParams.get("fields") === "sheets(properties(sheetId),merges)");
+    expect(merges.map(url => url.pathname.endsWith(":getByDataFilter") ? "byId" : "all"))
+      .toEqual(["byId", "all", "byId", "all", "byId", "all"]);
+  });
+
+  it("asks for no merges of a sheet a queued batch adds", async () => {
+    let provider = laidOut();
+    let sheets = gatekeeper(run);
+    await sheets.queued([{ op: "addSheet", title: "New" }]);
+    await sheets.queued([
+      { op: "writeCells", range: "New!A1", values: [["x"]] },
+      { op: "writeCells", range: "Sales!A1", values: [["y"]] },
+    ]);
+    provider.mergeReads = [];
+
+    expect((await sheets.info()).sheets.map(sheet => sheet.title)).toEqual(["Sales", "Q3 Plan", "New"]);
+    expect((await sheets.read("New!A1")).values).toEqual([["x"]]);
+    expect(provider.mergeReads).toEqual([[0], [0]]);
+  });
+
+  it("reads again the merges of the sheets a change acts on that are left when another is gone", async () => {
+    let provider = laidOut();
+    let sheets = gatekeeper(run);
+    let { actionId } = await sheets.queued([
+      { op: "writeCells", range: "Sales!A1", values: [["x"]] },
+      { op: "writeCells", range: "'Q3 Plan'!A1", values: [["y"]] },
+    ]);
+
+    provider.sheets = provider.sheets.filter(s => s.id !== 7);
+    provider.mergeReads = [];
+
+    expect(await sheets.apply(actionId!)).toBe(
+      "This change no longer applies: change 2 (writeCells): the spreadsheet has no sheet with ID 7.");
+    expect(provider.mergeReads).toEqual([[0, 7], [0]]);
     expect(provider.batches).toEqual([]);
   });
 
@@ -1896,7 +2160,7 @@ describe.each(RUNS)("Google Sheets changes to rows, columns and sheets ($name)",
     ]);
 
     // Q4, It's, Sales and the copy of Sales.
-    expect(action).toMatchObject({ title: "Edit 4 sheets", autoApprovable: false, actionKind: run.kind(UPDATE_SPREADSHEET) });
+    expect(action).toMatchObject({ title: "Edit 4 sheets", autoApprovable: true, actionKind: run.kind(DELETE_SPREADSHEET_CONTENT) });
     expect(action!.description).toContain(
       "Makes 12 changes, all or none of which are applied:\n\n" +
       '1. Add a sheet "Q4" of 5 rows and 3 columns at position 3\n' +
@@ -1958,8 +2222,8 @@ describe.each(RUNS)("Google Sheets changes to rows, columns and sheets ($name)",
     expect(action).toMatchObject({
       title: 'Edit "Q3 Plan"',
       description: 'Delete the sheet "Q3 Plan" (10 rows, 4 columns) and everything on it.',
-      autoApprovable: false,
-      actionKind: run.kind(UPDATE_SPREADSHEET),
+      autoApprovable: true,
+      actionKind: run.kind(DELETE_SPREADSHEET_CONTENT),
     });
     expect((await sheets.info()).sheets.map(s => s.title)).toEqual(["Sales"]);
 
@@ -2181,6 +2445,8 @@ describe.each(RUNS)("Google Sheets formatting ($name)", run => {
         [set, { ...set, italic: true }],
         [null, null],
       ],
+      rowHeights: [21, 21, 21],
+      columnWidths: [100, 100],
     });
     // Only Google can display a value in the number format the change sets; raw values are unaffected.
     expect(await sheets.read("Sales!A1:C2")).toEqual({
@@ -2255,6 +2521,8 @@ describe.each(RUNS)("Google Sheets formatting ($name)", run => {
         [null, ...changed[1], null],
         [null, null, null, null],
       ],
+      rowHeights: [21, 21, 21, 21],
+      columnWidths: [100, 100, 100, 100],
     };
     expect(await sheets.formats("Sales!A1:D4")).toEqual(around);
     // A number format reset is as unknown to the display as one set, blank cells included.
@@ -2333,7 +2601,8 @@ describe.each(RUNS)("Google Sheets formatting ($name)", run => {
 
     let rows = await sheets.queued([{ op: "insertRows", sheet: "Sales", at: 3 }]);
     expect(await sheets.formats("Sales!A2:A4")).toEqual({
-      range: "Sales!A2:A4", formats: [[{ bold: true }], [null], [{ italic: true }]], pendingCells: ["A3"],
+      range: "Sales!A2:A4", formats: [[{ bold: true }], [null], [{ italic: true }]],
+      rowHeights: [21, null, 21], columnWidths: [100], pendingCells: ["A3"],
     });
     // The rows around the inserted one are read by grid range, as no A1 range names them.
     expect(provider.requests.some(url => url.pathname.endsWith(":getByDataFilter"))).toBe(true);
@@ -2376,11 +2645,297 @@ describe.each(RUNS)("Google Sheets formatting ($name)", run => {
     let copy = await sheets.queued([{ op: "duplicateSheet", sheet: "Sales", title: "Copy" }]);
 
     let previewed = await sheets.formats("Copy!A1:A2");
-    expect(previewed).toEqual({ range: "Copy!A1:A2", formats: [[{ bold: true }], [{ italic: true }]] });
+    expect(previewed).toEqual({
+      range: "Copy!A1:A2", formats: [[{ bold: true }], [{ italic: true }]], rowHeights: [21, 21], columnWidths: [100],
+    });
 
     expect(await sheets.apply(format.actionId!)).toBeNull();
     expect(await sheets.apply(copy.actionId!)).toBeNull();
     expect(await sheets.formats("Copy!A1:A2")).toEqual(previewed);
+  });
+});
+
+/** A spreadsheet whose "Sales" freezes 2 rows and 1 column, merges C4:E6, and has a tall row 4 and a wide column C. */
+function laidOut() {
+  return budget([
+    { ...sheetMeta(0, "Sales"), frozenRowCount: 2, frozenColumnCount: 1, merges: [rectOf(3, 2, 3, 3)], rowHeights: { 3: 40 }, columnWidths: { 2: 150 } },
+    sheetMeta(7, "Q3 Plan", { index: 1, rowCount: 10, columnCount: 4 }),
+  ]);
+}
+
+/**
+ * The spreadsheet of `budget()` with an "Archive" sheet of 80,000 two-cell merges, whose list,
+ * compact, is over the 5 MiB Google's answer to a read may be.
+ */
+function archived() {
+  return budget([
+    sheetMeta(0, "Sales"),
+    sheetMeta(7, "Q3 Plan", { index: 1, rowCount: 10, columnCount: 4 }),
+    sheetMeta(9, "Archive", {
+      index: 2, rowCount: 80_000, columnCount: 4,
+      merges: Array.from({ length: 80_000 }, (_merge, row) => rectOf(row, 0, 1, 2)),
+    }),
+  ]);
+}
+
+describe.each(RUNS)("Google Sheets layout ($name)", run => {
+  useRun(run);
+
+  it("reads frozen lines, merges and line sizes, and moves them with queued rows as Google does", async () => {
+    let provider = laidOut();
+    let sheets = gatekeeper(run);
+
+    expect((await sheets.info()).sheets[0]).toMatchObject({ frozenRowCount: 2, frozenColumnCount: 1 });
+    expect(await sheets.formats("Sales!B3:D5")).toMatchObject({
+      merges: ["C4:E6"], rowHeights: [21, 40, 21], columnWidths: [100, 150, 100],
+    });
+    expect((await sheets.formats("Sales!A1:B2")).merges).toBeUndefined();
+
+    // One row among the frozen ones, which they take in, and one within the merge, which grows.
+    let rows = await sheets.queued([
+      { op: "insertRows", sheet: "Sales", at: 2 },
+      { op: "insertRows", sheet: "Sales", at: 6 },
+    ]);
+    expect((await sheets.info()).sheets[0]).toMatchObject({ frozenRowCount: 3, frozenColumnCount: 1 });
+    let previewed = await sheets.formats("Sales!C1:C8");
+    // Google sizes an inserted row from the row before it, which only the apply shows.
+    expect(previewed).toMatchObject({
+      merges: ["C5:E8"], rowHeights: [21, null, 21, 21, 40, null, 21, 21], columnWidths: [150],
+    });
+
+    expect(await sheets.apply(rows.actionId!)).toBeNull();
+    expect(provider.sheets[0]).toMatchObject({ frozenRowCount: 3, merges: [rectOf(4, 2, 4, 3)] });
+    expect(await sheets.formats("Sales!C1:C8")).toEqual({
+      ...previewed, rowHeights: [21, 21, 21, 21, 40, 40, 21, 21], pendingCells: undefined,
+    });
+  });
+
+  it("reads the sizes of the lines Google holds beside lines a queued change inserts", async () => {
+    // A read of only inserted columns holds no cell Google has, yet its rows do.
+    laidOut();
+    let sheets = gatekeeper(run);
+    await sheets.queued([{ op: "insertColumns", sheet: "Sales", at: "B", count: 2 }]);
+    expect(await sheets.formats("Sales!B3:C5")).toMatchObject({
+      rowHeights: [21, 40, 21], columnWidths: [null, null],
+    });
+    await sheets.queued([{ op: "insertRows", sheet: "Sales", at: 1 }]);
+    expect(await sheets.formats("Sales!E1:F1")).toMatchObject({ rowHeights: [null], columnWidths: [150, 100] });
+  });
+
+  it("resizes and freezes lines as an auto-approvable edit, shown in reads before it applies", async () => {
+    let provider = laidOut();
+    let sheets = gatekeeper(run);
+
+    let { actionId, action } = await sheets.queued([
+      { op: "resizeRows", sheet: "Sales", at: 1, count: 2, height: 30 },
+      { op: "resizeColumns", sheet: "Sales", at: "C", width: 60 },
+      { op: "freeze", sheet: "Sales", rows: 6, columns: 0 },
+    ]);
+    expect(action).toMatchObject({
+      title: 'Edit "Sales"', autoApprovable: true, actionKind: run.kind(LAYOUT_SPREADSHEET),
+      description: expect.stringContaining(
+        "1. In \"Sales\", make rows 1 to 2 30 pixels high\n" +
+        "2. In \"Sales\", make column C 60 pixels wide\n" +
+        "3. In \"Sales\", freeze the first 6 rows and no columns"),
+    });
+    let previewed = await sheets.formats("Sales!B1:C4");
+    expect(previewed).toMatchObject({ rowHeights: [30, 30, 21, 40], columnWidths: [100, 60] });
+    expect((await sheets.info()).sheets[0]).toMatchObject({ frozenRowCount: 6 });
+    expect((await sheets.info()).sheets[0].frozenColumnCount).toBeUndefined();
+
+    expect(await sheets.apply(actionId!)).toBeNull();
+    expect(changeRequests(provider.batches[0])).toEqual([
+      { updateDimensionProperties: { range: { sheetId: 0, dimension: "ROWS", startIndex: 0, endIndex: 2 }, properties: { pixelSize: 30 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId: 0, dimension: "COLUMNS", startIndex: 2, endIndex: 3 }, properties: { pixelSize: 60 }, fields: "pixelSize" } },
+      {
+        updateSheetProperties: {
+          properties: { sheetId: 0, gridProperties: { frozenRowCount: 6, frozenColumnCount: 0 } },
+          fields: "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+        },
+      },
+    ]);
+    expect(await sheets.formats("Sales!B1:C4")).toEqual(previewed);
+    expect((await sheets.info()).sheets[0]).toMatchObject({ frozenRowCount: 6 });
+  });
+
+  it("refuses freezing part of a merge when queued, and fails a freeze a collaborator's merge cuts", async () => {
+    let provider = laidOut();
+    let sheets = gatekeeper(run);
+
+    expect((await sheets.update([{ op: "freeze", sheet: "Sales", rows: 4 }])).error).toBe(
+      'Change 1 (freeze): freezing 4 rows of "Sales" would freeze only part of the merged cells C4:E6. ' +
+      "Unmerge them, or freeze rows up to one of their edges.");
+
+    let { actionId } = await sheets.queued([{ op: "freeze", sheet: "Sales", rows: 3 }]);
+    provider.sheets[0] = { ...provider.sheets[0], merges: [rectOf(2, 0, 2, 1)] };
+    expect(await sheets.apply(actionId!)).toBe(
+      'This change no longer applies: change 1 (freeze): freezing 3 rows of "Sales" would freeze only part ' +
+      "of the merged cells A3:A4. Unmerge them, or freeze rows up to one of their edges.");
+    expect(provider.batches).toEqual([]);
+  });
+
+  it("merges cells as an auto-approvable deletion of their values, shown in reads before it applies", async () => {
+    let provider = budget();
+    provider.setFormat("Sales!A2", { textFormat: { bold: true } });
+    provider.setFormat("Sales!B3", { textFormat: { italic: true } });
+    let sheets = gatekeeper(run);
+
+    let { actionId, action } = await sheets.queued([{ op: "mergeCells", range: "Sales!A2:B3" }]);
+    expect(action).toMatchObject({
+      title: 'Edit "Sales"', autoApprovable: true, actionKind: run.kind(DELETE_SPREADSHEET_CONTENT),
+      description: 'In "Sales", merge A2:B3 into one cell, clearing every cell but A2.',
+    });
+    expect(await sheets.read("Sales!A2:B3", "raw")).toEqual({ range: "Sales!A2:B3", values: [["EMEA", null], [null, null]] });
+    // Google gives the cells a merge covers its top-left cell's formatting.
+    let previewed = await sheets.formats("Sales!A2:B3");
+    expect(previewed).toMatchObject({
+      formats: [[{ bold: true }, null], [null, null]], merges: ["A2:B3"], pendingCells: ["B2", "A3", "B3"],
+    });
+    // A value written into a covered cell would be dropped.
+    expect((await sheets.update([{ op: "writeCells", range: "Sales!B2", values: [[1]] }])).error).toBe(
+      "Change 1 (writeCells): B2 is covered by the merged cells A2:B3, which show only A2's value, so Google " +
+      "would drop the value written there. Write it to A2, or unmerge the cells first.");
+
+    expect(await sheets.apply(actionId!)).toBeNull();
+    expect(changeRequests(provider.batches[0])).toEqual([{
+      mergeCells: { range: { sheetId: 0, startRowIndex: 1, endRowIndex: 3, startColumnIndex: 0, endColumnIndex: 2 }, mergeType: "MERGE_ALL" },
+    }]);
+    expect([provider.get("Sales!A2"), provider.get("Sales!B2"), provider.get("Sales!A3"), provider.get("Sales!B3")])
+      .toEqual(["EMEA", null, null, null]);
+    expect(await sheets.formats("Sales!A2:B3")).toEqual({
+      ...previewed, formats: [[{ bold: true }, { bold: true }], [{ bold: true }, { bold: true }]], pendingCells: undefined,
+    });
+
+    let unmerge = await sheets.queued([{ op: "unmergeCells", range: "Sales!A1:F20" }]);
+    expect(unmerge.action).toMatchObject({ autoApprovable: true, actionKind: run.kind(LAYOUT_SPREADSHEET) });
+    expect((await sheets.formats("Sales!A2:B3")).merges).toBeUndefined();
+    expect(await sheets.apply(unmerge.actionId!)).toBeNull();
+    expect(provider.sheets[0].merges).toEqual([]);
+  });
+
+  it("reads a range of a sheet of more merges than a read may answer, with a resize queued elsewhere", async () => {
+    let provider = archived();
+    let sheets = gatekeeper(run);
+    await sheets.queued([{ op: "resizeRows", sheet: "Sales", at: 1, count: 2, height: 30 }]);
+    provider.mergeReads = [];
+
+    // The range's own read answers the merge it overlaps; the sheet's 80,000 are not read.
+    expect(await sheets.formats("Archive!A1:C1")).toMatchObject({ merges: ["A1:B1"] });
+    expect(provider.mergeReads.flat()).not.toContain(9);
+  });
+
+  it("unmerges only the merges it was queued over, leaving one made in its range since", async () => {
+    let provider = budget([{ ...sheetMeta(0, "Sales"), merges: [rectOf(0, 0, 1, 2)] }, sheetMeta(7, "Q3 Plan", { index: 1 })]);
+    let sheets = gatekeeper(run);
+    let { actionId } = await sheets.queued([{ op: "unmergeCells", range: "Sales!A1:D1" }]);
+    // A collaborator merges C1:D1 once the approval has checked the range, before the batch lands.
+    provider.beforeNextBatch = () => { provider.sheets[0].merges = [...provider.sheets[0].merges ?? [], rectOf(0, 2, 1, 2)]; };
+
+    expect(await sheets.apply(actionId!)).toBeNull();
+    expect(provider.batches.at(-1)?.filter(request => request.unmergeCells)).toEqual([
+      { unmergeCells: { range: { sheetId: 0, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 2 } } },
+    ]);
+    expect(provider.sheets[0].merges).toEqual([rectOf(0, 2, 1, 2)]);
+  });
+
+  it("plans and applies a write without reading the merges of sheets no change acts on", async () => {
+    let provider = archived();
+    let sheets = gatekeeper(run);
+
+    let { actionId } = await sheets.queued([{ op: "writeCells", range: "Sales!A1", values: [["Area"]] }]);
+    expect(await sheets.read("Sales!A1:B1")).toMatchObject({ values: [["Area", "Total"]] });
+    expect(await sheets.apply(actionId!)).toBeNull();
+
+    expect(provider.get("Sales!A1")).toBe("Area");
+    expect(provider.masks.filter(mask => mask.startsWith("spreadsheetId,")).every(mask => !mask.includes("merges")))
+      .toBe(true);
+    // Queuing, the read with the write queued, and applying it each read the merges of "Sales" alone.
+    expect(provider.mergeReads).toEqual([[0], [0], [0]]);
+  });
+
+  it("formats and resizes a sheet of more merges than a read may answer, reading none of them", async () => {
+    let provider = archived();
+    let sheets = gatekeeper(run);
+    provider.mergeReads = [];
+
+    let { actionId, error } = await sheets.update([
+      { op: "formatCells", range: "Archive!A1:B2", format: { bold: true } },
+      { op: "resizeRows", sheet: "Archive", at: 1, count: 2, height: 30 },
+    ]);
+    expect(error).toBeUndefined();
+    expect(await sheets.apply(actionId!)).toBeNull();
+    expect(provider.batches).toHaveLength(1);
+    expect(provider.mergeReads).toEqual([]);
+  });
+
+  it("reads the merges of a sheet renamed in the batch that unmerges it under its new title", async () => {
+    let provider = laidOut();
+    let sheets = gatekeeper(run);
+
+    let { actionId, error } = await sheets.update([
+      { op: "renameSheet", sheet: "Sales", title: "Renamed" },
+      { op: "unmergeCells", range: "Renamed!C4:E6" },
+    ]);
+    expect(error).toBeUndefined();
+    expect((await sheets.info()).queuedChangeConflict).toBeUndefined();
+    expect(await sheets.apply(actionId!)).toBeNull();
+    expect(provider.sheets[0]).toMatchObject({ title: "Renamed", merges: [] });
+  });
+
+  it("reads the merges together with the metadata for reads with changes queued and for an approval", async () => {
+    let provider = laidOut();
+    let sheets = gatekeeper(run);
+    let write = await sheets.queued([{ op: "writeCells", range: "Sales!A1", values: [["Area"]] }]);
+    let meter = meterFetches();
+    let mostOpen = async (step: () => Promise<unknown>) => {
+      meter.mostOpen = 0;
+      await step();
+      return meter.mostOpen;
+    };
+
+    // The metadata and merges, and the values beside them for a range read.
+    expect(await mostOpen(() => sheets.info())).toBe(2);
+    expect(await mostOpen(() => sheets.read("Sales!A1:B2"))).toBe(3);
+    expect(await mostOpen(() => sheets.apply(write.actionId!))).toBe(2);
+    let rows = await sheets.queued([{ op: "insertRows", sheet: "Sales", at: 1 }]);
+    // Moved rows are read only once the metadata places them.
+    expect(await mostOpen(() => sheets.read("Sales!A1:B2"))).toBe(2);
+    expect(await mostOpen(() => sheets.apply(rows.actionId!))).toBe(2);
+    expect(provider.mergeReads.slice(1)).toEqual([[0], [0], [0], [0], [0], [0]]);
+  });
+
+  it("shows the merges of a sheet read while only changes to another are queued", async () => {
+    let provider = laidOut();
+    let sheets = gatekeeper(run);
+
+    await sheets.queued([{ op: "writeCells", range: "'Q3 Plan'!A1", values: [[1]] }]);
+    expect(await sheets.formats("Sales!B3:D5")).toMatchObject({ merges: ["C4:E6"] });
+    await sheets.queued([{ op: "insertRows", sheet: "Q3 Plan", at: 1 }]);
+    // A range naming no sheet reads the first visible one.
+    expect(await sheets.formats("B3:D5")).toMatchObject({ range: "Sales!B3:D5", merges: ["C4:E6"] });
+    expect(provider.mergeReads.at(-1)).toEqual([0, 7]);
+  });
+
+  it("refuses a change to a sheet whose merges are too many to read, saying so", async () => {
+    let provider = archived();
+    let sheets = gatekeeper(run);
+
+    expect((await sheets.update([{ op: "writeCells", range: "Archive!C1", values: [[1]] }])).error).toBe(
+      "The sheets the changes act on hold more merged cells than can be read at once: Google's list of " +
+      "them is over 5 MiB, so the changes cannot be checked against them. Unmerge cells on those sheets " +
+      "in Google Sheets, or change other sheets.");
+    expect(provider.mergeReads).toEqual([[9]]);
+    expect(provider.batches).toEqual([]);
+  });
+
+  it("fails a merge whose cleared cells a collaborator edited since it was queued, without writing", async () => {
+    let provider = budget();
+    let sheets = gatekeeper(run);
+    let { actionId } = await sheets.queued([{ op: "mergeCells", range: "Sales!A2:B2" }]);
+
+    provider.set("Sales!B2", 9);
+    expect(await sheets.apply(actionId!)).toBe(CHANGED);
+    expect(provider.commits).toBe(0);
   });
 });
 
@@ -2714,6 +3269,40 @@ describe("Google Sheets edits through a read and write Drive binding", () => {
     expect(provider.get("Sales!B2")).toBe(6);
   });
 
+  it("queues a merge as a deletion a user may let apply in any spreadsheet reached, shown in that spreadsheet's reads until it applies", async () => {
+    let { first, second } = spreadsheets();
+    let account = connection(ACCOUNT);
+
+    let merge = await account.call("sheet-1", "updateSpreadsheet", [{ op: "mergeCells", range: "Sales!A2:B2" }]);
+    expect(merge.action).toMatchObject({
+      autoApprovable: true,
+      actionKind: THROUGH_DRIVE.kind(DELETE_SPREADSHEET_CONTENT),
+      description: 'In "Sales", merge A2:B2 into one cell, clearing every cell but A2.',
+      fields: [
+        { label: "File", kind: "inline", value: "sheet-1" },
+        { label: "File name", kind: "inline", value: "Budget" },
+      ],
+    });
+    let formats = async (fileId: string, range: string) =>
+      (await account.call(fileId, "readFormats", range)).value as unknown as SpreadsheetFormats;
+    let pending = await formats("sheet-1", "Sales!A2:B2");
+    expect(pending).toMatchObject({ merges: ["A2:B2"], pendingCells: ["B2"] });
+    expect((await account.call("sheet-1", "readRange", "Sales!A2:B2", { valueMode: "raw" })).value)
+      .toEqual({ range: "Sales!A2:B2", values: [["EMEA", null]] });
+    // The other spreadsheet has a sheet of the same title, which the queued merge is no part of.
+    expect((await formats("sheet-2", "Sales!A2:B2")).merges).toBeUndefined();
+
+    expect(await account.apply(merge.actionId!)).toBeNull();
+    expect(changeRequests(first.batches[0])).toEqual([{
+      mergeCells: { range: { sheetId: 0, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 2 }, mergeType: "MERGE_ALL" },
+    }]);
+    expect(first.sheets[0].merges).toEqual([rectOf(1, 0, 1, 2)]);
+    expect(first.get("Sales!B2")).toBeNull();
+    expect(second.batches).toEqual([]);
+    expect((await account.state("sheet-1"))!.applied).toEqual([merge.actionId]);
+    expect(await formats("sheet-1", "Sales!A2:B2")).toEqual({ ...pending, pendingCells: undefined });
+  });
+
   it("lists the spreadsheets' kinds where the binding can edit them", async () => {
     serve(budget());
     expect(await connection(ACCOUNT).autoApprovable())
@@ -2723,5 +3312,289 @@ describe("Google Sheets edits through a read and write Drive binding", () => {
     expect(await spreadsheetFile.autoApprovable()).toEqual([COMMENTS]);
     await spreadsheetFile.describe();
     expect(await spreadsheetFile.autoApprovable()).toEqual([COMMENTS, ...DRIVE_SHEETS_KINDS]);
+  });
+});
+
+describe("Google Sheets format read size", () => {
+  /** The zeros of the longest pattern whose format, on 10,000 cells, is read whole. */
+  const ZEROS = 84;
+
+  it("refuses a format read by the length of its result's JSON, and reads fewer cells", async () => {
+    current = new SheetsProvider([sheetMeta(0, "Data", { rowCount: 100, columnCount: 100 })]).install();
+    let sheets = gatekeeper();
+    let border = { style: "SOLID", color: "#0000ff" } as const;
+    // A queued format is repeated in the result for each of the 10,000 cells it covers, so one
+    // character more in its pattern is 10,000 units more. The pattern's quotes are escaped in the
+    // JSON and its euro sign is not.
+    let pattern = (zeros: number) => `"€"${"0".repeat(zeros)}`;
+    await sheets.queued([{
+      op: "formatCells", range: "Data!A1:CV100",
+      format: {
+        bold: true, italic: true, underline: true, strikethrough: true, fontSize: 400,
+        textColor: "#ff0000", fillColor: "#00ff00", numberFormat: { type: "NUMBER", pattern: pattern(ZEROS) },
+        horizontalAlignment: "CENTER", verticalAlignment: "MIDDLE", wrap: "OVERFLOW",
+        borders: {
+          top: border, bottom: border, left: border, right: border,
+          innerHorizontal: border, innerVertical: border,
+        },
+      },
+    }]);
+
+    // The longest result the limit of 5 MiB of UTF-16 units lets through, to within one character
+    // of the pattern.
+    let length = JSON.stringify(await sheets.formats("Data!A1:CV100")).length;
+    expect(length).toBeLessThanOrEqual(5 * 1024 * 1024);
+    expect(length).toBeGreaterThan(5 * 1024 * 1024 - 10_000);
+
+    await sheets.queued([{
+      op: "formatCells", range: "Data!A1:CV100",
+      format: { numberFormat: { type: "NUMBER", pattern: pattern(ZEROS + 1) } },
+    }]);
+    await expect(sheets.formats("Data!A1:CV100")).rejects.toThrow(
+      "The formatting of this range is too large to read at once. Request fewer cells.");
+    expect((await sheets.formats("Data!A1:CV10")).formats).toHaveLength(10);
+    // The read of 10,000 formatted cells takes 2 s on a laptop and up to 12 s on a slow runner.
+  }, 30_000);
+});
+
+describe("Google Sheets replay cost", () => {
+  /** The batches queued in the first phase, each followed by a read. */
+  const N = 5;
+  const ROWS = 500;
+  const COLUMNS = 100;
+  /** The cells a read may hold at once, which the sheet's values fill. */
+  const READ = `Data!A1:CV${ROWS}`;
+  /**
+   * The fake's answers, in bytes: the spreadsheet's sheets and the values of `READ`, both asked
+   * compact as the client asks, and whether the account may edit, which is Drive's.
+   */
+  const SHEETS = 328;
+  const CAN_EDIT = 33;
+  const VALUES = 801_078;
+  /** The merges, asked for the sheet a change or a replay acts on, of a sheet that holds none. */
+  const MERGES = 30;
+
+  /** What a phase is measured in, in the order the table prints them. */
+  const MEASURES = [
+    "overlayCopies", "overlayEntries", "keysIndexed", "fetches", "responseBytes", "mostOpen", "indented",
+  ] as const;
+  type Measure = typeof MEASURES[number];
+  type Row = { phase: string; pending: number } & Record<Measure, number>;
+
+  const measured: Row[] = [];
+
+  afterAll(() => {
+    if (measured.length === 0) return;
+    let header = ["phase", ...MEASURES, "pending"];
+    let lines = measured.map(row =>
+      [row.phase, ...MEASURES.map(column => String(row[column])), String(row.pending)]);
+    let widths = header.map((title, column) =>
+      Math.max(title.length, ...lines.map(line => line[column].length)));
+    let print = (line: string[]) =>
+      line.map((cell, column) => column < 1 ? cell.padEnd(widths[column])
+        : cell.padStart(widths[column])).join("  ");
+    console.log([
+      "Google Sheets replay cost",
+      `A sheet of ${ROWS * COLUMNS} cells of short text, with ${MAX_QUEUED_ENTRIES} cell values and ` +
+      `formats queued by five batches (build). ${N} batches are then queued, each followed by a ` +
+      "read of the 50,000 cells; then one more read of them, a read of 10,000 cells' formats, a " +
+      "queued deletion of a row, a queued insertion of one and a read of the cells they moved, " +
+      "the oldest batch approved, the newest rejected, and a read whose newest batch stopped at " +
+      "its second change. mostOpen is of the fake, which has no limit on connections; pending " +
+      "is the batches awaiting a decision after the phase.",
+      print(header), ...lines.map(print),
+    ].join("\n"));
+  });
+
+  it("counts what a queue over a large sheet copies and fetches", async () => {
+    let values = Array.from({ length: ROWS }, (_row, r) => Array.from({ length: COLUMNS }, (_cell, c) =>
+      `r${String(r + 1).padStart(3, "0")} c${String(c + 1).padStart(3, "0")} abc`));
+    let provider = current = new SheetsProvider([
+      sheetMeta(0, "Data", { rowCount: 2 * ROWS, columnCount: COLUMNS }),
+      sheetMeta(7, "Notes", { index: 1, rowCount: 10, columnCount: 4 }),
+    ]);
+    values.forEach((row, r) => row.forEach((value, c) => provider.cells.set(key(0, r, c), value)));
+    provider.install();
+    let meter = meterFetches();
+    let sheets = gatekeeper();
+
+    // The fixture is the size it claims: a live sheet of 500 x 100 cells of short text is
+    // 1,134,661 bytes as one value range, printed as Google prints it.
+    let printed = `${JSON.stringify({ range: READ, majorDimension: "ROWS", values }, null, 2)}\n`.length;
+    expect(printed).toBeGreaterThan(1_080_000);
+    expect(printed).toBeLessThan(1_190_000);
+
+    let totals = (): Record<Measure, number> => ({
+      ...editorCost, fetches: meter.fetches, responseBytes: meter.responseBytes, mostOpen: 0,
+      indented: provider.indented.length,
+    });
+    let pending = async () => (await hooks().storedKeys(sheets.facet, "sheets"))
+      .filter(name => /^sheets:action:\d+$/.test(name)).length;
+    /** Runs one phase and records what it added to each measure. */
+    let phase = async (name: string, body: () => Promise<unknown>) => {
+      meter.mostOpen = 0;
+      let before = totals();
+      await body();
+      let after = totals();
+      measured.push({
+        phase: name,
+        ...Object.fromEntries(MEASURES.map(column => [column, after[column] - before[column]])) as Record<Measure, number>,
+        mostOpen: meter.mostOpen,
+        pending: await pending(),
+      });
+    };
+    let read = async () => {
+      let outcome = await sheets.call("readRange", READ);
+      expect(outcome.error).toBeUndefined();
+      return outcome.value as SpreadsheetRange;
+    };
+    let ids: number[] = [];
+    let queue = async (changes: SheetChange[]) => {
+      ids.push((await sheets.queued(changes)).actionId!);
+    };
+    /** Rows `from` to `from + 199` of the first sheet, as two changes of 10,000 cells each. */
+    let halves = (from: number) => [`Data!A${from}:CV${from + 99}`, `Data!A${from + 100}:CV${from + 199}`];
+
+    await phase("build", async () => {
+      for (let from of [401, 601, 801]) {
+        await queue(halves(from).map(range => ({ op: "formatCells", range, format: { bold: true } })));
+      }
+      for (let from of [1, 201]) await queue(halves(from).map(range => ({ op: "clearRange", range })));
+    });
+    // The queue holds the most it may: one more value or format is refused.
+    expect((await sheets.update([{ op: "formatCells", range: "Data!A1", format: { bold: true } }])).error)
+      .toContain(`to ${(MAX_QUEUED_ENTRIES + 1).toLocaleString("en-US")}, and at most`);
+
+    await phase("queue N, a read after each", async () => {
+      for (let i = 0; i < N; i++) {
+        await queue([{ op: "writeCells", range: `Data!A${201 + i}`, values: [[`written ${i}`]] }]);
+        await read();
+      }
+    });
+    await phase("read", read);
+    await phase("formats read", () => sheets.formats("Data!A401:CV500"));
+    await phase("queue a deleted row", () => queue([{ op: "deleteRows", sheet: "Data", at: 2 * ROWS }]));
+    await phase("queue an inserted row", () => queue([{ op: "insertRows", sheet: "Data", at: 1 }]));
+    await phase("moved read", read);
+    await phase("approve", async () => expect(await sheets.apply(ids[0])).toBeNull());
+    await phase("reject", async () => expect(await sheets.reject(ids.at(-1)!)).toBeNull());
+
+    // A batch of two changes, whose second a collaborator's frozen row leaves nothing to delete
+    // for: the batch stops after its first change wrote.
+    await queue([
+      { op: "writeCells", range: "Data!A210", values: [["written last"]] },
+      { op: "deleteRows", sheet: "Notes", at: 2, count: 9 },
+    ]);
+    provider.sheets[1] = { ...provider.sheets[1], frozenRowCount: 1 };
+    await phase("read, newest no longer applies", async () => {
+      expect((await read()).queuedChangeConflict).toBe(
+        `Queued change ${ids.at(-1)} no longer applies, so it and the changes queued after it are ` +
+        "not shown: change 2 (deleteRows): it would leave only the 1 frozen row of \"Notes\".");
+    });
+
+    let none = Object.fromEntries(MEASURES.map(column => [column, 0])) as Record<Measure, number>;
+    // A fold copies the overlay once, however many batches are pending: the fetched grid's, which
+    // holds no entry, and every batch then changes that one copy in place. Queueing copies the
+    // folded grid twice more, in `resolveChanges` and in `guardCells`, with the entries queued by
+    // then: 0, 20, 40, 60 and 80 thousand for the five batches of `build`, and 100,000 for every
+    // batch after them. Every read asks for compact JSON, so `indented` is 0 in every phase: the
+    // fake indents an answer that was not asked compact, and a read that forgot to ask would count
+    // here. The 50,000 values are 16 bytes a cell, where they are 27 indented.
+    //
+    // An answer of cells as entered is 40 bytes around its blocks, one for each area. Wherever the
+    // sheets are read to queue, replay or apply, the merges of the sheets the changes act on are
+    // read too (`MERGES`), of those whose changes consult them: after the sheets to queue, which
+    // finds sheets by title, and beside them to read or apply, which know the sheets' IDs from the
+    // queued changes. A change that only formats consults none.
+    expect(measured).toEqual([
+      {
+        ...none, phase: "build", pending: 5,
+        // Three copies a batch: the fold's, of no entry, and the two after it, of 0, 20, 40, 60
+        // and 80 thousand entries each.
+        overlayCopies: 15, overlayEntries: 400_000,
+        // The sheets and whether the account may edit, asked together for each batch, no merges
+        // (no change of the queue consults them), and then the two guards' cells as entered, at 53
+        // bytes a cell: a block of 10,000 cells is 531,313 bytes, and 15 more where it names its
+        // first row, which a block from row 1 does not. One of the first guard's two blocks names
+        // it and both of the second's, with a comma between the two.
+        fetches: 12, responseBytes: 5 * SHEETS + 5 * CAN_EDIT + 1_062_682 + 1_062_697,
+        mostOpen: 2,
+      },
+      {
+        ...none, phase: "queue N, a read after each", pending: 5 + N,
+        // Three copies to queue a batch and one to read: 15 and 5. The two copies after each
+        // queueing fold hold the 100,000 entries.
+        overlayCopies: 20, overlayEntries: 1_000_000,
+        // To queue: the sheets and whether the account may edit, together, then the guarded cell
+        // as entered, a block of 94 bytes. To read: the sheets, the merges and the 50,000 values,
+        // together.
+        fetches: 35, responseBytes: 10 * SHEETS + 5 * CAN_EDIT + 10 * MERGES + 5 * 134 + 5 * VALUES,
+        mostOpen: 3,
+      },
+      {
+        ...none, phase: "read", pending: 5 + N,
+        overlayCopies: 1,
+        // The sheets, the merges and the 50,000 values, together.
+        fetches: 3, responseBytes: SHEETS + MERGES + VALUES, mostOpen: 3,
+      },
+      {
+        ...none, phase: "formats read", pending: 5 + N,
+        overlayCopies: 1,
+        // The sheets and the merges of the sheets the queued changes consult, together, beside the
+        // formats Google holds for the cells, which answer the merges of the range read.
+        fetches: 3, responseBytes: SHEETS + MERGES + 35_008, mostOpen: 3,
+      },
+      {
+        ...none, phase: "queue a deleted row", pending: 6 + N,
+        // The fold's copy and the two to queue, of the 100,000 entries each.
+        overlayCopies: 3, overlayEntries: 200_000,
+        // A deletion indexes the queued keys of the copy it is applied to: once in
+        // `resolveChanges` and once in `guardCells`, 100,000 each: an index is one batch's on
+        // one copy, and goes with it. The row it deletes is empty.
+        keysIndexed: 200_000,
+        // The sheets and whether the account may edit, together, then the deleted row as entered:
+        // a block of 16 bytes, which names its first row and holds no cell.
+        fetches: 4, responseBytes: SHEETS + CAN_EDIT + MERGES + 56, mostOpen: 2,
+      },
+      {
+        ...none, phase: "queue an inserted row", pending: 7 + N,
+        // The fold's copy and the two to queue, of the 99,900 entries the deletion leaves each.
+        // The fold's deletion indexes the queued keys once, as it does in every fold from here on:
+        // the index goes with its batch, so each fold builds it again. An insertion builds no
+        // index and guards no cell.
+        overlayCopies: 3, overlayEntries: 199_800, keysIndexed: 100_000,
+        // The sheets and whether the account may edit, together.
+        fetches: 3, responseBytes: SHEETS + CAN_EDIT + MERGES, mostOpen: 2,
+      },
+      {
+        ...none, phase: "moved read", pending: 7 + N,
+        overlayCopies: 1, keysIndexed: 100_000,
+        // The sheets and the merges, together, then the 49,900 cells of the 499 rows below the
+        // inserted one as entered, at 53 bytes a cell, and as shown, at 16, together.
+        fetches: 4, responseBytes: SHEETS + MERGES + 2_651_240 + 799_562, mostOpen: 2,
+      },
+      {
+        ...none, phase: "approve", pending: 6 + N,
+        // The batch is planned again over the sheets as they are, with nothing queued. It formats,
+        // so its digest is of no cell and its plan reads no merges. The sheets, then the write,
+        // whose answer is 20 bytes.
+        overlayCopies: 1,
+        fetches: 2, responseBytes: SHEETS + 20, mostOpen: 1,
+      },
+      // A rejection reads nothing.
+      { ...none, phase: "reject", pending: 5 + N },
+      {
+        ...none, phase: "read, newest no longer applies", pending: 6 + N,
+        // Eleven pending, the stopped one included. Its first change wrote to the fold's grid, so
+        // the grid is put back: a second copy of the fetched grid, of no entry, and the ten batches
+        // before the stopped one applied to it again. The deleted row among them indexes the
+        // 80,000 queued keys in each of the two replays, where a fold that stops nowhere indexes
+        // them once.
+        overlayCopies: 2, keysIndexed: 2 * 80_000,
+        // As `moved read`, of all 500 rows, the sheets with the collaborator's frozen row (19
+        // bytes), and the merges of both sheets the queued changes act on (59).
+        fetches: 4, responseBytes: SHEETS + 19 + 59 + 2_656_553 + 801_164, mostOpen: 2,
+      },
+    ]);
   });
 });

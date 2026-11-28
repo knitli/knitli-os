@@ -189,6 +189,14 @@
       "reason": "Regression test for fork-owned prompt-blueprint marking and the agent list blindfold."
     },
     {
+      "path": "packages/workshop-backend/__tests__/knitli-replica-blindfold.test.ts",
+      "reason": "Regression test that a worktree replica pull and a view's file pin (upstream #1275) both refuse prompt files."
+    },
+    {
+      "path": "packages/workshop-backend/__tests__/knitli-deletion-fence.test.ts",
+      "reason": "Regression test that a workspace being deleted is paused like one being revoked."
+    },
+    {
       "path": "packages/workshop-backend/__tests__/knitli-prompt-refs.test.ts",
       "reason": "Regression test for fork-owned pinned prompt refs and their resolution."
     },
@@ -369,10 +377,6 @@
       "reason": "Regression test for the fork-owned executor form model."
     },
     {
-      "path": "packages/workshop-frontend/src/rateLimitedCapability.fork.test.ts",
-      "reason": "Regression test for fork-owned rate-limited capability disposal, split out when upstream #947 added its own rateLimitedCapability.test.ts so that file stays byte-identical."
-    },
-    {
       "path": "packages/workshop-frontend/src/GatekeeperModal.fork.test.tsx",
       "reason": "Fork ambient-resource and prefill tests, split out when upstream #505 added its own GatekeeperModal.test.tsx so that file stays byte-identical."
     },
@@ -415,6 +419,22 @@
     {
       "path": "packages/workshop-frontend/src/features/chat/composer/useComposerResources.fork.test.tsx",
       "reason": "Regression test for the composer's fork wiring of connectionRestartRecovery.ts, so upstream's useComposerResources.test.tsx stays byte-identical."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/chat/composer/attachments/spreadsheetTypes.ts",
+      "reason": "Fork-owned spreadsheet MIME types and upload ceiling for the composer; prepareChatAttachment.ts and useComposerAttachments.ts call it."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/chat/composer/attachments/stagedSpreadsheetUpload.ts",
+      "reason": "Fork-owned staged upload of a spreadsheet (uploadChatAttachment) and its reclaim; upstream's useComposerAttachments.ts calls it and streams every other file itself."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/chat/composer/attachments/useComposerAttachments.fork.test.tsx",
+      "reason": "Regression test for the composer's staged spreadsheet uploads, kept out of upstream's useComposerAttachments.test.tsx so that file stays byte-identical."
+    },
+    {
+      "path": "packages/workshop-frontend/src/features/chat/composer/attachments/prepareChatAttachment.fork.test.ts",
+      "reason": "Regression test for the spreadsheet upload ceiling, kept out of upstream's prepareChatAttachment.test.ts so that file stays byte-identical."
     },
     {
       "path": "packages/gatekeeper-linear/__tests__/workerd/oauth-link.test.ts",
@@ -555,49 +575,19 @@
   ],
   "reviewedSurvivors": [
     {
-      "token": "apiVersion",
-      "path": "packages/gatekeeper-ai-executor/__tests__/protocol-parity.test.ts",
-      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
+      "token": "PAST_LIMITS",
+      "path": "packages/workshop-backend/src/agent.ts",
+      "reason": "Upstream's own constant, still in its copy of this file; upstream #1285 only removed other uses."
     },
     {
-      "token": "apiVersion",
-      "path": "packages/workshop-backend/__integration__/ai-executor-admin-rpc.test.ts",
-      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
+      "token": "notShown",
+      "path": "packages/workshop-backend/src/agent.ts",
+      "reason": "Upstream's own helper, still in its copy of this file; upstream #1285 only removed other uses."
     },
     {
-      "token": "apiVersion",
-      "path": "packages/workshop-backend/src/inference-admin-protocol-v1.fixture.ts",
-      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
-    },
-    {
-      "token": "apiVersion",
-      "path": "packages/workshop-frontend/src/components/AdminAiExecutorsPanel.tsx",
-      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
-    },
-    {
-      "token": "apiVersion",
-      "path": "packages/workshop-frontend/src/components/ai-executors-form-model.test.ts",
-      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
-    },
-    {
-      "token": "apiVersion",
-      "path": "packages/workshop-frontend/src/components/ai-executors-form-model.ts",
-      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
-    },
-    {
-      "token": "apiVersion",
-      "path": "packages/workshop-shared/src/api.ts",
-      "reason": "The fork-owned AI Executor admin protocol's own field (a profile's API version); upstream #1250 only removed a comment naming the Google client's unrelated option."
-    },
-    {
-      "token": "accountSatisfies",
-      "path": "packages/workshop-frontend/src/ObserverConfigModal.tsx",
-      "reason": "Upstream's own helper, still in its copy of this file; upstream #1255 only removed other uses."
-    },
-    {
-      "token": "REPO_REQUIREMENT",
-      "path": "packages/workshop-backend/__tests__/admin-workspace-view.test.ts",
-      "reason": "Upstream's own test constant, still in its copy of this file; upstream #1254 only removed other uses."
+      "token": "notShown",
+      "path": "packages/workshop-backend/src/fork/chat-attachment-workbook.ts",
+      "reason": "A local variable of the fork's workbook summary (the sheets left undescribed), unrelated to the agent.ts helper upstream #1285 trimmed."
     }
   ]
 }

@@ -839,6 +839,11 @@ authorizes a read after fetching it.
   - **Left for a kernel PR:** `VoiceSession`'s `dictate` mode, `VoiceMode`'s `"dictate"` and the
     `dictationStt` preference and admin default are unused by the UI now. Removing them changes
     `workshop-shared`'s API and the backend, so it belongs in its own reviewed change.
+- **2026-11-28 sync (foundation `062d82c4`; same PR as the three entries below): no new seams.** One
+  commit, upstream #1309 (`fetchWithAuthRetry()` stops waiting for a retry pause or a token once
+  the caller's signal aborts), in seven `gatekeeper-google` files the fork does not edit, all
+  byte-identical to upstream after the merge; no conflict and nothing changed on both sides. It
+  adds no `alarm()` handler, Durable Object class, migration or `reviewedSurvivors` ack.
 - **2026-11-27 sync (foundation `d1c2c5b9`; same PR as the two entries below): no new seams.** One
   commit, upstream #1304 (a Google Doc run's `content` name and `elements()`, and
   `DocStore.lists()`), in four `gatekeeper-google` files the fork does not edit; no conflict and
